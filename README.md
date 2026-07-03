@@ -2,12 +2,15 @@
 
 Heap allocation visualizer: renders a `.heapl` (JSONL) stream of
 malloc/free/realloc events on an address-line map with two coordinated
-timelines (temporal and sequential) and full time-travel. See
-[SPECIFICATION.md](SPECIFICATION.md).
+timelines (temporal and sequential) and full time-travel.
 
-All parsing, seeking, and rasterization happen in a Rust → WebAssembly core
+Parsing, seeking, and rasterization happen in a Rust - WebAssembly core
 running in a Web Worker with OffscreenCanvas; the page stays fully
 client-side.
+
+Supports analyzing heap-traces, tagging, and naming allocations, marking timestamps and addresses - and saving analysis into a `.heapa` file for later work.
+
+![Heap visualizer showing coordinated time and event timelines above the address map](docs/images/heap-visualizer-overview.png)
 
 ## Build & run
 
