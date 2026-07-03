@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>heap-visualizer — heap allocation visualizer</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect x='1' y='6' width='5' height='4' fill='%233fb950'/><rect x='7' y='6' width='3' height='4' fill='%23f85149'/><rect x='11' y='6' width='4' height='4' fill='%233fb950'/></svg>">
+</head>
+<body>
+<header id="toolbar">
+  <div class="brand">heap-visualizer</div>
+  <button id="btn-open" title="Open a .heapl trace">Open…</button>
+  <input type="file" id="file-input" accept=".heapl,.jsonl,.json,.txt" hidden>
+  <button id="btn-demo" title="Load the bundled demo trace">Demo</button>
+  <span id="trace-title" class="title"></span>
+
+  <span class="sep"></span>
+
+  <button id="btn-step-back" title="Step back one event (←)">⏮</button>
+  <button id="btn-play" title="Play / pause (space)" disabled>▶</button>
+  <button id="btn-step-fwd" title="Step forward one event (→)">⏭</button>
+  <select id="play-mode" title="Playback advances by wall-clock time or by event index">
+    <option value="t">by time</option>
+    <option value="seq">by events</option>
+  </select>
+  <select id="play-speed" title="Playback speed"></select>
+
+  <span class="sep"></span>
+
+  <label>row <input id="row-bytes" size="7" placeholder="0x1000"
+    title="Bytes per address-line row (e.g. 4k or 0x1000; defaults to 0x1000; ctrl+wheel on the map)"></label>
+  <label>collapse ≥ <input id="collapse-min" value="5" size="5"
+    title="Collapse a run of empty rows only when it is at least this long: a plain number means rows (e.g. 5), a byte size means empty address space (e.g. 64k, 1m, 0x10000)"></label>
+  <label>zoom <select id="row-px">
+    <option value="4">xs</option>
+    <option value="8">s</option>
+    <option value="12" selected>m</option>
+    <option value="18">l</option>
+    <option value="26">xl</option>
+  </select></label>
+  <label>color <select id="color-mode">
+    <option value="0">live</option>
+    <option value="1">site</option>
+    <option value="2">thread</option>
+    <option value="3">size</option>
+    <option value="4">age</option>
+    <option value="5">tag</option>
+  </select></label>
+  <button id="btn-filter">Filter</button>
+  <button id="btn-analysis" hidden>Analysis</button>
+  <button id="btn-mark" hidden title="Bookmark the current playhead position (m)">＋ mark</button>
+
+  <span class="sep"></span>
+
+  <input id="jump-input" placeholder="seq · t:1e6 · 0x…" size="12"
+    title="Jump to an event index, a time (t: prefix), or an address (0x…) — press g to focus">
+  <button id="btn-jump">Go</button>
+  <button id="btn-warnings" hidden>⚠ <span id="warn-count"></span></button>
+</header>
+
+<div id="legend" hidden></div>
+
+<main id="views">
+  <section class="tl-strip" id="strip-t">
+    <span class="tl-tag" title="x = wall-clock time; bursts bunch up">time</span>
+    <canvas id="tlt"></canvas>
+    <div class="tl-hoverline" hidden></div>
+    <div class="tl-select" hidden></div>
+    <div class="tl-marks"></div>
+  </section>
+  <section class="tl-strip" id="strip-s">
+    <span class="tl-tag" title="x = event index; order and count">events</span>
+    <canvas id="tls"></canvas>
+    <div class="tl-hoverline" hidden></div>
+    <div class="tl-select" hidden></div>
+    <div class="tl-marks"></div>
+  </section>
+
+  <section id="addr-scroll">
+    <div id="addr-view">
+      <canvas id="addr"></canvas>
+      <svg id="addr-overlay"></svg>
+      <div id="addr-mark-lines"></div>
+    </div>
+    <div id="addr-spacer"></div>
+    <div id="empty-hint">no live allocations at this point</div>
+  </section>
+</main>
+
+<footer id="status">
+  <span id="st-pos">—</span>
+  <span id="st-live">—</span>
+  <span id="st-info"></span>
+  <span class="grow"></span>
+  <span id="st-trace">drop a .heapl file anywhere</span>
+</footer>
+
+<div id="tooltip" hidden></div>
+
+<div id="filter-panel" class="panel" hidden>
+  <div class="panel-head">Filter <button class="panel-close" data-close="filter-panel">×</button></div>
+  <div class="panel-body">
+    <div class="filter-row">
+      <label><input type="radio" name="fmode" value="1" checked> dim others</label>
+      <label><input type="radio" name="fmode" value="2"> hide others</label>
+      <button id="filter-clear">clear</button>
+    </div>
+    <div class="filter-row"><label>size <input id="f-size-min" placeholder="min (e.g. 4k)" size="9">–<input id="f-size-max" placeholder="max" size="9"></label></div>
+    <div id="f-sites" class="check-group"></div>
+    <div id="f-thrs" class="check-group"></div>
+  </div>
+</div>
+
+<div id="analysis-panel" class="panel" hidden>
+  <div class="panel-head">Analysis
+    <span class="head-actions">
+      <button id="an-save" title="Download tags, names, colors, and bookmarks as a .heapa.json file">Save…</button>
+      <button id="an-load" title="Load a saved analysis file">Load…</button>
+      <input type="file" id="analysis-file" accept=".json,.heapa" hidden>
+      <button class="panel-close" data-close="analysis-panel">×</button>
+    </span>
+  </div>
+  <div class="panel-body">
+    <div class="an-section">
+      <div class="group-title">time marks · click = jump in time (address view stays) · ⌖ = also center the place</div>
+      <div id="an-bookmarks" class="check-group"></div>
+    </div>
+    <div class="an-section">
+      <div class="group-title">address marks · shift-click the map to add · click to center</div>
+      <div id="an-addrmarks" class="check-group"></div>
+    </div>
+    <div class="an-section">
+      <div class="group-title">tags · check = visible (uses the filter’s dim/hide mode) · recolor, rename, delete</div>
+      <div id="tags-list" class="check-group"></div>
+    </div>
+    <div class="an-section">
+      <div class="group-title">named allocations · click to select</div>
+      <div id="an-names" class="check-group"></div>
+    </div>
+  </div>
+</div>
+
+<div id="warnings-panel" class="panel" hidden>
+  <div class="panel-head">Warnings <button class="panel-close" data-close="warnings-panel">×</button></div>
+  <div class="panel-body" id="warnings-list"></div>
+</div>
+
+<div id="detail-panel" class="panel" hidden>
+  <div class="panel-head">Allocation <button class="panel-close" data-close="detail-panel">×</button></div>
+  <div class="panel-body" id="detail-body"></div>
+</div>
+
+<div id="sel-popover" hidden>
+  <div id="sel-range" class="sel-range"></div>
+  <div class="sel-actions">
+    <button id="sel-zoom">Zoom</button>
+    <input id="sel-tag-name" placeholder="tag name" size="9" list="tag-names">
+    <datalist id="tag-names"></datalist>
+    <button id="sel-tag">Tag</button>
+    <button id="sel-cancel">×</button>
+  </div>
+</div>
+
+<div id="progress" hidden><div>loading trace… <span id="progress-pct">0%</span></div></div>
+<div id="drop-overlay" hidden><div>drop trace to load</div></div>
+
+<script type="module" src="main.js"></script>
+</body>
+</html>

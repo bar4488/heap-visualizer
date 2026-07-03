@@ -1,0 +1,63 @@
+# heap-visualizer
+
+Heap allocation visualizer: renders a `.heapl` (JSONL) stream of
+malloc/free/realloc events on an address-line map with two coordinated
+timelines (temporal and sequential) and full time-travel. See
+[SPECIFICATION.md](SPECIFICATION.md).
+
+All parsing, seeking, and rasterization happen in a Rust → WebAssembly core
+running in a Web Worker with OffscreenCanvas; the page stays fully
+client-side.
+
+## Build & run
+
+```sh
+./build.sh                     # cargo build → web/heap_visualizer_core.wasm (needs the
+                               # wasm32-unknown-unknown target: rustup target
+                               # add wasm32-unknown-unknown)
+python3 gen.py --seed 1 --ops 50000 --threads 4 --out web/demo.heapl
+python3 -m http.server -d web 8630
+# open http://localhost:8630  (or ...?trace=demo.heapl to autoload)
+```
+
+Drop any `.heapl` file onto the page to load it.
+
+## Analysis workflow
+
+- **Shift-drag** a range on either timeline to select it, then **Zoom** into it
+  or **Tag** every allocation created in it. With a filter active, only
+  allocations the filter matches get tagged — the filter defines the working
+  set.
+- Click an allocation to open its panel: give it a **name**, a **tag**, or a
+  **highlight color** (shown in every color mode).
+- **＋ mark** (or `m`) bookmarks the current playhead position; time marks show
+  as flags on both timelines. Clicking one jumps in time while the address
+  view stays put; the ⌖ button (or shift+click on the flag) also centers
+  where the event happened.
+- **Shift-click** the address map to drop an **address mark** — a named
+  horizontal flag line; click it (or its Analysis-panel entry) to center that
+  address at any playhead. `g` focuses the jump box, which accepts a seq,
+  `t:` time, or `0x…` address.
+- The **Analysis** panel lists bookmarks, tags (visibility filter, recolor,
+  rename, delete) and named allocations, and **saves/loads** the whole thing
+  as a `.heapa.json` file — dropping one onto the page restores the analysis.
+- The **collapse ≥** box controls empty-row collapsing: a plain number is a
+  run length in rows (e.g. `5`), a byte size (`64k`, `0x10000`) is empty
+  address space — byte thresholds adapt when the row width changes.
+- Color modes: live, site, thread, size (log ramp), age (log-normalized vs
+  the oldest live allocation), tag. Tagged allocations keep a colored stripe
+  in every mode, and both timelines carry a tag lane along the bottom.
+
+## Tests
+
+```sh
+cargo test --manifest-path core/Cargo.toml
+```
+
+## Layout
+
+- `core/` — Rust WASM engine (JSONL parser, columnar store, snapshot seeks,
+  address-line raster, timeline binning). Plain C ABI, no wasm-bindgen.
+- `web/` — static viewer: `worker.js` owns the WASM + canvases, `main.js` is
+  DOM chrome and input.
+- `gen.py` — deterministic synthetic trace generator.

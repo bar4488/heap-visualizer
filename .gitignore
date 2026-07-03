@@ -1,0 +1,4 @@
+core/target/
+web/heap_visualizer_core.wasm
+web/demo.heapl
+*.heapl
