@@ -12,6 +12,8 @@ Supports analyzing heap-traces, tagging, and naming allocations, marking timesta
 
 ![Heap visualizer showing coordinated time and event timelines above the address map](docs/images/heap-visualizer-overview.png)
 
+![Heap visualizer analysis - address / time marks, tags, timelaps](docs/images/heap-visualizer-analysis.png)
+
 ## Build & run
 
 ```sh
