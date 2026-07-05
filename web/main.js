@@ -540,6 +540,8 @@ $('show-all').onchange = () =>
   worker.postMessage({ type: 'set', key: 'showAll', value: $('show-all').checked });
 $('show-sizes').onchange = () =>
   worker.postMessage({ type: 'set', key: 'sizeLabels', value: $('show-sizes').checked });
+$('show-addrs').onchange = () =>
+  worker.postMessage({ type: 'set', key: 'addrLabels', value: $('show-addrs').checked });
 
 // the worker draws in-allocation labels; it needs the user-assigned names
 function sendNames() {
@@ -1757,6 +1759,14 @@ function placeLivePanel(panel) {
 function fillDetailPanel(info) {
   const panel = $('detail-panel');
   if (!info) { panel.hidden = true; return; }
+  // never two windows for the same allocation: if it is already pinned,
+  // bring that window to the front instead of opening a duplicate
+  const dup = document.querySelector(`.pinned-detail[data-e="${info.e}"]`);
+  if (dup) {
+    panel.hidden = true;
+    raisePanel(dup);
+    return;
+  }
   UI.detailInfo = info;
   panel.querySelector('.ph-t').textContent = detailTitle(info);
   buildDetailBody($('detail-body'), info);
@@ -1778,6 +1788,7 @@ $('d-pin').onclick = () => {
   // identical chrome to the live panel — the orange pin is the only tell
   const win = document.createElement('div');
   win.className = 'panel pinned-detail';
+  win.dataset.e = info.e;
   win.innerHTML = `<div class="panel-head"><span class="ph-t">${esc(detailTitle(info))}</span>
       <span class="head-actions">
         <button class="d-pin pinned" title="Unpin — return this to the live Allocation panel">📌</button>

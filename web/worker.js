@@ -21,6 +21,7 @@ const S = {
   tlS: { lo: 0, hi: 1 }, // sequential view range (seq)
   addrMarks: [],         // [{lo, hi}] address marks, set by the main thread
   names: new Map(),      // creator event -> user name, for in-alloc labels
+  addrLabels: true,      // draw row start addresses along the left edge
   locked: false,         // locked viewport: stepping never auto-scrolls
   playing: false,
   playMode: 't',         // 't' | 'seq'
@@ -196,14 +197,16 @@ function renderAddr() {
         }
       }
     } else if (lb.k === 0) {
-      ctx.font = `${Math.round(10 * dpr)}px ui-monospace, SFMono-Regular, Menlo, monospace`;
-      const text = lb.addr;
-      const tw = ctx.measureText(text).width;
-      const y = lb.y + S.rowPx / 2;
-      ctx.fillStyle = 'rgba(13,17,23,0.55)';
-      ctx.fillRect(2 * dpr, y - 6 * dpr, tw + 8 * dpr, 12 * dpr);
-      ctx.fillStyle = 'rgba(160,171,183,0.95)';
-      ctx.fillText(text, 6 * dpr, y + dpr);
+      if (S.addrLabels) {
+        ctx.font = `${Math.round(10 * dpr)}px ui-monospace, SFMono-Regular, Menlo, monospace`;
+        const text = lb.addr;
+        const tw = ctx.measureText(text).width;
+        const y = lb.y + S.rowPx / 2;
+        ctx.fillStyle = 'rgba(13,17,23,0.55)';
+        ctx.fillRect(2 * dpr, y - 6 * dpr, tw + 8 * dpr, 12 * dpr);
+        ctx.fillStyle = 'rgba(160,171,183,0.95)';
+        ctx.fillText(text, 6 * dpr, y + dpr);
+      }
     } else {
       ctx.font = `${Math.round(9 * dpr)}px ui-monospace, monospace`;
       const text = `${fmtBytes(lb.bytes)} skipped`;
@@ -540,7 +543,7 @@ onmessage = async (ev) => {
       break;
     }
     case 'set': {
-      if (!S.loaded && !['rowPx', 'locked', 'sizeLabels'].includes(m.key)) break;
+      if (!S.loaded && !['rowPx', 'locked', 'sizeLabels', 'addrLabels'].includes(m.key)) break;
       switch (m.key) {
         case 'rowBytes': {
           const anchor = captureAnchor();
@@ -568,6 +571,10 @@ onmessage = async (ev) => {
           break;
         case 'sizeLabels':
           if (E) E.hp_set_size_labels(m.value ? 1 : 0);
+          S.dirty.addr = true;
+          break;
+        case 'addrLabels':
+          S.addrLabels = !!m.value;
           S.dirty.addr = true;
           break;
         case 'showAll': {
