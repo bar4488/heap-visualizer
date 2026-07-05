@@ -20,6 +20,8 @@ const S = {
   tlT: { lo: 0, hi: 1 }, // temporal view range (t)
   tlS: { lo: 0, hi: 1 }, // sequential view range (seq)
   addrMarks: [],         // [{lo, hi}] address marks, set by the main thread
+  names: new Map(),      // creator event -> user name, for in-alloc labels
+  locked: false,         // locked viewport: stepping never auto-scrolls
   playing: false,
   playMode: 't',         // 't' | 'seq'
   playRate: 0,           // t-units/s or events/s
@@ -132,12 +134,23 @@ function restoreAnchor(anchor) {
 
 function seekAnchored(seq) {
   const anchor = captureAnchor();
+  // pin the anchor row so it survives the seek even if everything in it is
+  // freed — the user stays exactly where they were looking
+  if (anchor) E.hp_set_anchor_pin(anchor.lo, anchor.hi);
   E.hp_seek_seq(seq);
   restoreAnchor(anchor);
 }
 
 function allDirty() {
   S.dirty.addr = S.dirty.tlt = S.dirty.tls = true;
+}
+
+// Detail-panel info for the allocation an event touches; null when the
+// event resolves to no creator (e.g. a free of an unknown id).
+function allocInfo(event) {
+  if (!event || event.e === undefined || !canvases.addr) return null;
+  E.hp_alloc_info(event.e, canvases.addr.width, S.scroll);
+  return retJson();
 }
 
 // ---------------------------------------------------------------------------
@@ -164,7 +177,25 @@ function renderAddr() {
   const ctx = ctxs.addr;
   ctx.textBaseline = 'middle';
   for (const lb of labels) {
-    if (lb.k === 0) {
+    if (lb.k === 2) {
+      // in-allocation label, centered: "name · size" if it fits, else the
+      // name, else the hex size, else nothing
+      const fs = Math.min(10 * dpr, S.rowPx - 3);
+      if (fs >= 6) {
+        ctx.font = `${Math.round(fs)}px ui-monospace, SFMono-Regular, Menlo, monospace`;
+        const avail = lb.w - 5 * dpr;
+        const name = S.names.get(lb.e);
+        const candidates = name ? [`${name} · ${lb.text}`, name, lb.text] : [lb.text];
+        for (const text of candidates) {
+          const tw = ctx.measureText(text).width;
+          if (tw <= avail) {
+            ctx.fillStyle = 'rgba(8,14,18,0.92)';
+            ctx.fillText(text, lb.x + (lb.w - tw) / 2, lb.y + S.rowPx / 2 + dpr);
+            break;
+          }
+        }
+      }
+    } else if (lb.k === 0) {
       ctx.font = `${Math.round(10 * dpr)}px ui-monospace, SFMono-Regular, Menlo, monospace`;
       const text = lb.addr;
       const tw = ctx.measureText(text).width;
@@ -394,18 +425,31 @@ onmessage = async (ev) => {
       if (!S.loaded) break;
       stopPlay();
       const target = Math.max(0, Math.min(S.n, E.hp_cur() + m.delta));
-      E.hp_seek_seq(target);
+      if (S.locked) {
+        // keep the viewport anchored to the same address instead of scrolling
+        seekAnchored(target);
+      } else {
+        E.hp_seek_seq(target);
+      }
       S.playPos = S.playMode === 't' ? E.hp_cur_t() : target;
-      // center the address-line on the allocation the stepped event touched
       const evIdx = m.delta > 0 ? target - 1 : Math.min(target, S.n - 1);
       if (evIdx >= 0 && canvases.addr) {
-        const y = E.hp_scroll_for_event(evIdx, canvases.addr.height);
-        if (y >= 0) {
-          S.scroll = y;
-          postMessage({ type: 'scrollTo', y: y / dpr });
-        }
         E.hp_event_json(evIdx);
-        postMessage({ type: 'stepped', event: retJson() });
+        const event = retJson();
+        // select the allocation the event touches (F selects what it frees)
+        if (event && event.e !== undefined) E.hp_set_selected(event.e);
+        if (!S.locked) {
+          // center the address-line on that allocation
+          const y = E.hp_scroll_for_event(evIdx, canvases.addr.height);
+          if (y >= 0) {
+            S.scroll = y;
+            postMessage({ type: 'scrollTo', y: y / dpr });
+          }
+          // when zoomed horizontally, also pan it into view
+          const pan = E.hp_center_x_for_event(evIdx);
+          postMessage({ type: 'xview', pan });
+        }
+        postMessage({ type: 'stepped', event, info: allocInfo(event) });
       }
       allDirty();
       break;
@@ -425,6 +469,14 @@ onmessage = async (ev) => {
           S.scroll = y;
           postMessage({ type: 'scrollTo', y: y / dpr });
         }
+        const pan = E.hp_center_x_for_event(evIdx);
+        postMessage({ type: 'xview', pan });
+      }
+      if (m.select && evIdx >= 0) {
+        E.hp_event_json(evIdx);
+        const event = retJson();
+        if (event && event.e !== undefined) E.hp_set_selected(event.e);
+        postMessage({ type: 'stepped', event, info: allocInfo(event) });
       }
       allDirty();
       break;
@@ -441,10 +493,27 @@ onmessage = async (ev) => {
       postMessage({ type: 'addr-at', reqId: m.reqId, addr });
       break;
     }
-    case 'addr-marks':
-      S.addrMarks = m.marks;
+    case 'names':
+      S.names = new Map(m.names);
       S.dirty.addr = true;
       break;
+    case 'addr-marks': {
+      S.addrMarks = m.marks;
+      if (E) {
+        // pin the marked rows so they stay laid out (and scrollable to)
+        // even when nothing is live there
+        const buf = new Uint8Array(m.marks.length * 8);
+        const dv = new DataView(buf.buffer);
+        m.marks.forEach((mk, i) => {
+          dv.setUint32(i * 8, mk.lo, true);
+          dv.setUint32(i * 8 + 4, mk.hi, true);
+        });
+        writeBuf(buf);
+        E.hp_set_pins(m.marks.length);
+      }
+      S.dirty.addr = true;
+      break;
+    }
     case 'goto-addr': {
       if (!S.loaded || !canvases.addr) break;
       const y = E.hp_scroll_for_addr(m.lo, m.hi, 0);
@@ -471,7 +540,7 @@ onmessage = async (ev) => {
       break;
     }
     case 'set': {
-      if (!S.loaded && m.key !== 'rowPx') break;
+      if (!S.loaded && !['rowPx', 'locked', 'sizeLabels'].includes(m.key)) break;
       switch (m.key) {
         case 'rowBytes': {
           const anchor = captureAnchor();
@@ -492,6 +561,24 @@ onmessage = async (ev) => {
           S.rowPx = m.value * dpr;
           S.gapPx = Math.max(8, Math.round(S.rowPx * 0.6));
           if (E) applyRowPx();
+          S.dirty.addr = true;
+          break;
+        case 'locked':
+          S.locked = !!m.value;
+          break;
+        case 'sizeLabels':
+          if (E) E.hp_set_size_labels(m.value ? 1 : 0);
+          S.dirty.addr = true;
+          break;
+        case 'showAll': {
+          const anchor = captureAnchor();
+          E.hp_set_show_all(m.value ? 1 : 0);
+          restoreAnchor(anchor);
+          S.dirty.addr = true;
+          break;
+        }
+        case 'xview':
+          E.hp_set_xview(m.value.zoom, m.value.pan);
           S.dirty.addr = true;
           break;
         case 'colorMode':
@@ -518,9 +605,10 @@ onmessage = async (ev) => {
       break;
     case 'tag-range': {
       if (!S.loaded) break;
+      const byFree = m.byFree ? 1 : 0;
       const count = m.kind === 0
-        ? E.hp_tag_t_range(m.lo, m.hi, m.tag)
-        : E.hp_tag_seq_range(Math.max(0, Math.round(m.lo)), Math.max(0, Math.round(m.hi)), m.tag);
+        ? E.hp_tag_t_range(m.lo, m.hi, m.tag, byFree)
+        : E.hp_tag_seq_range(Math.max(0, Math.round(m.lo)), Math.max(0, Math.round(m.hi)), m.tag, byFree);
       postMessage({ type: 'tagged', count, tag: m.tag });
       tagsChanged();
       break;
@@ -571,6 +659,29 @@ onmessage = async (ev) => {
       if (!S.loaded || !canvases.addr) break;
       E.hp_pick(canvases.addr.width, Math.round(m.x * dpr), m.y * dpr, S.scroll);
       postMessage({ type: 'pick-result', reqId: m.reqId, info: retJson(), forClick: m.forClick });
+      break;
+    }
+    case 'events': {
+      if (!S.loaded) break;
+      E.hp_events_json(m.from, m.count);
+      postMessage({ type: 'events', reqId: m.reqId, from: m.from, events: retJson() });
+      break;
+    }
+    case 'flash-event': {
+      // re-click on the current event in the list: scroll/pan it into view
+      // and flash its exact location (tiny allocations become findable)
+      if (!S.loaded || !canvases.addr) break;
+      const evIdx = Math.max(0, Math.min(S.n - 1, m.seq));
+      const y = E.hp_scroll_for_event(evIdx, canvases.addr.height);
+      if (y >= 0 && Math.abs(y - S.scroll) > 1) {
+        S.scroll = y;
+        postMessage({ type: 'scrollTo', y: y / dpr });
+        S.dirty.addr = true;
+      }
+      const pan = E.hp_center_x_for_event(evIdx);
+      postMessage({ type: 'xview', pan });
+      E.hp_event_rects(evIdx, canvases.addr.width, S.scroll);
+      postMessage({ type: 'flash-rects', rects: retJson() });
       break;
     }
     case 'tlhover': {

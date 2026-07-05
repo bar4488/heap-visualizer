@@ -104,6 +104,8 @@ pub extern "C" fn hp_parse_begin() {
     a.view = View::new();
     a.cfg.selected = NONE_U32;
     a.cfg.filter = Filter::default();
+    a.cfg.x_zoom = 1.0;
+    a.cfg.x_pan = 0.0;
 }
 
 #[no_mangle]
@@ -303,6 +305,72 @@ pub extern "C" fn hp_set_selected(e: u32) {
     app().cfg.selected = e;
 }
 
+/// Horizontal zoom/pan on the byte axis of each row. `zoom` >= 1 (1 = the
+/// whole row fits the width); `pan` is a fraction of the row [0, 1 - 1/zoom].
+#[no_mangle]
+pub extern "C" fn hp_set_xview(zoom: f64, pan: f64) {
+    let a = app();
+    a.cfg.x_zoom = if zoom.is_finite() { zoom.max(1.0) } else { 1.0 };
+    let max_pan = 1.0 - 1.0 / a.cfg.x_zoom;
+    a.cfg.x_pan = if pan.is_finite() { pan.clamp(0.0, max_pan) } else { 0.0 };
+}
+
+/// Pan the horizontal view so the allocation touched by event `e` is centered
+/// (no-op when not zoomed). Returns the resulting pan fraction.
+#[no_mangle]
+pub extern "C" fn hp_center_x_for_event(e: u32) -> f64 {
+    let a = app();
+    let s = &a.store;
+    if e >= s.len() || a.cfg.x_zoom <= 1.0 {
+        return a.cfg.x_pan;
+    }
+    let ei = e as usize;
+    let creator = if s.op[ei] == OP_F { s.target[ei] } else { e };
+    if creator == NONE_U32 {
+        return a.cfg.x_pan;
+    }
+    let rb = a.view.row_bytes;
+    let off = s.addr[creator as usize].saturating_sub(a.view.base) % rb;
+    let vis = 1.0 / a.cfg.x_zoom;
+    a.cfg.x_pan = (off as f64 / rb as f64 - vis / 2.0).clamp(0.0, 1.0 - vis);
+    a.cfg.x_pan
+}
+
+/// Show/hide the hex size labels drawn inside allocations.
+#[no_mangle]
+pub extern "C" fn hp_set_size_labels(on: u32) {
+    app().cfg.size_labels = on != 0;
+}
+
+/// Toggle the stable "all rows" layout: every row any allocation ever
+/// touches stays laid out regardless of the playhead.
+#[no_mangle]
+pub extern "C" fn hp_set_show_all(on: u32) {
+    let a = app();
+    a.view.set_show_all(&a.store, on != 0);
+}
+
+/// Pin the scroll anchor (the address at the top of the viewport) so its row
+/// survives seeks even when everything in it is freed.
+#[no_mangle]
+pub extern "C" fn hp_set_anchor_pin(lo: u32, hi: u32) {
+    let addr = (hi as u64) << 32 | lo as u64;
+    app().view.set_anchor_pin(Some(addr));
+}
+
+/// Pinned addresses, written into the input buffer as consecutive u64 LE
+/// values. Their rows stay laid out even when empty (see View::pins).
+#[no_mangle]
+pub extern "C" fn hp_set_pins(count: u32) {
+    let a = app();
+    let mut pins = Vec::with_capacity(count as usize);
+    for i in 0..count as usize {
+        let b = &a.buf[i * 8..i * 8 + 8];
+        pins.push(u64::from_le_bytes(b.try_into().unwrap()));
+    }
+    a.view.set_pins(pins);
+}
+
 /// Filter spec is written into the input buffer as JSON:
 /// {"mode":1,"sites":[0,3],"thrs":[1],"sizeMin":0,"sizeMax":0}
 #[no_mangle]
@@ -395,24 +463,42 @@ pub extern "C" fn hp_tag_event(e: u32, tag: u32) {
     }
 }
 
-/// Tag every allocation *created* in the seq range [lo, hi). When a filter
-/// is active (dim or hide), only allocations it matches are tagged — the
-/// filter defines the working set. Returns the number tagged.
+/// Tag allocations touched by events in the seq range [lo, hi). With
+/// `by_free == 0` that is every allocation *created* in the range (M/R);
+/// with `by_free != 0` it is every allocation *freed* in the range (the
+/// creator each F/R kills). When a filter is active (dim or hide), only
+/// allocations it matches are tagged — the filter defines the working set.
+/// Returns the number tagged.
 #[no_mangle]
-pub extern "C" fn hp_tag_seq_range(lo: u32, hi: u32, tag: u32) -> u32 {
-    let a = app();
+pub extern "C" fn hp_tag_seq_range(lo: u32, hi: u32, tag: u32, by_free: u32) -> u32 {
+    tag_seq_range(app(), lo, hi, tag, by_free)
+}
+
+fn tag_seq_range(a: &mut App, lo: u32, hi: u32, tag: u32, by_free: u32) -> u32 {
     let tag = tag.min(255) as u8;
-    let to_tag: Vec<u32> = {
+    let mut to_tag: Vec<u32> = {
         let s = &a.store;
         let f = &a.cfg.filter;
         let filtered = f.mode != render::FILTER_OFF;
         (lo..hi.min(s.len()))
-            .filter(|&e| {
+            .filter_map(|e| {
                 let op = s.op[e as usize];
-                (op == OP_M || op == OP_R) && (!filtered || f.pass(s, e))
+                if by_free != 0 {
+                    if (op == OP_F || op == OP_R) && s.target[e as usize] != NONE_U32 {
+                        Some(s.target[e as usize])
+                    } else {
+                        None
+                    }
+                } else if op == OP_M || op == OP_R {
+                    Some(e)
+                } else {
+                    None
+                }
             })
+            .filter(|&c| !filtered || f.pass(s, c))
             .collect()
     };
+    to_tag.dedup();
     let n = to_tag.len() as u32;
     for e in to_tag {
         a.store.tag[e as usize] = tag;
@@ -420,9 +506,10 @@ pub extern "C" fn hp_tag_seq_range(lo: u32, hi: u32, tag: u32) -> u32 {
     n
 }
 
-/// Tag every allocation created in the time range [lo, hi]. Returns count.
+/// Tag every allocation created (or freed, see `by_free`) in the time range
+/// [lo, hi]. Returns count.
 #[no_mangle]
-pub extern "C" fn hp_tag_t_range(lo: f64, hi: f64, tag: u32) -> u32 {
+pub extern "C" fn hp_tag_t_range(lo: f64, hi: f64, tag: u32, by_free: u32) -> u32 {
     let (b0, b1) = {
         let s = &app().store;
         (
@@ -430,7 +517,7 @@ pub extern "C" fn hp_tag_t_range(lo: f64, hi: f64, tag: u32) -> u32 {
             s.seq_for_t(hi.max(0.0).floor() as u64),
         )
     };
-    hp_tag_seq_range(b0, b1, tag)
+    hp_tag_seq_range(b0, b1, tag, by_free)
 }
 
 /// Tag colors are written into the input buffer as consecutive u32 LE rgb
@@ -624,6 +711,33 @@ pub extern "C" fn hp_move_link(w: u32, scroll: f64) {
     ret_str(&a.out);
 }
 
+/// Rects covering the allocation event `e` touches (for the event-list flash).
+#[no_mangle]
+pub extern "C" fn hp_event_rects(e: u32, w: u32, scroll: f64) {
+    let a = app();
+    a.out = render::event_rects(&a.store, &mut a.view, &a.cfg, w, e, scroll);
+    ret_str(&a.out);
+}
+
+/// Detail-panel info for the allocation created at event `e` (same JSON shape
+/// as hp_pick); null if `e` is not a creator (M/R) event.
+#[no_mangle]
+pub extern "C" fn hp_alloc_info(e: u32, w: u32, scroll: f64) {
+    let a = app();
+    let is_creator = {
+        let s = &a.store;
+        e < s.len() && (s.op[e as usize] == OP_M || s.op[e as usize] == OP_R)
+    };
+    if !is_creator {
+        a.out.clear();
+        a.out.push_str("null");
+    } else {
+        let addr = a.store.addr[e as usize];
+        a.out = render::alloc_info(&a.store, &mut a.view, &a.cfg, w, addr, e, scroll);
+    }
+    ret_str(&a.out);
+}
+
 /// Address under canvas pixel (x, y) given scroll, whether or not a live
 /// allocation covers it. ret[0]/ret[1] = addr (u64 lo/hi), ret[3] = found
 /// (0 when the pixel is in a gap marker or outside the layout).
@@ -640,7 +754,8 @@ pub extern "C" fn hp_addr_at(w: u32, x: u32, y: f64, scroll: f64) {
     let yv = (y + scroll).max(0.0) as u64;
     if let Some(i) = v.row_at_y(yv, a.cfg.row_px, a.cfg.gap_px) {
         let row_start = v.base + v.rows[i] * v.row_bytes;
-        let off = (x as f64 / w as f64 * v.row_bytes as f64) as u64;
+        let (scale, pan) = a.cfg.x_map(w, v.row_bytes);
+        let off = (pan + x as f64 / scale) as u64;
         let addr = row_start + off.min(v.row_bytes - 1);
         r[0] = addr as u32;
         r[1] = (addr >> 32) as u32;
@@ -684,16 +799,12 @@ pub extern "C" fn hp_scroll_for_event(e: u32, h: u32) -> f64 {
     render::scroll_for_event(&a.store, &mut a.view, &a.cfg, h, e)
 }
 
-/// Details of one event (for the step readout / warning jumps).
-#[no_mangle]
-pub extern "C" fn hp_event_json(e: u32) {
-    let a = app();
-    let s = &a.store;
-    let o = &mut a.out;
-    o.clear();
+/// One event as JSON, appended to `o`. `e` also carries the creator event
+/// index (the allocation the event touches — for F that is its target), so
+/// the viewer can select/highlight it.
+fn push_event_json(o: &mut String, s: &Store, e: u32) {
     if e >= s.len() {
         o.push_str("null");
-        ret_str(o);
         return;
     }
     let ei = e as usize;
@@ -704,8 +815,8 @@ pub extern "C" fn hp_event_json(e: u32) {
         ei
     };
     o.push_str(&format!(
-        "{{\"seq\":{},\"op\":{},\"t\":{},\"id\":{},\"addr\":\"0x{:x}\",\"size\":{}",
-        e, s.op[ei], s.t[ei] as f64, s.id[ei], s.addr[gi], s.size[gi]
+        "{{\"seq\":{},\"op\":{},\"t\":{},\"id\":{},\"e\":{},\"addr\":\"0x{:x}\",\"size\":{}",
+        e, s.op[ei], s.t[ei] as f64, s.id[ei], gi, s.addr[gi], s.size[gi]
     ));
     if s.op[ei] == OP_R {
         o.push_str(&format!(
@@ -721,6 +832,35 @@ pub extern "C" fn hp_event_json(e: u32) {
         o.push_str("null");
     }
     o.push('}');
+}
+
+/// Details of one event (for the step readout / warning jumps).
+#[no_mangle]
+pub extern "C" fn hp_event_json(e: u32) {
+    let a = app();
+    let s = &a.store;
+    let o = &mut a.out;
+    o.clear();
+    push_event_json(o, s, e);
+    ret_str(o);
+}
+
+/// A slice of events [from, from + count) for the event-list panel.
+#[no_mangle]
+pub extern "C" fn hp_events_json(from: u32, count: u32) {
+    let a = app();
+    let s = &a.store;
+    let o = &mut a.out;
+    o.clear();
+    o.push('[');
+    let hi = from.saturating_add(count.min(2000)).min(s.len());
+    for e in from..hi {
+        if e > from {
+            o.push(',');
+        }
+        push_event_json(o, s, e);
+    }
+    o.push(']');
     ret_str(o);
 }
 
@@ -1027,6 +1167,124 @@ not json at all
         // 3 (realloc without a site field → unconstrained, passes)
         assert_eq!(to_tag, vec![1, 3]);
         assert_eq!(a.store.tag, vec![0, 1, 0, 1, 0]);
+    }
+
+    #[test]
+    fn tag_freed_range() {
+        let mut a = load(SAMPLE);
+        // events: 0 M(id1), 1 M(id2), 2 F(id1), 3 R(id3 kills id2), 4 F(id3)
+        // frees in [2, 4): F#2 kills creator 0, R#3 kills creator 1
+        let n = tag_seq_range(&mut a, 2, 4, 1, 1);
+        assert_eq!(n, 2);
+        assert_eq!(a.store.tag, vec![1, 1, 0, 0, 0]);
+        // freed in [4, 5): F#4 kills the realloc creator (event 3)
+        let n = tag_seq_range(&mut a, 4, 5, 2, 1);
+        assert_eq!(n, 1);
+        assert_eq!(a.store.tag, vec![1, 1, 0, 2, 0]);
+        // by_free = 0 keeps the old "creators in range" behavior
+        let n = tag_seq_range(&mut a, 0, 5, 3, 0);
+        assert_eq!(n, 3);
+        assert_eq!(a.store.tag, vec![3, 3, 0, 3, 0]);
+    }
+
+    #[test]
+    fn pinned_rows_stay_laid_out() {
+        let mut a = load(SAMPLE);
+        // at the end of the trace everything is freed: no rows at all
+        a.view.seek(&a.store, 5);
+        a.view.ensure_rows();
+        assert!(a.view.rows.is_empty());
+        // pin an address: its row is laid out even though nothing is live
+        a.view.set_pins(vec![0x3000]);
+        a.view.ensure_rows();
+        assert_eq!(a.view.rows, vec![2]); // (0x3000 - base 0x1000) / 0x1000
+        let y = a.view.scroll_for_addr(0x3000, 0, 12, 7);
+        assert_eq!(y, 0.0);
+        // live rows merge with (and dedup against) pins
+        a.view.seek(&a.store, 2); // 0x1000 and 0x2000 live
+        a.view.set_pins(vec![0x2000, 0x3000]);
+        a.view.ensure_rows();
+        assert_eq!(a.view.rows, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn show_all_rows_stable() {
+        let mut a = load(SAMPLE);
+        // at the end everything is freed: normally no rows at all
+        a.view.seek(&a.store, 5);
+        a.view.ensure_rows();
+        assert!(a.view.rows.is_empty());
+        // show_all lays out every row ever touched: 0x1000, 0x2000, 0x3000
+        a.view.set_show_all(&a.store, true);
+        a.view.ensure_rows();
+        assert_eq!(a.view.rows, vec![0, 1, 2]);
+        // and the layout is identical at any playhead position
+        a.view.seek(&a.store, 1);
+        a.view.ensure_rows();
+        assert_eq!(a.view.rows, vec![0, 1, 2]);
+        // switching back returns to the live-set layout
+        a.view.set_show_all(&a.store, false);
+        a.view.ensure_rows();
+        assert_eq!(a.view.rows, vec![0]);
+    }
+
+    #[test]
+    fn anchor_pin_survives_free() {
+        let mut a = load(SAMPLE);
+        a.view.seek(&a.store, 2);
+        // anchor at the 0x2000 row, then free everything
+        a.view.set_anchor_pin(Some(0x2000));
+        a.view.seek(&a.store, 5);
+        a.view.ensure_rows();
+        assert_eq!(a.view.rows, vec![1]); // pinned row survives
+        let y = a.view.scroll_for_addr(0x2000, 0, 12, 7);
+        assert_eq!(y, 0.0);
+    }
+
+    #[test]
+    fn x_zoom_pick() {
+        let mut a = load(SAMPLE);
+        a.view.seek(&a.store, 2);
+        // zoom 16x, pan 0: row 0 (0x1000..0x2000) shows only 0x1000..0x1100
+        a.cfg.x_zoom = 16.0;
+        a.cfg.x_pan = 0.0;
+        // the 64-byte alloc at 0x1000 now spans the first quarter of the width
+        let p = render::pick(&a.store, &mut a.view, &a.cfg, 400, 50, 0.0, 0.0);
+        assert!(p.contains("\"id\":1"), "pick got {}", p);
+        // past the alloc (byte offset 128) there is nothing
+        let p = render::pick(&a.store, &mut a.view, &a.cfg, 400, 200, 0.0, 0.0);
+        assert_eq!(p, "null");
+        // pan past the alloc entirely: nothing under x=0 anymore
+        a.cfg.x_pan = 0.5;
+        let p = render::pick(&a.store, &mut a.view, &a.cfg, 400, 0, 0.0, 0.0);
+        assert_eq!(p, "null");
+    }
+
+    #[test]
+    fn size_label_on_middle_row() {
+        // a 3-row allocation (0x1000..0x4000 over 0x1000-byte rows): the
+        // label goes on the middle row, not the first
+        let input = r#"{"op":"M","id":1,"addr":"0x1000","size":12288,"t":10}"#;
+        let mut a = load(input);
+        a.view.seek(&a.store, 1);
+        let out = render::render_addr(&a.store, &mut a.view, &a.cfg, &mut a.frame, 400, 300, 0.0);
+        // rows are contiguous: row_y(1) = row_px = 12
+        assert!(out.labels.contains("\"k\":2,\"x\":0,\"y\":12"), "labels: {}", out.labels);
+        // a 4-row allocation rounds to the top middle: row index 1 again
+        let input = r#"{"op":"M","id":1,"addr":"0x1000","size":16384,"t":10}"#;
+        let mut a = load(input);
+        a.view.seek(&a.store, 1);
+        let out = render::render_addr(&a.store, &mut a.view, &a.cfg, &mut a.frame, 400, 300, 0.0);
+        assert!(out.labels.contains("\"k\":2,\"x\":0,\"y\":12"), "labels: {}", out.labels);
+    }
+
+    #[test]
+    fn move_link_highlights_malloc() {
+        let mut a = load(SAMPLE);
+        a.view.seek(&a.store, 1); // just applied M id=1
+        let ml = render::move_link(&a.store, &mut a.view, &a.cfg, 400, 0.0);
+        assert!(ml.contains("\"op\":0"), "got {}", ml);
+        assert!(ml.contains("\"new\":[{"), "got {}", ml);
     }
 
     #[test]

@@ -338,8 +338,10 @@ class Generator:
                 "sites": [s.name for s in SITES],
             },
         }
-        # header carries seq like any other line for a uniform reader
-        self._emit(out, header)
+        # the header carries no seq: per spec §3.7, seq is the 0-based index
+        # among *event* records (header and comments excluded)
+        out.write(json.dumps(header, separators=(",", ":")))
+        out.write("\n")
 
     # -- reporting ----------------------------------------------------------
 
@@ -353,7 +355,7 @@ class Generator:
             "  address span  : %s .. %s (%d bytes, %.2f MiB)\n"
             "  final t       : %d %s\n"
             % (
-                self.seq - 1,  # minus the header line
+                self.seq,
                 self.n_malloc, self.n_free, self.n_realloc,
                 self.n_leak, self._cur_live_bytes,
                 self.peak_live_bytes, self.peak_live_bytes / (1 << 20),

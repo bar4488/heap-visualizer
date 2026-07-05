@@ -26,6 +26,19 @@ pub struct View {
 
     /// row index -> number of live allocations touching it.
     occ: HashMap<u64, u32>,
+    /// Pinned addresses (user address marks): their rows stay in the layout
+    /// even when nothing is live there, so they are always scrollable to.
+    pub pins: Vec<u64>,
+    /// Transient pin on the viewport's scroll anchor: the address at the top
+    /// of the viewport stays laid out across seeks even if everything there
+    /// is freed, so the user is not scrolled away from what they look at.
+    pub anchor_pin: Option<u64>,
+    /// When on, lay out every row any allocation *ever* touches (playhead
+    /// independent) so the map never reflows as allocations come and go.
+    pub show_all: bool,
+    /// Cached union rows for the current row_bytes (valid when show_all set).
+    all_rows: Vec<u64>,
+    all_rows_valid: bool,
     rows_dirty: bool,
     /// Sorted display-row indices (occupied rows plus empty filler rows for
     /// runs shorter than collapse_min) + count of collapsed gaps before each.
@@ -45,6 +58,11 @@ impl View {
             collapse_rows: 5,
             collapse_bytes: 0,
             occ: HashMap::new(),
+            pins: Vec::new(),
+            anchor_pin: None,
+            show_all: false,
+            all_rows: Vec::new(),
+            all_rows_valid: false,
             rows_dirty: true,
             rows: Vec::new(),
             gaps_before: Vec::new(),
@@ -55,6 +73,8 @@ impl View {
         self.cur = 0;
         self.live.clear();
         self.occ.clear();
+        self.pins.clear();
+        self.anchor_pin = None;
         self.live_count = 0;
         self.live_bytes = 0;
         self.rows_dirty = true;
@@ -62,6 +82,10 @@ impl View {
             self.row_bytes = s.hdr_row_bytes;
         }
         self.recompute_base(s);
+        self.all_rows_valid = false;
+        if self.show_all {
+            self.build_all_rows(s);
+        }
     }
 
     pub fn recompute_base(&mut self, s: &Store) {
@@ -86,6 +110,10 @@ impl View {
         let entries: Vec<(u64, u32)> = self.live.iter().copied().collect();
         for (_, e) in entries {
             self.occ_add(s, e, 1);
+        }
+        self.all_rows_valid = false;
+        if self.show_all {
+            self.build_all_rows(s);
         }
         self.rows_dirty = true;
     }
@@ -219,8 +247,19 @@ impl View {
             return;
         }
         let collapse_min = self.effective_collapse_min();
-        let mut occupied: Vec<u64> = self.occ.keys().copied().collect();
+        // show_all lays out the union of rows any allocation ever touches
+        // (a superset of the live rows), keeping the map stable over time
+        let mut occupied: Vec<u64> = if self.show_all {
+            self.all_rows.clone()
+        } else {
+            self.occ.keys().copied().collect()
+        };
+        // pinned addresses keep their rows laid out even when empty
+        for &p in self.pins.iter().chain(self.anchor_pin.iter()) {
+            occupied.push(self.row_of(p));
+        }
         occupied.sort_unstable();
+        occupied.dedup();
         self.rows.clear();
         self.gaps_before.clear();
         let mut gaps = 0u32;
@@ -267,6 +306,53 @@ impl View {
 
     pub fn mark_rows_dirty(&mut self) {
         self.rows_dirty = true;
+    }
+
+    pub fn set_pins(&mut self, pins: Vec<u64>) {
+        self.pins = pins;
+        self.rows_dirty = true;
+    }
+
+    pub fn set_anchor_pin(&mut self, pin: Option<u64>) {
+        if self.anchor_pin != pin {
+            self.anchor_pin = pin;
+            self.rows_dirty = true;
+        }
+    }
+
+    pub fn set_show_all(&mut self, s: &Store, on: bool) {
+        self.show_all = on;
+        if on && !self.all_rows_valid {
+            self.build_all_rows(s);
+        }
+        self.rows_dirty = true;
+    }
+
+    /// Union of rows touched by any allocation across the whole trace, for
+    /// the current row_bytes (same span/cap rules as live occupancy).
+    fn build_all_rows(&mut self, s: &Store) {
+        let mut set: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        for e in 0..s.len() {
+            let op = s.op[e as usize];
+            if op != OP_M && op != OP_R {
+                continue;
+            }
+            let a = s.addr[e as usize];
+            let r0 = self.row_of(a);
+            let r1 = self.row_of(a + s.span(e) - 1);
+            if r1 - r0 > 65536 {
+                set.insert(r0);
+                set.insert(r1);
+            } else {
+                for r in r0..=r1 {
+                    set.insert(r);
+                }
+            }
+        }
+        let mut rows: Vec<u64> = set.into_iter().collect();
+        rows.sort_unstable();
+        self.all_rows = rows;
+        self.all_rows_valid = true;
     }
 
     /// y-position (virtual px) of the display row at index i.

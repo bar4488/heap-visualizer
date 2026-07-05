@@ -20,6 +20,7 @@
   <button id="btn-step-back" title="Step back one event (←)">⏮</button>
   <button id="btn-play" title="Play / pause (space)" disabled>▶</button>
   <button id="btn-step-fwd" title="Step forward one event (→)">⏭</button>
+  <button id="btn-lock" title="Lock the viewport: stepping keeps the address view where it is instead of auto-scrolling (L)">🔓</button>
   <select id="play-mode" title="Playback advances by wall-clock time or by event index">
     <option value="t">by time</option>
     <option value="seq">by events</option>
@@ -28,26 +29,10 @@
 
   <span class="sep"></span>
 
-  <label>row <input id="row-bytes" size="7" placeholder="0x1000"
-    title="Bytes per address-line row (e.g. 4k or 0x1000; defaults to 0x1000; ctrl+wheel on the map)"></label>
-  <label>collapse ≥ <input id="collapse-min" value="5" size="5"
-    title="Collapse a run of empty rows only when it is at least this long: a plain number means rows (e.g. 5), a byte size means empty address space (e.g. 64k, 1m, 0x10000)"></label>
-  <label>zoom <select id="row-px">
-    <option value="4">xs</option>
-    <option value="8">s</option>
-    <option value="12" selected>m</option>
-    <option value="18">l</option>
-    <option value="26">xl</option>
-  </select></label>
-  <label>color <select id="color-mode">
-    <option value="0">live</option>
-    <option value="1">site</option>
-    <option value="2">thread</option>
-    <option value="3">size</option>
-    <option value="4">age</option>
-    <option value="5">tag</option>
-  </select></label>
+  <button id="hz-reset" hidden title="Horizontal zoom on the address line (ctrl/alt+wheel to zoom around the cursor, shift+wheel or horizontal scroll to pan) — click to reset">×1</button>
+  <button id="btn-layout" title="Address-line layout: row bytes, collapsing, zoom, colors">Layout</button>
   <button id="btn-filter">Filter</button>
+  <button id="btn-events" hidden title="Sequenced list of all events">Events</button>
   <button id="btn-analysis" hidden>Analysis</button>
   <button id="btn-mark" hidden title="Bookmark the current playhead position (m)">＋ mark</button>
 
@@ -98,6 +83,35 @@
 
 <div id="tooltip" hidden></div>
 
+<div id="layout-panel" class="panel" hidden>
+  <div class="panel-head">Layout <button class="panel-close" data-close="layout-panel">×</button></div>
+  <div class="panel-body">
+    <div class="filter-row"><label>row bytes <input id="row-bytes" size="7" placeholder="0x1000"
+      title="Bytes per address-line row (e.g. 4k or 0x1000; defaults to 0x1000)"></label></div>
+    <div class="filter-row"><label>collapse ≥ <input id="collapse-min" value="5" size="5"
+      title="Collapse a run of empty rows only when it is at least this long: a plain number means rows (e.g. 5), a byte size means empty address space (e.g. 64k, 1m, 0x10000)"></label></div>
+    <div class="filter-row"><label title="Lay out every row any allocation ever touches, so the map never reflows or scrolls away as allocations are freed">
+      <input type="checkbox" id="show-all"> all rows</label></div>
+    <div class="filter-row"><label title="Show each allocation's name / size (hex) inside it when it fits">
+      <input type="checkbox" id="show-sizes" checked> sizes</label></div>
+    <div class="filter-row"><label>row zoom <select id="row-px">
+      <option value="4">xs</option>
+      <option value="8">s</option>
+      <option value="12" selected>m</option>
+      <option value="18">l</option>
+      <option value="26">xl</option>
+    </select></label></div>
+    <div class="filter-row"><label>color <select id="color-mode">
+      <option value="0">live</option>
+      <option value="1">site</option>
+      <option value="2">thread</option>
+      <option value="3">size</option>
+      <option value="4">age</option>
+      <option value="5">tag</option>
+    </select></label></div>
+  </div>
+</div>
+
 <div id="filter-panel" class="panel" hidden>
   <div class="panel-head">Filter <button class="panel-close" data-close="filter-panel">×</button></div>
   <div class="panel-body">
@@ -131,7 +145,8 @@
       <div id="an-addrmarks" class="check-group"></div>
     </div>
     <div class="an-section">
-      <div class="group-title">tags · check = visible (uses the filter’s dim/hide mode) · recolor, rename, delete</div>
+      <div class="group-title">tags · check = visible (uses the filter’s dim/hide mode) · recolor, rename, delete
+        <span class="allnone" id="tags-allnone"><a data-an="all">all</a> · <a data-an="none">none</a></span></div>
       <div id="tags-list" class="check-group"></div>
     </div>
     <div class="an-section">
@@ -157,8 +172,22 @@
     <button id="sel-zoom">Zoom</button>
     <input id="sel-tag-name" placeholder="tag name" size="9" list="tag-names">
     <datalist id="tag-names"></datalist>
-    <button id="sel-tag">Tag</button>
+    <button id="sel-tag" title="Tag the allocations created (malloc'd) in this range">Tag allocs</button>
+    <button id="sel-tag-freed" title="Tag the allocations freed in this range">Tag freed</button>
     <button id="sel-cancel">×</button>
+  </div>
+</div>
+
+<div id="events-panel" class="panel" hidden>
+  <div class="panel-head">Events
+    <span class="head-actions">
+      <label title="Keep the current event in view while stepping / playing"><input type="checkbox" id="ev-follow" checked> follow</label>
+      <button class="panel-close" data-close="events-panel">×</button>
+    </span>
+  </div>
+  <div id="events-scroll">
+    <div id="events-spacer"></div>
+    <div id="events-rows"></div>
   </div>
 </div>
 

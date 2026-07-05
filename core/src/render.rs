@@ -109,6 +109,12 @@ pub struct Cfg {
     pub color_mode: u8,
     pub selected: u32,
     pub filter: Filter,
+    /// Horizontal zoom on the byte axis of each row (1 = whole row visible).
+    pub x_zoom: f64,
+    /// Horizontal pan as a fraction of the row [0, 1 - 1/x_zoom].
+    pub x_pan: f64,
+    /// Draw the allocation size (hex) inside allocations wide enough to fit it.
+    pub size_labels: bool,
     /// User-chosen tag colors, indexed by tag id - 1; falls back to CAT.
     pub tag_colors: Vec<[u8; 3]>,
     /// Per-allocation color overrides (creator event -> rgb), any mode.
@@ -123,9 +129,21 @@ impl Cfg {
             color_mode: MODE_LIVE,
             selected: NONE_U32,
             filter: Filter::default(),
+            x_zoom: 1.0,
+            x_pan: 0.0,
+            size_labels: true,
             tag_colors: Vec::new(),
             overrides: std::collections::HashMap::new(),
         }
+    }
+
+    /// Horizontal mapping for a row of `rb` bytes drawn `w` px wide:
+    /// (px per byte, pan offset in bytes). x = (offset - pan) * scale.
+    pub fn x_map(&self, w: u32, rb: u64) -> (f64, f64) {
+        let zoom = self.x_zoom.max(1.0);
+        let scale = w as f64 * zoom / rb as f64;
+        let pan = self.x_pan.clamp(0.0, 1.0 - 1.0 / zoom) * rb as f64;
+        (scale, pan)
     }
 
     pub fn tag_color(&self, tag: u8) -> [u8; 3] {
@@ -428,7 +446,6 @@ pub fn render_addr(
             labels.push_str(&format!("{{\"k\":0,\"y\":{},\"addr\":\"0x{:x}\"}}", y, addr));
         }
     }
-    labels.push(']');
 
     // --- pass 2: allocations (live set walk, lockstep with rows) ---
     let cur_t = s.t_at(v.cur);
@@ -437,10 +454,41 @@ pub fn render_addr(
     } else {
         0.0
     };
-    let wf = w as f64;
     let rb = v.row_bytes;
+    let (scale, pan) = cfg.x_map(w, rb);
     let mut j = 0usize; // pointer into v.rows
     let mut sel_rect: Option<(i64, i64, i64, i64)> = None;
+    // size labels: drawn by the JS layer, emitted only where they can fit
+    let label_sizes = cfg.size_labels && row_px >= 9;
+    let mut n_size_labels = 0u32;
+    // visible display-row index range, for placing each label on the middle
+    // visible line of a multi-row allocation
+    let (vis_lo, vis_hi) = {
+        let n_rows = v.rows.len();
+        let mut lo = 0usize;
+        let mut hi = n_rows;
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if v.row_y(mid, row_px, gap_px) + row_px as u64 <= scroll {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        let first = lo;
+        let bottom = scroll + h as u64;
+        let mut lo = 0usize;
+        let mut hi = n_rows;
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if v.row_y(mid, row_px, gap_px) < bottom {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        (first, lo.saturating_sub(1))
+    };
     for &(a, e) in v.live.iter() {
         let pass = cfg.filter.pass(s, e);
         if !pass && cfg.filter.mode == FILTER_HIDE {
@@ -470,9 +518,22 @@ pub fn render_addr(
             None
         };
 
+        // label the middle visible line of the allocation (rounded to the top)
+        let label_target = if label_sizes {
+            let j_end = match v.rows.binary_search(&r1) {
+                Ok(i) => i,
+                Err(i) => i.saturating_sub(1),
+            };
+            let lo = j.max(vis_lo);
+            let hi = j_end.min(vis_hi);
+            if lo <= hi { Some(lo + (hi - lo) / 2) } else { None }
+        } else {
+            None
+        };
         let mut idx = j;
         while idx < v.rows.len() && v.rows[idx] <= r1 {
             let r = v.rows[idx];
+            let cur_idx = idx;
             let y = v.row_y(idx, row_px, gap_px) as i64 - scroll as i64;
             idx += 1;
             if y + (row_px as i64) < 0 || y >= h as i64 {
@@ -487,11 +548,13 @@ pub fn render_addr(
             if hi <= lo {
                 continue;
             }
-            let scale = wf / rb as f64;
-            let x0 = ((lo - row_start) as f64 * scale) as i64;
-            let mut x1 = ((hi - row_start) as f64 * scale).ceil() as i64;
+            let x0 = (((lo - row_start) as f64 - pan) * scale) as i64;
+            let mut x1 = ((((hi - row_start) as f64 - pan) * scale)).ceil() as i64;
             if x1 <= x0 {
                 x1 = x0 + 1;
+            }
+            if x1 <= 0 || x0 >= w as i64 {
+                continue; // panned/zoomed out of the horizontal window
             }
             let y1 = y + row_px as i64 - 1;
             // requested part vs slack band
@@ -501,12 +564,12 @@ pub fn render_addr(
             } else if req_end <= lo {
                 x0
             } else {
-                (((req_end - row_start) as f64 * scale) as i64).clamp(x0, x1)
+                ((((req_end - row_start) as f64 - pan) * scale) as i64).clamp(x0, x1)
             };
             if xm > x0 {
                 // fully covered pixels of the requested part
-                let c0 = ((lo - row_start) as f64 * scale).ceil() as i64;
-                let c1 = ((req_end - row_start) as f64 * scale).floor() as i64;
+                let c0 = (((lo - row_start) as f64 - pan) * scale).ceil() as i64;
+                let c1 = (((req_end - row_start) as f64 - pan) * scale).floor() as i64;
                 frame.fill_alloc(x0, xm, c0, c1, y, y1, color);
             }
             if x1 > xm {
@@ -516,6 +579,28 @@ pub fn render_addr(
                 let sh = (row_px as i64 / 4).clamp(1, 3);
                 frame.fill(x0, x1, y1 - sh, y1, sc);
             }
+            // in-allocation label on the middle visible segment; the JS layer
+            // picks "name · size" / name / size by what actually fits (it
+            // knows the names and measures the text)
+            if label_target == Some(cur_idx) && n_size_labels < 400 {
+                let vx0 = x0.max(0);
+                let vw = x1.min(w as i64) - vx0;
+                if vw >= 18 {
+                    if !first {
+                        labels.push(',');
+                    }
+                    first = false;
+                    labels.push_str(&format!(
+                        "{{\"k\":2,\"x\":{},\"y\":{},\"w\":{},\"e\":{},\"text\":\"0x{:x}\"}}",
+                        vx0,
+                        y,
+                        vw,
+                        e,
+                        s.size[e as usize]
+                    ));
+                    n_size_labels += 1;
+                }
+            }
             if e == cfg.selected && sel_rect.is_none() {
                 sel_rect = Some((x0, x1, y, y1));
             }
@@ -524,6 +609,7 @@ pub fn render_addr(
             }
         }
     }
+    labels.push(']');
 
     RenderOut { labels }
 }
@@ -545,7 +631,8 @@ pub fn pick(
         None => return "null".to_string(),
     };
     let row_start = v.base + v.rows[i] * v.row_bytes;
-    let addr_at = row_start + ((x as f64 / w as f64) * v.row_bytes as f64) as u64;
+    let (scale, pan) = cfg.x_map(w, v.row_bytes);
+    let addr_at = row_start + ((pan + x as f64 / scale) as u64).min(v.row_bytes - 1);
 
     // scan live allocs whose start is <= addr_at, newest-start first
     let floor = addr_at.saturating_sub(s.max_span.max(1));
@@ -560,6 +647,21 @@ pub fn pick(
         Some(f) => f,
         None => return "null".to_string(),
     };
+    alloc_info(s, v, cfg, w, a, e, scroll)
+}
+
+/// Info JSON for the allocation created at event `e` based at `a` — the
+/// payload behind hover tooltips, the detail panel, and step readouts.
+pub fn alloc_info(
+    s: &Store,
+    v: &mut View,
+    cfg: &Cfg,
+    w: u32,
+    a: u64,
+    e: u32,
+    scroll: f64,
+) -> String {
+    v.ensure_rows();
     let ei = e as usize;
     let mut out = String::with_capacity(512);
     out.push_str(&format!(
@@ -627,6 +729,7 @@ fn region_rects(
     max: usize,
 ) -> String {
     let rb = v.row_bytes;
+    let (scale, pan) = cfg.x_map(w, rb);
     let end = a + span.max(1);
     let r0 = (a.saturating_sub(v.base)) / rb;
     let r1 = (end - 1).saturating_sub(v.base) / rb;
@@ -646,8 +749,11 @@ fn region_rects(
         if hi <= lo {
             continue;
         }
-        let x0 = (lo - row_start) as f64 * w as f64 / rb as f64;
-        let x1 = ((hi - row_start) as f64 * w as f64 / rb as f64).max(x0 + 1.0);
+        let x0 = ((lo - row_start) as f64 - pan) * scale;
+        let x1 = (((hi - row_start) as f64 - pan) * scale).max(x0 + 1.0);
+        if x1 <= 0.0 || x0 >= w as f64 {
+            continue;
+        }
         if n > 0 {
             out.push(',');
         }
@@ -663,7 +769,27 @@ fn region_rects(
     out
 }
 
-/// If the most recently applied event is an R (or F), emit link/flash geometry.
+/// Highlight rects (JSON array, canvas coords) for the allocation event `e`
+/// touches — the creator itself for M/R, the freed allocation for F. Used to
+/// flash the exact location of an event picked from the event list.
+pub fn event_rects(s: &Store, v: &mut View, cfg: &Cfg, w: u32, e: u32, scroll: f64) -> String {
+    if e >= s.len() {
+        return "[]".to_string();
+    }
+    let ei = e as usize;
+    let creator = if s.op[ei] == OP_F { s.target[ei] } else { e };
+    if creator == NONE_U32 {
+        return "[]".to_string();
+    }
+    v.ensure_rows();
+    format!(
+        "[{}]",
+        region_rects(s, v, cfg, w, s.addr[creator as usize], s.span(creator), scroll, 16)
+    )
+}
+
+/// Emit link/flash geometry for the most recently applied event: R draws a
+/// move link, F flashes the freed region, M outlines the fresh allocation.
 pub fn move_link(s: &Store, v: &mut View, cfg: &Cfg, w: u32, scroll: f64) -> String {
     if v.cur == 0 {
         return "null".to_string();
@@ -671,13 +797,14 @@ pub fn move_link(s: &Store, v: &mut View, cfg: &Cfg, w: u32, scroll: f64) -> Str
     let e = v.cur - 1;
     let ei = e as usize;
     let op = s.op[ei];
-    if op == OP_M {
-        return "null".to_string();
-    }
     v.ensure_rows();
     let mut out = String::from("{");
     out.push_str(&format!("\"op\":{},\"seq\":{}", op, e));
-    if op == OP_R {
+    if op == OP_M {
+        out.push_str(",\"old\":[],\"new\":[");
+        out.push_str(&region_rects(s, v, cfg, w, s.addr[ei], s.span(e), scroll, 4));
+        out.push(']');
+    } else if op == OP_R {
         let (oa, os) = (s.old_addr[ei], s.old_size[ei]);
         out.push_str(",\"old\":[");
         if os > 0 {

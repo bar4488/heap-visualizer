@@ -31,6 +31,8 @@ const UI = {
   addrMarks: [],          // {name, addr: '0x…'} address marks
   sel: null,        // active range selection {kind, lo, hi}
   setView: {},      // per-strip view setters, filled by setupTimeline
+  locked: false,    // locked viewport: stepping never auto-scrolls
+  xview: { zoom: 1, pan: 0 }, // horizontal zoom/pan on the address line
 };
 
 // expose for tests / console poking
@@ -102,11 +104,14 @@ function sendResizes() {
     const r = el.getBoundingClientRect();
     worker.postMessage({ type: 'resize', which, w: r.width * dpr, h: r.height * dpr, dpr });
   };
-  send('addr', addrScroll);
+  // measure the addr canvas box itself (addr-view), not the scroll container:
+  // the container's rect includes the scrollbar, which would squeeze the
+  // raster and shift it against the overlay highlights
+  send('addr', $('addr-view'));
   send('tlt', $('strip-t'));
   send('tls', $('strip-s'));
 }
-new ResizeObserver(sendResizes).observe(addrScroll);
+new ResizeObserver(sendResizes).observe($('addr-view'));
 new ResizeObserver(sendResizes).observe($('strip-t'));
 
 // ---------------------------------------------------------------------------
@@ -218,9 +223,26 @@ worker.onmessage = (ev) => {
     case 'stepped':
       if (m.event) {
         const e = m.event;
+        // the worker already selected the allocation this event touches
+        if (e.e !== undefined && e.e !== null) UI.selected = e.e;
         $('st-info').textContent =
           `${OPS[e.op]} id=${e.id} ${e.addr} ${fmtBytes(e.size)}${e.site ? ' · ' + e.site : ''}`;
+        // open the allocation dialog for the malloc/free we stepped onto
+        if (m.info) fillDetailPanel(m.info);
       }
+      break;
+    case 'xview':
+      // the worker panned horizontally (centering a stepped-to allocation)
+      if (m.pan !== undefined) {
+        UI.xview.pan = m.pan;
+        updateHzButton();
+      }
+      break;
+    case 'events':
+      onEventsSlice(m);
+      break;
+    case 'flash-rects':
+      flashRects(m.rects);
       break;
     case 'pick-result':
       onPickResult(m);
@@ -266,6 +288,10 @@ function onLoaded(m) {
   UI.bookmarks = [];
   UI.addrMarks = [];
   sendAddrMarks();
+  sendNames();
+  // the wasm view is recreated per trace: re-apply sticky toolbar prefs
+  worker.postMessage({ type: 'set', key: 'showAll', value: $('show-all').checked });
+  worker.postMessage({ type: 'set', key: 'sizeLabels', value: $('show-sizes').checked });
   clearSelection();
   syncTagDatalist();
   buildAnalysisPanel();
@@ -273,7 +299,11 @@ function onLoaded(m) {
   $('btn-analysis').hidden = false;
   $('btn-analysis').classList.remove('active');
   $('btn-mark').hidden = false;
+  $('btn-events').hidden = false;
   $('btn-play').disabled = false;
+  UI.xview = { zoom: 1, pan: 0 };
+  updateHzButton();
+  resetEventsPanel();
   $('trace-title').textContent = m.meta.title || UI.fileName || '';
   $('st-trace').textContent =
     `${UI.fileName || ''} · ${fmtNum(m.n)} events (M ${fmtNum(m.meta.nMalloc)} / F ${fmtNum(m.meta.nFree)} / R ${fmtNum(m.meta.nRealloc)})` +
@@ -319,6 +349,7 @@ function onState(m) {
   updateMarkers();
   lastAddrMarkYs = m.addrMarkYs || [];
   renderAddrMarkLines();
+  updateEventsPanel();
 }
 
 // ---------------------------------------------------------------------------
@@ -347,6 +378,11 @@ function drawMoveLink(ml) {
   } else if (ml && ml.op === 1) {
     for (const r of ml.old) {
       content += `<rect class="ml-old" x="${r.x / dpr}" y="${r.y / dpr}" width="${Math.max(1, r.w / dpr)}" height="${Math.max(1, r.h / dpr)}"/>`;
+    }
+  } else if (ml && ml.op === 0) {
+    // fresh malloc: outline the new allocation so small ones are findable
+    for (const r of ml.new) {
+      content += `<rect class="ml-new" x="${r.x / dpr}" y="${r.y / dpr}" width="${Math.max(1, r.w / dpr)}" height="${Math.max(1, r.h / dpr)}"/>`;
     }
   }
   svg.innerHTML = content;
@@ -399,6 +435,17 @@ $('btn-play').onclick = togglePlay;
 $('btn-step-back').onclick = (e) => worker.postMessage({ type: 'step', delta: e.shiftKey ? -100 : -1 });
 $('btn-step-fwd').onclick = (e) => worker.postMessage({ type: 'step', delta: e.shiftKey ? 100 : 1 });
 
+function toggleLock() {
+  UI.locked = !UI.locked;
+  $('btn-lock').textContent = UI.locked ? '🔒' : '🔓';
+  $('btn-lock').classList.toggle('active', UI.locked);
+  worker.postMessage({ type: 'set', key: 'locked', value: UI.locked });
+  $('st-info').textContent = UI.locked
+    ? 'viewport locked — stepping will not scroll the address view'
+    : 'viewport unlocked — stepping follows the touched allocation';
+}
+$('btn-lock').onclick = toggleLock;
+
 $('btn-jump').onclick = doJump;
 $('jump-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') doJump(); });
 
@@ -432,6 +479,7 @@ document.addEventListener('keydown', (e) => {
   else if (e.key === 'Home') { worker.postMessage({ type: 'seek', seq: 0 }); }
   else if (e.key === 'End') { if (UI.state) worker.postMessage({ type: 'seek', seq: UI.state.n }); }
   else if (e.key === 'm' && UI.loaded) { addBookmark(); }
+  else if (e.key === 'l' || e.key === 'L') { toggleLock(); }
   else if (e.key === 'g' && UI.loaded) {
     e.preventDefault();
     $('jump-input').focus();
@@ -483,12 +531,17 @@ $('color-mode').onchange = () => {
   worker.postMessage({ type: 'set', key: 'colorMode', value: +$('color-mode').value });
   buildLegend();
 };
+$('show-all').onchange = () =>
+  worker.postMessage({ type: 'set', key: 'showAll', value: $('show-all').checked });
+$('show-sizes').onchange = () =>
+  worker.postMessage({ type: 'set', key: 'sizeLabels', value: $('show-sizes').checked });
 
-function stepRowBytes(dir) {
-  const current = rowBytesValue() || DEFAULT_ROW_BYTES;
-  const next = Math.max(1, dir > 0 ? current * 2 : Math.floor(current / 2));
-  setRowBytesInput(next);
-  $('row-bytes').onchange();
+// the worker draws in-allocation labels; it needs the user-assigned names
+function sendNames() {
+  worker.postMessage({
+    type: 'names',
+    names: [...UI.names.entries()].map(([e, v]) => [e, v.name]),
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -531,18 +584,30 @@ function esc(s) {
 // filter panel
 // ---------------------------------------------------------------------------
 
+function allNoneHtml(sel) {
+  return `<span class="allnone"><a data-an="all" data-sel="${sel}">all</a> · <a data-an="none" data-sel="${sel}">none</a></span>`;
+}
+
 function buildFilterPanel() {
   const sites = $('f-sites');
   sites.innerHTML = UI.meta.sites.length
-    ? '<div class="group-title">sites</div>' + UI.meta.sites.map((s, i) =>
+    ? `<div class="group-title">sites ${allNoneHtml('site')}</div>` + UI.meta.sites.map((s, i) =>
       `<label><input type="checkbox" data-site="${i}" checked><span class="swatch" style="background:${CAT[i % 12]}"></span>${esc(s.name)}<span class="count">${fmtNum(s.count)}</span></label>`).join('')
     : '';
   const thrs = $('f-thrs');
   thrs.innerHTML = UI.meta.thrs.length > 1
-    ? '<div class="group-title">threads</div>' + UI.meta.thrs.map((t, i) =>
+    ? `<div class="group-title">threads ${allNoneHtml('thr')}</div>` + UI.meta.thrs.map((t, i) =>
       `<label><input type="checkbox" data-thr="${i}" checked><span class="swatch" style="background:${CAT[(i + 5) % 12]}"></span>thr ${t.thr}<span class="count">${fmtNum(t.count)}</span></label>`).join('')
     : '';
   $('filter-panel').querySelectorAll('input').forEach((inp) => { inp.onchange = sendFilter; });
+  $('filter-panel').querySelectorAll('.allnone a').forEach((a) => {
+    a.onclick = () => {
+      const on = a.dataset.an === 'all';
+      $('filter-panel').querySelectorAll(`input[data-${a.dataset.sel}]`)
+        .forEach((b) => { b.checked = on; });
+      sendFilter();
+    };
+  });
   $('f-size-min').oninput = sendFilter;
   $('f-size-max').oninput = sendFilter;
 }
@@ -588,13 +653,62 @@ $('filter-clear').onclick = () => {
   sendFilter();
 };
 
+// ---------------------------------------------------------------------------
+// panels as draggable windows: drag by the header, and keep a z-stack where
+// the last panel opened or dragged sits on top
+// ---------------------------------------------------------------------------
+
+let panelZ = 40;
+
+function raisePanel(p) {
+  p.style.zIndex = ++panelZ;
+}
+
+function showPanel(id) {
+  const p = $(id);
+  p.hidden = false;
+  raisePanel(p);
+}
+
+document.querySelectorAll('.panel').forEach((p) => {
+  // any interaction with a window brings it to the front
+  p.addEventListener('pointerdown', () => raisePanel(p));
+  const head = p.querySelector('.panel-head');
+  head.addEventListener('pointerdown', (e) => {
+    // header buttons/inputs (close, save, follow…) still work normally
+    if (e.target.closest('button, input, select, a')) return;
+    e.preventDefault();
+    head.setPointerCapture(e.pointerId);
+    const r = p.getBoundingClientRect();
+    const dx = e.clientX - r.left;
+    const dy = e.clientY - r.top;
+    const move = (ev) => {
+      p.style.left = `${Math.min(innerWidth - 60, Math.max(4 - r.width + 60, ev.clientX - dx))}px`;
+      p.style.top = `${Math.min(innerHeight - 40, Math.max(0, ev.clientY - dy))}px`;
+      p.style.right = 'auto';
+      p.style.bottom = 'auto';
+    };
+    const up = () => {
+      head.removeEventListener('pointermove', move);
+      head.removeEventListener('pointerup', up);
+    };
+    head.addEventListener('pointermove', move);
+    head.addEventListener('pointerup', up);
+  });
+});
+
 // panel open/close plumbing
 for (const [btn, panel] of [
+  ['btn-layout', 'layout-panel'],
   ['btn-filter', 'filter-panel'],
   ['btn-analysis', 'analysis-panel'],
   ['btn-warnings', 'warnings-panel'],
 ]) {
-  $(btn).onclick = () => { $(panel).hidden = !$(panel).hidden; };
+  $(btn).onclick = () => {
+    const p = $(panel);
+    p.hidden = !p.hidden;
+    if (!p.hidden) raisePanel(p);
+  };
 }
 document.querySelectorAll('.panel-close').forEach((b) => {
   b.onclick = () => { $(b.dataset.close).hidden = true; };
@@ -618,6 +732,134 @@ function buildWarningsPanel() {
     row.onclick = () => worker.postMessage({ type: 'jump', seq: +row.dataset.seq + 1 });
   });
 }
+
+// ---------------------------------------------------------------------------
+// events panel (virtualized sequential list)
+// ---------------------------------------------------------------------------
+
+const EV_ROW = 18;            // px per row
+const EV_MAX_SPACER = 12e6;   // cap the scroll height; index-mapped beyond it
+const evState = { from: 0, count: 0, reqId: 0, lastSeq: -1 };
+
+function evLayout() {
+  const n = UI.meta ? UI.meta.n : 0;
+  const viewH = $('events-scroll').clientHeight;
+  const spacerH = Math.min(n * EV_ROW, EV_MAX_SPACER);
+  const visN = Math.max(1, Math.ceil(viewH / EV_ROW) + 1);
+  const maxFrom = Math.max(0, n - visN + 1);
+  return { n, viewH, spacerH, visN, maxFrom };
+}
+
+function refreshEventsPanel() {
+  if (!UI.loaded || $('events-panel').hidden) return;
+  const L = evLayout();
+  $('events-spacer').style.height = `${L.spacerH}px`;
+  const sc = $('events-scroll');
+  const denom = Math.max(1, L.spacerH - L.viewH);
+  const from = Math.min(L.maxFrom, Math.round((sc.scrollTop / denom) * L.maxFrom));
+  $('events-rows').style.top = `${sc.scrollTop}px`;
+  evState.from = from;
+  evState.count = L.visN;
+  evState.reqId = UI.reqId++;
+  worker.postMessage({ type: 'events', from, count: L.visN, reqId: evState.reqId });
+}
+
+function onEventsSlice(m) {
+  if (m.reqId !== evState.reqId) return;
+  const curSeq = UI.state ? UI.state.seq - 1 : -1;
+  $('events-rows').innerHTML = m.events.map((ev) => `
+    <div class="ev-row${ev.seq === curSeq ? ' cur' : ''}" data-seq="${ev.seq}" title="click: seek here and select the allocation">
+      <span class="ev-seq">${fmtNum(ev.seq)}</span>
+      <span class="ev-op ${['m', 'f', 'r'][ev.op]}">${['M', 'F', 'R'][ev.op]}</span>
+      <span class="ev-addr">${ev.addr}</span>
+      <span class="ev-size">${fmtBytes(ev.size)}</span>
+      <span class="ev-site">${ev.site ? esc(ev.site) : ''}</span>
+    </div>`).join('');
+  $('events-rows').querySelectorAll('.ev-row').forEach((row) => {
+    row.onclick = () => {
+      const seq = +row.dataset.seq;
+      if (UI.state && seq === UI.state.seq - 1) {
+        // already the current event: flash exactly where it is on the map
+        worker.postMessage({ type: 'flash-event', seq });
+      } else {
+        worker.postMessage({ type: 'jump', seq: seq + 1, select: true });
+      }
+    };
+  });
+}
+
+// pulse overlay marking the exact location of an allocation (from the event
+// list); a ping ring makes even sub-pixel allocations findable
+function flashRects(rects) {
+  const view = $('addr-view');
+  for (const r of (rects || []).slice(0, 16)) {
+    const x = r.x / dpr;
+    const y = r.y / dpr;
+    const w = Math.max(3, r.w / dpr);
+    const h = Math.max(3, r.h / dpr);
+    const el = document.createElement('div');
+    el.className = 'rect-flash';
+    el.style.left = `${x}px`;
+    el.style.top = `${y}px`;
+    el.style.width = `${w}px`;
+    el.style.height = `${h}px`;
+    view.appendChild(el);
+    const ping = document.createElement('div');
+    ping.className = 'rect-ping';
+    ping.style.left = `${x + w / 2}px`;
+    ping.style.top = `${y + h / 2}px`;
+    view.appendChild(ping);
+    setTimeout(() => { el.remove(); ping.remove(); }, 1500);
+  }
+}
+
+// keep the highlight (and, with follow on, the scroll position) on the
+// current event as the playhead moves
+function updateEventsPanel() {
+  if (!UI.loaded || $('events-panel').hidden || !UI.state) return;
+  const cur = UI.state.seq - 1;
+  if (cur === evState.lastSeq) return;
+  evState.lastSeq = cur;
+  if ($('ev-follow').checked && (cur < evState.from || cur >= evState.from + evState.count - 1)) {
+    evScrollToSeq(cur);
+    return;
+  }
+  $('events-rows').querySelectorAll('.ev-row').forEach((row) => {
+    row.classList.toggle('cur', +row.dataset.seq === cur);
+  });
+}
+
+function evScrollToSeq(seq) {
+  const L = evLayout();
+  const target = Math.max(0, Math.min(L.maxFrom, seq - Math.floor(L.visN / 2)));
+  const y = (target / Math.max(1, L.maxFrom)) * Math.max(0, L.spacerH - L.viewH);
+  $('events-scroll').scrollTop = y;
+  refreshEventsPanel();
+}
+
+function resetEventsPanel() {
+  evState.lastSeq = -1;
+  $('events-scroll').scrollTop = 0;
+  $('events-rows').innerHTML = '';
+  if (!$('events-panel').hidden) refreshEventsPanel();
+}
+
+$('events-scroll').addEventListener('scroll', refreshEventsPanel);
+new ResizeObserver(() => refreshEventsPanel()).observe($('events-scroll'));
+$('btn-events').onclick = () => {
+  const p = $('events-panel');
+  p.hidden = !p.hidden;
+  if (!p.hidden) {
+    raisePanel(p);
+    evState.lastSeq = -1;
+    refreshEventsPanel();
+    updateEventsPanel();
+  }
+};
+$('ev-follow').onchange = () => {
+  evState.lastSeq = -1;
+  updateEventsPanel();
+};
 
 // ---------------------------------------------------------------------------
 // tags & range selection
@@ -741,6 +983,17 @@ function buildTagsSection() {
   });
 }
 
+// all / none visibility toggles for the tags list (untagged included)
+document.querySelectorAll('#tags-allnone a').forEach((a) => {
+  a.onclick = () => {
+    const on = a.dataset.an === 'all';
+    UI.untaggedVisible = on;
+    UI.tags.forEach((t) => { t.visible = on; });
+    buildTagsSection();
+    sendFilter();
+  };
+});
+
 function deleteTag(id) {
   worker.postMessage({ type: 'retag', from: id, to: 0 });
   for (let k = id + 1; k <= UI.tags.length; k++) {
@@ -779,6 +1032,7 @@ function buildNamesSection() {
       const v = inp.value.trim();
       if (v) UI.names.get(e).name = v;
       else { UI.names.delete(e); buildNamesSection(); }
+      sendNames();
     };
   });
   list.querySelectorAll('[data-ngo]').forEach((el) => {
@@ -797,6 +1051,7 @@ function buildNamesSection() {
         worker.postMessage({ type: 'alloc-color', e, rgb: null });
       }
       buildNamesSection();
+      sendNames();
     };
   });
 }
@@ -829,7 +1084,7 @@ function addAddrMark(addrHex) {
   sendAddrMarks();
   buildAddrMarksSection();
   $('st-info').textContent = `marked ${addrHex} — rename it in the Analysis panel`;
-  $('analysis-panel').hidden = false;
+  showPanel('analysis-panel');
 }
 
 function buildAddrMarksSection() {
@@ -885,7 +1140,7 @@ function addBookmark() {
   buildBookmarksSection();
   updateMarkers();
   $('st-info').textContent = `bookmarked seq ${fmtNum(b.seq)} · ${fmtTime(b.t)} — rename it in the Analysis panel`;
-  $('analysis-panel').hidden = false;
+  showPanel('analysis-panel');
 }
 $('btn-mark').onclick = addBookmark;
 
@@ -994,6 +1249,7 @@ function applyAnalysis(obj) {
     }
   }
   UI.names = new Map((obj.names || []).map((r) => [r.e, { name: r.name, id: r.id, addr: r.addr }]));
+  sendNames();
   UI.allocColors = new Map((obj.allocColors || []).filter(([, c]) => /^#[0-9a-f]{6}$/i.test(c)));
   for (const [e, c] of UI.allocColors) {
     worker.postMessage({ type: 'alloc-color', e, rgb: parseInt(c.slice(1), 16) });
@@ -1022,7 +1278,7 @@ function applyAnalysis(obj) {
   buildAnalysisPanel();
   buildLegend();
   updateMarkers();
-  $('analysis-panel').hidden = false;
+  showPanel('analysis-panel');
   $('st-info').textContent =
     `analysis loaded: ${UI.tags.length} tags, ${UI.names.size} names, ${UI.bookmarks.length} time marks, ${UI.addrMarks.length} addr marks`;
 }
@@ -1083,15 +1339,16 @@ $('sel-zoom').onclick = () => {
   UI.setView[UI.sel.kind]({ lo: UI.sel.lo, hi: UI.sel.hi });
   clearSelection();
 };
-$('sel-tag').onclick = applySelTag;
-$('sel-tag-name').addEventListener('keydown', (e) => { if (e.key === 'Enter') applySelTag(); });
+$('sel-tag').onclick = () => applySelTag(false);
+$('sel-tag-freed').onclick = () => applySelTag(true);
+$('sel-tag-name').addEventListener('keydown', (e) => { if (e.key === 'Enter') applySelTag(false); });
 $('sel-cancel').onclick = clearSelection;
 
-function applySelTag() {
+function applySelTag(byFree) {
   if (!UI.sel) return;
   const id = tagIdFor($('sel-tag-name').value);
   if (!id) { $('sel-tag-name').focus(); return; }
-  worker.postMessage({ type: 'tag-range', kind: UI.sel.kind, lo: UI.sel.lo, hi: UI.sel.hi, tag: id });
+  worker.postMessage({ type: 'tag-range', kind: UI.sel.kind, lo: UI.sel.lo, hi: UI.sel.hi, tag: id, byFree });
   // switch to tag coloring so the result is visible immediately
   $('color-mode').value = '5';
   worker.postMessage({ type: 'set', key: 'colorMode', value: 5 });
@@ -1273,10 +1530,57 @@ addrScroll.addEventListener('scroll', () => {
   worker.postMessage({ type: 'scroll', y });
 });
 
+// --- horizontal zoom on the byte axis (see also hz-reset in the toolbar) ---
+
+function sendXView() {
+  worker.postMessage({ type: 'set', key: 'xview', value: { ...UI.xview } });
+  updateHzButton();
+}
+
+function updateHzButton() {
+  const z = UI.xview.zoom;
+  const b = $('hz-reset');
+  b.hidden = z <= 1.001;
+  b.textContent = `↔ ×${z >= 10 ? Math.round(z) : z.toFixed(1)}`;
+}
+
+$('hz-reset').onclick = () => {
+  UI.xview = { zoom: 1, pan: 0 };
+  sendXView();
+};
+
+function hzZoomAt(clientX, factor) {
+  const r = addrCanvas.getBoundingClientRect();
+  const fx = Math.min(1, Math.max(0, (clientX - r.left) / r.width));
+  const v = UI.xview;
+  const cursorFrac = v.pan + fx / v.zoom; // row fraction under the cursor
+  const zoom = Math.min(65536, Math.max(1, v.zoom * factor));
+  const pan = Math.min(Math.max(cursorFrac - fx / zoom, 0), 1 - 1 / zoom);
+  UI.xview = { zoom, pan };
+  sendXView();
+}
+
+function hzPan(deltaPx) {
+  const v = UI.xview;
+  if (v.zoom <= 1) return;
+  const pan = v.pan + (deltaPx / addrScroll.clientWidth) / v.zoom;
+  UI.xview.pan = Math.min(Math.max(pan, 0), 1 - 1 / v.zoom);
+  sendXView();
+}
+
 addrScroll.addEventListener('wheel', (e) => {
-  if (e.ctrlKey) {
+  if (e.ctrlKey || e.altKey) {
+    // zoom the byte axis around the cursor, timeline-style (row size unchanged)
     e.preventDefault();
-    stepRowBytes(e.deltaY > 0 ? 1 : -1);
+    hzZoomAt(e.clientX, Math.exp(-e.deltaY * 0.0015));
+  } else if (e.shiftKey) {
+    // shift+wheel: pan the zoomed byte axis, timeline-style
+    e.preventDefault();
+    hzPan((e.deltaY || e.deltaX) * 0.6);
+  } else if (e.deltaX !== 0 && UI.xview.zoom > 1) {
+    // horizontal wheel / trackpad: pan too
+    e.preventDefault();
+    hzPan(e.deltaX);
   }
 }, { passive: false });
 
@@ -1385,6 +1689,7 @@ function fillDetailPanel(info) {
     if (v) UI.names.set(info.e, { name: v, id: info.id, addr: info.addr });
     else UI.names.delete(info.e);
     buildNamesSection();
+    sendNames();
   };
   $('d-tag-apply').onclick = () => {
     const id = tagIdFor($('d-tag').value);
@@ -1404,7 +1709,7 @@ function fillDetailPanel(info) {
     worker.postMessage({ type: 'alloc-color', e: info.e, rgb: null });
     buildNamesSection();
   };
-  panel.hidden = false;
+  showPanel('detail-panel');
 }
 
 // ---------------------------------------------------------------------------
