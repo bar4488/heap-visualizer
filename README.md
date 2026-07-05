@@ -25,6 +25,21 @@ python3 -m http.server -d web 8630
 # open http://localhost:8630  (or ...?trace=demo.heapl to autoload)
 ```
 
+To build and export a reusable Rust image with the WASM target preinstalled:
+
+```sh
+./build-docker.sh             # images/heap-visualizer-wasm-builder.tar
+docker run --rm -v "$PWD:/work" heap-visualizer-wasm-builder \
+  cargo build --release --target wasm32-unknown-unknown \
+  --manifest-path core/Cargo.toml
+```
+
+Once the builder image is available, build and stage the project WASM with:
+
+```sh
+./build-wasm-docker.sh         # web/heap_visualizer_core.wasm
+```
+
 Drop any `.heapl` file onto the page to load it.
 
 ## Analysis workflow
