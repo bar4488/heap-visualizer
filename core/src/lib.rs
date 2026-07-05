@@ -1096,6 +1096,7 @@ not json at all
 {"op":"F","id":1,"t":40}
 "#;
         let mut a = load(input);
+        a.view.set_show_all(&a.store, false);
         let (row_px, gap_px) = (a.cfg.row_px, a.cfg.gap_px);
         a.view.seek(&a.store, 3);
         // top of viewport at the 0x9000 row (display index 1, one gap before)
@@ -1190,6 +1191,7 @@ not json at all
     #[test]
     fn pinned_rows_stay_laid_out() {
         let mut a = load(SAMPLE);
+        a.view.set_show_all(&a.store, false);
         // at the end of the trace everything is freed: no rows at all
         a.view.seek(&a.store, 5);
         a.view.ensure_rows();
@@ -1210,6 +1212,7 @@ not json at all
     #[test]
     fn show_all_rows_stable() {
         let mut a = load(SAMPLE);
+        a.view.set_show_all(&a.store, false);
         // at the end everything is freed: normally no rows at all
         a.view.seek(&a.store, 5);
         a.view.ensure_rows();
@@ -1231,6 +1234,7 @@ not json at all
     #[test]
     fn anchor_pin_survives_free() {
         let mut a = load(SAMPLE);
+        a.view.set_show_all(&a.store, false);
         a.view.seek(&a.store, 2);
         // anchor at the 0x2000 row, then free everything
         a.view.set_anchor_pin(Some(0x2000));
@@ -1285,6 +1289,28 @@ not json at all
         let ml = render::move_link(&a.store, &mut a.view, &a.cfg, 400, 0.0);
         assert!(ml.contains("\"op\":0"), "got {}", ml);
         assert!(ml.contains("\"new\":[{"), "got {}", ml);
+    }
+
+    #[test]
+    fn timeline_tag_lanes() {
+        let mut a = load(SAMPLE);
+        a.store.tag[0] = 1; // tag the first malloc (freed by event 2)
+        let mut px = Vec::new();
+        timeline::render(&a.store, &a.cfg, 1, 100, 40, 0.0, 5.0, &mut px);
+        let at = |px: &[u8], x: usize, y: usize| {
+            let p = (y * 100 + x) * 4;
+            [px[p], px[p + 1], px[p + 2]]
+        };
+        let c = render::CAT[0]; // tag 1 -> palette index 0
+        // creation lane along the top edge, free lane along the bottom edge
+        assert!((0..100).any(|x| at(&px, x, 0) == c), "no tagged-alloc lane");
+        assert!((0..100).any(|x| at(&px, x, 39) == c), "no tagged-free lane");
+        // untagged: both lanes empty
+        for t in a.store.tag.iter_mut() {
+            *t = 0;
+        }
+        timeline::render(&a.store, &a.cfg, 1, 100, 40, 0.0, 5.0, &mut px);
+        assert!(!(0..100).any(|x| at(&px, x, 0) == c || at(&px, x, 39) == c));
     }
 
     #[test]

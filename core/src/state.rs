@@ -60,7 +60,7 @@ impl View {
             occ: HashMap::new(),
             pins: Vec::new(),
             anchor_pin: None,
-            show_all: false,
+            show_all: true,
             all_rows: Vec::new(),
             all_rows_valid: false,
             rows_dirty: true,

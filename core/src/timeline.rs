@@ -4,7 +4,7 @@
 //! kind 0 = temporal (x is t), kind 1 = sequential (x is seq).
 
 use crate::render::{BG, GREEN, RED};
-use crate::store::Store;
+use crate::store::*;
 
 const BASELINE: [u8; 3] = [0x30, 0x36, 0x3d];
 const GREEN_DIM: [u8; 3] = [0x1c, 0x4a, 0x28];
@@ -49,8 +49,10 @@ pub fn bin(s: &Store, kind: u32, w: u32, lo: f64, hi: f64) -> Bins {
 }
 
 /// Render a two-sided density strip: green (allocs) above the baseline,
-/// red (frees) below, sqrt-scaled. A thin lane along the bottom marks
-/// columns containing tagged allocations, in their tag color.
+/// red (frees) below, sqrt-scaled. Thin lanes mark tagged activity in the
+/// tag color: along the top edge, columns where tagged allocations are
+/// created (the alloc half); along the bottom edge, columns where tagged
+/// allocations are freed (the free half).
 pub fn render(
     s: &Store,
     cfg: &crate::render::Cfg,
@@ -108,19 +110,34 @@ pub fn render(
         put(x, mid, BASELINE);
     }
 
-    // --- tag lane ---
+    // --- tag lanes: creations on top, frees on the bottom ---
     let lane = ((h / 14) as i64).clamp(2, 5);
     for x in 0..w as usize {
         let (a, b) = (bins.from[x], bins.from[x + 1]);
-        let mut tc: Option<[u8; 3]> = None;
+        let mut alloc_c: Option<[u8; 3]> = None;
+        let mut free_c: Option<[u8; 3]> = None;
         for e in a..b {
-            let t = s.tag[e as usize];
-            if t != 0 {
-                tc = Some(cfg.tag_color(t));
+            let ei = e as usize;
+            let op = s.op[ei];
+            if alloc_c.is_none() && (op == OP_M || op == OP_R) && s.tag[ei] != 0 {
+                alloc_c = Some(cfg.tag_color(s.tag[ei]));
+            }
+            if free_c.is_none() && (op == OP_F || op == OP_R) {
+                let tgt = s.target[ei];
+                if tgt != NONE_U32 && s.tag[tgt as usize] != 0 {
+                    free_c = Some(cfg.tag_color(s.tag[tgt as usize]));
+                }
+            }
+            if alloc_c.is_some() && free_c.is_some() {
                 break;
             }
         }
-        if let Some(c) = tc {
+        if let Some(c) = alloc_c {
+            for y in 0..lane {
+                put(x as i64, y, c);
+            }
+        }
+        if let Some(c) = free_c {
             for y in (h as i64 - lane)..h as i64 {
                 put(x as i64, y, c);
             }

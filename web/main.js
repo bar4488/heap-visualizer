@@ -127,7 +127,9 @@ async function loadBuffer(buf, name) {
 
 async function loadURL(url) {
   try {
-    const resp = await fetch(url);
+    // always revalidate: a stale cached trace (e.g. an old demo.heapl)
+    // would resurface warnings that were fixed in the file
+    const resp = await fetch(url, { cache: 'no-cache' });
     if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
     loadBuffer(await resp.arrayBuffer(), url.split('/').pop());
   } catch (e) {
@@ -321,6 +323,9 @@ function onLoaded(m) {
   buildSpeedSelect();
   buildLegend();
   $('detail-panel').hidden = true;
+  UI.detailInfo = null;
+  // pinned allocation windows reference events of the previous trace
+  document.querySelectorAll('.pinned-detail').forEach((w) => w.remove());
 }
 
 function onState(m) {
@@ -670,7 +675,7 @@ function showPanel(id) {
   raisePanel(p);
 }
 
-document.querySelectorAll('.panel').forEach((p) => {
+function makePanelWindow(p) {
   // any interaction with a window brings it to the front
   p.addEventListener('pointerdown', () => raisePanel(p));
   const head = p.querySelector('.panel-head');
@@ -695,10 +700,12 @@ document.querySelectorAll('.panel').forEach((p) => {
     head.addEventListener('pointermove', move);
     head.addEventListener('pointerup', up);
   });
-});
+}
+document.querySelectorAll('.panel').forEach(makePanelWindow);
 
 // panel open/close plumbing
 for (const [btn, panel] of [
+  ['btn-playcfg', 'play-panel'],
   ['btn-layout', 'layout-panel'],
   ['btn-filter', 'filter-panel'],
   ['btn-analysis', 'analysis-panel'],
@@ -1037,10 +1044,8 @@ function buildNamesSection() {
   });
   list.querySelectorAll('[data-ngo]').forEach((el) => {
     el.onclick = () => {
-      const e = +el.dataset.ngo;
-      UI.selected = e;
-      worker.postMessage({ type: 'set', key: 'selected', value: e });
-      worker.postMessage({ type: 'jump', seq: e + 1 });
+      // select, jump to birth, and open the allocation info window
+      worker.postMessage({ type: 'jump', seq: +el.dataset.ngo + 1, select: true });
     };
   });
   list.querySelectorAll('[data-ndel]').forEach((el) => {
@@ -1349,9 +1354,7 @@ function applySelTag(byFree) {
   const id = tagIdFor($('sel-tag-name').value);
   if (!id) { $('sel-tag-name').focus(); return; }
   worker.postMessage({ type: 'tag-range', kind: UI.sel.kind, lo: UI.sel.lo, hi: UI.sel.hi, tag: id, byFree });
-  // switch to tag coloring so the result is visible immediately
-  $('color-mode').value = '5';
-  worker.postMessage({ type: 'set', key: 'colorMode', value: 5 });
+  // the color mode stays as-is: tags remain visible via their stripe
   buildLegend();
   clearSelection();
 }
@@ -1650,9 +1653,10 @@ function onPickResult(m) {
   if (pickQueue) flushPick(false);
 }
 
-function fillDetailPanel(info) {
-  const panel = $('detail-panel');
-  if (!info) { panel.hidden = true; return; }
+// Render allocation info into `root` and wire its controls. Scoped by class
+// (no ids) so the same body can live in the detail panel and in any number
+// of pinned windows at once.
+function buildDetailBody(root, info) {
   const rows = [
     ['id', info.id],
     ['range', `${info.addr} – ${info.end}`],
@@ -1669,48 +1673,138 @@ function fillDetailPanel(info) {
   }
   const curTag = info.tag > 0 ? UI.tags[info.tag - 1]?.name || '' : '';
   html += `<div class="row"><span class="k">name</span>
-    <input id="d-name" placeholder="name this allocation" value="${esc(UI.names.get(info.e)?.name || '')}" size="18"></div>`;
+    <input class="d-name" placeholder="name this allocation" value="${esc(UI.names.get(info.e)?.name || '')}" size="18"></div>`;
   html += `<div class="row"><span class="k">tag</span>
-    <input id="d-tag" placeholder="tag (empty = none)" value="${esc(curTag)}" size="12" list="tag-names">
-    <button id="d-tag-apply">set</button></div>`;
+    <input class="d-tag" placeholder="tag (empty = none)" value="${esc(curTag)}" size="12" list="tag-names">
+    <button class="d-tag-apply">set</button></div>`;
   html += `<div class="row"><span class="k">color</span>
-    <input type="color" id="d-color" value="#3fb950" title="highlight this allocation in every color mode">
-    <button id="d-color-clear">clear</button></div>`;
+    <input type="color" class="d-color" value="#3fb950" title="highlight this allocation in every color mode">
+    <button class="d-color-clear">clear</button></div>`;
   html += `<div class="actions">
-    <button id="d-birth">go to birth</button>
-    ${info.deathSeq !== null ? '<button id="d-death">go to death</button>' : ''}
+    <button class="d-focus" title="Scroll/pan to this allocation and flash exactly where it is">⌖ focus</button>
+    <button class="d-birth">go to birth</button>
+    ${info.deathSeq !== null ? '<button class="d-death">go to death</button>' : ''}
   </div>`;
-  $('detail-body').innerHTML = html;
-  $('d-birth').onclick = () => worker.postMessage({ type: 'jump', seq: info.seq + 1 });
-  const dd = $('d-death');
+  root.innerHTML = html;
+  const q = (sel) => root.querySelector(sel);
+  // same pulse as re-clicking the current event in the Events panel
+  q('.d-focus').onclick = () => worker.postMessage({ type: 'flash-event', seq: info.e });
+  q('.d-birth').onclick = () => worker.postMessage({ type: 'jump', seq: info.seq + 1 });
+  const dd = q('.d-death');
   if (dd) dd.onclick = () => worker.postMessage({ type: 'jump', seq: info.deathSeq + 1 });
-  $('d-name').onchange = () => {
-    const v = $('d-name').value.trim();
+  q('.d-name').onchange = () => {
+    const v = q('.d-name').value.trim();
     if (v) UI.names.set(info.e, { name: v, id: info.id, addr: info.addr });
     else UI.names.delete(info.e);
     buildNamesSection();
     sendNames();
+    // keep the enclosing window's title in sync with the name
+    const t = root.closest('.panel')?.querySelector('.ph-t');
+    if (t) t.textContent = detailTitle(info);
   };
-  $('d-tag-apply').onclick = () => {
-    const id = tagIdFor($('d-tag').value);
+  q('.d-tag-apply').onclick = () => {
+    const id = tagIdFor(q('.d-tag').value);
     worker.postMessage({ type: 'tag-event', e: info.e, tag: id });
     info.tag = id;
     buildLegend();
   };
   const curColor = UI.allocColors.get(info.e);
-  if (curColor) $('d-color').value = curColor;
-  $('d-color').oninput = () => {
-    UI.allocColors.set(info.e, $('d-color').value);
-    worker.postMessage({ type: 'alloc-color', e: info.e, rgb: parseInt($('d-color').value.slice(1), 16) });
+  if (curColor) q('.d-color').value = curColor;
+  q('.d-color').oninput = () => {
+    UI.allocColors.set(info.e, q('.d-color').value);
+    worker.postMessage({ type: 'alloc-color', e: info.e, rgb: parseInt(q('.d-color').value.slice(1), 16) });
     buildNamesSection();
   };
-  $('d-color-clear').onclick = () => {
+  q('.d-color-clear').onclick = () => {
     UI.allocColors.delete(info.e);
     worker.postMessage({ type: 'alloc-color', e: info.e, rgb: null });
     buildNamesSection();
   };
-  showPanel('detail-panel');
 }
+
+function detailTitle(info) {
+  const name = UI.names.get(info.e)?.name;
+  return name ? `Allocation · ${name}` : 'Allocation';
+}
+
+// When the live panel (re)opens, start from its default bottom-left spot and
+// cascade up-right past any pinned windows sitting there, so a fresh window
+// never lands on top of an existing one.
+function placeLivePanel(panel) {
+  panel.style.left = '';
+  panel.style.top = '';
+  panel.style.right = '';
+  panel.style.bottom = '';
+  const r = panel.getBoundingClientRect();
+  let x = r.left;
+  let y = r.top;
+  const pins = [...document.querySelectorAll('.pinned-detail')].map((w) => w.getBoundingClientRect());
+  const clash = () => pins.some((p) => Math.abs(p.left - x) < 48 && Math.abs(p.top - y) < 48);
+  let moved = false;
+  while (clash() && y > 40) {
+    x += 28;
+    y -= 28;
+    moved = true;
+  }
+  if (moved) {
+    panel.style.left = `${x}px`;
+    panel.style.top = `${y}px`;
+    panel.style.right = 'auto';
+    panel.style.bottom = 'auto';
+  }
+}
+
+function fillDetailPanel(info) {
+  const panel = $('detail-panel');
+  if (!info) { panel.hidden = true; return; }
+  UI.detailInfo = info;
+  panel.querySelector('.ph-t').textContent = detailTitle(info);
+  buildDetailBody($('detail-body'), info);
+  const wasHidden = panel.hidden;
+  panel.hidden = false;
+  if (wasHidden) placeLivePanel(panel);
+  raisePanel(panel);
+}
+
+// Pin the current allocation window: it stays exactly where it is (as a
+// pinned window, orange pin), and the next selection opens a fresh live
+// Allocation panel. Clicking a pinned window's pin returns it to the live
+// panel; × closes it. Any number of windows can be pinned.
+$('d-pin').onclick = () => {
+  const info = UI.detailInfo;
+  if (!info) return;
+  const live = $('detail-panel');
+  const r = live.getBoundingClientRect();
+  // identical chrome to the live panel — the orange pin is the only tell
+  const win = document.createElement('div');
+  win.className = 'panel pinned-detail';
+  win.innerHTML = `<div class="panel-head"><span class="ph-t">${esc(detailTitle(info))}</span>
+      <span class="head-actions">
+        <button class="d-pin pinned" title="Unpin — return this to the live Allocation panel">📌</button>
+        <button class="panel-close">×</button>
+      </span></div>
+    <div class="panel-body detail-body"></div>`;
+  document.body.appendChild(win);
+  buildDetailBody(win.querySelector('.panel-body'), info);
+  // take over the live panel's exact spot: visually the window just stays
+  win.style.left = `${r.left}px`;
+  win.style.top = `${r.top}px`;
+  win.style.right = 'auto';
+  win.style.bottom = 'auto';
+  win.querySelector('.panel-close').onclick = () => win.remove();
+  win.querySelector('.d-pin').onclick = () => {
+    const rr = win.getBoundingClientRect();
+    win.remove();
+    fillDetailPanel(info);
+    live.style.left = `${rr.left}px`;
+    live.style.top = `${rr.top}px`;
+    live.style.right = 'auto';
+    live.style.bottom = 'auto';
+  };
+  makePanelWindow(win);
+  raisePanel(win);
+  live.hidden = true;
+};
 
 // ---------------------------------------------------------------------------
 // tooltip

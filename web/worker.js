@@ -378,7 +378,7 @@ onmessage = async (ev) => {
       for (const k of ['addr', 'tlt', 'tls']) {
         ctxs[k] = canvases[k].getContext('2d');
       }
-      const resp = await fetch(m.wasmURL);
+      const resp = await fetch(m.wasmURL, { cache: 'no-cache' });
       const bytes = await resp.arrayBuffer();
       const { instance } = await WebAssembly.instantiate(bytes, {});
       E = instance.exports;

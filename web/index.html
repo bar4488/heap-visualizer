@@ -17,15 +17,7 @@
 
   <span class="sep"></span>
 
-  <button id="btn-step-back" title="Step back one event (←)">⏮</button>
-  <button id="btn-play" title="Play / pause (space)" disabled>▶</button>
-  <button id="btn-step-fwd" title="Step forward one event (→)">⏭</button>
-  <button id="btn-lock" title="Lock the viewport: stepping keeps the address view where it is instead of auto-scrolling (L)">🔓</button>
-  <select id="play-mode" title="Playback advances by wall-clock time or by event index">
-    <option value="t">by time</option>
-    <option value="seq">by events</option>
-  </select>
-  <select id="play-speed" title="Playback speed"></select>
+  <button id="btn-playcfg" title="Playback controls: step, play/pause (space), mode, speed">Play</button>
 
   <span class="sep"></span>
 
@@ -34,7 +26,6 @@
   <button id="btn-filter">Filter</button>
   <button id="btn-events" hidden title="Sequenced list of all events">Events</button>
   <button id="btn-analysis" hidden>Analysis</button>
-  <button id="btn-mark" hidden title="Bookmark the current playhead position (m)">＋ mark</button>
 
   <span class="sep"></span>
 
@@ -83,6 +74,22 @@
 
 <div id="tooltip" hidden></div>
 
+<div id="play-panel" class="panel" hidden>
+  <div class="panel-head">Play <button class="panel-close" data-close="play-panel">×</button></div>
+  <div class="panel-body">
+    <div class="filter-row">
+      <button id="btn-step-back" title="Step back one event (←, shift = ×100)">⏮</button>
+      <button id="btn-play" title="Play / pause (space)" disabled>▶</button>
+      <button id="btn-step-fwd" title="Step forward one event (→, shift = ×100)">⏭</button>
+    </div>
+    <div class="filter-row"><label>advance <select id="play-mode" title="Playback advances by wall-clock time or by event index">
+      <option value="t">by time</option>
+      <option value="seq">by events</option>
+    </select></label></div>
+    <div class="filter-row"><label>speed <select id="play-speed" title="Playback speed"></select></label></div>
+  </div>
+</div>
+
 <div id="layout-panel" class="panel" hidden>
   <div class="panel-head">Layout <button class="panel-close" data-close="layout-panel">×</button></div>
   <div class="panel-body">
@@ -91,7 +98,7 @@
     <div class="filter-row"><label>collapse ≥ <input id="collapse-min" value="5" size="5"
       title="Collapse a run of empty rows only when it is at least this long: a plain number means rows (e.g. 5), a byte size means empty address space (e.g. 64k, 1m, 0x10000)"></label></div>
     <div class="filter-row"><label title="Lay out every row any allocation ever touches, so the map never reflows or scrolls away as allocations are freed">
-      <input type="checkbox" id="show-all"> all rows</label></div>
+      <input type="checkbox" id="show-all" checked> all rows</label></div>
     <div class="filter-row"><label title="Show each allocation's name / size (hex) inside it when it fits">
       <input type="checkbox" id="show-sizes" checked> sizes</label></div>
     <div class="filter-row"><label>row zoom <select id="row-px">
@@ -109,6 +116,10 @@
       <option value="4">age</option>
       <option value="5">tag</option>
     </select></label></div>
+    <div class="filter-row">
+      <button id="btn-lock" title="Lock the viewport: stepping keeps the address view where it is instead of auto-scrolling (L)">🔓</button>
+      <label>lock viewport — stepping doesn't scroll (L)</label>
+    </div>
   </div>
 </div>
 
@@ -129,6 +140,7 @@
 <div id="analysis-panel" class="panel" hidden>
   <div class="panel-head">Analysis
     <span class="head-actions">
+      <button id="btn-mark" hidden title="Bookmark the current playhead position (m)">＋ mark</button>
       <button id="an-save" title="Download tags, names, colors, and bookmarks as a .heapa.json file">Save…</button>
       <button id="an-load" title="Load a saved analysis file">Load…</button>
       <input type="file" id="analysis-file" accept=".json,.heapa" hidden>
@@ -162,8 +174,13 @@
 </div>
 
 <div id="detail-panel" class="panel" hidden>
-  <div class="panel-head">Allocation <button class="panel-close" data-close="detail-panel">×</button></div>
-  <div class="panel-body" id="detail-body"></div>
+  <div class="panel-head"><span class="ph-t">Allocation</span>
+    <span class="head-actions">
+      <button id="d-pin" class="d-pin" title="Pin: keep this window as-is; new selections open in a fresh Allocation panel">📌</button>
+      <button class="panel-close" data-close="detail-panel">×</button>
+    </span>
+  </div>
+  <div class="panel-body detail-body" id="detail-body"></div>
 </div>
 
 <div id="sel-popover" hidden>
