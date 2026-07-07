@@ -56,6 +56,10 @@ pub struct Store {
     pub thr_idx: Vec<u16>,
     pub site: Vec<u32>,
     pub stack: Vec<u32>,
+    /// Index into `extras` of this event's caller-defined JSON fields
+    /// (unrecognized top-level keys), interned as a raw JSON object body
+    /// fragment; NONE_U32 = none.
+    pub extra: Vec<u32>,
     /// For F/R events: index of the creating event (M/R) being killed.
     pub target: Vec<u32>,
     /// For R events: old geometry (resolved from target, else record copy).
@@ -78,6 +82,7 @@ pub struct Store {
     pub thrs: Vec<i64>,
     pub thr_count: Vec<u32>,
     pub stacks: Vec<String>,
+    pub extras: Vec<String>,
 
     // header
     pub has_header: bool,

@@ -371,14 +371,14 @@ pub extern "C" fn hp_set_pins(count: u32) {
     a.view.set_pins(pins);
 }
 
-/// Filter spec is written into the input buffer as JSON:
+/// Parse a filter spec JSON blob:
 /// {"mode":1,"sites":[0,3],"thrs":[1],"sizeMin":0,"sizeMax":0}
-#[no_mangle]
-pub extern "C" fn hp_set_filter(len: u32) {
-    let a = app();
-    let data: Vec<u8> = a.buf[..len as usize].to_vec();
+/// An empty array (`"sites":[]`) is a real constraint (nothing selected ->
+/// hide everything with a site), distinct from an absent/null key (no
+/// constraint) — see `Filter::sites_set`.
+fn parse_filter_json(data: &[u8]) -> Filter {
     let mut f = Filter::default();
-    let mut sc = json::Scan::new(&data);
+    let mut sc = json::Scan::new(data);
     if sc.eat(b'{') {
         loop {
             let span = match sc.string_span() {
@@ -400,16 +400,17 @@ pub extern "C" fn hp_set_filter(len: u32) {
                     f.size_max = sc.integer().unwrap_or(0).max(0) as u64;
                 }
                 b"sites" | b"thrs" | b"tags" => {
-                    let words = if key == b"sites" {
-                        &mut f.sites
-                    } else if key == b"thrs" {
-                        &mut f.thrs
-                    } else {
-                        &mut f.tags
-                    };
+                    // collect into a scratch Vec first: an empty JSON array is
+                    // a real constraint ("nothing selected" -> hide all), so
+                    // it must still flip the *_set flag even though it never
+                    // touches the bitmask itself, and doing that while `words`
+                    // (a &mut into one of f's fields) is alive would fight the
+                    // borrow checker for no benefit — this runs once per
+                    // filter change, not per allocation, so the extra Vec is free
                     sc.ws();
                     if sc.peek() == b'[' {
                         sc.i += 1;
+                        let mut vals: Vec<u32> = Vec::new();
                         loop {
                             sc.ws();
                             if sc.peek() == b']' {
@@ -417,12 +418,7 @@ pub extern "C" fn hp_set_filter(len: u32) {
                                 break;
                             }
                             if let Some(v) = sc.integer() {
-                                let v = v.max(0) as u32;
-                                let w = (v / 64) as usize;
-                                if words.len() <= w {
-                                    words.resize(w + 1, 0);
-                                }
-                                words[w] |= 1u64 << (v % 64);
+                                vals.push(v.max(0) as u32);
                             } else {
                                 break;
                             }
@@ -430,6 +426,19 @@ pub extern "C" fn hp_set_filter(len: u32) {
                             if sc.peek() == b',' {
                                 sc.i += 1;
                             }
+                        }
+                        let (words, set_flag) = match key {
+                            b"sites" => (&mut f.sites, &mut f.sites_set),
+                            b"thrs" => (&mut f.thrs, &mut f.thrs_set),
+                            _ => (&mut f.tags, &mut f.tags_set),
+                        };
+                        *set_flag = true;
+                        for v in vals {
+                            let w = (v / 64) as usize;
+                            if words.len() <= w {
+                                words.resize(w + 1, 0);
+                            }
+                            words[w] |= 1u64 << (v % 64);
                         }
                     } else {
                         // "null" means no constraint
@@ -448,7 +457,27 @@ pub extern "C" fn hp_set_filter(len: u32) {
             }
         }
     }
-    a.cfg.filter = f;
+    f
+}
+
+#[no_mangle]
+pub extern "C" fn hp_set_filter(len: u32) {
+    let a = app();
+    let data: Vec<u8> = a.buf[..len as usize].to_vec();
+    a.cfg.filter = parse_filter_json(&data);
+}
+
+/// Crop the address-line to creator events with `lo <= e < hi` — always dims
+/// (never hides) allocations outside the range, independent of the filter's
+/// own dim/hide mode (see `Cfg::crop`). Negative `lo` or `hi <= lo` clears it.
+#[no_mangle]
+pub extern "C" fn hp_set_crop(lo: i32, hi: i32) {
+    let a = app();
+    a.cfg.crop = if lo >= 0 && hi > lo {
+        Some((lo as u32, hi as u32))
+    } else {
+        None
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -736,6 +765,28 @@ pub extern "C" fn hp_alloc_info(e: u32, w: u32, scroll: f64) {
         a.out = render::alloc_info(&a.store, &mut a.view, &a.cfg, w, addr, e, scroll);
     }
     ret_str(&a.out);
+}
+
+/// Creator-event index of the live allocation covering `addr`, or -1 if none
+/// is live there. Address-only (no pixel/row layout math).
+fn live_at_addr(s: &Store, v: &View, addr: u64) -> i32 {
+    let floor = addr.saturating_sub(s.max_span.max(1));
+    for &(ea, e) in v.live.range((floor, 0)..=(addr, u32::MAX)).rev() {
+        if ea + s.span(e) > addr {
+            return e as i32;
+        }
+    }
+    -1
+}
+
+/// Creator-event index of the live allocation covering `addr` (lo/hi u32 halves
+/// of a u64) at the current playhead, or -1 if none is live there — for "go to
+/// address" to auto-select a hit.
+#[no_mangle]
+pub extern "C" fn hp_live_at_addr(addr_lo: u32, addr_hi: u32) -> i32 {
+    let a = app();
+    let addr = (addr_lo as u64) | ((addr_hi as u64) << 32);
+    live_at_addr(&a.store, &a.view, addr)
 }
 
 /// Address under canvas pixel (x, y) given scroll, whether or not a live
@@ -1145,12 +1196,93 @@ not json at all
     }
 
     #[test]
+    fn extra_properties_parsed_and_exposed() {
+        let src = r#"{"op":"H","v":1,"unit":"ns","row_bytes":4096}
+{"seq":0,"t":100,"op":"M","id":1,"addr":"0x1000","size":64,"pool":"gfx","refs":3}
+{"seq":1,"t":200,"op":"M","id":2,"addr":"0x2000","size":32}
+"#;
+        let mut a = load(src);
+        assert_eq!(a.store.extras, vec!["\"pool\":\"gfx\",\"refs\":3".to_string()]);
+        assert_eq!(a.store.extra[0], 0);
+        assert_eq!(a.store.extra[1], NONE_U32);
+        a.view.seek(&a.store, 2);
+        let info = render::alloc_info(&a.store, &mut a.view, &a.cfg, 200, 0x1000, 0, 0.0);
+        assert!(info.contains("\"extra\":{\"pool\":\"gfx\",\"refs\":3}"));
+        let info2 = render::alloc_info(&a.store, &mut a.view, &a.cfg, 200, 0x2000, 1, 0.0);
+        assert!(!info2.contains("\"extra\""));
+    }
+
+    #[test]
+    fn crop_dims_but_never_hides() {
+        let mut a = load(SAMPLE);
+        // creators: 0, 1, 3 (see `tagging`); crop to [1, 3) keeps only event 1
+        a.cfg.crop = Some((1, 3));
+        assert_eq!(a.cfg.filter.mode, render::FILTER_OFF);
+        let (hide0, dim0) = render::visibility(&a.cfg, &a.store, 0);
+        assert!(!hide0 && dim0); // outside crop: dimmed, never hidden
+        let (hide1, dim1) = render::visibility(&a.cfg, &a.store, 1);
+        assert!(!hide1 && !dim1); // inside crop: untouched
+        let (hide3, dim3) = render::visibility(&a.cfg, &a.store, 3);
+        assert!(!hide3 && dim3);
+
+        // even if the Filter panel's own mode is "hide others", crop still
+        // only dims — it never hides, regardless of that unrelated setting
+        a.cfg.filter.mode = render::FILTER_HIDE;
+        let (hide0b, dim0b) = render::visibility(&a.cfg, &a.store, 0);
+        assert!(!hide0b && dim0b);
+    }
+
+    #[test]
+    fn live_at_addr_finds_and_misses() {
+        let mut a = load(SAMPLE);
+        a.view.seek(&a.store, 3); // after: id1 freed, id2 (0x2000, 128B) live
+        assert_eq!(live_at_addr(&a.store, &a.view, 0x2000), 1);
+        assert_eq!(live_at_addr(&a.store, &a.view, 0x2000 + 127), 1);
+        assert_eq!(live_at_addr(&a.store, &a.view, 0x2000 + 128), -1);
+        assert_eq!(live_at_addr(&a.store, &a.view, 0x1000), -1); // id1 already freed
+    }
+
+    #[test]
+    fn empty_filter_array_hides_everything_selected() {
+        // "sites":[] must mean "nothing selected" (hide/dim every site-tagged
+        // allocation), not "no constraint" — an empty bitmask Vec is
+        // otherwise indistinguishable from an absent/null key, which is what
+        // the *_set flags exist to disambiguate (regression: the "none" link
+        // in the sites/threads/tags filter UI used to send exactly this and
+        // had no effect at all).
+        let f = parse_filter_json(br#"{"mode":1,"sites":[],"thrs":null,"tags":null}"#);
+        assert!(f.sites_set);
+        assert!(!f.thrs_set);
+        assert!(!f.tags_set);
+        assert!(f.sites.is_empty());
+
+        let mut a = load(SAMPLE);
+        a.cfg.filter = f;
+        // every creator with a site (0, 1) must now fail; event 3 (realloc,
+        // no site) is unaffected by the site constraint per existing semantics
+        assert!(!a.cfg.filter.pass(&a.store, 0));
+        assert!(!a.cfg.filter.pass(&a.store, 1));
+        assert!(a.cfg.filter.pass(&a.store, 3));
+
+        // same story for an empty tags selection: every creator (all
+        // untagged, tag id 0) must fail once tags_set is true with no bits
+        let f2 = parse_filter_json(br#"{"mode":1,"tags":[]}"#);
+        assert!(f2.tags_set);
+        let mut a2 = load(SAMPLE);
+        a2.cfg.filter = f2;
+        assert!(!a2.cfg.filter.pass(&a2.store, 0));
+        assert!(!a2.cfg.filter.pass(&a2.store, 1));
+        assert!(!a2.cfg.filter.pass(&a2.store, 3));
+    }
+
+    #[test]
     fn tag_range_respects_filter() {
         // sites: a (events 0), b (event 1); realloc keeps site b (event 3)
         let mut a = load(SAMPLE);
         // filter: only site "b" (index 1), hide mode
         a.cfg.filter.mode = render::FILTER_HIDE;
         a.cfg.filter.sites = vec![1u64 << 1];
+        a.cfg.filter.sites_set = true;
         let to_tag: Vec<u32> = {
             let s = &a.store;
             let f = &a.cfg.filter;

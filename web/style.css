@@ -63,6 +63,7 @@ button { cursor: pointer; }
 button:hover:not(:disabled) { border-color: var(--fg-dim); }
 button:disabled { opacity: 0.4; cursor: default; }
 button.active { background: #1f3d2b; border-color: var(--green); }
+#crop-indicator { background: #3a2f14; border-color: #d29922; color: #f2cc60; }
 label { color: var(--fg-dim); font-size: 12px; display: inline-flex; align-items: center; gap: 4px; }
 input { font-family: ui-monospace, monospace; }
 
@@ -84,7 +85,48 @@ input { font-family: ui-monospace, monospace; }
 
 /* ---------- views ---------- */
 
-#views { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+#workspace { flex: 1; display: flex; flex-direction: row; min-height: 0; min-width: 0; }
+#views { flex: 1; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+
+/* ---------- dockable drawers ---------- */
+
+.drawer {
+  flex: 0 0 auto;
+  width: 300px;
+  display: flex; flex-direction: column;
+  background: var(--bg2);
+  overflow: hidden;
+  position: relative;
+}
+#drawer-left { border-right: 1px solid var(--border); }
+#drawer-right { border-left: 1px solid var(--border); }
+/* width-resize handle on the drawer's inner edge (against #views) */
+.drawer-resize {
+  position: absolute; top: 0; bottom: 0; width: 6px;
+  cursor: col-resize; z-index: 5;
+}
+#drawer-left .drawer-resize { right: -3px; }
+#drawer-right .drawer-resize { left: -3px; }
+/* a docked panel gives up floating chrome and becomes a stacked flex item;
+   multiple panels in one drawer split the height evenly by default and can
+   be resized against their neighbor via .drawer-vresize */
+.panel.docked {
+  position: static !important;
+  z-index: auto !important;
+  width: auto !important; max-height: none;
+  flex: 1 1 0; min-height: 60px;
+  border: none; border-radius: 0;
+  box-shadow: none;
+  border-bottom: 1px solid var(--border);
+}
+.drawer-vresize {
+  flex: 0 0 6px;
+  cursor: row-resize;
+  background: var(--border);
+}
+.dock-btn { opacity: 0.6; }
+.dock-btn:hover { opacity: 1; }
+.dock-btn.active { opacity: 1; color: var(--accent); }
 
 .tl-strip {
   position: relative;
@@ -111,6 +153,26 @@ input { font-family: ui-monospace, monospace; }
   background: rgba(88,166,255,0.18);
   border-left: 1px solid var(--accent);
   border-right: 1px solid var(--accent);
+  pointer-events: none; z-index: 1;
+}
+/* mirrored selection: the same range shown on the *other* strip, converted
+   between time <-> events domains — dashed (not solid) so it never reads as
+   an independent, separately-draggable selection, but still the same accent
+   color and comparable weight to the primary band so it's easy to spot */
+.tl-select-echo {
+  position: absolute; top: 0; bottom: 0;
+  background: rgba(88,166,255,0.14);
+  border-left: 2px dashed var(--accent);
+  border-right: 2px dashed var(--accent);
+  pointer-events: none; z-index: 1;
+}
+/* crop: persistent (until removed), so it gets its own color distinct from
+   the transient selection/echo bands above */
+.tl-crop {
+  position: absolute; top: 0; bottom: 0;
+  background: repeating-linear-gradient(135deg, rgba(210,153,34,0.10) 0 6px, rgba(210,153,34,0.18) 6px 12px);
+  border-left: 1px solid #d29922;
+  border-right: 1px solid #d29922;
   pointer-events: none; z-index: 1;
 }
 
@@ -336,6 +398,13 @@ input[type="color"] {
 #events-panel .head-actions label { font-weight: 400; }
 #events-scroll { position: relative; overflow-y: auto; height: 52vh; }
 #events-spacer { width: 1px; }
+/* seq-range band mirroring the current timeline selection, in the scroll
+   gutter so it never competes with the row highlight */
+#events-sel-band {
+  position: absolute; left: 0; width: 4px; z-index: 2;
+  background: var(--accent); opacity: 0.7; border-radius: 2px;
+  pointer-events: none;
+}
 #events-rows {
   position: absolute; left: 0; right: 0; top: 0;
   font: 11.5px ui-monospace, monospace;
@@ -347,7 +416,10 @@ input[type="color"] {
 }
 .ev-row:hover { background: var(--bg3); }
 .ev-row.cur { background: #1f3d2b; box-shadow: inset 2px 0 0 var(--green); }
-.ev-row .ev-seq { color: var(--fg-dim); width: 76px; flex: none; text-align: right; }
+.ev-row .ev-seq {
+  color: var(--fg-dim); width: 58px; flex: none; text-align: left;
+  font-variant-numeric: tabular-nums;
+}
 .ev-row .ev-op { width: 14px; flex: none; font-weight: 700; }
 .ev-row .ev-op.m { color: var(--green); }
 .ev-row .ev-op.f { color: var(--red); }
@@ -377,6 +449,41 @@ input[type="color"] {
   font-size: 18px;
 }
 #drop-overlay { border: 3px dashed var(--accent); color: var(--accent); pointer-events: none; }
+
+/* ---------- search / goto-anything overlay (g) ---------- */
+
+#search-overlay {
+  position: fixed; inset: 0; z-index: 110;
+  display: flex; align-items: flex-start; justify-content: center;
+  padding-top: 12vh;
+  background: rgba(13,17,23,0.6);
+}
+#search-box {
+  width: 520px; max-width: 92vw; max-height: 60vh;
+  display: flex; flex-direction: column;
+  background: #161b22f8;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.7);
+  overflow: hidden;
+}
+#search-input {
+  padding: 12px 14px;
+  font: 14px ui-monospace, monospace;
+  background: var(--bg3); color: var(--fg);
+  border: none; border-bottom: 1px solid var(--border);
+  outline: none;
+}
+#search-results { overflow-y: auto; }
+#search-results .sr-row {
+  padding: 7px 14px; display: flex; gap: 10px; align-items: baseline;
+  cursor: pointer; font: 12px ui-monospace, monospace;
+}
+#search-results .sr-row.sel, #search-results .sr-row:hover { background: var(--bg3); }
+#search-results .sr-kind { color: var(--accent); width: 40px; flex: none; text-transform: uppercase; font-size: 10px; }
+#search-results .sr-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); }
+#search-results .sr-sub { color: var(--fg-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#search-results .empty { padding: 12px 14px; color: var(--fg-dim); }
 
 /* move-link overlay shapes (SVG) */
 #addr-overlay .ml-old { fill: none; stroke: var(--red); stroke-width: 1.5; stroke-dasharray: 4 3; }

@@ -30,6 +30,9 @@ const UI = {
   bookmarks: [],          // {name, seq, t} time marks
   addrMarks: [],          // {name, addr: '0x…'} address marks
   sel: null,        // active range selection {kind, lo, hi}
+  selMirror: null,  // UI.sel converted to the other domain: {kind, lo, hi}
+  marksDirty: false, // tags/bookmarks/addr marks/names/colors changed since last save/load
+  crop: null,       // {lo, hi} in seq domain, or null; see setCrop/clearCrop
   setView: {},      // per-strip view setters, filled by setupTimeline
   locked: false,    // locked viewport: stepping never auto-scrolls
   xview: { zoom: 1, pan: 0 }, // horizontal zoom/pan on the address line
@@ -143,7 +146,7 @@ async function handleFile(f) {
   const head = await f.slice(0, 300).text();
   if (head.includes('"heapVisualizerAnalysis"')) {
     try {
-      applyAnalysis(JSON.parse(await f.text()));
+      applyMarks(JSON.parse(await f.text()));
     } catch (e) {
       $('st-trace').textContent = `analysis load failed: ${e.message}`;
     }
@@ -252,6 +255,12 @@ worker.onmessage = (ev) => {
     case 'addr-at':
       if (m.addr) addAddrMark(m.addr);
       break;
+    case 'addr-selected':
+      if (m.info) {
+        UI.selected = m.info.e;
+        fillDetailPanel(m.info);
+      }
+      break;
     case 'tagged':
       if (m.tag > 0) {
         $('st-info').textContent =
@@ -273,6 +282,9 @@ worker.onmessage = (ev) => {
     case 'tlhover-result':
       onTlHoverResult(m);
       break;
+    case 'convert-result':
+      onConvertResult(m);
+      break;
   }
 };
 
@@ -289,6 +301,9 @@ function onLoaded(m) {
   UI.allocColors.clear();
   UI.bookmarks = [];
   UI.addrMarks = [];
+  UI.marksDirty = false;
+  UI.crop = null;
+  updateCropIndicator();
   sendAddrMarks();
   sendNames();
   // the wasm view is recreated per trace: re-apply sticky toolbar prefs
@@ -296,12 +311,14 @@ function onLoaded(m) {
   worker.postMessage({ type: 'set', key: 'sizeLabels', value: $('show-sizes').checked });
   clearSelection();
   syncTagDatalist();
-  buildAnalysisPanel();
+  buildMarksPanel();
   updateMarkers();
   $('btn-analysis').hidden = false;
   $('btn-analysis').classList.remove('active');
   $('btn-mark').hidden = false;
   $('btn-events').hidden = false;
+  $('an-save').hidden = false;
+  $('an-load').hidden = false;
   $('btn-play').disabled = false;
   UI.xview = { zoom: 1, pan: 0 };
   updateHzButton();
@@ -326,6 +343,10 @@ function onLoaded(m) {
   UI.detailInfo = null;
   // pinned allocation windows reference events of the previous trace
   document.querySelectorAll('.pinned-detail').forEach((w) => w.remove());
+  refreshDrawerDividers('left');
+  refreshDrawerDividers('right');
+  restoreSession();
+  restoreMarksAutosave();
 }
 
 function onState(m) {
@@ -351,6 +372,7 @@ function onState(m) {
   $('empty-hint').style.display = m.liveCount === 0 ? 'block' : 'none';
   drawMoveLink(m.moveLink);
   updateSelOverlay();
+  drawCropBands();
   updateMarkers();
   lastAddrMarkYs = m.addrMarkYs || [];
   renderAddrMarkLines();
@@ -454,12 +476,19 @@ $('btn-lock').onclick = toggleLock;
 $('btn-jump').onclick = doJump;
 $('jump-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') doJump(); });
 
-function doJump() {
-  const v = $('jump-input').value.trim();
+function doJump() { execJump($('jump-input').value.trim()); }
+
+function isJumpValue(v) {
+  const addrText = v.startsWith('a:') ? v.slice(2).trim() : v;
+  return /^0x[0-9a-f]+$/i.test(addrText) || v.startsWith('t:') || /^\d/.test(v);
+}
+
+function execJump(v) {
   if (!v) return;
   const addrText = v.startsWith('a:') ? v.slice(2).trim() : v;
   if (/^0x[0-9a-f]+$/i.test(addrText)) {
-    // go to address: scroll the address-line, playhead untouched
+    // go to address: scroll the address-line, playhead untouched (selects
+    // the live allocation there, if any — see the worker's goto-addr handler)
     try {
       const a = BigInt(addrText);
       worker.postMessage({
@@ -476,6 +505,103 @@ function doJump() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// search / goto-anything overlay (g)
+// ---------------------------------------------------------------------------
+
+let searchItems = [];
+let searchSel = 0;
+
+function buildSearchTargets(q) {
+  const items = [];
+  const match = (...parts) => !q || parts.join(' ').toLowerCase().includes(q);
+  UI.bookmarks.forEach((b) => {
+    if (match(b.name)) items.push({
+      kind: 'mark', label: b.name, sub: `seq ${fmtNum(b.seq)} · ${fmtTime(b.t)}`,
+      action: () => worker.postMessage({ type: 'seek', seq: b.seq }),
+    });
+  });
+  UI.addrMarks.forEach((m) => {
+    if (match(m.name, m.addr)) items.push({
+      kind: 'addr', label: m.name, sub: m.addr, action: () => gotoAddr(m.addr),
+    });
+  });
+  UI.names.forEach((v, e) => {
+    if (match(v.name, v.addr)) items.push({
+      kind: 'alloc', label: v.name, sub: `id ${v.id} · ${v.addr}`,
+      action: () => worker.postMessage({ type: 'jump', seq: e + 1, select: true }),
+    });
+  });
+  UI.warnings.forEach((w) => {
+    if (match(w.msg)) items.push({
+      kind: 'warn', label: w.msg, sub: `#${w.seq}`,
+      action: () => worker.postMessage({ type: 'jump', seq: w.seq + 1 }),
+    });
+  });
+  return items.slice(0, 60);
+}
+
+function currentSearchItems() {
+  const raw = $('search-input').value.trim();
+  const items = [];
+  if (raw && isJumpValue(raw)) {
+    items.push({ kind: 'go', label: `Go to ${raw}`, sub: '', action: () => execJump(raw) });
+  }
+  items.push(...buildSearchTargets(raw.toLowerCase()));
+  return items;
+}
+
+function renderSearchResults() {
+  searchItems = currentSearchItems();
+  searchSel = Math.min(searchSel, Math.max(0, searchItems.length - 1));
+  const list = $('search-results');
+  list.innerHTML = searchItems.length
+    ? searchItems.map((it, i) => `<div class="sr-row${i === searchSel ? ' sel' : ''}" data-i="${i}">
+        <span class="sr-kind">${it.kind}</span><span class="sr-label">${esc(it.label)}</span><span class="sr-sub">${esc(it.sub || '')}</span>
+      </div>`).join('')
+    : '<div class="empty">no matches</div>';
+  list.querySelectorAll('.sr-row').forEach((row) => {
+    row.onclick = () => { searchItems[+row.dataset.i].action(); closeSearchOverlay(); };
+  });
+}
+
+function openSearchOverlay() {
+  if (!UI.loaded) return;
+  $('search-overlay').hidden = false;
+  const inp = $('search-input');
+  inp.value = '';
+  searchSel = 0;
+  renderSearchResults();
+  inp.focus();
+}
+
+function closeSearchOverlay() {
+  $('search-overlay').hidden = true;
+}
+
+$('search-input').addEventListener('input', () => { searchSel = 0; renderSearchResults(); });
+$('search-input').addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    searchSel = Math.min(searchItems.length - 1, searchSel + 1);
+    renderSearchResults();
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    searchSel = Math.max(0, searchSel - 1);
+    renderSearchResults();
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    const it = searchItems[searchSel];
+    if (it) { it.action(); closeSearchOverlay(); }
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    closeSearchOverlay();
+  }
+});
+$('search-overlay').addEventListener('pointerdown', (e) => {
+  if (e.target === $('search-overlay')) closeSearchOverlay();
+});
+
 document.addEventListener('keydown', (e) => {
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
   if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
@@ -487,8 +613,7 @@ document.addEventListener('keydown', (e) => {
   else if (e.key === 'l' || e.key === 'L') { toggleLock(); }
   else if (e.key === 'g' && UI.loaded) {
     e.preventDefault();
-    $('jump-input').focus();
-    $('jump-input').select();
+    openSearchOverlay();
   }
 });
 
@@ -606,17 +731,23 @@ function buildFilterPanel() {
     ? `<div class="group-title">threads ${allNoneHtml('thr')}</div>` + UI.meta.thrs.map((t, i) =>
       `<label><input type="checkbox" data-thr="${i}" checked><span class="swatch" style="background:${CAT[(i + 5) % 12]}"></span>thr ${t.thr}<span class="count">${fmtNum(t.count)}</span></label>`).join('')
     : '';
-  $('filter-panel').querySelectorAll('input').forEach((inp) => { inp.onchange = sendFilter; });
-  $('filter-panel').querySelectorAll('.allnone a').forEach((a) => {
-    a.onclick = () => {
-      const on = a.dataset.an === 'all';
-      $('filter-panel').querySelectorAll(`input[data-${a.dataset.sel}]`)
-        .forEach((b) => { b.checked = on; });
-      sendFilter();
-    };
-  });
+  // scoped to sites/threads only — tags live in the same panel but keep
+  // their own dedicated wiring (buildTagsSection) driven by UI.tags state,
+  // not raw checkbox DOM state
+  for (const group of [sites, thrs]) {
+    group.querySelectorAll('input').forEach((inp) => { inp.onchange = sendFilter; });
+    group.querySelectorAll('.allnone a').forEach((a) => {
+      a.onclick = () => {
+        const on = a.dataset.an === 'all';
+        group.querySelectorAll(`input[data-${a.dataset.sel}]`)
+          .forEach((b) => { b.checked = on; });
+        sendFilter();
+      };
+    });
+  }
   $('f-size-min').oninput = sendFilter;
   $('f-size-max').oninput = sendFilter;
+  buildTagsSection();
 }
 
 function sendFilter() {
@@ -647,7 +778,6 @@ function sendFilter() {
     },
   });
   $('btn-filter').classList.toggle('active', active);
-  $('btn-analysis').classList.toggle('active', !allTags);
 }
 
 $('filter-clear').onclick = () => {
@@ -664,6 +794,11 @@ $('filter-clear').onclick = () => {
 // panels as draggable windows: drag by the header, and keep a z-stack where
 // the last panel opened or dragged sits on top
 // ---------------------------------------------------------------------------
+
+// dockable/floating panels tracked by session (drawers, window positions) —
+// detail-panel and its pinned clones are excluded: they're per-allocation
+// and not meaningful to restore across a session
+const PANEL_IDS = ['play-panel', 'layout-panel', 'filter-panel', 'analysis-panel', 'warnings-panel', 'events-panel'];
 
 let panelZ = 40;
 
@@ -684,6 +819,7 @@ function makePanelWindow(p) {
   head.addEventListener('pointerdown', (e) => {
     // header buttons/inputs (close, save, follow…) still work normally
     if (e.target.closest('button, input, select, a')) return;
+    if (p.classList.contains('docked')) return; // stacked in a drawer — not draggable
     e.preventDefault();
     head.setPointerCapture(e.pointerId);
     const r = p.getBoundingClientRect();
@@ -705,6 +841,175 @@ function makePanelWindow(p) {
 }
 document.querySelectorAll('.panel').forEach(makePanelWindow);
 
+// ---------------------------------------------------------------------------
+// dockable left/right drawers: panels float by default (above); this adds an
+// alternate home where any of PANEL_IDS can stack, get hidden as a group, and
+// be resized — without changing anything about how floating panels behave
+// ---------------------------------------------------------------------------
+
+// no manual show/hide control: a drawer is visible exactly when it has a
+// docked window in it, empty otherwise — see refreshDrawerDividers
+UI.drawers = { left: [], right: [], widthLeft: 300, widthRight: 300 };
+
+const panelFloatRect = new Map(); // panel element -> its floating {left,top,right,bottom}, for undock
+
+function drawerEl(side) { return $(side === 'left' ? 'drawer-left' : 'drawer-right'); }
+
+function updateDockButtons(p) {
+  const side = p.dataset.dockSide;
+  const l = p.querySelector('.dock-left');
+  const r = p.querySelector('.dock-right');
+  if (l) l.classList.toggle('active', side === 'left');
+  if (r) r.classList.toggle('active', side === 'right');
+}
+
+function refreshDrawerDividers(side) {
+  const dr = drawerEl(side);
+  dr.querySelectorAll('.drawer-vresize').forEach((d) => d.remove());
+  // a docked-but-closed (×'d) panel stays a DOM child so re-opening it from
+  // the toolbar still works, but it shouldn't hold the drawer open or get a
+  // divider of its own
+  const panels = [...dr.children].filter((c) => c.classList.contains('panel') && !c.hidden);
+  panels.forEach((p, i) => {
+    p.style.flex = '1 1 0';
+    if (i > 0) {
+      const div = document.createElement('div');
+      div.className = 'drawer-vresize';
+      dr.insertBefore(div, p);
+      wireVResize(div, panels[i - 1], p);
+    }
+  });
+  dr.hidden = panels.length === 0;
+}
+
+// drag the divider between two stacked panels: pin the panel above to a
+// fixed pixel height, leave the panel(s) below sharing the rest
+function wireVResize(div, panelA, panelB) {
+  div.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    div.setPointerCapture(e.pointerId);
+    const startY = e.clientY;
+    const startAH = panelA.getBoundingClientRect().height;
+    const totalH = startAH + panelB.getBoundingClientRect().height;
+    const move = (ev) => {
+      const ah = Math.max(60, Math.min(totalH - 60, startAH + (ev.clientY - startY)));
+      panelA.style.flex = `0 0 ${ah}px`;
+      panelB.style.flex = '1 1 0';
+    };
+    const up = () => {
+      div.removeEventListener('pointermove', move);
+      div.removeEventListener('pointerup', up);
+    };
+    div.addEventListener('pointermove', move);
+    div.addEventListener('pointerup', up);
+  });
+}
+
+function wireDrawerWidthResize(side) {
+  const dr = drawerEl(side);
+  const handle = document.createElement('div');
+  handle.className = 'drawer-resize';
+  dr.appendChild(handle);
+  handle.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    handle.setPointerCapture(e.pointerId);
+    const startX = e.clientX;
+    const startW = dr.getBoundingClientRect().width;
+    const move = (ev) => {
+      const dx = ev.clientX - startX;
+      const w = Math.max(160, Math.min(600, side === 'left' ? startW + dx : startW - dx));
+      dr.style.width = `${w}px`;
+      UI.drawers[side === 'left' ? 'widthLeft' : 'widthRight'] = w;
+    };
+    const up = () => {
+      handle.removeEventListener('pointermove', move);
+      handle.removeEventListener('pointerup', up);
+    };
+    handle.addEventListener('pointermove', move);
+    handle.addEventListener('pointerup', up);
+  });
+}
+wireDrawerWidthResize('left');
+wireDrawerWidthResize('right');
+
+function dockPanel(p, side) {
+  if (p.dataset.dockSide === side) return;
+  if (p.dataset.dockSide) undockPanel(p); // also cleans up the old side's bookkeeping/dividers
+  panelFloatRect.set(p, { left: p.style.left, top: p.style.top, right: p.style.right, bottom: p.style.bottom });
+  p.classList.add('docked');
+  p.dataset.dockSide = side;
+  p.hidden = false;
+  drawerEl(side).appendChild(p);
+  // id-keyed bookkeeping is only for session persistence of the fixed
+  // PANEL_IDS windows — dynamically-created pinned allocation windows have
+  // no stable id and dock/undock fine without being tracked here
+  if (p.id) {
+    const arr = UI.drawers[side === 'left' ? 'left' : 'right'];
+    if (!arr.includes(p.id)) arr.push(p.id);
+  }
+  refreshDrawerDividers(side);
+  updateDockButtons(p);
+}
+
+function undockPanel(p) {
+  const side = p.dataset.dockSide;
+  if (!side) return;
+  delete p.dataset.dockSide;
+  p.classList.remove('docked');
+  p.style.flex = '';
+  document.body.appendChild(p);
+  const r = panelFloatRect.get(p);
+  if (r) {
+    p.style.left = r.left; p.style.top = r.top; p.style.right = r.right; p.style.bottom = r.bottom;
+  }
+  panelFloatRect.delete(p);
+  if (p.id) {
+    const arr = UI.drawers[side === 'left' ? 'left' : 'right'];
+    const i = arr.indexOf(p.id);
+    if (i >= 0) arr.splice(i, 1);
+  }
+  refreshDrawerDividers(side);
+  raisePanel(p);
+  updateDockButtons(p);
+}
+
+function toggleDock(p, side) {
+  if (p.dataset.dockSide === side) undockPanel(p);
+  else dockPanel(p, side);
+}
+
+// shared by the fixed PANEL_IDS windows and dynamically-created pinned
+// allocation windows (see the d-pin handler) — anything with a .panel-head
+// and a .panel-close can be made dockable
+function addDockButtonsTo(p) {
+  const closeBtn = p.querySelector('.panel-close');
+  const left = document.createElement('button');
+  left.className = 'dock-left dock-btn';
+  left.title = 'Dock to the left drawer (click again to undock)';
+  left.textContent = '⟨';
+  left.onclick = () => toggleDock(p, 'left');
+  const right = document.createElement('button');
+  right.className = 'dock-right dock-btn';
+  right.title = 'Dock to the right drawer (click again to undock)';
+  right.textContent = '⟩';
+  right.onclick = () => toggleDock(p, 'right');
+  closeBtn.insertAdjacentElement('beforebegin', left);
+  closeBtn.insertAdjacentElement('beforebegin', right);
+}
+PANEL_IDS.forEach((id) => addDockButtonsTo($(id)));
+
+// re-dock panels and restore drawer width/visibility from a saved session
+function applyDrawersState(d) {
+  if (!d) return;
+  UI.drawers = { left: [], right: [], widthLeft: d.widthLeft || 300, widthRight: d.widthRight || 300 };
+  drawerEl('left').style.width = `${UI.drawers.widthLeft}px`;
+  drawerEl('right').style.width = `${UI.drawers.widthRight}px`;
+  // dockPanel pushes into UI.drawers.left/right itself and shows the drawer
+  // (via refreshDrawerDividers) as soon as it has content
+  (d.left || []).forEach((id) => { if ($(id)) dockPanel($(id), 'left'); });
+  (d.right || []).forEach((id) => { if ($(id)) dockPanel($(id), 'right'); });
+}
+
 // panel open/close plumbing
 for (const [btn, panel] of [
   ['btn-playcfg', 'play-panel'],
@@ -717,10 +1022,15 @@ for (const [btn, panel] of [
     const p = $(panel);
     p.hidden = !p.hidden;
     if (!p.hidden) raisePanel(p);
+    if (p.dataset.dockSide) refreshDrawerDividers(p.dataset.dockSide);
   };
 }
 document.querySelectorAll('.panel-close').forEach((b) => {
-  b.onclick = () => { $(b.dataset.close).hidden = true; };
+  b.onclick = () => {
+    const p = $(b.dataset.close);
+    p.hidden = true;
+    if (p.dataset.dockSide) refreshDrawerDividers(p.dataset.dockSide);
+  };
 });
 
 // ---------------------------------------------------------------------------
@@ -771,6 +1081,7 @@ function refreshEventsPanel() {
   evState.count = L.visN;
   evState.reqId = UI.reqId++;
   worker.postMessage({ type: 'events', from, count: L.visN, reqId: evState.reqId });
+  updateEventsSelBand();
 }
 
 function onEventsSlice(m) {
@@ -855,6 +1166,41 @@ function resetEventsPanel() {
 
 $('events-scroll').addEventListener('scroll', refreshEventsPanel);
 new ResizeObserver(() => refreshEventsPanel()).observe($('events-scroll'));
+
+// drag a seq range directly in the Events list — feeds the same UI.sel path
+// as shift-dragging the events (strip-s) timeline, so zoom/tag/crop from the
+// selection popover and the mirrored band on both strips all just work
+{
+  const scEl = $('events-scroll');
+  let dragFromY = null;
+  let dragFromSeq = 0;
+  let dragCaptured = false;
+  const yToSeq = (y) => evState.from + (y - scEl.getBoundingClientRect().top) / EV_ROW;
+  scEl.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || !UI.loaded) return;
+    dragFromY = e.clientY;
+    dragFromSeq = yToSeq(e.clientY);
+    dragCaptured = false;
+    // don't capture yet: setPointerCapture re-targets the eventual click to
+    // this element too, which would swallow plain row clicks (jump-to-event)
+  });
+  scEl.addEventListener('pointermove', (e) => {
+    if (dragFromY === null || Math.abs(e.clientY - dragFromY) < 3) return;
+    if (!dragCaptured) { scEl.setPointerCapture(e.pointerId); dragCaptured = true; }
+    const n = UI.state ? UI.state.n : (UI.meta ? UI.meta.n : 0);
+    const b = yToSeq(e.clientY);
+    UI.sel = { kind: 1, lo: Math.max(0, Math.min(dragFromSeq, b)), hi: Math.min(n, Math.max(dragFromSeq, b)) };
+    updateSelOverlay();
+    requestSelMirror();
+  });
+  scEl.addEventListener('pointerup', (e) => {
+    if (dragFromY === null) return;
+    const moved = dragCaptured;
+    dragFromY = null;
+    dragCaptured = false;
+    if (moved && UI.sel && UI.sel.kind === 1) openSelPopover(e.clientX, e.clientY);
+  });
+}
 $('btn-events').onclick = () => {
   const p = $('events-panel');
   p.hidden = !p.hidden;
@@ -864,6 +1210,7 @@ $('btn-events').onclick = () => {
     refreshEventsPanel();
     updateEventsPanel();
   }
+  if (p.dataset.dockSide) refreshDrawerDividers(p.dataset.dockSide);
 };
 $('ev-follow').onchange = () => {
   evState.lastSeq = -1;
@@ -885,6 +1232,7 @@ function tagIdFor(name) {
     sendTagColors();
     buildTagsSection();
     $('btn-analysis').hidden = false;
+    markDirty();
   }
   return i + 1;
 }
@@ -902,10 +1250,9 @@ function sendTagColors() {
   });
 }
 
-function buildAnalysisPanel() {
+function buildMarksPanel() {
   buildBookmarksSection();
   buildAddrMarksSection();
-  buildTagsSection();
   buildNamesSection();
 }
 
@@ -925,6 +1272,7 @@ function buildBookmarksSection() {
     inp.onchange = () => {
       UI.bookmarks[+inp.dataset.bmname].name = inp.value.trim() || `mark ${+inp.dataset.bmname + 1}`;
       updateMarkers();
+      markDirty();
     };
   });
   list.querySelectorAll('[data-bmgo]').forEach((el) => {
@@ -940,6 +1288,7 @@ function buildBookmarksSection() {
       UI.bookmarks.splice(+el.dataset.bmdel, 1);
       buildBookmarksSection();
       updateMarkers();
+      markDirty();
     };
   });
 }
@@ -970,6 +1319,7 @@ function buildTagsSection() {
       if (id === 0) UI.untaggedVisible = inp.checked;
       else UI.tags[id - 1].visible = inp.checked;
       sendFilter();
+      markDirty();
     };
   });
   list.querySelectorAll('input[data-tagcolor]').forEach((inp) => {
@@ -977,6 +1327,7 @@ function buildTagsSection() {
       UI.tags[+inp.dataset.tagcolor - 1].color = inp.value;
       sendTagColors();
       buildLegend();
+      markDirty();
     };
   });
   list.querySelectorAll('input[data-tagname]').forEach((inp) => {
@@ -985,6 +1336,7 @@ function buildTagsSection() {
       if (v) UI.tags[+inp.dataset.tagname - 1].name = v;
       syncTagDatalist();
       buildLegend();
+      markDirty();
     };
   });
   list.querySelectorAll('[data-tagdel]').forEach((el) => {
@@ -1000,6 +1352,7 @@ document.querySelectorAll('#tags-allnone a').forEach((a) => {
     UI.tags.forEach((t) => { t.visible = on; });
     buildTagsSection();
     sendFilter();
+    markDirty();
   };
 });
 
@@ -1009,10 +1362,17 @@ function deleteTag(id) {
     worker.postMessage({ type: 'retag', from: k, to: k - 1 });
   }
   UI.tags.splice(id - 1, 1);
+  // with no tags left, buildTagsSection renders only the "none yet" hint —
+  // no checkbox survives to undo an "untagged" filter, which would strand
+  // the user with everything hidden and no obvious way back except the
+  // Filter panel's unrelated "clear" button; auto-restore visibility instead
+  if (UI.tags.length === 0) UI.untaggedVisible = true;
   syncTagDatalist();
   sendTagColors();
+  buildTagsSection();
   sendFilter();
   buildLegend();
+  markDirty();
 }
 
 function buildNamesSection() {
@@ -1033,6 +1393,7 @@ function buildNamesSection() {
       const e = +inp.dataset.ncolor;
       UI.allocColors.set(e, inp.value);
       worker.postMessage({ type: 'alloc-color', e, rgb: parseInt(inp.value.slice(1), 16) });
+      markDirty();
     };
   });
   list.querySelectorAll('[data-nname]').forEach((inp) => {
@@ -1042,6 +1403,7 @@ function buildNamesSection() {
       if (v) UI.names.get(e).name = v;
       else { UI.names.delete(e); buildNamesSection(); }
       sendNames();
+      markDirty();
     };
   });
   list.querySelectorAll('[data-ngo]').forEach((el) => {
@@ -1059,6 +1421,7 @@ function buildNamesSection() {
       }
       buildNamesSection();
       sendNames();
+      markDirty();
     };
   });
 }
@@ -1090,8 +1453,9 @@ function addAddrMark(addrHex) {
   UI.addrMarks.push({ name: `addr ${UI.addrMarks.length + 1}`, addr: addrHex });
   sendAddrMarks();
   buildAddrMarksSection();
-  $('st-info').textContent = `marked ${addrHex} — rename it in the Analysis panel`;
+  $('st-info').textContent = `marked ${addrHex} — rename it in the Marks panel`;
   showPanel('analysis-panel');
+  markDirty();
 }
 
 function buildAddrMarksSection() {
@@ -1109,6 +1473,7 @@ function buildAddrMarksSection() {
     inp.onchange = () => {
       UI.addrMarks[+inp.dataset.amname].name = inp.value.trim() || `addr ${+inp.dataset.amname + 1}`;
       renderAddrMarkLines();
+      markDirty();
     };
   });
   list.querySelectorAll('[data-amgo]').forEach((el) => {
@@ -1117,6 +1482,7 @@ function buildAddrMarksSection() {
   list.querySelectorAll('[data-amdel]').forEach((el) => {
     el.onclick = () => {
       UI.addrMarks.splice(+el.dataset.amdel, 1);
+      markDirty();
       sendAddrMarks();
       buildAddrMarksSection();
     };
@@ -1146,8 +1512,9 @@ function addBookmark() {
   UI.bookmarks.push(b);
   buildBookmarksSection();
   updateMarkers();
-  $('st-info').textContent = `bookmarked seq ${fmtNum(b.seq)} · ${fmtTime(b.t)} — rename it in the Analysis panel`;
+  $('st-info').textContent = `bookmarked seq ${fmtNum(b.seq)} · ${fmtTime(b.t)} — rename it in the Marks panel`;
   showPanel('analysis-panel');
+  markDirty();
 }
 $('btn-mark').onclick = addBookmark;
 
@@ -1188,7 +1555,7 @@ function requestTagsDump() {
   });
 }
 
-async function buildAnalysis() {
+async function buildMarks() {
   const taggedEvents = await requestTagsDump();
   return {
     heapVisualizerAnalysis: 1,
@@ -1213,25 +1580,38 @@ async function buildAnalysis() {
   };
 }
 
-async function saveAnalysis() {
+function markDirty() { UI.marksDirty = true; }
+
+// warn on refresh/close only when there are unsaved marks (tags, bookmarks,
+// addr marks, names, colors) — session/layout state doesn't need this since
+// it's auto-persisted continuously (see saveSession)
+window.addEventListener('beforeunload', (e) => {
+  if (UI.marksDirty) {
+    e.preventDefault();
+    e.returnValue = '';
+  }
+});
+
+async function saveMarks() {
   if (!UI.loaded) return;
-  const obj = await buildAnalysis();
+  const obj = await buildMarks();
   const base = (UI.fileName || 'trace').replace(/\.(heapl|jsonl|json|txt)$/, '');
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([JSON.stringify(obj)], { type: 'application/json' }));
   a.download = `${base}.heapa.json`;
   a.click();
   URL.revokeObjectURL(a.href);
-  $('st-info').textContent = `analysis saved to ${a.download}`;
+  $('st-info').textContent = `marks saved to ${a.download}`;
+  UI.marksDirty = false;
 }
 
-function applyAnalysis(obj) {
+function applyMarks(obj, quiet) {
   if (!obj || obj.heapVisualizerAnalysis !== 1) {
-    $('st-trace').textContent = 'not a heap-visualizer analysis file';
+    if (!quiet) $('st-trace').textContent = 'not a heap-visualizer marks file';
     return;
   }
   if (!UI.loaded) {
-    $('st-trace').textContent = 'load the matching trace first, then load the analysis';
+    $('st-trace').textContent = 'load the matching trace first, then load the marks';
     return;
   }
   if (obj.trace && obj.trace.n !== UI.meta.n) {
@@ -1282,48 +1662,306 @@ function applyAnalysis(obj) {
   }
   syncTagDatalist();
   sendFilter();
-  buildAnalysisPanel();
+  buildMarksPanel();
   buildLegend();
   updateMarkers();
-  showPanel('analysis-panel');
-  $('st-info').textContent =
-    `analysis loaded: ${UI.tags.length} tags, ${UI.names.size} names, ${UI.bookmarks.length} time marks, ${UI.addrMarks.length} addr marks`;
+  if (!quiet) {
+    showPanel('analysis-panel');
+    $('st-info').textContent =
+      `marks loaded: ${UI.tags.length} tags, ${UI.names.size} names, ${UI.bookmarks.length} time marks, ${UI.addrMarks.length} addr marks`;
+  }
+  UI.marksDirty = false;
 }
 
-UI.buildAnalysis = buildAnalysis;
-UI.applyAnalysis = applyAnalysis;
+UI.buildMarks = buildMarks;
+UI.applyMarks = applyMarks;
 
-$('an-save').onclick = saveAnalysis;
+$('an-save').onclick = saveMarks;
 $('an-load').onclick = () => $('analysis-file').click();
 $('analysis-file').onchange = async (ev) => {
   const f = ev.target.files[0];
   if (f) {
     try {
-      applyAnalysis(JSON.parse(await f.text()));
+      applyMarks(JSON.parse(await f.text()));
     } catch (e) {
-      $('st-trace').textContent = `analysis load failed: ${e.message}`;
+      $('st-trace').textContent = `marks load failed: ${e.message}`;
     }
   }
   ev.target.value = '';
 };
 
+// ---------------------------------------------------------------------------
+// session: filters, layout, view/zoom, crop, window & drawer state, playhead —
+// everything *except* marks (tags/bookmarks/addr marks/names/colors, which
+// stay manual Save…/Load… since they're meant to be portable/shared).
+// Auto-persisted to localStorage per trace file name; restored silently on
+// load. No manual UI for this — it's working state, not a deliverable.
+// ---------------------------------------------------------------------------
+
+function sessionKey() {
+  return UI.fileName ? `heapviz:session:${UI.fileName}` : null;
+}
+
+function buildSession() {
+  const windows = {};
+  for (const id of PANEL_IDS) {
+    const p = $(id);
+    windows[id] = { hidden: p.hidden, left: p.style.left, top: p.style.top, right: p.style.right, bottom: p.style.bottom };
+  }
+  const fmode = document.querySelector('input[name=fmode]:checked');
+  return {
+    heapVisualizerSession: 1,
+    rowBytes: $('row-bytes').value,
+    collapseMin: $('collapse-min').value,
+    rowPx: $('row-px').value,
+    colorMode: $('color-mode').value,
+    showAll: $('show-all').checked,
+    sizeLabels: $('show-sizes').checked,
+    addrLabels: $('show-addrs').checked,
+    xview: UI.xview,
+    crop: UI.crop,
+    filter: {
+      fmode: fmode ? fmode.value : '1',
+      sizeMin: $('f-size-min').value,
+      sizeMax: $('f-size-max').value,
+      // checkbox states by index — meaningful only against the same trace's
+      // site/thread list, which is exactly what the file-name-scoped key gives us
+      sites: [...document.querySelectorAll('#filter-panel input[data-site]')].map((b) => b.checked),
+      thrs: [...document.querySelectorAll('#filter-panel input[data-thr]')].map((b) => b.checked),
+    },
+    playhead: UI.state ? UI.state.seq : 0,
+    windows,
+    drawers: UI.drawers || null, // filled in once dockable drawers exist
+  };
+}
+
+function applySession(obj) {
+  if (!obj || obj.heapVisualizerSession !== 1) return;
+  if (obj.rowBytes !== undefined) {
+    $('row-bytes').value = obj.rowBytes;
+    const v = rowBytesValue();
+    if (v > 0) worker.postMessage({ type: 'set', key: 'rowBytes', value: v });
+  }
+  if (obj.collapseMin !== undefined) { $('collapse-min').value = obj.collapseMin; sendCollapseMin(); }
+  if (obj.rowPx !== undefined) {
+    $('row-px').value = obj.rowPx;
+    worker.postMessage({ type: 'set', key: 'rowPx', value: +$('row-px').value });
+  }
+  if (obj.colorMode !== undefined) {
+    $('color-mode').value = obj.colorMode;
+    worker.postMessage({ type: 'set', key: 'colorMode', value: +$('color-mode').value });
+    buildLegend();
+  }
+  if (obj.showAll !== undefined) {
+    $('show-all').checked = obj.showAll;
+    worker.postMessage({ type: 'set', key: 'showAll', value: obj.showAll });
+  }
+  if (obj.sizeLabels !== undefined) {
+    $('show-sizes').checked = obj.sizeLabels;
+    worker.postMessage({ type: 'set', key: 'sizeLabels', value: obj.sizeLabels });
+  }
+  if (obj.addrLabels !== undefined) {
+    $('show-addrs').checked = obj.addrLabels;
+    worker.postMessage({ type: 'set', key: 'addrLabels', value: obj.addrLabels });
+  }
+  if (obj.xview) { UI.xview = obj.xview; sendXView(); }
+  if (obj.filter) {
+    const f = obj.filter;
+    const fr = document.querySelector(`input[name=fmode][value="${f.fmode}"]`);
+    if (fr) fr.checked = true;
+    if (f.sizeMin !== undefined) $('f-size-min').value = f.sizeMin;
+    if (f.sizeMax !== undefined) $('f-size-max').value = f.sizeMax;
+    const siteBoxes = [...document.querySelectorAll('#filter-panel input[data-site]')];
+    (f.sites || []).forEach((checked, i) => { if (siteBoxes[i]) siteBoxes[i].checked = checked; });
+    const thrBoxes = [...document.querySelectorAll('#filter-panel input[data-thr]')];
+    (f.thrs || []).forEach((checked, i) => { if (thrBoxes[i]) thrBoxes[i].checked = checked; });
+    sendFilter();
+  }
+  if (obj.windows) {
+    for (const id of PANEL_IDS) {
+      const w = obj.windows[id];
+      const p = $(id);
+      if (!w || !p) continue;
+      p.hidden = w.hidden;
+      if (w.left) { p.style.left = w.left; p.style.top = w.top; p.style.right = w.right; p.style.bottom = w.bottom; }
+    }
+  }
+  if (obj.crop) setCrop(obj.crop.lo, obj.crop.hi);
+  if (obj.playhead !== undefined) worker.postMessage({ type: 'seek', seq: obj.playhead });
+  applyDrawersState(obj.drawers);
+}
+
+function saveSessionNow() {
+  const key = sessionKey();
+  if (!key || !UI.loaded) return;
+  try { localStorage.setItem(key, JSON.stringify(buildSession())); } catch { /* storage full/unavailable: silently skip */ }
+}
+
+function marksKey() {
+  return UI.fileName ? `heapviz:marks:${UI.fileName}` : null;
+}
+
+// marks (tags/bookmarks/addr marks/names/colors) also auto-persist to
+// localStorage alongside the session — the manual Save…/Load… buttons are
+// still there for a portable/shareable file, but there's no reason a plain
+// refresh should lose work that was never explicitly exported
+async function saveMarksAutosave() {
+  const key = marksKey();
+  if (!key || !UI.loaded) return;
+  try {
+    localStorage.setItem(key, JSON.stringify(await buildMarks()));
+  } catch { /* storage full/unavailable: silently skip */ }
+}
+
+function restoreMarksAutosave() {
+  const key = marksKey();
+  if (!key) return;
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw) applyMarks(JSON.parse(raw), true);
+  } catch { /* corrupt/unavailable: ignore, nothing to restore */ }
+}
+
+// cheap periodic autosave rather than hooking every single input's change
+// event — a full session snapshot is a handful of DOM reads, negligible next
+// to render/scroll work, and this keeps every future settable from needing
+// to remember to call a save function
+let sessionSaveTimer = null;
+function scheduleSessionAutosave() {
+  if (sessionSaveTimer) return;
+  sessionSaveTimer = setInterval(() => {
+    if (!UI.loaded) return;
+    saveSessionNow();
+    if (UI.marksDirty) saveMarksAutosave();
+  }, 2000);
+}
+scheduleSessionAutosave();
+window.addEventListener('beforeunload', saveSessionNow);
+
+function restoreSession() {
+  const key = sessionKey();
+  if (!key) return;
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw) applySession(JSON.parse(raw));
+  } catch { /* corrupt/unavailable: ignore, defaults stand */ }
+}
+
 function clearSelection() {
   UI.sel = null;
+  UI.selMirror = null;
   $('sel-popover').hidden = true;
-  document.querySelectorAll('.tl-select').forEach((el) => { el.hidden = true; });
+  document.querySelectorAll('.tl-select, .tl-select-echo').forEach((el) => { el.hidden = true; });
+  $('events-sel-band').hidden = true;
+}
+
+// paints a range band (as a fraction of the strip's current view) into `el`
+function paintBand(el, strip, kind, lo, hi) {
+  const v = kind === 0 ? UI.tlT : UI.tlS;
+  const w = strip.clientWidth;
+  const x0 = ((lo - v.lo) / (v.hi - v.lo)) * w;
+  const x1 = ((hi - v.lo) / (v.hi - v.lo)) * w;
+  el.style.left = `${Math.max(0, x0)}px`;
+  el.style.width = `${Math.max(0, Math.min(w, x1) - Math.max(0, x0))}px`;
+  el.hidden = x1 < 0 || x0 > w;
 }
 
 function updateSelOverlay() {
   if (!UI.sel) return;
   const strip = $(UI.sel.kind === 0 ? 'strip-t' : 'strip-s');
-  const el = strip.querySelector('.tl-select');
-  const v = UI.sel.kind === 0 ? UI.tlT : UI.tlS;
-  const w = strip.clientWidth;
-  const x0 = ((UI.sel.lo - v.lo) / (v.hi - v.lo)) * w;
-  const x1 = ((UI.sel.hi - v.lo) / (v.hi - v.lo)) * w;
-  el.style.left = `${Math.max(0, x0)}px`;
-  el.style.width = `${Math.max(0, Math.min(w, x1) - Math.max(0, x0))}px`;
-  el.hidden = x1 < 0 || x0 > w;
+  paintBand(strip.querySelector('.tl-select'), strip, UI.sel.kind, UI.sel.lo, UI.sel.hi);
+  // the mirrored range on the *other* strip lags one worker round-trip
+  // behind (see requestSelMirror) — repaint it against the current view too
+  // so panning/zooming that strip keeps the echo band in the right place
+  if (UI.selMirror) {
+    const other = $(UI.selMirror.kind === 0 ? 'strip-t' : 'strip-s');
+    paintBand(other.querySelector('.tl-select-echo'), other, UI.selMirror.kind, UI.selMirror.lo, UI.selMirror.hi);
+  }
+  updateEventsSelBand();
+}
+
+// keep the mirrored selection (other domain) in sync with UI.sel; cheap
+// coalesced worker round-trip, see requestConvert
+function requestSelMirror() {
+  if (!UI.sel) { UI.selMirror = null; return; }
+  const sel = UI.sel;
+  requestConvert(sel.kind, sel.lo, sel.hi, (lo, hi) => {
+    if (UI.sel !== sel) return; // a newer selection superseded this request
+    UI.selMirror = { kind: sel.kind === 0 ? 1 : 0, lo, hi };
+    updateSelOverlay();
+  });
+}
+
+// thin band in the Events panel's scroll gutter spanning the seq range of
+// the current selection (direct if kind is seq, mirrored if kind is time)
+function updateEventsSelBand() {
+  const band = $('events-sel-band');
+  if (!UI.sel) { band.hidden = true; return; }
+  const seqRange = UI.sel.kind === 1 ? UI.sel : UI.selMirror;
+  if (!seqRange || $('events-panel').hidden) { band.hidden = true; return; }
+  const L = evLayout();
+  const sc = $('events-scroll');
+  // viewport-relative y, from the currently-visible row window (evState.from)
+  // — what refreshEventsPanel keeps accurate even once the spacer height is
+  // capped for very long traces (EV_MAX_SPACER); #events-sel-band is a plain
+  // sibling of the scroll content (unlike #events-rows, which self-cancels
+  // scrollTop via its own `top` style), so re-add scrollTop to place it in
+  // the scroll container's coordinate space
+  const y0 = (seqRange.lo - evState.from) * EV_ROW;
+  const y1 = (seqRange.hi - evState.from) * EV_ROW;
+  band.hidden = y1 <= 0 || y0 >= L.viewH;
+  if (!band.hidden) {
+    const top = Math.max(0, Math.min(L.viewH, y0));
+    const bot = Math.max(0, Math.min(L.viewH, y1));
+    band.style.top = `${top + sc.scrollTop}px`;
+    band.style.height = `${Math.max(2, bot - top)}px`;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// crop: temporarily show only allocations created (born) inside a seq window,
+// dimming/hiding the rest per the Filter panel's dim/hide mode — persistent
+// until removed, unlike the transient drag selection above
+// ---------------------------------------------------------------------------
+
+function setCrop(seqLo, seqHi) {
+  const n = UI.state ? UI.state.n : (UI.meta ? UI.meta.n : Infinity);
+  if (!UI.loaded) return;
+  UI.crop = { lo: Math.max(0, Math.min(seqLo, seqHi)), hi: Math.min(n, Math.max(seqLo, seqHi)) };
+  worker.postMessage({ type: 'set', key: 'crop', value: UI.crop });
+  updateCropIndicator();
+  drawCropBands();
+}
+
+function clearCrop() {
+  if (!UI.crop) return;
+  UI.crop = null;
+  worker.postMessage({ type: 'set', key: 'crop', value: null });
+  updateCropIndicator();
+  drawCropBands();
+}
+
+function updateCropIndicator() {
+  const btn = $('crop-indicator');
+  btn.hidden = !UI.crop;
+  if (UI.crop) $('crop-range').textContent = `seq ${fmtNum(UI.crop.lo)}–${fmtNum(UI.crop.hi)}`;
+}
+$('crop-indicator').onclick = clearCrop;
+
+function drawCropBands() {
+  const stripS = $('strip-s');
+  const bandS = stripS.querySelector('.tl-crop');
+  if (!UI.crop) {
+    bandS.hidden = true;
+    $('strip-t').querySelector('.tl-crop').hidden = true;
+    return;
+  }
+  paintBand(bandS, stripS, 1, UI.crop.lo, UI.crop.hi);
+  requestConvert(1, UI.crop.lo, UI.crop.hi, (lo, hi) => {
+    if (!UI.crop) return; // cleared while the conversion was in flight
+    const stripT = $('strip-t');
+    paintBand(stripT.querySelector('.tl-crop'), stripT, 0, lo, hi);
+  });
 }
 
 function openSelPopover(clientX, clientY) {
@@ -1346,6 +1984,16 @@ $('sel-zoom').onclick = () => {
   UI.setView[UI.sel.kind]({ lo: UI.sel.lo, hi: UI.sel.hi });
   clearSelection();
 };
+$('sel-crop').onclick = () => {
+  if (!UI.sel) return;
+  const sel = UI.sel;
+  if (sel.kind === 1) {
+    setCrop(Math.round(sel.lo), Math.round(sel.hi));
+  } else {
+    requestConvert(0, sel.lo, sel.hi, (lo, hi) => setCrop(Math.round(lo), Math.round(hi)));
+  }
+  clearSelection();
+};
 $('sel-tag').onclick = () => applySelTag(false);
 $('sel-tag-freed').onclick = () => applySelTag(true);
 $('sel-tag-name').addEventListener('keydown', (e) => { if (e.key === 'Enter') applySelTag(false); });
@@ -1359,6 +2007,7 @@ function applySelTag(byFree) {
   // the color mode stays as-is: tags remain visible via their stripe
   buildLegend();
   clearSelection();
+  markDirty();
 }
 
 document.addEventListener('keydown', (e) => {
@@ -1384,7 +2033,9 @@ function setupTimeline(stripId, canvas, kind) {
   const strip = $(stripId);
   const hoverline = strip.querySelector('.tl-hoverline');
   const view = () => (kind === 0 ? UI.tlT : UI.tlS);
-  const setView = (raw) => {
+  // `mirror` is internal: false when this call is itself the mirrored
+  // update for the *other* strip's zoom, so it doesn't bounce back and forth
+  const setView = (raw, mirror = true) => {
     if (!UI.meta) return;
     const v = kind === 0
       ? clampView(raw, UI.meta.tMin, Math.max(UI.meta.tMax, UI.meta.tMin + 1), 1e-9)
@@ -1393,6 +2044,11 @@ function setupTimeline(stripId, canvas, kind) {
     UI.tlLocalAt = performance.now();
     worker.postMessage({ type: 'tlview', kind, lo: v.lo, hi: v.hi });
     updateSelOverlay();
+    if (mirror) {
+      requestConvert(kind, v.lo, v.hi, (lo, hi) => {
+        UI.setView[kind === 0 ? 1 : 0]({ lo, hi }, false);
+      });
+    }
   };
   const valAt = (x) => {
     const r = canvas.getBoundingClientRect();
@@ -1413,6 +2069,7 @@ function setupTimeline(stripId, canvas, kind) {
     const b = valAt(Math.max(selecting, x));
     UI.sel = { kind, lo: a, hi: b };
     updateSelOverlay();
+    requestSelMirror();
   };
 
   strip.addEventListener('pointerdown', (e) => {
@@ -1501,6 +2158,37 @@ function onTlHoverResult(m) {
     positionTooltipNearMouse();
   }
   if (tlHoverReq) flushTlHover();
+}
+
+// ---------------------------------------------------------------------------
+// domain conversion (time <-> seq), for mirroring selection/zoom between the
+// two timeline strips and the Events panel; coalesced like tlHover above so a
+// fast drag never queues more than one in-flight request
+// ---------------------------------------------------------------------------
+
+let convertReq = null;   // {kind, lo, hi, cb} waiting to be sent
+let convertInFlight = null;
+let convertCb = null;
+
+function requestConvert(kind, lo, hi, cb) {
+  convertReq = { kind, lo, hi, cb };
+  if (!convertInFlight) flushConvert();
+}
+function flushConvert() {
+  if (!convertReq || !UI.loaded) { convertInFlight = null; return; }
+  const q = convertReq;
+  convertReq = null;
+  convertInFlight = UI.reqId++;
+  convertCb = q.cb;
+  worker.postMessage({ type: 'convert', kind: q.kind, lo: q.lo, hi: q.hi, reqId: convertInFlight });
+}
+function onConvertResult(m) {
+  if (m.reqId !== convertInFlight) return;
+  convertInFlight = null;
+  const cb = convertCb;
+  convertCb = null;
+  if (cb) cb(m.lo, m.hi);
+  if (convertReq) flushConvert();
 }
 
 // ---------------------------------------------------------------------------
@@ -1673,6 +2361,11 @@ function buildDetailBody(root, info) {
   if (info.stack) {
     html += `<div class="row"><span class="k">stack</span><span>${esc(info.stack)}</span></div>`;
   }
+  if (info.extra) {
+    for (const [k, v] of Object.entries(info.extra)) {
+      html += `<div class="row"><span class="k">${esc(k)}</span><span>${esc(typeof v === 'string' ? v : JSON.stringify(v))}</span></div>`;
+    }
+  }
   const curTag = info.tag > 0 ? UI.tags[info.tag - 1]?.name || '' : '';
   html += `<div class="row"><span class="k">name</span>
     <input class="d-name" placeholder="name this allocation" value="${esc(UI.names.get(info.e)?.name || '')}" size="18"></div>`;
@@ -1703,12 +2396,14 @@ function buildDetailBody(root, info) {
     // keep the enclosing window's title in sync with the name
     const t = root.closest('.panel')?.querySelector('.ph-t');
     if (t) t.textContent = detailTitle(info);
+    markDirty();
   };
   q('.d-tag-apply').onclick = () => {
     const id = tagIdFor(q('.d-tag').value);
     worker.postMessage({ type: 'tag-event', e: info.e, tag: id });
     info.tag = id;
     buildLegend();
+    markDirty();
   };
   const curColor = UI.allocColors.get(info.e);
   if (curColor) q('.d-color').value = curColor;
@@ -1716,11 +2411,13 @@ function buildDetailBody(root, info) {
     UI.allocColors.set(info.e, q('.d-color').value);
     worker.postMessage({ type: 'alloc-color', e: info.e, rgb: parseInt(q('.d-color').value.slice(1), 16) });
     buildNamesSection();
+    markDirty();
   };
   q('.d-color-clear').onclick = () => {
     UI.allocColors.delete(info.e);
     worker.postMessage({ type: 'alloc-color', e: info.e, rgb: null });
     buildNamesSection();
+    markDirty();
   };
 }
 
@@ -1772,7 +2469,11 @@ function fillDetailPanel(info) {
   buildDetailBody($('detail-body'), info);
   const wasHidden = panel.hidden;
   panel.hidden = false;
-  if (wasHidden) placeLivePanel(panel);
+  // only reset/cascade position when the live panel was just vacated by a
+  // pin (so a fresh window doesn't land on the pinned one); a plain close
+  // (× or Escape) leaves the window exactly where the user left it
+  if (wasHidden && UI.detailWasPinned) placeLivePanel(panel);
+  UI.detailWasPinned = false;
   raisePanel(panel);
 }
 
@@ -1802,10 +2503,16 @@ $('d-pin').onclick = () => {
   win.style.top = `${r.top}px`;
   win.style.right = 'auto';
   win.style.bottom = 'auto';
-  win.querySelector('.panel-close').onclick = () => win.remove();
+  win.querySelector('.panel-close').onclick = () => {
+    const side = win.dataset.dockSide;
+    win.remove();
+    if (side) refreshDrawerDividers(side);
+  };
   win.querySelector('.d-pin').onclick = () => {
+    const side = win.dataset.dockSide;
     const rr = win.getBoundingClientRect();
     win.remove();
+    if (side) refreshDrawerDividers(side);
     fillDetailPanel(info);
     live.style.left = `${rr.left}px`;
     live.style.top = `${rr.top}px`;
@@ -1813,7 +2520,9 @@ $('d-pin').onclick = () => {
     live.style.bottom = 'auto';
   };
   makePanelWindow(win);
+  addDockButtonsTo(win);
   raisePanel(win);
+  UI.detailWasPinned = true;
   live.hidden = true;
 };
 

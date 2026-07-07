@@ -56,12 +56,17 @@ pub const FILTER_HIDE: u8 = 2;
 #[derive(Default)]
 pub struct Filter {
     pub mode: u8,
-    /// bitmask over site indices; empty = no site constraint
+    /// bitmask over site indices; meaningful only when `sites_set` (an empty
+    /// *set* bitmask, as opposed to an absent one, means "no site selected"
+    /// — i.e. hide everything with a site).
     pub sites: Vec<u64>,
-    /// bitmask over thread indices; empty = no thread constraint
+    pub sites_set: bool,
+    /// bitmask over thread indices; see `sites_set`.
     pub thrs: Vec<u64>,
-    /// bitmask over tag ids (bit 0 = untagged); empty = no tag constraint
+    pub thrs_set: bool,
+    /// bitmask over tag ids (bit 0 = untagged); see `sites_set`.
     pub tags: Vec<u64>,
+    pub tags_set: bool,
     pub size_min: u64,
     pub size_max: u64, // 0 = unbounded
 }
@@ -77,19 +82,19 @@ impl Filter {
             return true;
         }
         let ei = e as usize;
-        if !self.sites.is_empty() {
+        if self.sites_set {
             let site = s.site[ei];
             if site != NONE_U32 && !Self::bit(&self.sites, site) {
                 return false;
             }
         }
-        if !self.thrs.is_empty() {
+        if self.thrs_set {
             let thr = s.thr_idx[ei];
             if thr != NONE_U16 && !Self::bit(&self.thrs, thr as u32) {
                 return false;
             }
         }
-        if !self.tags.is_empty() && !Self::bit(&self.tags, s.tag[ei] as u32) {
+        if self.tags_set && !Self::bit(&self.tags, s.tag[ei] as u32) {
             return false;
         }
         let sz = s.size[ei];
@@ -103,12 +108,28 @@ impl Filter {
     }
 }
 
+/// Combined filter+crop visibility decision for creator event `e`: whether it
+/// should be skipped entirely (`hide`) and/or rendered dimmed (`dim`). Crop
+/// always dims, never hides, regardless of the filter's own dim/hide mode.
+pub fn visibility(cfg: &Cfg, s: &Store, e: u32) -> (bool, bool) {
+    let filter_pass = cfg.filter.pass(s, e);
+    let cropped_out = matches!(cfg.crop, Some((lo, hi)) if e < lo || e >= hi);
+    let hide = !filter_pass && cfg.filter.mode == FILTER_HIDE;
+    let dim = !filter_pass || cropped_out;
+    (hide, dim)
+}
+
 pub struct Cfg {
     pub row_px: u32,
     pub gap_px: u32,
     pub color_mode: u8,
     pub selected: u32,
     pub filter: Filter,
+    /// Crop: creator events outside `[crop.0, crop.1)` are always *dimmed*
+    /// (never hidden, independent of `filter.mode`) — set via hp_set_crop.
+    /// Kept separate from `Filter` so it always renders the same way
+    /// regardless of whatever dim/hide mode the Filter panel happens to be in.
+    pub crop: Option<(u32, u32)>,
     /// Horizontal zoom on the byte axis of each row (1 = whole row visible).
     pub x_zoom: f64,
     /// Horizontal pan as a fraction of the row [0, 1 - 1/x_zoom].
@@ -129,6 +150,7 @@ impl Cfg {
             color_mode: MODE_LIVE,
             selected: NONE_U32,
             filter: Filter::default(),
+            crop: None,
             x_zoom: 1.0,
             x_pan: 0.0,
             size_labels: true,
@@ -490,10 +512,11 @@ pub fn render_addr(
         (first, lo.saturating_sub(1))
     };
     for &(a, e) in v.live.iter() {
-        let pass = cfg.filter.pass(s, e);
-        if !pass && cfg.filter.mode == FILTER_HIDE {
+        let (hide, dim_it) = visibility(cfg, s, e);
+        if hide {
             continue;
         }
+        let pass = !dim_it;
         let span = s.span(e);
         let size = s.size[e as usize].max(1).min(span);
         let end = a + span;
@@ -708,6 +731,11 @@ pub fn alloc_info(
     if s.stack[ei] != NONE_U32 {
         out.push_str(",\"stack\":");
         push_json_str(&mut out, &s.stacks[s.stack[ei] as usize]);
+    }
+    if s.extra[ei] != NONE_U32 {
+        out.push_str(",\"extra\":{");
+        out.push_str(&s.extras[s.extra[ei] as usize]);
+        out.push('}');
     }
     // highlight rects across visible rows
     out.push_str(",\"rects\":[");

@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use crate::json::{parse_addr, unescape, Scan};
+use crate::json::{parse_addr, push_json_str, unescape, Scan};
 use crate::store::*;
 
 const SNAP_MAX: usize = 96;
@@ -28,6 +28,7 @@ pub struct Parser {
     site_map: HashMap<String, u32>,
     thr_map: HashMap<i64, u16>,
     stack_map: HashMap<String, u32>,
+    extra_map: HashMap<String, u32>,
     seq_warned: bool,
 }
 
@@ -46,6 +47,9 @@ struct Raw {
     thr: Option<i64>,
     site: Option<String>,
     stack: Option<String>,
+    /// Raw JSON object body fragment (`"k":v,"k2":v2`) of unrecognized
+    /// top-level keys, verbatim from the source (already valid JSON text).
+    extra: String,
     // header fields
     v: Option<i64>,
     unit: Option<String>,
@@ -69,6 +73,7 @@ impl Parser {
             site_map: HashMap::new(),
             thr_map: HashMap::new(),
             stack_map: HashMap::new(),
+            extra_map: HashMap::new(),
             seq_warned: false,
         }
     }
@@ -125,6 +130,7 @@ impl Parser {
         self.site_map = HashMap::new();
         self.thr_map = HashMap::new();
         self.stack_map = HashMap::new();
+        self.extra_map = HashMap::new();
     }
 
     fn line(&mut self, line: &[u8]) {
@@ -182,7 +188,17 @@ impl Parser {
         i
     }
 
-    fn apply(&mut self, raw: Raw) {
+    fn intern_extra(&mut self, ex: String) -> u32 {
+        if let Some(&i) = self.extra_map.get(&ex) {
+            return i;
+        }
+        let i = self.store.extras.len() as u32;
+        self.extra_map.insert(ex.clone(), i);
+        self.store.extras.push(ex);
+        i
+    }
+
+    fn apply(&mut self, mut raw: Raw) {
         if raw.op == b'H' {
             let s = &mut self.store;
             s.has_header = true;
@@ -264,6 +280,11 @@ impl Parser {
             Some(st) => self.intern_stack(st),
             None => NONE_U32,
         };
+        let extra = if raw.extra.is_empty() {
+            NONE_U32
+        } else {
+            self.intern_extra(std::mem::take(&mut raw.extra))
+        };
 
         // resolve the killed allocation for F / R
         let mut target = NONE_U32;
@@ -327,6 +348,7 @@ impl Parser {
         s.thr_idx.push(thr_idx);
         s.site.push(site);
         s.stack.push(stack);
+        s.extra.push(extra);
         s.target.push(target);
         s.old_addr.push(o_addr);
         s.old_size.push(o_size);
@@ -433,6 +455,7 @@ impl Default for Store {
             thr_idx: Vec::new(),
             site: Vec::new(),
             stack: Vec::new(),
+            extra: Vec::new(),
             target: Vec::new(),
             old_addr: Vec::new(),
             old_size: Vec::new(),
@@ -445,6 +468,7 @@ impl Default for Store {
             thrs: Vec::new(),
             thr_count: Vec::new(),
             stacks: Vec::new(),
+            extras: Vec::new(),
             has_header: false,
             version: 1,
             unit: "ns".to_string(),
@@ -561,7 +585,14 @@ fn parse_raw(line: &[u8]) -> Option<Raw> {
                 raw.meta = Some(String::from_utf8_lossy(&sc.b[a..b]).into_owned());
             }
             _ => {
-                sc.skip_value()?;
+                let key_str = unescape(&sc.b[ks..ke]);
+                let (a, b) = sc.skip_value()?;
+                if !raw.extra.is_empty() {
+                    raw.extra.push(',');
+                }
+                push_json_str(&mut raw.extra, &key_str);
+                raw.extra.push(':');
+                raw.extra.push_str(&String::from_utf8_lossy(&sc.b[a..b]));
             }
         }
         sc.ws();

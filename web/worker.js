@@ -528,6 +528,14 @@ onmessage = async (ev) => {
         postMessage({ type: 'addr-flash', y: (y - centered) / dpr });
         S.dirty.addr = true;
       }
+      // if a live allocation covers this address at the current playhead,
+      // select it (same as clicking it on the map)
+      const e = E.hp_live_at_addr(m.lo, m.hi);
+      if (e >= 0) {
+        E.hp_set_selected(e);
+        S.dirty.addr = true;
+        postMessage({ type: 'addr-selected', info: allocInfo({ e }) });
+      }
       break;
     }
     case 'tlview': {
@@ -602,7 +610,27 @@ onmessage = async (ev) => {
           S.dirty.addr = true;
           break;
         }
+        case 'crop':
+          E.hp_set_crop(m.value ? Math.round(m.value.lo) : -1, m.value ? Math.round(m.value.hi) : -1);
+          S.dirty.addr = true;
+          break;
       }
+      break;
+    }
+    // domain conversion: given a [lo,hi] range in the `kind` domain (0 = time,
+    // 1 = seq), return the equivalent range in the other domain — shared by
+    // crop (time -> seq) and the time/events strip mirroring (either way)
+    case 'convert': {
+      if (!S.loaded) { postMessage({ type: 'convert-result', reqId: m.reqId, lo: m.lo, hi: m.hi }); break; }
+      let lo, hi;
+      if (m.kind === 0) {
+        lo = E.hp_seq_for_t(m.lo);
+        hi = E.hp_seq_for_t(m.hi);
+      } else {
+        lo = E.hp_t_for_seq(Math.max(0, Math.round(m.lo)));
+        hi = E.hp_t_for_seq(Math.max(0, Math.round(m.hi)));
+      }
+      postMessage({ type: 'convert-result', reqId: m.reqId, lo, hi });
       break;
     }
     case 'tag-event':

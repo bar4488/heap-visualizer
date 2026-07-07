@@ -25,24 +25,35 @@
   <button id="btn-layout" title="Address-line layout: row bytes, collapsing, zoom, colors">Layout</button>
   <button id="btn-filter">Filter</button>
   <button id="btn-events" hidden title="Sequenced list of all events">Events</button>
-  <button id="btn-analysis" hidden>Analysis</button>
+  <button id="btn-analysis" hidden>Marks</button>
+  <button id="crop-indicator" hidden title="Crop is active — click to remove it">✂ <span id="crop-range"></span> ×</button>
+
+  <span class="sep"></span>
+
+  <button id="an-save" hidden title="Download tags, names, colors, and marks (bookmarks/addr marks) as a .heapa.json file">Save…</button>
+  <button id="an-load" hidden title="Load a saved marks file">Load…</button>
+  <input type="file" id="analysis-file" accept=".json,.heapa" hidden>
 
   <span class="sep"></span>
 
   <input id="jump-input" placeholder="seq · t:1e6 · 0x…" size="12"
-    title="Jump to an event index, a time (t: prefix), or an address (0x…) — press g to focus">
+    title="Jump to an event index, a time (t: prefix), or an address (0x…) — press g for the search overlay">
   <button id="btn-jump">Go</button>
   <button id="btn-warnings" hidden>⚠ <span id="warn-count"></span></button>
 </header>
 
 <div id="legend" hidden></div>
 
+<div id="workspace">
+<div id="drawer-left" class="drawer" hidden></div>
 <main id="views">
   <section class="tl-strip" id="strip-t">
     <span class="tl-tag" title="x = wall-clock time; bursts bunch up">time</span>
     <canvas id="tlt"></canvas>
     <div class="tl-hoverline" hidden></div>
     <div class="tl-select" hidden></div>
+    <div class="tl-select-echo" hidden title="the events selection, converted to time"></div>
+    <div class="tl-crop" hidden title="crop is active — click the ✂ pill in the toolbar to remove it"></div>
     <div class="tl-marks"></div>
   </section>
   <section class="tl-strip" id="strip-s">
@@ -50,6 +61,8 @@
     <canvas id="tls"></canvas>
     <div class="tl-hoverline" hidden></div>
     <div class="tl-select" hidden></div>
+    <div class="tl-select-echo" hidden title="the time selection, converted to events"></div>
+    <div class="tl-crop" hidden title="crop is active — click the ✂ pill in the toolbar to remove it"></div>
     <div class="tl-marks"></div>
   </section>
 
@@ -63,6 +76,8 @@
     <div id="empty-hint">no live allocations at this point</div>
   </section>
 </main>
+<div id="drawer-right" class="drawer" hidden></div>
+</div>
 
 <footer id="status">
   <span id="st-pos">—</span>
@@ -136,16 +151,18 @@
     <div class="filter-row"><label>size <input id="f-size-min" placeholder="min (e.g. 4k)" size="9">–<input id="f-size-max" placeholder="max" size="9"></label></div>
     <div id="f-sites" class="check-group"></div>
     <div id="f-thrs" class="check-group"></div>
+    <div class="an-section">
+      <div class="group-title">tags · check = visible (uses the dim/hide mode above) · recolor, rename, delete
+        <span class="allnone" id="tags-allnone"><a data-an="all">all</a> · <a data-an="none">none</a></span></div>
+      <div id="tags-list" class="check-group"></div>
+    </div>
   </div>
 </div>
 
 <div id="analysis-panel" class="panel" hidden>
-  <div class="panel-head">Analysis
+  <div class="panel-head">Marks
     <span class="head-actions">
       <button id="btn-mark" hidden title="Bookmark the current playhead position (m)">＋ mark</button>
-      <button id="an-save" title="Download tags, names, colors, and bookmarks as a .heapa.json file">Save…</button>
-      <button id="an-load" title="Load a saved analysis file">Load…</button>
-      <input type="file" id="analysis-file" accept=".json,.heapa" hidden>
       <button class="panel-close" data-close="analysis-panel">×</button>
     </span>
   </div>
@@ -157,11 +174,6 @@
     <div class="an-section">
       <div class="group-title">address marks · shift-click the map to add · click to center</div>
       <div id="an-addrmarks" class="check-group"></div>
-    </div>
-    <div class="an-section">
-      <div class="group-title">tags · check = visible (uses the filter’s dim/hide mode) · recolor, rename, delete
-        <span class="allnone" id="tags-allnone"><a data-an="all">all</a> · <a data-an="none">none</a></span></div>
-      <div id="tags-list" class="check-group"></div>
     </div>
     <div class="an-section">
       <div class="group-title">named allocations · click to select</div>
@@ -189,6 +201,7 @@
   <div id="sel-range" class="sel-range"></div>
   <div class="sel-actions">
     <button id="sel-zoom">Zoom</button>
+    <button id="sel-crop" title="Crop: only show allocations created in this range, dimming/hiding the rest (birth-time crop) — remove from the toolbar pill">Crop</button>
     <input id="sel-tag-name" placeholder="tag name" size="9" list="tag-names">
     <datalist id="tag-names"></datalist>
     <button id="sel-tag" title="Tag the allocations created (malloc'd) in this range">Tag allocs</button>
@@ -206,7 +219,15 @@
   </div>
   <div id="events-scroll">
     <div id="events-spacer"></div>
+    <div id="events-sel-band" hidden title="the current time/events selection"></div>
     <div id="events-rows"></div>
+  </div>
+</div>
+
+<div id="search-overlay" hidden>
+  <div id="search-box">
+    <input id="search-input" placeholder="seq · t:1e6 · 0x… · search marks / names / warnings" autocomplete="off" spellcheck="false">
+    <div id="search-results"></div>
   </div>
 </div>
 
