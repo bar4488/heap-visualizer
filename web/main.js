@@ -828,13 +828,13 @@ function makePanelWindow(p) {
     head.setPointerCapture(e.pointerId);
     const startX = e.clientX;
     const startY = e.clientY;
-    const startedDocked = p.classList.contains('docked');
     const r = p.getBoundingClientRect();
     const dx = e.clientX - r.left;
     const dy = e.clientY - r.top;
     let moved = false;
     let dropSide = null;
     let dropRef = null;
+    let zoneSide = null; // last side reported by dropSideAt, for edge-transition detection
 
     const floatTo = (ev) => {
       p.style.left = `${Math.min(innerWidth - 60, Math.max(4 - r.width + 60, ev.clientX - dx))}px`;
@@ -844,35 +844,40 @@ function makePanelWindow(p) {
     };
     const move = (ev) => {
       if (!moved && Math.hypot(ev.clientX - startX, ev.clientY - startY) < 4) return;
-      moved = true;
+      if (!moved) {
+        moved = true;
+        // pick up immediately: a docked panel pops out of its drawer the
+        // instant a drag starts (rather than only on drop), so it's always
+        // obviously "in your hand" and never looks stuck mid-drag — it only
+        // re-docks if actually dropped on a drawer, below
+        if (p.classList.contains('docked')) undockPanel(p);
+        p.classList.add('dragging');
+      }
+      // keep the window tracking the cursor continuously, even while
+      // hovering a drop zone — it used to freeze there, which read as stuck
+      floatTo(ev);
       const side = dropSideAt(ev.clientX);
+      // refreshDrawerDividers rebuilds divider elements (and their pointer
+      // listeners) from scratch — only run it on an actual zone change, not
+      // every pointermove tick, or it visibly stutters the drag
+      if (side !== zoneSide) {
+        if (zoneSide) refreshDrawerDividers(zoneSide);
+        zoneSide = side;
+      }
       if (side) {
         dropSide = side;
         dropRef = showDropPreview(p, side, ev.clientY);
       } else {
         dropSide = null;
         clearDropPreview();
-        // a drawer briefly revealed as an empty preview (see showDropPreview)
-        // shouldn't linger once the pointer moves off it without dropping
-        refreshDrawerDividers('left');
-        refreshDrawerDividers('right');
-        if (!startedDocked) floatTo(ev);
       }
     };
-    const up = (ev) => {
+    const up = () => {
       head.removeEventListener('pointermove', move);
       head.removeEventListener('pointerup', up);
       clearDropPreview();
-      if (moved) {
-        if (dropSide) {
-          dockPanelAt(p, dropSide, dropRef);
-        } else if (startedDocked) {
-          // dragged out of both drawers — undock to floating under the cursor
-          undockPanel(p);
-          floatTo(ev);
-          raisePanel(p);
-        }
-      }
+      p.classList.remove('dragging');
+      if (moved && dropSide) dockPanelAt(p, dropSide, dropRef);
       // normalizes hidden state for whichever drawer(s) were touched, and is
       // a harmless no-op for any that weren't
       refreshDrawerDividers('left');

@@ -130,6 +130,17 @@ input { font-family: ui-monospace, monospace; }
   z-index: 200; pointer-events: none;
   box-shadow: 0 0 4px var(--accent);
 }
+/* the "in your hand" state while dragging a window (docked or floating) —
+   applied after undocking, so it's always the plain floating .panel look
+   plus this on top; makes it unmistakable that it's detached and moving */
+.panel.dragging {
+  z-index: 300 !important;
+  opacity: 0.88;
+  cursor: grabbing;
+  box-shadow: 0 20px 50px rgba(0,0,0,0.75);
+  transition: none;
+}
+.panel.dragging .panel-head { cursor: grabbing; }
 
 
 .tl-strip {
