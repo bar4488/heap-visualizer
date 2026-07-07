@@ -285,6 +285,11 @@ worker.onmessage = (ev) => {
     case 'convert-result':
       onConvertResult(m);
       break;
+    case 'alloc-info-result': {
+      const w = allocInfoWaiters.get(m.reqId);
+      if (w) { allocInfoWaiters.delete(m.reqId); w(m.info); }
+      break;
+    }
   }
 };
 
@@ -819,21 +824,59 @@ function makePanelWindow(p) {
   head.addEventListener('pointerdown', (e) => {
     // header buttons/inputs (close, save, follow…) still work normally
     if (e.target.closest('button, input, select, a')) return;
-    if (p.classList.contains('docked')) return; // stacked in a drawer — not draggable
     e.preventDefault();
     head.setPointerCapture(e.pointerId);
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const startedDocked = p.classList.contains('docked');
     const r = p.getBoundingClientRect();
     const dx = e.clientX - r.left;
     const dy = e.clientY - r.top;
-    const move = (ev) => {
+    let moved = false;
+    let dropSide = null;
+    let dropRef = null;
+
+    const floatTo = (ev) => {
       p.style.left = `${Math.min(innerWidth - 60, Math.max(4 - r.width + 60, ev.clientX - dx))}px`;
       p.style.top = `${Math.min(innerHeight - 40, Math.max(0, ev.clientY - dy))}px`;
       p.style.right = 'auto';
       p.style.bottom = 'auto';
     };
-    const up = () => {
+    const move = (ev) => {
+      if (!moved && Math.hypot(ev.clientX - startX, ev.clientY - startY) < 4) return;
+      moved = true;
+      const side = dropSideAt(ev.clientX);
+      if (side) {
+        dropSide = side;
+        dropRef = showDropPreview(p, side, ev.clientY);
+      } else {
+        dropSide = null;
+        clearDropPreview();
+        // a drawer briefly revealed as an empty preview (see showDropPreview)
+        // shouldn't linger once the pointer moves off it without dropping
+        refreshDrawerDividers('left');
+        refreshDrawerDividers('right');
+        if (!startedDocked) floatTo(ev);
+      }
+    };
+    const up = (ev) => {
       head.removeEventListener('pointermove', move);
       head.removeEventListener('pointerup', up);
+      clearDropPreview();
+      if (moved) {
+        if (dropSide) {
+          dockPanelAt(p, dropSide, dropRef);
+        } else if (startedDocked) {
+          // dragged out of both drawers — undock to floating under the cursor
+          undockPanel(p);
+          floatTo(ev);
+          raisePanel(p);
+        }
+      }
+      // normalizes hidden state for whichever drawer(s) were touched, and is
+      // a harmless no-op for any that weren't
+      refreshDrawerDividers('left');
+      refreshDrawerDividers('right');
     };
     head.addEventListener('pointermove', move);
     head.addEventListener('pointerup', up);
@@ -854,14 +897,6 @@ UI.drawers = { left: [], right: [], widthLeft: 300, widthRight: 300 };
 const panelFloatRect = new Map(); // panel element -> its floating {left,top,right,bottom}, for undock
 
 function drawerEl(side) { return $(side === 'left' ? 'drawer-left' : 'drawer-right'); }
-
-function updateDockButtons(p) {
-  const side = p.dataset.dockSide;
-  const l = p.querySelector('.dock-left');
-  const r = p.querySelector('.dock-right');
-  if (l) l.classList.toggle('active', side === 'left');
-  if (r) r.classList.toggle('active', side === 'right');
-}
 
 function refreshDrawerDividers(side) {
   const dr = drawerEl(side);
@@ -932,23 +967,97 @@ function wireDrawerWidthResize(side) {
 wireDrawerWidthResize('left');
 wireDrawerWidthResize('right');
 
-function dockPanel(p, side) {
-  if (p.dataset.dockSide === side) return;
-  if (p.dataset.dockSide) undockPanel(p); // also cleans up the old side's bookkeeping/dividers
-  panelFloatRect.set(p, { left: p.style.left, top: p.style.top, right: p.style.right, bottom: p.style.bottom });
+// dropSideAt/showDropPreview/clearDropPreview drive the drag-and-drop dock
+// path (see makePanelWindow): dock at a specific position, reorder within
+// the same drawer, or move between drawers, all by dragging a panel's header
+function dropSideAt(clientX) {
+  const leftDr = drawerEl('left');
+  const rightDr = drawerEl('right');
+  if (!leftDr.hidden && clientX <= leftDr.getBoundingClientRect().right) return 'left';
+  if (!rightDr.hidden && clientX >= rightDr.getBoundingClientRect().left) return 'right';
+  // activation zone at the screen edge, so a currently-empty (hidden) drawer
+  // can still be dropped into
+  const EDGE = 44;
+  if (clientX <= EDGE) return 'left';
+  if (clientX >= innerWidth - EDGE) return 'right';
+  return null;
+}
+
+// the docked panel (if any) just before which `p` should land, given a
+// pointer y position — null means "append at the end"
+const dndIndicator = document.createElement('div');
+dndIndicator.id = 'dnd-indicator';
+dndIndicator.hidden = true;
+document.body.appendChild(dndIndicator);
+
+// shows an insertion-line preview at the position `p` would land in `side`'s
+// drawer for a drop at `clientY`, and returns the panel to insert before
+// (null = append at the end). Note: dr.children always includes the
+// permanent .drawer-resize width handle, so "empty" is judged by panel count.
+function showDropPreview(p, side, clientY) {
+  const dr = drawerEl(side);
+  dr.hidden = false; // reveal as a preview even if currently empty
+  document.querySelectorAll('.drawer.drop-target').forEach((d) => { if (d !== dr) d.classList.remove('drop-target'); });
+  dr.classList.add('drop-target');
+  const panels = [...dr.children].filter((c) => c.classList.contains('panel') && !c.hidden && c !== p);
+  const ref = panels.find((cand) => {
+    const cr = cand.getBoundingClientRect();
+    return clientY < cr.top + cr.height / 2;
+  }) || null;
+  let rect;
+  let y;
+  if (ref) {
+    rect = ref.getBoundingClientRect();
+    y = rect.top;
+  } else if (panels.length) {
+    rect = panels[panels.length - 1].getBoundingClientRect();
+    y = rect.bottom;
+  } else {
+    rect = dr.getBoundingClientRect();
+    y = rect.top + 6;
+  }
+  dndIndicator.style.left = `${rect.left}px`;
+  dndIndicator.style.width = `${rect.width}px`;
+  dndIndicator.style.top = `${y - 1}px`;
+  dndIndicator.hidden = false;
+  return ref;
+}
+
+function clearDropPreview() {
+  dndIndicator.hidden = true;
+  document.querySelectorAll('.drawer.drop-target').forEach((d) => d.classList.remove('drop-target'));
+}
+
+function dockPanelAt(p, side, beforeEl) {
+  const oldSide = p.dataset.dockSide;
+  if (!oldSide) {
+    panelFloatRect.set(p, { left: p.style.left, top: p.style.top, right: p.style.right, bottom: p.style.bottom });
+  }
   p.classList.add('docked');
   p.dataset.dockSide = side;
   p.hidden = false;
-  drawerEl(side).appendChild(p);
+  drawerEl(side).insertBefore(p, beforeEl || null);
   // id-keyed bookkeeping is only for session persistence of the fixed
   // PANEL_IDS windows — dynamically-created pinned allocation windows have
-  // no stable id and dock/undock fine without being tracked here
+  // no stable id and dock/reorder/undock fine without being tracked here
+  if (oldSide && oldSide !== side && p.id) {
+    const oldArr = UI.drawers[oldSide];
+    const oi = oldArr.indexOf(p.id);
+    if (oi >= 0) oldArr.splice(oi, 1);
+  }
   if (p.id) {
-    const arr = UI.drawers[side === 'left' ? 'left' : 'right'];
-    if (!arr.includes(p.id)) arr.push(p.id);
+    // rebuild from actual DOM order: correct for both a fresh dock and a
+    // same-drawer reorder, no manual index bookkeeping needed
+    UI.drawers[side] = [...drawerEl(side).children]
+      .filter((c) => c.classList.contains('panel') && c.id)
+      .map((c) => c.id);
   }
   refreshDrawerDividers(side);
-  updateDockButtons(p);
+  if (oldSide && oldSide !== side) refreshDrawerDividers(oldSide);
+}
+
+function dockPanel(p, side) {
+  dockPanelAt(p, side, null);
 }
 
 function undockPanel(p) {
@@ -970,33 +1079,7 @@ function undockPanel(p) {
   }
   refreshDrawerDividers(side);
   raisePanel(p);
-  updateDockButtons(p);
 }
-
-function toggleDock(p, side) {
-  if (p.dataset.dockSide === side) undockPanel(p);
-  else dockPanel(p, side);
-}
-
-// shared by the fixed PANEL_IDS windows and dynamically-created pinned
-// allocation windows (see the d-pin handler) — anything with a .panel-head
-// and a .panel-close can be made dockable
-function addDockButtonsTo(p) {
-  const closeBtn = p.querySelector('.panel-close');
-  const left = document.createElement('button');
-  left.className = 'dock-left dock-btn';
-  left.title = 'Dock to the left drawer (click again to undock)';
-  left.textContent = '⟨';
-  left.onclick = () => toggleDock(p, 'left');
-  const right = document.createElement('button');
-  right.className = 'dock-right dock-btn';
-  right.title = 'Dock to the right drawer (click again to undock)';
-  right.textContent = '⟩';
-  right.onclick = () => toggleDock(p, 'right');
-  closeBtn.insertAdjacentElement('beforebegin', left);
-  closeBtn.insertAdjacentElement('beforebegin', right);
-}
-PANEL_IDS.forEach((id) => addDockButtonsTo($(id)));
 
 // re-dock panels and restore drawer width/visibility from a saved session
 function applyDrawersState(d) {
@@ -1545,6 +1628,18 @@ function updateMarkers() {
 // analysis save / load
 // ---------------------------------------------------------------------------
 
+const allocInfoWaiters = new Map();
+
+// fetch alloc_info for a creator event directly (not via pixel pick) — used
+// to recreate pinned allocation windows from a saved session
+function requestAllocInfo(e) {
+  return new Promise((resolve) => {
+    const reqId = UI.reqId++;
+    allocInfoWaiters.set(reqId, resolve);
+    worker.postMessage({ type: 'alloc-info', e, reqId });
+  });
+}
+
 const dumpWaiters = new Map();
 
 function requestTagsDump() {
@@ -1577,20 +1672,17 @@ async function buildMarks() {
     allocColors: [...UI.allocColors.entries()],
     bookmarks: UI.bookmarks,
     addrMarks: UI.addrMarks,
+    // layout/filters/crop/drawers/window positions — folded in so the one
+    // manually-exported file is a complete snapshot, not just the "marks"
+    session: buildSession(),
   };
 }
 
+// tracks whether marks changed since the last save/load/autosave — drives
+// the periodic marks autosave below, not a refresh warning: marks (like
+// session/layout state) now auto-persist to localStorage, so there's nothing
+// a plain refresh can actually lose
 function markDirty() { UI.marksDirty = true; }
-
-// warn on refresh/close only when there are unsaved marks (tags, bookmarks,
-// addr marks, names, colors) — session/layout state doesn't need this since
-// it's auto-persisted continuously (see saveSession)
-window.addEventListener('beforeunload', (e) => {
-  if (UI.marksDirty) {
-    e.preventDefault();
-    e.returnValue = '';
-  }
-});
 
 async function saveMarks() {
   if (!UI.loaded) return;
@@ -1665,6 +1757,10 @@ function applyMarks(obj, quiet) {
   buildMarksPanel();
   buildLegend();
   updateMarkers();
+  // layout/filters/crop/drawers/window positions, if this file has them
+  // (buildMarks folds in buildSession()) — applied last so they win over the
+  // legacy rowBytes/collapseMin/colorMode/playhead fields above
+  applySession(obj.session);
   if (!quiet) {
     showPanel('analysis-panel');
     $('st-info').textContent =
@@ -1731,7 +1827,15 @@ function buildSession() {
     },
     playhead: UI.state ? UI.state.seq : 0,
     windows,
-    drawers: UI.drawers || null, // filled in once dockable drawers exist
+    drawers: UI.drawers || null,
+    // pinned allocation windows: re-fetched by creator event index on
+    // restore (see applySession), since only the trace — not the info blob
+    // itself — is worth persisting
+    pinned: [...document.querySelectorAll('.pinned-detail')].map((win) => ({
+      e: +win.dataset.e,
+      dockSide: win.dataset.dockSide || null,
+      left: win.style.left, top: win.style.top, right: win.style.right, bottom: win.style.bottom,
+    })),
   };
 }
 
@@ -1789,6 +1893,22 @@ function applySession(obj) {
   if (obj.crop) setCrop(obj.crop.lo, obj.crop.hi);
   if (obj.playhead !== undefined) worker.postMessage({ type: 'seek', seq: obj.playhead });
   applyDrawersState(obj.drawers);
+  restorePinnedWindows(obj.pinned);
+}
+
+// re-fetches each pinned allocation's info by creator event index (the trace
+// itself, not the info blob, is what's persisted) and recreates its window,
+// docked or floating exactly as saved
+async function restorePinnedWindows(pinned) {
+  if (!pinned || !pinned.length) return;
+  document.querySelectorAll('.pinned-detail').forEach((w) => w.remove()); // avoid dupes on repeated restore
+  for (const pw of pinned) {
+    const info = await requestAllocInfo(pw.e);
+    if (!info) continue; // stale/unknown event (e.g. mismatched trace): skip
+    const win = createPinnedWindow(info, null);
+    win.style.left = pw.left; win.style.top = pw.top; win.style.right = pw.right; win.style.bottom = pw.bottom;
+    if (pw.dockSide) dockPanelAt(win, pw.dockSide, null);
+  }
 }
 
 function saveSessionNow() {
@@ -2477,16 +2597,11 @@ function fillDetailPanel(info) {
   raisePanel(panel);
 }
 
-// Pin the current allocation window: it stays exactly where it is (as a
-// pinned window, orange pin), and the next selection opens a fresh live
-// Allocation panel. Clicking a pinned window's pin returns it to the live
-// panel; × closes it. Any number of windows can be pinned.
-$('d-pin').onclick = () => {
-  const info = UI.detailInfo;
-  if (!info) return;
+// Build a standalone pinned-allocation window for `info`, optionally placed
+// at a floating `rect` ({left,top,right,bottom} css strings). Shared by the
+// interactive pin button and by session restore (see applySession).
+function createPinnedWindow(info, rect) {
   const live = $('detail-panel');
-  const r = live.getBoundingClientRect();
-  // identical chrome to the live panel — the orange pin is the only tell
   const win = document.createElement('div');
   win.className = 'panel pinned-detail';
   win.dataset.e = info.e;
@@ -2498,11 +2613,12 @@ $('d-pin').onclick = () => {
     <div class="panel-body detail-body"></div>`;
   document.body.appendChild(win);
   buildDetailBody(win.querySelector('.panel-body'), info);
-  // take over the live panel's exact spot: visually the window just stays
-  win.style.left = `${r.left}px`;
-  win.style.top = `${r.top}px`;
-  win.style.right = 'auto';
-  win.style.bottom = 'auto';
+  if (rect) {
+    win.style.left = `${rect.left}px`;
+    win.style.top = `${rect.top}px`;
+    win.style.right = 'auto';
+    win.style.bottom = 'auto';
+  }
   win.querySelector('.panel-close').onclick = () => {
     const side = win.dataset.dockSide;
     win.remove();
@@ -2520,8 +2636,20 @@ $('d-pin').onclick = () => {
     live.style.bottom = 'auto';
   };
   makePanelWindow(win);
-  addDockButtonsTo(win);
   raisePanel(win);
+  return win;
+}
+
+// Pin the current allocation window: it stays exactly where it is (as a
+// pinned window, orange pin), and the next selection opens a fresh live
+// Allocation panel. Clicking a pinned window's pin returns it to the live
+// panel; × closes it. Any number of windows can be pinned.
+$('d-pin').onclick = () => {
+  const info = UI.detailInfo;
+  if (!info) return;
+  const live = $('detail-panel');
+  // identical chrome to the live panel — the orange pin is the only tell
+  createPinnedWindow(info, live.getBoundingClientRect());
   UI.detailWasPinned = true;
   live.hidden = true;
 };

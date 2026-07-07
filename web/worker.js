@@ -696,6 +696,13 @@ onmessage = async (ev) => {
       postMessage({ type: 'pick-result', reqId: m.reqId, info: retJson(), forClick: m.forClick });
       break;
     }
+    // look up a creator event's info directly (not via pixel pick) — used to
+    // recreate pinned allocation windows from a saved session
+    case 'alloc-info': {
+      if (!S.loaded || !canvases.addr) { postMessage({ type: 'alloc-info-result', reqId: m.reqId, info: null }); break; }
+      postMessage({ type: 'alloc-info-result', reqId: m.reqId, info: allocInfo({ e: m.e }) });
+      break;
+    }
     case 'events': {
       if (!S.loaded) break;
       E.hp_events_json(m.from, m.count);

@@ -124,9 +124,13 @@ input { font-family: ui-monospace, monospace; }
   cursor: row-resize;
   background: var(--border);
 }
-.dock-btn { opacity: 0.6; }
-.dock-btn:hover { opacity: 1; }
-.dock-btn.active { opacity: 1; color: var(--accent); }
+.drawer.drop-target { outline: 2px dashed var(--accent); outline-offset: -2px; }
+#dnd-indicator {
+  position: fixed; height: 2px; background: var(--accent);
+  z-index: 200; pointer-events: none;
+  box-shadow: 0 0 4px var(--accent);
+}
+
 
 .tl-strip {
   position: relative;
@@ -394,9 +398,13 @@ input[type="color"] {
 
 /* events panel: virtualized sequential event list */
 #events-panel { width: 480px; }
+/* a fixed height only makes sense while floating; docked, it should flex to
+   fill whatever room the drawer gives it (like every other docked panel) —
+   otherwise it fights the drawer's own flex sizing and gets clipped */
+#events-panel:not(.docked) { height: 52vh; }
 #events-panel .head-actions { display: flex; gap: 10px; align-items: center; }
 #events-panel .head-actions label { font-weight: 400; }
-#events-scroll { position: relative; overflow-y: auto; height: 52vh; }
+#events-scroll { position: relative; overflow-y: auto; flex: 1; min-height: 0; }
 #events-spacer { width: 1px; }
 /* seq-range band mirroring the current timeline selection, in the scroll
    gutter so it never competes with the row highlight */
