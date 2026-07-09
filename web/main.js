@@ -822,6 +822,7 @@ function makePanelWindow(p) {
   p.addEventListener('pointerdown', () => raisePanel(p));
   const head = p.querySelector('.panel-head');
   head.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
     // header buttons/inputs (close, save, follow…) still work normally
     if (e.target.closest('button, input, select, a')) return;
     e.preventDefault();
@@ -843,6 +844,10 @@ function makePanelWindow(p) {
       p.style.bottom = 'auto';
     };
     const move = (ev) => {
+      if ((ev.buttons & 1) === 0) {
+        finish();
+        return;
+      }
       if (!moved && Math.hypot(ev.clientX - startX, ev.clientY - startY) < 4) return;
       if (!moved) {
         moved = true;
@@ -872,9 +877,14 @@ function makePanelWindow(p) {
         clearDropPreview();
       }
     };
-    const up = () => {
-      head.removeEventListener('pointermove', move);
-      head.removeEventListener('pointerup', up);
+    let finished = false;
+    function finish() {
+      if (finished) return;
+      finished = true;
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', finish);
+      window.removeEventListener('pointercancel', finish);
+      if (head.hasPointerCapture?.(e.pointerId)) head.releasePointerCapture(e.pointerId);
       clearDropPreview();
       p.classList.remove('dragging');
       if (moved && dropSide) dockPanelAt(p, dropSide, dropRef);
@@ -882,9 +892,10 @@ function makePanelWindow(p) {
       // a harmless no-op for any that weren't
       refreshDrawerDividers('left');
       refreshDrawerDividers('right');
-    };
-    head.addEventListener('pointermove', move);
-    head.addEventListener('pointerup', up);
+    }
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', finish);
+    window.addEventListener('pointercancel', finish);
   });
 }
 document.querySelectorAll('.panel').forEach(makePanelWindow);
