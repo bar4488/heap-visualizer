@@ -933,26 +933,38 @@ function refreshDrawerDividers(side) {
   dr.hidden = panels.length === 0;
 }
 
-// drag the divider between two stacked panels: pin the panel above to a
-// fixed pixel height, leave the panel(s) below sharing the rest
+// Drag the divider between two stacked panels. Snapshot every visible panel at
+// its current pixel height first, then move height only between the two panels
+// adjacent to the handle; otherwise flexbox redistributes the delta across all
+// docked panels in the drawer when there are three or more.
 function wireVResize(div, panelA, panelB) {
   div.addEventListener('pointerdown', (e) => {
     e.preventDefault();
     div.setPointerCapture(e.pointerId);
     const startY = e.clientY;
+    const panels = [...div.parentElement.children]
+      .filter((c) => c.classList.contains('panel') && !c.hidden);
+    panels.forEach((p) => {
+      p.style.flex = `0 0 ${p.getBoundingClientRect().height}px`;
+    });
     const startAH = panelA.getBoundingClientRect().height;
-    const totalH = startAH + panelB.getBoundingClientRect().height;
+    const startBH = panelB.getBoundingClientRect().height;
+    const totalH = startAH + startBH;
+    const minH = Math.min(60, totalH / 2);
     const move = (ev) => {
-      const ah = Math.max(60, Math.min(totalH - 60, startAH + (ev.clientY - startY)));
+      const ah = Math.max(minH, Math.min(totalH - minH, startAH + (ev.clientY - startY)));
       panelA.style.flex = `0 0 ${ah}px`;
-      panelB.style.flex = '1 1 0';
+      panelB.style.flex = `0 0 ${totalH - ah}px`;
     };
     const up = () => {
       div.removeEventListener('pointermove', move);
       div.removeEventListener('pointerup', up);
+      div.removeEventListener('pointercancel', up);
+      if (div.hasPointerCapture?.(e.pointerId)) div.releasePointerCapture(e.pointerId);
     };
     div.addEventListener('pointermove', move);
     div.addEventListener('pointerup', up);
+    div.addEventListener('pointercancel', up);
   });
 }
 
