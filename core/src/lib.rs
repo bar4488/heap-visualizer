@@ -336,7 +336,7 @@ pub extern "C" fn hp_center_x_for_event(e: u32) -> f64 {
     a.cfg.x_pan
 }
 
-/// Show/hide the hex size labels drawn inside allocations.
+/// Show/hide the size labels drawn inside allocations.
 #[no_mangle]
 pub extern "C" fn hp_set_size_labels(on: u32) {
     app().cfg.size_labels = on != 0;

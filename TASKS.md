@@ -28,8 +28,9 @@ Batch of UX improvements requested for the viewer. Checked off as implemented.
   allocation *ever* touches (playhead-independent), so the map never reflows
   as allocations come and go.
 - [x] **11. In-allocation labels** — centered label inside each allocation wide
-  enough: "name · 0xsize" if it fits, else the name, else the hex size.
-  Toggleable via the "sizes" checkbox; names come from the Analysis panel.
+  enough: "name · size" if it fits, else the name, else the size. Toggleable
+  via the "sizes" checkbox; the size format is controlled from Layout, and
+  names come from the Analysis panel.
 - [x] **12. Flash-where-is-it from the event list** — clicking the already-current
   event in the Events panel scrolls/pans to it and pulses its exact location
   (rect flash + expanding ping ring for tiny allocations).

@@ -134,7 +134,7 @@ pub struct Cfg {
     pub x_zoom: f64,
     /// Horizontal pan as a fraction of the row [0, 1 - 1/x_zoom].
     pub x_pan: f64,
-    /// Draw the allocation size (hex) inside allocations wide enough to fit it.
+    /// Emit allocation-size labels for allocations wide enough to fit text.
     pub size_labels: bool,
     /// User-chosen tag colors, indexed by tag id - 1; falls back to CAT.
     pub tag_colors: Vec<[u8; 3]>,
@@ -614,11 +614,12 @@ pub fn render_addr(
                     }
                     first = false;
                     labels.push_str(&format!(
-                        "{{\"k\":2,\"x\":{},\"y\":{},\"w\":{},\"e\":{},\"text\":\"0x{:x}\"}}",
+                        "{{\"k\":2,\"x\":{},\"y\":{},\"w\":{},\"e\":{},\"size\":{},\"text\":\"0x{:x}\"}}",
                         vx0,
                         y,
                         vw,
                         e,
+                        s.size[e as usize],
                         s.size[e as usize]
                     ));
                     n_size_labels += 1;

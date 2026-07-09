@@ -55,6 +55,23 @@ function fmtBytes(b) {
   return `${b >= 100 ? b.toFixed(0) : b.toFixed(1)} ${u[i]}`;
 }
 
+function fmtHexSize(b) {
+  return `0x${Math.max(0, Math.round(Number(b) || 0)).toString(16)}`;
+}
+
+function allocSizeFormat() {
+  return $('alloc-size-format')?.value === 'hex' ? 'hex' : 'human';
+}
+
+function fmtAllocSize(b) {
+  return allocSizeFormat() === 'hex' ? fmtHexSize(b) : fmtBytes(b);
+}
+
+function fmtAllocSizeDetail(b) {
+  if (allocSizeFormat() !== 'hex') return `${fmtBytes(b)} (${fmtNum(b)} B)`;
+  return `${fmtHexSize(b)} (${fmtBytes(b)}, ${fmtNum(b)} B)`;
+}
+
 const NS_PER_UNIT = { ns: 1, us: 1e3, ms: 1e6, s: 1e9 };
 
 function fmtTime(t) {
@@ -231,7 +248,7 @@ worker.onmessage = (ev) => {
         // the worker already selected the allocation this event touches
         if (e.e !== undefined && e.e !== null) UI.selected = e.e;
         $('st-info').textContent =
-          `${OPS[e.op]} id=${e.id} ${e.addr} ${fmtBytes(e.size)}${e.site ? ' · ' + e.site : ''}`;
+          `${OPS[e.op]} id=${e.id} ${e.addr} ${fmtAllocSize(e.size)}${e.site ? ' · ' + e.site : ''}`;
         // open the allocation dialog for the malloc/free we stepped onto
         if (m.info) fillDetailPanel(m.info);
       }
@@ -314,6 +331,7 @@ function onLoaded(m) {
   // the wasm view is recreated per trace: re-apply sticky toolbar prefs
   worker.postMessage({ type: 'set', key: 'showAll', value: $('show-all').checked });
   worker.postMessage({ type: 'set', key: 'sizeLabels', value: $('show-sizes').checked });
+  worker.postMessage({ type: 'set', key: 'allocSizeFormat', value: allocSizeFormat() });
   clearSelection();
   syncTagDatalist();
   buildMarksPanel();
@@ -670,8 +688,24 @@ $('show-all').onchange = () =>
   worker.postMessage({ type: 'set', key: 'showAll', value: $('show-all').checked });
 $('show-sizes').onchange = () =>
   worker.postMessage({ type: 'set', key: 'sizeLabels', value: $('show-sizes').checked });
+$('alloc-size-format').onchange = () => sendAllocSizeFormat();
 $('show-addrs').onchange = () =>
   worker.postMessage({ type: 'set', key: 'addrLabels', value: $('show-addrs').checked });
+
+function sendAllocSizeFormat() {
+  worker.postMessage({ type: 'set', key: 'allocSizeFormat', value: allocSizeFormat() });
+  refreshAllocSizeDisplays();
+}
+
+function refreshAllocSizeDisplays() {
+  if (UI.detailInfo && !$('detail-panel').hidden) {
+    buildDetailBody($('detail-body'), UI.detailInfo);
+  }
+  document.querySelectorAll('.pinned-detail').forEach((win) => {
+    if (win._allocInfo) buildDetailBody(win.querySelector('.panel-body'), win._allocInfo);
+  });
+  refreshEventsPanel();
+}
 
 // the worker draws in-allocation labels; it needs the user-assigned names
 function sendNames() {
@@ -1203,7 +1237,7 @@ function onEventsSlice(m) {
       <span class="ev-seq">${fmtNum(ev.seq)}</span>
       <span class="ev-op ${['m', 'f', 'r'][ev.op]}">${['M', 'F', 'R'][ev.op]}</span>
       <span class="ev-addr">${ev.addr}</span>
-      <span class="ev-size">${fmtBytes(ev.size)}</span>
+      <span class="ev-size">${fmtAllocSize(ev.size)}</span>
       <span class="ev-site">${ev.site ? esc(ev.site) : ''}</span>
     </div>`).join('');
   $('events-rows').querySelectorAll('.ev-row').forEach((row) => {
@@ -1855,6 +1889,7 @@ function buildSession() {
     collapseMin: $('collapse-min').value,
     rowPx: $('row-px').value,
     colorMode: $('color-mode').value,
+    allocSizeFormat: allocSizeFormat(),
     showAll: $('show-all').checked,
     sizeLabels: $('show-sizes').checked,
     addrLabels: $('show-addrs').checked,
@@ -1899,6 +1934,10 @@ function applySession(obj) {
     $('color-mode').value = obj.colorMode;
     worker.postMessage({ type: 'set', key: 'colorMode', value: +$('color-mode').value });
     buildLegend();
+  }
+  if (obj.allocSizeFormat !== undefined) {
+    $('alloc-size-format').value = obj.allocSizeFormat === 'hex' ? 'hex' : 'human';
+    sendAllocSizeFormat();
   }
   if (obj.showAll !== undefined) {
     $('show-all').checked = obj.showAll;
@@ -2492,7 +2531,7 @@ function onPickResult(m) {
     const tag = info.tag > 0 ? UI.tags[info.tag - 1] : null;
     const lines = [
       `<b>${name ? `“${esc(name)}”  ` : ''}id ${info.id}</b>${info.site ? `  <span style="color:${CAT[(info.siteIdx ?? 0) % 12]}">${esc(info.site)}</span>` : ''}${tag ? `  <span style="color:${tag.color}">⬤ ${esc(tag.name)}</span>` : ''}`,
-      `${info.addr} – ${info.end}  <span class="g">${fmtBytes(info.size)}</span>${info.usable ? ` <span class="dim">(usable ${fmtBytes(info.usable)})</span>` : ''}`,
+      `${info.addr} – ${info.end}  <span class="g">${fmtAllocSize(info.size)}</span>${info.usable ? ` <span class="dim">(usable ${fmtAllocSize(info.usable)})</span>` : ''}`,
       `<span class="dim">born</span> seq ${fmtNum(info.seq)} · t ${fmtTime(info.t)}   <span class="dim">age</span> ${fmtTime(info.age)}`,
       `${info.thr !== null ? `<span class="dim">thr</span> ${info.thr}   ` : ''}` +
       (info.deathSeq !== null ? `<span class="dim">dies</span> seq ${fmtNum(info.deathSeq)} (t ${fmtTime(info.deathT)})` : '<span class="dim">never freed</span>'),
@@ -2514,8 +2553,8 @@ function buildDetailBody(root, info) {
   const rows = [
     ['id', info.id],
     ['range', `${info.addr} – ${info.end}`],
-    ['size', `${fmtBytes(info.size)} (${fmtNum(info.size)} B)`],
-    info.usable ? ['usable', fmtBytes(info.usable)] : null,
+    ['size', fmtAllocSizeDetail(info.size)],
+    info.usable ? ['usable', fmtAllocSizeDetail(info.usable)] : null,
     ['site', info.site ?? '—'],
     ['thread', info.thr ?? '—'],
     ['born', `seq ${fmtNum(info.seq)} · t ${fmtTime(info.t)}`],
@@ -2673,6 +2712,7 @@ function createPinnedWindow(info, rect) {
   const win = document.createElement('div');
   win.className = 'panel pinned-detail';
   win.dataset.e = info.e;
+  win._allocInfo = info;
   win.innerHTML = `<div class="panel-head"><span class="ph-t">${esc(detailTitle(info))}</span>
       <span class="head-actions">
         <button class="d-pin pinned" title="Unpin — return this to the live Allocation panel">📌</button>

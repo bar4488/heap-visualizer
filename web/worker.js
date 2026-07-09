@@ -22,6 +22,7 @@ const S = {
   addrMarks: [],         // [{lo, hi}] address marks, set by the main thread
   names: new Map(),      // creator event -> user name, for in-alloc labels
   addrLabels: true,      // draw row start addresses along the left edge
+  allocSizeFormat: 'human',
   locked: false,         // locked viewport: stepping never auto-scrolls
   playing: false,
   playMode: 't',         // 't' | 'seq'
@@ -180,13 +181,14 @@ function renderAddr() {
   for (const lb of labels) {
     if (lb.k === 2) {
       // in-allocation label, centered: "name · size" if it fits, else the
-      // name, else the hex size, else nothing
+      // name, else the formatted size, else nothing
       const fs = Math.min(10 * dpr, S.rowPx - 3);
       if (fs >= 6) {
         ctx.font = `${Math.round(fs)}px ui-monospace, SFMono-Regular, Menlo, monospace`;
         const avail = lb.w - 5 * dpr;
         const name = S.names.get(lb.e);
-        const candidates = name ? [`${name} · ${lb.text}`, name, lb.text] : [lb.text];
+        const sizeText = lb.size === undefined ? lb.text : fmtAllocSize(lb.size);
+        const candidates = name ? [`${name} · ${sizeText}`, name, sizeText] : [sizeText];
         for (const text of candidates) {
           const tw = ctx.measureText(text).width;
           if (tw <= avail) {
@@ -292,6 +294,13 @@ function fmtBytes(b) {
   let i = -1;
   do { b /= 1024; i++; } while (b >= 1024 && i < u.length - 1);
   return `${b >= 100 ? b.toFixed(0) : b.toFixed(1)} ${u[i]}`;
+}
+
+function fmtAllocSize(b) {
+  if (S.allocSizeFormat === 'hex') {
+    return `0x${Math.max(0, Math.round(Number(b) || 0)).toString(16)}`;
+  }
+  return fmtBytes(b);
 }
 
 // ---------------------------------------------------------------------------
@@ -551,7 +560,7 @@ onmessage = async (ev) => {
       break;
     }
     case 'set': {
-      if (!S.loaded && !['rowPx', 'locked', 'sizeLabels', 'addrLabels'].includes(m.key)) break;
+      if (!S.loaded && !['rowPx', 'locked', 'sizeLabels', 'addrLabels', 'allocSizeFormat'].includes(m.key)) break;
       switch (m.key) {
         case 'rowBytes': {
           const anchor = captureAnchor();
@@ -583,6 +592,10 @@ onmessage = async (ev) => {
           break;
         case 'addrLabels':
           S.addrLabels = !!m.value;
+          S.dirty.addr = true;
+          break;
+        case 'allocSizeFormat':
+          S.allocSizeFormat = m.value === 'hex' ? 'hex' : 'human';
           S.dirty.addr = true;
           break;
         case 'showAll': {

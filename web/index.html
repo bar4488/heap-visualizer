@@ -114,8 +114,13 @@
       title="Collapse a run of empty rows only when it is at least this long: a plain number means rows (e.g. 5), a byte size means empty address space (e.g. 64k, 1m, 0x10000)"></label></div>
     <div class="filter-row"><label title="Lay out every row any allocation ever touches, so the map never reflows or scrolls away as allocations are freed">
       <input type="checkbox" id="show-all" checked> all rows</label></div>
-    <div class="filter-row"><label title="Show each allocation's name / size (hex) inside it when it fits">
+    <div class="filter-row"><label title="Show each allocation's name / size inside it when it fits">
       <input type="checkbox" id="show-sizes" checked> sizes</label></div>
+    <div class="filter-row"><label>size format <select id="alloc-size-format"
+      title="How allocation sizes are shown in labels, tooltips, the allocation panel, and events">
+      <option value="human">compact</option>
+      <option value="hex">hex</option>
+    </select></label></div>
     <div class="filter-row"><label title="Show row start addresses along the left edge of the map">
       <input type="checkbox" id="show-addrs" checked> addresses</label></div>
     <div class="filter-row"><label>row zoom <select id="row-px">
