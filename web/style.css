@@ -416,6 +416,7 @@ input[type="color"] {
 #events-panel .head-actions { display: flex; gap: 10px; align-items: center; }
 #events-panel .head-actions label { font-weight: 400; }
 #events-scroll { position: relative; overflow-y: auto; flex: 1; min-height: 0; }
+#events-scroll:focus { outline: none; }
 #events-spacer { width: 1px; }
 /* seq-range band mirroring the current timeline selection, in the scroll
    gutter so it never competes with the row highlight */

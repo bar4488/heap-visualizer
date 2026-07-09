@@ -1256,6 +1256,13 @@ function evScrollToSeq(seq) {
   refreshEventsPanel();
 }
 
+function stepEventsSelection(delta) {
+  if (!UI.loaded || !UI.state || !UI.state.n) return;
+  const cur = UI.state.seq - 1;
+  const target = Math.max(0, Math.min(UI.state.n - 1, cur + delta));
+  worker.postMessage({ type: 'jump', seq: target + 1, select: true });
+}
+
 function resetEventsPanel() {
   evState.lastSeq = -1;
   $('events-scroll').scrollTop = 0;
@@ -1263,7 +1270,16 @@ function resetEventsPanel() {
   if (!$('events-panel').hidden) refreshEventsPanel();
 }
 
-$('events-scroll').addEventListener('scroll', refreshEventsPanel);
+{
+  const scEl = $('events-scroll');
+  scEl.addEventListener('scroll', refreshEventsPanel);
+  scEl.addEventListener('pointerdown', () => scEl.focus({ preventScroll: true }));
+  scEl.addEventListener('keydown', (e) => {
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    e.preventDefault();
+    stepEventsSelection(e.key === 'ArrowDown' ? 1 : -1);
+  });
+}
 new ResizeObserver(() => refreshEventsPanel()).observe($('events-scroll'));
 
 // drag a seq range directly in the Events list — feeds the same UI.sel path
@@ -2562,22 +2578,45 @@ function detailTitle(info) {
   return name ? `Allocation · ${name}` : 'Allocation';
 }
 
-// When the live panel (re)opens, start from its default bottom-left spot and
-// cascade up-right past any pinned windows sitting there, so a fresh window
-// never lands on top of an existing one.
-function placeLivePanel(panel) {
+function panelHasManualPosition(panel) {
+  return !!(panel.style.left || panel.style.top || panel.style.right || panel.style.bottom);
+}
+
+// When the live panel (re)opens, keep it in the usable workspace beside any
+// open drawer. After pinning, start from the default bottom-left spot and
+// cascade up-right past any pinned windows sitting there.
+function placeLivePanel(panel, reset = false) {
+  if (reset) {
   panel.style.left = '';
   panel.style.top = '';
   panel.style.right = '';
   panel.style.bottom = '';
+  }
   const r = panel.getBoundingClientRect();
   let x = r.left;
   let y = r.top;
+  const gap = 10;
+  const leftDr = drawerEl('left');
+  const rightDr = drawerEl('right');
+  let minX = gap;
+  let maxX = Math.max(gap, innerWidth - r.width - gap);
+  if (!leftDr.hidden) minX = Math.max(minX, leftDr.getBoundingClientRect().right + gap);
+  if (!rightDr.hidden) maxX = Math.min(maxX, rightDr.getBoundingClientRect().left - r.width - gap);
+  if (maxX < minX) {
+    // Very narrow layouts may not have enough room between two drawers; keep
+    // the panel visible and prefer the space nearest the left drawer.
+    const visibleMax = Math.max(gap, innerWidth - r.width - gap);
+    minX = Math.min(minX, visibleMax);
+    maxX = visibleMax;
+  }
+  const clampX = (v) => Math.min(maxX, Math.max(minX, v));
+  const nx = clampX(x);
+  let moved = Math.abs(nx - x) > 0.5;
+  x = nx;
   const pins = [...document.querySelectorAll('.pinned-detail')].map((w) => w.getBoundingClientRect());
   const clash = () => pins.some((p) => Math.abs(p.left - x) < 48 && Math.abs(p.top - y) < 48);
-  let moved = false;
   while (clash() && y > 40) {
-    x += 28;
+    x = clampX(x + 28);
     y -= 28;
     moved = true;
   }
@@ -2607,8 +2646,9 @@ function fillDetailPanel(info) {
   panel.hidden = false;
   // only reset/cascade position when the live panel was just vacated by a
   // pin (so a fresh window doesn't land on the pinned one); a plain close
-  // (× or Escape) leaves the window exactly where the user left it
-  if (wasHidden && UI.detailWasPinned) placeLivePanel(panel);
+  // (× or Escape) leaves the window where the user left it unless that spot is
+  // now covered by an open drawer
+  if (wasHidden) placeLivePanel(panel, UI.detailWasPinned || !panelHasManualPosition(panel));
   UI.detailWasPinned = false;
   raisePanel(panel);
 }
@@ -2650,6 +2690,7 @@ function createPinnedWindow(info, rect) {
     live.style.top = `${rr.top}px`;
     live.style.right = 'auto';
     live.style.bottom = 'auto';
+    placeLivePanel(live);
   };
   makePanelWindow(win);
   raisePanel(win);
