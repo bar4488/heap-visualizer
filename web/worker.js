@@ -31,13 +31,25 @@ const S = {
   lastTick: 0,
   dirty: { addr: true, tlt: true, tls: true },
   lastState: '',
+  matchStale: true,      // filter-matches set needs rebuilding
+  matchCount: 0,         // size of the last rebuilt filter-matches set
 };
+
+// Rebuild the engine's filter-matches set (Events "matching only" list) only
+// when the filter or tagging has changed since the last rebuild.
+function ensureMatches() {
+  if (S.matchStale) {
+    S.matchCount = E.hp_matches_rebuild();
+    S.matchStale = false;
+  }
+}
 
 const binCache = { 0: { key: '' }, 1: { key: '' } };
 let tagGen = 0; // bumped whenever tags/tag colors change, to bust bin caches
 
 function tagsChanged() {
   tagGen++;
+  S.matchStale = true; // tag visibility is a filter dimension
   S.dirty.addr = S.dirty.tlt = S.dirty.tls = true;
   E.hp_tag_counts_json();
   postMessage({ type: 'tag-counts', counts: retJson() });
@@ -86,9 +98,12 @@ async function loadTrace(buffer) {
   const meta = retJson();
   E.hp_warnings_json();
   const warnings = retJson();
+  E.hp_meta_keys_json();
+  const metaKeys = retJson();
 
   S.loaded = true;
   S.n = n;
+  S.matchStale = true;
   S.tMin = meta.tMin;
   S.tMax = meta.tMax;
   S.tlT = { lo: meta.tMin, hi: Math.max(meta.tMax, meta.tMin + 1) };
@@ -103,7 +118,7 @@ async function loadTrace(buffer) {
   // start at the end of the trace: "what was live at exit"
   E.hp_seek_seq(n);
   allDirty();
-  postMessage({ type: 'loaded', meta, warnings, n });
+  postMessage({ type: 'loaded', meta, warnings, n, metaKeys });
 }
 
 function applyRowPx() {
@@ -620,6 +635,8 @@ onmessage = async (ev) => {
         case 'filter': {
           const len = writeBuf(te.encode(JSON.stringify(m.value)));
           E.hp_set_filter(len);
+          postMessage({ type: 'meta-error', error: retStr() });
+          S.matchStale = true;
           S.dirty.addr = true;
           break;
         }
@@ -720,6 +737,21 @@ onmessage = async (ev) => {
       if (!S.loaded) break;
       E.hp_events_json(m.from, m.count);
       postMessage({ type: 'events', reqId: m.reqId, from: m.from, events: retJson() });
+      break;
+    }
+    // "matching only" list: a slice of the events that pass the active filter
+    case 'events-matches': {
+      if (!S.loaded) break;
+      ensureMatches();
+      E.hp_matches_json(m.from, m.count);
+      postMessage({ type: 'events', reqId: m.reqId, from: m.from, events: retJson(), filtered: true, matchCount: S.matchCount });
+      break;
+    }
+    // just the size of the filter-matches set (to size the virtualized list)
+    case 'match-count': {
+      if (!S.loaded) break;
+      ensureMatches();
+      postMessage({ type: 'match-count', reqId: m.reqId, count: S.matchCount });
       break;
     }
     case 'flash-event': {

@@ -69,12 +69,91 @@ pub struct Filter {
     pub tags_set: bool,
     pub size_min: u64,
     pub size_max: u64, // 0 = unbounded
+    /// Field query: a parsed boolean expression over an allocation's fields —
+    /// both built-in columns (`size`, `addr`, `site`, `thr`, `op`, …) and
+    /// caller-defined `extra`s (see `crate::query` / `EventFields`). Active only
+    /// when `Some`; `meta_hit` is a precomputed per-event hit-mask (indexed by
+    /// creator-event seq), filled by `precompute_meta` at filter-set time so
+    /// `pass` stays an O(1) lookup on the render hot path. `meta_err` holds the
+    /// last parse error (empty = ok), for surfacing to the UI.
+    pub meta_query: Option<crate::query::Expr>,
+    pub meta_err: String,
+    pub meta_hit: Vec<bool>,
+}
+
+/// Adapts an event's built-in columns plus its `extra` fragment into the
+/// `(key, value)` field set a query evaluates against, so *every* allocation
+/// field — not just caller-defined `extra`s — is queryable. Numbers are
+/// formatted lazily into display strings; numeric tests re-parse them.
+pub struct EventFields<'a> {
+    pub s: &'a Store,
+    pub e: usize,
+}
+
+impl crate::query::Fields for EventFields<'_> {
+    fn any(&self, f: &mut dyn FnMut(&str, &str) -> bool) -> bool {
+        let (s, e) = (self.s, self.e);
+        if f("size", &s.size[e].to_string()) {
+            return true;
+        }
+        if s.usable[e] != 0 && f("usable", &s.usable[e].to_string()) {
+            return true;
+        }
+        if f("id", &s.id[e].to_string()) {
+            return true;
+        }
+        if f("seq", &e.to_string()) {
+            return true;
+        }
+        if f("t", &s.t[e].to_string()) {
+            return true;
+        }
+        if f("addr", &format!("0x{:x}", s.addr[e])) {
+            return true;
+        }
+        let op = match s.op[e] {
+            OP_M => "malloc",
+            OP_R => "realloc",
+            _ => "free",
+        };
+        if f("op", op) {
+            return true;
+        }
+        if s.site[e] != NONE_U32 && f("site", &s.sites[s.site[e] as usize]) {
+            return true;
+        }
+        if s.thr_idx[e] != NONE_U16 && f("thr", &s.thrs[s.thr_idx[e] as usize].to_string()) {
+            return true;
+        }
+        if s.extra[e] != NONE_U32 {
+            for (k, v) in crate::query::fields(s.extras[s.extra[e] as usize].as_bytes()) {
+                if f(&k, &v) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
 }
 
 impl Filter {
     fn bit(words: &[u64], i: u32) -> bool {
         let w = (i / 64) as usize;
         w < words.len() && words[w] >> (i % 64) & 1 == 1
+    }
+
+    /// Resolve the metadata query against the interned `extras` table into
+    /// `meta_hit`. Call once whenever the filter (or the store) changes; keeps
+    /// `pass` from re-parsing metadata JSON per allocation per frame.
+    pub fn precompute_meta(&mut self, s: &Store) {
+        match &self.meta_query {
+            None => self.meta_hit.clear(),
+            Some(q) => {
+                self.meta_hit = (0..s.len() as usize)
+                    .map(|e| q.eval(&EventFields { s, e }))
+                    .collect();
+            }
+        }
     }
 
     pub fn pass(&self, s: &Store, e: u32) -> bool {
@@ -95,6 +174,9 @@ impl Filter {
             }
         }
         if self.tags_set && !Self::bit(&self.tags, s.tag[ei] as u32) {
+            return false;
+        }
+        if self.meta_query.is_some() && !self.meta_hit.get(ei).copied().unwrap_or(false) {
             return false;
         }
         let sz = s.size[ei];

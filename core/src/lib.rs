@@ -5,6 +5,7 @@
 
 pub mod json;
 pub mod parse;
+pub mod query;
 pub mod render;
 pub mod state;
 pub mod store;
@@ -33,6 +34,10 @@ struct App {
     buf: Vec<u8>,    // input buffer (file chunks, filter JSON)
     out: String,     // reused JSON output
     labels: String,  // labels from the last address render
+    /// Creator events (M/R) passing the active filter, in seq order — the
+    /// Events panel's "matching only" list. Rebuilt on demand by
+    /// `hp_matches_rebuild` whenever the filter (or tagging) changes.
+    matches: Vec<u32>,
 }
 
 impl App {
@@ -47,6 +52,7 @@ impl App {
             buf: Vec::new(),
             out: String::new(),
             labels: String::new(),
+            matches: Vec::new(),
         }
     }
 }
@@ -399,6 +405,18 @@ fn parse_filter_json(data: &[u8]) -> Filter {
                 b"sizeMax" => {
                     f.size_max = sc.integer().unwrap_or(0).max(0) as u64;
                 }
+                b"metaQuery" => {
+                    if let Some((a, b)) = sc.string_span() {
+                        let q = json::unescape(&data[a..b]);
+                        match query::parse(&q) {
+                            Ok(expr) => f.meta_query = expr,
+                            Err(e) => {
+                                f.meta_query = None;
+                                f.meta_err = e;
+                            }
+                        }
+                    }
+                }
                 b"sites" | b"thrs" | b"tags" => {
                     // collect into a scratch Vec first: an empty JSON array is
                     // a real constraint ("nothing selected" -> hide all), so
@@ -460,11 +478,74 @@ fn parse_filter_json(data: &[u8]) -> Filter {
     f
 }
 
+/// Apply a filter (JSON in the input buffer). Returns the metadata-query parse
+/// error via `ret_str` (empty string = ok), so the UI can flag a bad query.
 #[no_mangle]
 pub extern "C" fn hp_set_filter(len: u32) {
     let a = app();
     let data: Vec<u8> = a.buf[..len as usize].to_vec();
-    a.cfg.filter = parse_filter_json(&data);
+    let mut f = parse_filter_json(&data);
+    f.precompute_meta(&a.store);
+    a.out.clear();
+    a.out.push_str(&f.meta_err);
+    a.cfg.filter = f;
+    ret_str(&a.out);
+}
+
+/// Distinct metadata keys and their observed values across all allocations,
+/// for the query autocomplete: `[{"key":"pool","values":["gfx","net"]}, ...]`.
+/// Values per key are capped so a high-cardinality field can't blow up.
+#[no_mangle]
+pub extern "C" fn hp_meta_keys_json() {
+    let a = app();
+    let s = &a.store;
+    let mut map: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+        std::collections::BTreeMap::new();
+    // built-in columns every allocation has (see render::EventFields). Numeric
+    // fields list no values (they're compared as ranges); enumerable ones seed
+    // their observed values so value-completion works like it does for extras.
+    for k in ["size", "usable", "id", "seq", "t", "addr", "op", "site", "thr"] {
+        map.entry(k.to_string()).or_default();
+    }
+    let ops = map.entry("op".to_string()).or_default();
+    ops.insert("malloc".to_string());
+    ops.insert("realloc".to_string());
+    let sites = map.entry("site".to_string()).or_default();
+    for name in s.sites.iter().take(64) {
+        sites.insert(name.clone());
+    }
+    let thrs = map.entry("thr".to_string()).or_default();
+    for t in s.thrs.iter().take(64) {
+        thrs.insert(t.to_string());
+    }
+    for frag in &s.extras {
+        for (k, v) in query::fields(frag.as_bytes()) {
+            let set = map.entry(k).or_default();
+            if set.len() < 64 {
+                set.insert(v);
+            }
+        }
+    }
+    let o = &mut a.out;
+    o.clear();
+    o.push('[');
+    for (i, (k, vals)) in map.iter().enumerate() {
+        if i > 0 {
+            o.push(',');
+        }
+        o.push_str("{\"key\":");
+        push_json_str(o, k);
+        o.push_str(",\"values\":[");
+        for (j, v) in vals.iter().enumerate() {
+            if j > 0 {
+                o.push(',');
+            }
+            push_json_str(o, v);
+        }
+        o.push_str("]}");
+    }
+    o.push(']');
+    ret_str(o);
 }
 
 /// Crop the address-line to creator events with `lo <= e < hi` — always dims
@@ -915,6 +996,50 @@ pub extern "C" fn hp_events_json(from: u32, count: u32) {
     ret_str(o);
 }
 
+/// Rebuild the "filter matches" set — every creator event (M/R) that passes
+/// the active filter, in seq order — and return its size. This is the working
+/// set the Events panel's "matching only" mode lists and bulk-tags. With the
+/// filter off, every allocation matches. Recompute whenever the filter or a
+/// tag assignment (a filter dimension) changes.
+#[no_mangle]
+pub extern "C" fn hp_matches_rebuild() -> u32 {
+    let a = app();
+    let m: Vec<u32> = {
+        let s = &a.store;
+        let f = &a.cfg.filter;
+        (0..s.len())
+            .filter(|&e| {
+                let op = s.op[e as usize];
+                (op == OP_M || op == OP_R) && f.pass(s, e)
+            })
+            .collect()
+    };
+    let n = m.len() as u32;
+    a.matches = m;
+    n
+}
+
+/// A slice [from, from + count) of the filter-matches set (see
+/// `hp_matches_rebuild`), serialized exactly like `hp_events_json`. Assumes
+/// the caller has rebuilt the set for the current filter first.
+#[no_mangle]
+pub extern "C" fn hp_matches_json(from: u32, count: u32) {
+    let a = app();
+    let from = from as usize;
+    let hi = (from + count.min(2000) as usize).min(a.matches.len());
+    a.out.clear();
+    a.out.push('[');
+    for i in from..hi {
+        if i > from {
+            a.out.push(',');
+        }
+        let e = a.matches[i];
+        push_event_json(&mut a.out, &a.store, e);
+    }
+    a.out.push(']');
+    ret_str(&a.out);
+}
+
 // ---------------------------------------------------------------------------
 // timelines
 // ---------------------------------------------------------------------------
@@ -1210,6 +1335,70 @@ not json at all
         assert!(info.contains("\"extra\":{\"pool\":\"gfx\",\"refs\":3}"));
         let info2 = render::alloc_info(&a.store, &mut a.view, &a.cfg, 200, 0x2000, 1, 0.0);
         assert!(!info2.contains("\"extra\""));
+    }
+
+    #[test]
+    fn meta_filter_selects_and_tags() {
+        let src = r#"{"op":"M","id":1,"addr":"0x1000","size":64,"pool":"gfx","refs":3}
+{"op":"M","id":2,"addr":"0x2000","size":64,"pool":"net"}
+{"op":"M","id":3,"addr":"0x3000","size":64,"pool":"GFX","refs":9}
+{"op":"M","id":4,"addr":"0x4000","size":64}
+"#;
+        let mut a = load(src);
+
+        // boolean query: (pool=gfx OR pool=GFX) AND refs present, all matched
+        // case-insensitively through the query engine
+        let mut f = parse_filter_json(br#"{"mode":1,"metaQuery":"pool:gfx"}"#);
+        assert!(f.meta_query.is_some());
+        assert!(f.meta_err.is_empty());
+        f.precompute_meta(&a.store);
+        assert!(f.pass(&a.store, 0)); // pool=gfx
+        assert!(!f.pass(&a.store, 1)); // pool=net
+        assert!(f.pass(&a.store, 2)); // pool=GFX (case-insensitive)
+        assert!(!f.pass(&a.store, 3)); // no metadata at all
+        a.cfg.filter = f;
+
+        // "tag all matches": tag every filter-passing creator in the stream
+        let total = a.store.len();
+        let n = tag_seq_range(&mut a, 0, total, 7, 0);
+        assert_eq!(n, 2);
+        assert_eq!(a.store.tag, vec![7, 0, 7, 0]);
+
+        // numeric + boolean: refs>5 OR pool=net
+        let mut f2 = parse_filter_json(br#"{"mode":1,"metaQuery":"refs>5 OR pool=net"}"#);
+        assert!(f2.meta_query.is_some());
+        f2.precompute_meta(&a.store);
+        assert!(!f2.pass(&a.store, 0)); // refs=3, pool=gfx
+        assert!(f2.pass(&a.store, 1)); // pool=net
+        assert!(f2.pass(&a.store, 2)); // refs=9
+        assert!(!f2.pass(&a.store, 3)); // no metadata
+
+        // built-in columns are queryable too, not just caller-defined extras:
+        // numeric `id`, hex `addr`, enum `op`, and mixing with an extra key
+        let mut f4 = parse_filter_json(br#"{"mode":1,"metaQuery":"id<3 AND op:malloc"}"#);
+        f4.precompute_meta(&a.store);
+        assert!(f4.pass(&a.store, 0)); // id=1
+        assert!(f4.pass(&a.store, 1)); // id=2
+        assert!(!f4.pass(&a.store, 2)); // id=3 fails id<3
+        assert!(!f4.pass(&a.store, 3)); // id=4
+
+        let mut f5 = parse_filter_json(br#"{"mode":1,"metaQuery":"addr:0x3000"}"#);
+        f5.precompute_meta(&a.store);
+        assert!(!f5.pass(&a.store, 0));
+        assert!(f5.pass(&a.store, 2)); // 0x3000
+
+        // a built-in field AND'd with an extra key
+        let mut f6 = parse_filter_json(br#"{"mode":1,"metaQuery":"size>=64 AND pool:gfx"}"#);
+        f6.precompute_meta(&a.store);
+        assert!(f6.pass(&a.store, 0)); // size 64, pool gfx
+        assert!(!f6.pass(&a.store, 1)); // pool net
+        assert!(f6.pass(&a.store, 2)); // size 64, pool GFX
+        assert!(!f6.pass(&a.store, 3)); // no pool
+
+        // a malformed query filters nothing and reports the error
+        let f3 = parse_filter_json(br#"{"mode":1,"metaQuery":"refs>"}"#);
+        assert!(f3.meta_query.is_none());
+        assert!(!f3.meta_err.is_empty());
     }
 
     #[test]
