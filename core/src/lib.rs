@@ -405,6 +405,22 @@ fn parse_filter_json(data: &[u8]) -> Filter {
                 b"sizeMax" => {
                     f.size_max = sc.integer().unwrap_or(0).max(0) as u64;
                 }
+                b"addrLo" | b"addrHi" => {
+                    // hex ("0x..") or decimal address string; null = no bound
+                    let is_lo = key == b"addrLo";
+                    if let Some((a, b)) = sc.string_span() {
+                        if let Some(v) = json::parse_addr(&data[a..b]) {
+                            if is_lo {
+                                f.addr_lo = v;
+                            } else {
+                                f.addr_hi = v;
+                            }
+                            f.addr_set = true;
+                        }
+                    } else {
+                        let _ = sc.skip_value();
+                    }
+                }
                 b"metaQuery" => {
                     if let Some((a, b)) = sc.string_span() {
                         let q = json::unescape(&data[a..b]);
@@ -474,6 +490,10 @@ fn parse_filter_json(data: &[u8]) -> Filter {
                 break;
             }
         }
+    }
+    // an address-range filter is only meaningful as a non-empty [lo, hi)
+    if f.addr_hi <= f.addr_lo {
+        f.addr_set = false;
     }
     f
 }
@@ -1399,6 +1419,38 @@ not json at all
         let f3 = parse_filter_json(br#"{"mode":1,"metaQuery":"refs>"}"#);
         assert!(f3.meta_query.is_none());
         assert!(!f3.meta_err.is_empty());
+    }
+
+    #[test]
+    fn addr_range_filter_intersects() {
+        // four 64-byte allocations at 0x1000/0x2000/0x3000/0x4000
+        let src = r#"{"op":"M","id":1,"addr":"0x1000","size":64}
+{"op":"M","id":2,"addr":"0x2000","size":64}
+{"op":"M","id":3,"addr":"0x3000","size":64}
+{"op":"M","id":4,"addr":"0x4000","size":64}
+"#;
+        let a = load(src);
+
+        // [0x2000, 0x3000) intersects only the 0x2000 allocation (end exclusive:
+        // 0x3000 does not overlap [0x3000, 0x3040))
+        let f = parse_filter_json(br#"{"mode":1,"addrLo":"0x2000","addrHi":"0x3000"}"#);
+        assert!(f.addr_set);
+        assert!(!f.pass(&a.store, 0));
+        assert!(f.pass(&a.store, 1));
+        assert!(!f.pass(&a.store, 2));
+        assert!(!f.pass(&a.store, 3));
+
+        // a range that clips into the tail of 0x1000's extent still counts it
+        // (intersection, not containment): [0x1020, 0x2020) hits 0x1000 & 0x2000
+        let f2 = parse_filter_json(br#"{"mode":1,"addrLo":"0x1020","addrHi":"0x2020"}"#);
+        assert!(f2.pass(&a.store, 0));
+        assert!(f2.pass(&a.store, 1));
+        assert!(!f2.pass(&a.store, 2));
+
+        // a degenerate / empty range is treated as no constraint (passes all)
+        let f3 = parse_filter_json(br#"{"mode":1,"addrLo":"0x3000","addrHi":"0x3000"}"#);
+        assert!(!f3.addr_set);
+        assert!(f3.pass(&a.store, 0));
     }
 
     #[test]

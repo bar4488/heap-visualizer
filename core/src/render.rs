@@ -79,6 +79,14 @@ pub struct Filter {
     pub meta_query: Option<crate::query::Expr>,
     pub meta_err: String,
     pub meta_hit: Vec<bool>,
+    /// Address-range filter: keep only allocations whose byte extent
+    /// `[addr, addr+size)` intersects `[addr_lo, addr_hi)` (end exclusive).
+    /// Active only when `addr_set`; set from the allocation panel's "match
+    /// range" button (see `hp_set_filter` / `EventFields` is *not* involved —
+    /// this is exact u64 arithmetic the query language can't express).
+    pub addr_lo: u64,
+    pub addr_hi: u64,
+    pub addr_set: bool,
 }
 
 /// Adapts an event's built-in columns plus its `extra` fragment into the
@@ -178,6 +186,14 @@ impl Filter {
         }
         if self.meta_query.is_some() && !self.meta_hit.get(ei).copied().unwrap_or(false) {
             return false;
+        }
+        if self.addr_set {
+            let a = s.addr[ei];
+            // intersects [addr_lo, addr_hi): starts before the range ends and
+            // ends after the range starts (a+size, saturating for safety)
+            if a >= self.addr_hi || a.saturating_add(s.size[ei]) <= self.addr_lo {
+                return false;
+            }
         }
         let sz = s.size[ei];
         if sz < self.size_min {

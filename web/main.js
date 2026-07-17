@@ -37,6 +37,7 @@ const UI = {
   locked: false,    // locked viewport: stepping never auto-scrolls
   xview: { zoom: 1, pan: 0 }, // horizontal zoom/pan on the address line
   metaKeys: [],     // [{key, values:[…]}] for the metadata-query autocomplete
+  rangeFilter: null, // {lo:'0x…', hi:'0x…'} address-range filter, or null
 };
 
 // expose for tests / console poking
@@ -831,6 +832,8 @@ function sendFilter() {
   const sizeMax = parseSize($('f-size-max').value);
   const metaQuery = $('f-query').value.trim();
   const metaActive = !!metaQuery;
+  const range = UI.rangeFilter;
+  const rangeActive = !!range;
   const allSites = sites.length === siteBoxes.length;
   const allThrs = thrs.length === thrBoxes.length;
   // tag visibility (from the tags panel; bit 0 = untagged)
@@ -838,7 +841,7 @@ function sendFilter() {
   if (UI.untaggedVisible) tagBits.push(0);
   UI.tags.forEach((t, i) => { if (t.visible) tagBits.push(i + 1); });
   const allTags = tagBits.length === UI.tags.length + 1;
-  const active = !allSites || !allThrs || !allTags || sizeMin > 0 || sizeMax > 0 || metaActive;
+  const active = !allSites || !allThrs || !allTags || sizeMin > 0 || sizeMax > 0 || metaActive || rangeActive;
   const mode = active ? +panel.querySelector('input[name=fmode]:checked').value : 0;
   worker.postMessage({
     type: 'set', key: 'filter',
@@ -849,6 +852,8 @@ function sendFilter() {
       tags: allTags ? null : tagBits,
       sizeMin, sizeMax,
       metaQuery,
+      addrLo: range ? range.lo : null,
+      addrHi: range ? range.hi : null,
     },
   });
   $('btn-filter').classList.toggle('active', active);
@@ -860,6 +865,32 @@ function sendFilter() {
   }
 }
 
+// Reflect UI.rangeFilter into the Filter panel's address-range row (a chip
+// with the [lo, hi) extent and a clear button). Called whenever the range
+// changes; the actual filtering is driven by sendFilter.
+function syncRangeRow() {
+  const row = $('f-range-row');
+  const r = UI.rangeFilter;
+  if (!r) { row.hidden = true; return; }
+  $('f-range-val').textContent = `${r.lo} – ${r.hi}`;
+  row.hidden = false;
+}
+
+// Apply an address-range filter [lo, hi) (hex strings), reveal the Filter
+// panel so the constraint is visible/clearable, and push it to the engine.
+function setRangeFilter(lo, hi) {
+  UI.rangeFilter = { lo, hi };
+  syncRangeRow();
+  showPanel('filter-panel');
+  sendFilter();
+}
+
+$('f-range-clear').onclick = () => {
+  UI.rangeFilter = null;
+  syncRangeRow();
+  sendFilter();
+};
+
 $('filter-clear').onclick = () => {
   $('filter-panel').querySelectorAll('input[type=checkbox]').forEach((b) => { b.checked = true; });
   $('f-size-min').value = '';
@@ -868,6 +899,8 @@ $('filter-clear').onclick = () => {
   syncQueryHL();
   hideMetaError();
   closeMetaAc();
+  UI.rangeFilter = null;
+  syncRangeRow();
   UI.untaggedVisible = true;
   UI.tags.forEach((t) => { t.visible = true; });
   buildTagsSection();
@@ -2163,6 +2196,7 @@ function buildSession() {
       sizeMin: $('f-size-min').value,
       sizeMax: $('f-size-max').value,
       metaQuery: $('f-query').value,
+      range: UI.rangeFilter,
       // checkbox states by index — meaningful only against the same trace's
       // site/thread list, which is exactly what the file-name-scoped key gives us
       sites: [...document.querySelectorAll('#filter-panel input[data-site]')].map((b) => b.checked),
@@ -2224,6 +2258,8 @@ function applySession(obj) {
     if (f.sizeMax !== undefined) $('f-size-max').value = f.sizeMax;
     if (f.metaQuery !== undefined) $('f-query').value = f.metaQuery;
     else if (f.metaKey || f.metaVal) $('f-query').value = `${f.metaKey || ''}:${f.metaVal || ''}`;
+    UI.rangeFilter = f.range && f.range.lo && f.range.hi ? { lo: f.range.lo, hi: f.range.hi } : null;
+    syncRangeRow();
     const siteBoxes = [...document.querySelectorAll('#filter-panel input[data-site]')];
     (f.sites || []).forEach((checked, i) => { if (siteBoxes[i]) siteBoxes[i].checked = checked; });
     const thrBoxes = [...document.querySelectorAll('#filter-panel input[data-thr]')];
@@ -2848,6 +2884,7 @@ function buildDetailBody(root, info) {
     <button class="d-color-clear">clear</button></div>`;
   html += `<div class="actions">
     <button class="d-focus" title="Scroll/pan to this allocation and flash exactly where it is">⌖ focus</button>
+    <button class="d-range" title="Filter to every allocation whose address range overlaps this one's ${esc(info.addr)} – ${esc(info.end)}">⇔ match range</button>
     <button class="d-birth">go to birth</button>
     ${info.deathSeq !== null ? '<button class="d-death">go to death</button>' : ''}
   </div>`;
@@ -2855,6 +2892,8 @@ function buildDetailBody(root, info) {
   const q = (sel) => root.querySelector(sel);
   // same pulse as re-clicking the current event in the Events panel
   q('.d-focus').onclick = () => worker.postMessage({ type: 'flash-event', seq: info.e });
+  // filter to allocations whose byte extent intersects this one's [addr, end)
+  q('.d-range').onclick = () => setRangeFilter(info.addr, info.end);
   q('.d-birth').onclick = () => worker.postMessage({ type: 'jump', seq: info.seq + 1 });
   const dd = q('.d-death');
   if (dd) dd.onclick = () => worker.postMessage({ type: 'jump', seq: info.deathSeq + 1 });

@@ -49,7 +49,10 @@ Drop any `.heapl` file onto the page to load it.
   allocations the filter matches get tagged — the filter defines the working
   set.
 - Click an allocation to open its panel: give it a **name**, a **tag**, or a
-  **highlight color** (shown in every color mode).
+  **highlight color** (shown in every color mode). **⇔ match range** filters the
+  map to every allocation whose bytes overlap this one's address range — handy
+  for seeing everything that ever lived in a region; the constraint shows in the
+  Filter panel and clears from there.
 - **＋ mark** (or `m`) bookmarks the current playhead position; time marks show
   as flags on both timelines. Clicking one jumps in time while the address
   view stays put; the ⌖ button (or shift+click on the flag) also centers
