@@ -36,6 +36,8 @@ const UI = {
   setView: {},      // per-strip view setters, filled by setupTimeline
   locked: false,    // locked viewport: stepping never auto-scrolls
   xview: { zoom: 1, pan: 0 }, // horizontal zoom/pan on the address line
+  metaKeys: [],     // [{key, values:[…]}] for the metadata-query autocomplete
+  rangeFilter: null, // {lo:'0x…', hi:'0x…'} address-range filter, or null
 };
 
 // expose for tests / console poking
@@ -222,6 +224,9 @@ worker.onmessage = (ev) => {
     case 'loaded':
       onLoaded(m);
       break;
+    case 'meta-error':
+      if (m.error) showMetaError(m.error); else hideMetaError();
+      break;
     case 'state':
       onState(m);
       break;
@@ -284,6 +289,12 @@ worker.onmessage = (ev) => {
           `tagged ${fmtNum(m.count)} allocations “${UI.tags[m.tag - 1]?.name ?? m.tag}”`;
       }
       buildLegend();
+      // if a tag-visibility filter is in play, tagging can change the matched
+      // set — re-pull the filtered Events list
+      if (evState.matchOnly && !$('events-panel').hidden) {
+        evState.lastSeq = -1;
+        refreshEventsPanel();
+      }
       break;
     case 'tag-counts':
       UI.tagCounts = {};
@@ -314,6 +325,7 @@ function onLoaded(m) {
   $('progress').hidden = true;
   UI.meta = m.meta;
   UI.warnings = m.warnings;
+  UI.metaKeys = m.metaKeys || [];
   UI.loaded = true;
   UI.selected = null;
   UI.tags = [];
@@ -626,7 +638,8 @@ $('search-overlay').addEventListener('pointerdown', (e) => {
 });
 
 document.addEventListener('keydown', (e) => {
-  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+  const t = e.target;
+  if (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA' || t.isContentEditable) return;
   if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
   else if (e.key === 'ArrowRight') { e.preventDefault(); worker.postMessage({ type: 'step', delta: e.shiftKey ? 100 : 1 }); }
   else if (e.key === 'ArrowLeft') { e.preventDefault(); worker.postMessage({ type: 'step', delta: e.shiftKey ? -100 : -1 }); }
@@ -789,6 +802,26 @@ function buildFilterPanel() {
   buildTagsSection();
 }
 
+// "tag matches": apply a (new or existing) tag to every allocation the active
+// filter currently matches. The engine's seq-range tagger already uses the
+// live filter as its working set, so a full-stream range tags exactly the
+// filtered allocations. Shared by the Filter panel and the Events panel.
+function tagFilterMatches(inputId) {
+  const inp = $(inputId);
+  const name = inp.value.trim();
+  if (!name) { inp.focus(); return; }
+  const tag = tagIdFor(name);
+  worker.postMessage({ type: 'tag-range', kind: 1, lo: 0, hi: 2e9, tag, byFree: 0 });
+}
+function wireTagMatches(inputId, buttonId) {
+  $(buttonId).onclick = () => tagFilterMatches(inputId);
+  $(inputId).addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); tagFilterMatches(inputId); }
+  });
+}
+wireTagMatches('f-tag-name', 'f-tag-apply');
+wireTagMatches('ev-tag-name', 'ev-tag-apply');
+
 function sendFilter() {
   const panel = $('filter-panel');
   const siteBoxes = [...panel.querySelectorAll('input[data-site]')];
@@ -797,6 +830,10 @@ function sendFilter() {
   const thrs = thrBoxes.filter((b) => b.checked).map((b) => +b.dataset.thr);
   const sizeMin = parseSize($('f-size-min').value);
   const sizeMax = parseSize($('f-size-max').value);
+  const metaQuery = $('f-query').value.trim();
+  const metaActive = !!metaQuery;
+  const range = UI.rangeFilter;
+  const rangeActive = !!range;
   const allSites = sites.length === siteBoxes.length;
   const allThrs = thrs.length === thrBoxes.length;
   // tag visibility (from the tags panel; bit 0 = untagged)
@@ -804,7 +841,7 @@ function sendFilter() {
   if (UI.untaggedVisible) tagBits.push(0);
   UI.tags.forEach((t, i) => { if (t.visible) tagBits.push(i + 1); });
   const allTags = tagBits.length === UI.tags.length + 1;
-  const active = !allSites || !allThrs || !allTags || sizeMin > 0 || sizeMax > 0;
+  const active = !allSites || !allThrs || !allTags || sizeMin > 0 || sizeMax > 0 || metaActive || rangeActive;
   const mode = active ? +panel.querySelector('input[name=fmode]:checked').value : 0;
   worker.postMessage({
     type: 'set', key: 'filter',
@@ -814,20 +851,255 @@ function sendFilter() {
       thrs: allThrs ? null : thrs,
       tags: allTags ? null : tagBits,
       sizeMin, sizeMax,
+      metaQuery,
+      addrLo: range ? range.lo : null,
+      addrHi: range ? range.hi : null,
     },
   });
   $('btn-filter').classList.toggle('active', active);
+  // the filtered Events list depends on the filter — re-pull it (the worker
+  // rebuilds its match set lazily on the next matches request)
+  if (evState.matchOnly && !$('events-panel').hidden) {
+    evState.lastSeq = -1;
+    refreshEventsPanel();
+  }
 }
+
+// Reflect UI.rangeFilter into the Filter panel's address-range row (a chip
+// with the [lo, hi) extent and a clear button). Called whenever the range
+// changes; the actual filtering is driven by sendFilter.
+function syncRangeRow() {
+  const row = $('f-range-row');
+  const r = UI.rangeFilter;
+  if (!r) { row.hidden = true; return; }
+  $('f-range-val').textContent = `${r.lo} – ${r.hi}`;
+  row.hidden = false;
+}
+
+// Apply an address-range filter [lo, hi) (hex strings), reveal the Filter
+// panel so the constraint is visible/clearable, and push it to the engine.
+function setRangeFilter(lo, hi) {
+  UI.rangeFilter = { lo, hi };
+  syncRangeRow();
+  showPanel('filter-panel');
+  sendFilter();
+}
+
+$('f-range-clear').onclick = () => {
+  UI.rangeFilter = null;
+  syncRangeRow();
+  sendFilter();
+};
 
 $('filter-clear').onclick = () => {
   $('filter-panel').querySelectorAll('input[type=checkbox]').forEach((b) => { b.checked = true; });
   $('f-size-min').value = '';
   $('f-size-max').value = '';
+  $('f-query').value = '';
+  syncQueryHL();
+  hideMetaError();
+  closeMetaAc();
+  UI.rangeFilter = null;
+  syncRangeRow();
   UI.untaggedVisible = true;
   UI.tags.forEach((t) => { t.visible = true; });
   buildTagsSection();
   sendFilter();
 };
+
+// ---------------------------------------------------------------------------
+// metadata query: parse-error banner + context-aware autocomplete
+// ---------------------------------------------------------------------------
+
+function showMetaError(msg) {
+  const el = $('f-query-err');
+  el.textContent = `⚠ ${msg}`;
+  el.hidden = false;
+  $('f-query-box').classList.add('err');
+}
+function hideMetaError() {
+  $('f-query-err').hidden = true;
+  $('f-query-box').classList.remove('err');
+}
+
+// -- syntax highlighting -----------------------------------------------------
+// The textarea's own text is transparent; this paints a colored copy behind it,
+// kept glyph-aligned by sharing the exact font/padding/wrapping (see CSS).
+const Q_KW = /^(and|or|not)$/i;
+function highlightQuery(text) {
+  const re = /(\s+)|("[^"]*"?)|(>=|<=)|(&&|\|\|)|([:=<>~])|([()])|([&|!])|([^\s()"><=:~&|!]+)/g;
+  const out = [];
+  let prevOp = false; // was the previous meaningful token an operator?
+  let m;
+  while ((m = re.exec(text))) {
+    if (m[1]) { out.push(esc(m[1])); continue; } // whitespace: keep as-is
+    let cls, op = false;
+    if (m[2]) cls = 'qt-str';
+    else if (m[3] || m[5]) { cls = 'qt-op'; op = true; }
+    else if (m[4] || m[7]) cls = 'qt-kw';
+    else if (m[6]) cls = 'qt-paren';
+    else if (prevOp) cls = 'qt-val';        // a bare word right after an operator
+    else if (Q_KW.test(m[8])) cls = 'qt-kw';
+    else cls = 'qt-key';
+    out.push(`<span class="${cls}">${esc(m[0])}</span>`);
+    prevOp = op;
+  }
+  return out.join('');
+}
+function syncQueryHL() {
+  const inp = $('f-query');
+  const hl = $('f-query-hl');
+  hl.innerHTML = highlightQuery(inp.value);
+  hl.scrollTop = inp.scrollTop;
+}
+
+const META_OPS = [
+  [':', 'contains'], ['=', 'equals'],
+  ['>', 'greater'], ['>=', 'at least'], ['<', 'less'], ['<=', 'at most'],
+];
+const META_KEYWORDS = ['AND', 'OR', 'NOT'];
+let acItems = [];
+let acSel = 0;
+
+// the token being edited: the run of key/op/value chars ending at the cursor
+// (parens and whitespace delimit clauses, so they bound the token)
+function acToken(text, pos) {
+  let start = pos;
+  while (start > 0 && !/[\s()]/.test(text[start - 1])) start--;
+  return { start, str: text.slice(start, pos) };
+}
+
+function metaValuesFor(key) {
+  if (key === '' || key === '*') {
+    const all = new Set();
+    for (const k of UI.metaKeys) for (const v of k.values) all.add(v);
+    return [...all];
+  }
+  const e = UI.metaKeys.find((k) => k.key.toLowerCase() === key.toLowerCase());
+  return e ? e.values : [];
+}
+
+function computeAcItems() {
+  const inp = $('f-query');
+  const pos = inp.selectionStart ?? inp.value.length;
+  const { start, str } = acToken(inp.value, pos);
+  const items = [];
+  const opM = str.match(/^([\w.*]*)(>=|<=|[:=<>~])(.*)$/);
+  if (opM) {
+    // typing a value → suggest observed values for this key
+    const [, key, op, partial] = opM;
+    const vStart = start + key.length + op.length;
+    const pl = partial.toLowerCase();
+    for (const v of metaValuesFor(key)) {
+      if (!pl || v.toLowerCase().includes(pl)) {
+        const ins = /[\s()"]/.test(v) ? `"${v}"` : v;
+        items.push({ label: v, kind: 'value', s: vStart, e: pos, insert: ins });
+      }
+      if (items.length >= 40) break;
+    }
+  } else {
+    const known = UI.metaKeys.some((k) => k.key.toLowerCase() === str.toLowerCase());
+    if (str && known) {
+      // a complete key → suggest an operator to follow it
+      for (const [op, desc] of META_OPS) {
+        items.push({ label: `${str}${op}`, hint: desc, kind: 'op', s: pos, e: pos, insert: op });
+      }
+    }
+    const sl = str.toLowerCase();
+    for (const k of UI.metaKeys) {
+      if (k.key.toLowerCase() === sl) continue; // already offered its operators
+      if (!sl || k.key.toLowerCase().includes(sl)) {
+        items.push({ label: k.key, kind: 'key', s: start, e: pos, insert: k.key });
+      }
+      if (items.length >= 40) break;
+    }
+    // boolean keywords only make sense once there's a clause to combine
+    if (start > 0) {
+      for (const kw of META_KEYWORDS) {
+        if (!str || kw.startsWith(str.toUpperCase())) {
+          items.push({ label: kw, kind: 'kw', s: start, e: pos, insert: `${kw} ` });
+        }
+      }
+    }
+  }
+  return items;
+}
+
+function renderMetaAc() {
+  const box = $('f-query-ac');
+  if (!acItems.length) { box.hidden = true; return; }
+  acSel = Math.max(0, Math.min(acSel, acItems.length - 1));
+  box.innerHTML = acItems.map((it, i) => `
+    <div class="ac-item${i === acSel ? ' sel' : ''}" data-i="${i}">
+      <span class="${it.kind === 'value' ? 'ac-val' : ''}">${esc(it.label)}</span>
+      <span class="ac-kind">${esc(it.hint || it.kind)}</span>
+    </div>`).join('');
+  box.hidden = false;
+  box.querySelectorAll('.ac-item').forEach((row) => {
+    // mousedown (not click) so it fires before the input's blur closes the box
+    row.addEventListener('mousedown', (e) => { e.preventDefault(); acceptAc(+row.dataset.i); });
+  });
+}
+
+function updateMetaAc() {
+  if (!UI.metaKeys.length) { closeMetaAc(); return; }
+  acItems = computeAcItems();
+  acSel = 0;
+  renderMetaAc();
+}
+function closeMetaAc() {
+  acItems = [];
+  $('f-query-ac').hidden = true;
+}
+
+function acceptAc(i) {
+  const it = acItems[i];
+  if (!it) return;
+  const inp = $('f-query');
+  const v = inp.value;
+  inp.value = v.slice(0, it.s) + it.insert + v.slice(it.e);
+  const caret = it.s + it.insert.length;
+  inp.setSelectionRange(caret, caret);
+  inp.focus();
+  syncQueryHL();
+  sendFilter();
+  updateMetaAc(); // re-suggest in the new context (e.g. operators after a key)
+}
+
+let metaDebounce = 0;
+{
+  const inp = $('f-query');
+  // autocomplete updates instantly; applying the query (parse + precompute)
+  // is debounced so a half-typed clause doesn't churn the engine or flash a
+  // transient parse error on every keystroke
+  inp.addEventListener('input', () => {
+    syncQueryHL();
+    updateMetaAc();
+    clearTimeout(metaDebounce);
+    metaDebounce = setTimeout(sendFilter, 200);
+  });
+  inp.addEventListener('scroll', () => { $('f-query-hl').scrollTop = inp.scrollTop; });
+  inp.addEventListener('click', updateMetaAc);
+  inp.addEventListener('focus', updateMetaAc);
+  inp.addEventListener('blur', () => setTimeout(closeMetaAc, 120));
+  inp.addEventListener('keydown', (e) => {
+    const open = !$('f-query-ac').hidden && acItems.length;
+    if (e.key === 'ArrowDown') {
+      if (!open) { updateMetaAc(); return; }
+      e.preventDefault(); acSel = Math.min(acItems.length - 1, acSel + 1); renderMetaAc();
+    } else if (e.key === 'ArrowUp') {
+      if (!open) return;
+      e.preventDefault(); acSel = Math.max(0, acSel - 1); renderMetaAc();
+    } else if ((e.key === 'Enter' || e.key === 'Tab') && open) {
+      e.preventDefault(); acceptAc(acSel);
+    } else if (e.key === 'Enter' && !e.shiftKey) {
+      // no suggestion open: apply now instead of inserting a newline
+      e.preventDefault(); closeMetaAc(); clearTimeout(metaDebounce); sendFilter();
+    } else if (e.key === 'Escape' && open) {
+      e.preventDefault(); e.stopPropagation(); closeMetaAc();
+    }
+  });
+}
 
 // ---------------------------------------------------------------------------
 // panels as draggable windows: drag by the header, and keep a z-stack where
@@ -1203,10 +1475,10 @@ function buildWarningsPanel() {
 
 const EV_ROW = 18;            // px per row
 const EV_MAX_SPACER = 12e6;   // cap the scroll height; index-mapped beyond it
-const evState = { from: 0, count: 0, reqId: 0, lastSeq: -1 };
+const evState = { from: 0, count: 0, reqId: 0, lastSeq: -1, matchOnly: false, matchCount: 0 };
 
 function evLayout() {
-  const n = UI.meta ? UI.meta.n : 0;
+  const n = evState.matchOnly ? evState.matchCount : (UI.meta ? UI.meta.n : 0);
   const viewH = $('events-scroll').clientHeight;
   const spacerH = Math.min(n * EV_ROW, EV_MAX_SPACER);
   const visN = Math.max(1, Math.ceil(viewH / EV_ROW) + 1);
@@ -1225,12 +1497,23 @@ function refreshEventsPanel() {
   evState.from = from;
   evState.count = L.visN;
   evState.reqId = UI.reqId++;
-  worker.postMessage({ type: 'events', from, count: L.visN, reqId: evState.reqId });
+  worker.postMessage({
+    type: evState.matchOnly ? 'events-matches' : 'events',
+    from, count: L.visN, reqId: evState.reqId,
+  });
   updateEventsSelBand();
 }
 
 function onEventsSlice(m) {
   if (m.reqId !== evState.reqId) return;
+  // the filtered slice reports the total match count; if it changed since we
+  // sized the virtual list, adopt it and re-lay-out once so the spacer/scroll
+  // reflect the real number of matches
+  if (m.filtered && m.matchCount !== evState.matchCount) {
+    evState.matchCount = m.matchCount;
+    $('ev-match-count').textContent = `${fmtNum(m.matchCount)} match${m.matchCount === 1 ? '' : 'es'}`;
+    if (evState.matchOnly) { refreshEventsPanel(); return; }
+  }
   const curSeq = UI.state ? UI.state.seq - 1 : -1;
   $('events-rows').innerHTML = m.events.map((ev) => `
     <div class="ev-row${ev.seq === curSeq ? ' cur' : ''}" data-seq="${ev.seq}" title="click: seek here and select the allocation">
@@ -1285,7 +1568,9 @@ function updateEventsPanel() {
   const cur = UI.state.seq - 1;
   if (cur === evState.lastSeq) return;
   evState.lastSeq = cur;
-  if ($('ev-follow').checked && (cur < evState.from || cur >= evState.from + evState.count - 1)) {
+  // in "matching only" mode the list isn't indexed by seq, so scroll-follow
+  // can't map the playhead to a row — just keep the highlight in sync
+  if (!evState.matchOnly && $('ev-follow').checked && (cur < evState.from || cur >= evState.from + evState.count - 1)) {
     evScrollToSeq(cur);
     return;
   }
@@ -1311,6 +1596,7 @@ function stepEventsSelection(delta) {
 
 function resetEventsPanel() {
   evState.lastSeq = -1;
+  evState.matchCount = 0;
   $('events-scroll').scrollTop = 0;
   $('events-rows').innerHTML = '';
   if (!$('events-panel').hidden) refreshEventsPanel();
@@ -1338,7 +1624,9 @@ new ResizeObserver(() => refreshEventsPanel()).observe($('events-scroll'));
   let dragCaptured = false;
   const yToSeq = (y) => evState.from + (y - scEl.getBoundingClientRect().top) / EV_ROW;
   scEl.addEventListener('pointerdown', (e) => {
-    if (e.button !== 0 || !UI.loaded) return;
+    // seq-range drag maps row position → seq, which only holds for the full
+    // contiguous list; disable it while showing the filtered subset
+    if (e.button !== 0 || !UI.loaded || evState.matchOnly) return;
     dragFromY = e.clientY;
     dragFromSeq = yToSeq(e.clientY);
     dragCaptured = false;
@@ -1376,6 +1664,14 @@ $('btn-events').onclick = () => {
 $('ev-follow').onchange = () => {
   evState.lastSeq = -1;
   updateEventsPanel();
+};
+$('ev-match').onchange = () => {
+  evState.matchOnly = $('ev-match').checked;
+  evState.matchCount = 0;
+  evState.lastSeq = -1;
+  $('events-toolbar').hidden = !evState.matchOnly;
+  $('events-scroll').scrollTop = 0;
+  refreshEventsPanel();
 };
 
 // ---------------------------------------------------------------------------
@@ -1899,6 +2195,8 @@ function buildSession() {
       fmode: fmode ? fmode.value : '1',
       sizeMin: $('f-size-min').value,
       sizeMax: $('f-size-max').value,
+      metaQuery: $('f-query').value,
+      range: UI.rangeFilter,
       // checkbox states by index — meaningful only against the same trace's
       // site/thread list, which is exactly what the file-name-scoped key gives us
       sites: [...document.querySelectorAll('#filter-panel input[data-site]')].map((b) => b.checked),
@@ -1958,10 +2256,15 @@ function applySession(obj) {
     if (fr) fr.checked = true;
     if (f.sizeMin !== undefined) $('f-size-min').value = f.sizeMin;
     if (f.sizeMax !== undefined) $('f-size-max').value = f.sizeMax;
+    if (f.metaQuery !== undefined) $('f-query').value = f.metaQuery;
+    else if (f.metaKey || f.metaVal) $('f-query').value = `${f.metaKey || ''}:${f.metaVal || ''}`;
+    UI.rangeFilter = f.range && f.range.lo && f.range.hi ? { lo: f.range.lo, hi: f.range.hi } : null;
+    syncRangeRow();
     const siteBoxes = [...document.querySelectorAll('#filter-panel input[data-site]')];
     (f.sites || []).forEach((checked, i) => { if (siteBoxes[i]) siteBoxes[i].checked = checked; });
     const thrBoxes = [...document.querySelectorAll('#filter-panel input[data-thr]')];
     (f.thrs || []).forEach((checked, i) => { if (thrBoxes[i]) thrBoxes[i].checked = checked; });
+    syncQueryHL();
     sendFilter();
   }
   if (obj.windows) {
@@ -2099,7 +2402,8 @@ function requestSelMirror() {
 // the current selection (direct if kind is seq, mirrored if kind is time)
 function updateEventsSelBand() {
   const band = $('events-sel-band');
-  if (!UI.sel) { band.hidden = true; return; }
+  // the band maps seq → row position, which the filtered list doesn't preserve
+  if (!UI.sel || evState.matchOnly) { band.hidden = true; return; }
   const seqRange = UI.sel.kind === 1 ? UI.sel : UI.selMirror;
   if (!seqRange || $('events-panel').hidden) { band.hidden = true; return; }
   const L = evLayout();
@@ -2580,6 +2884,7 @@ function buildDetailBody(root, info) {
     <button class="d-color-clear">clear</button></div>`;
   html += `<div class="actions">
     <button class="d-focus" title="Scroll/pan to this allocation and flash exactly where it is">⌖ focus</button>
+    <button class="d-range" title="Filter to every allocation whose address range overlaps this one's ${esc(info.addr)} – ${esc(info.end)}">⇔ match range</button>
     <button class="d-birth">go to birth</button>
     ${info.deathSeq !== null ? '<button class="d-death">go to death</button>' : ''}
   </div>`;
@@ -2587,6 +2892,8 @@ function buildDetailBody(root, info) {
   const q = (sel) => root.querySelector(sel);
   // same pulse as re-clicking the current event in the Events panel
   q('.d-focus').onclick = () => worker.postMessage({ type: 'flash-event', seq: info.e });
+  // filter to allocations whose byte extent intersects this one's [addr, end)
+  q('.d-range').onclick = () => setRangeFilter(info.addr, info.end);
   q('.d-birth').onclick = () => worker.postMessage({ type: 'jump', seq: info.seq + 1 });
   const dd = q('.d-death');
   if (dd) dd.onclick = () => worker.postMessage({ type: 'jump', seq: info.deathSeq + 1 });

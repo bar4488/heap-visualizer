@@ -154,6 +154,28 @@
       <button id="filter-clear">clear</button>
     </div>
     <div class="filter-row"><label>size <input id="f-size-min" placeholder="min (e.g. 4k)" size="9">–<input id="f-size-max" placeholder="max" size="9"></label></div>
+    <div class="filter-row f-query-row">
+      <label for="f-query">query</label>
+      <div class="query-wrap">
+        <div id="f-query-box" class="query-box">
+          <div id="f-query-hl" class="query-hl" aria-hidden="true"
+               data-ph="e.g.  size>4096 op:realloc pool:gfx   —   any field: size, site, thr, addr, id + your metadata   —   AND / OR / NOT, (grouping), a..b ranges"></div>
+          <textarea id="f-query" class="query-input" rows="3" autocomplete="off"
+                    spellcheck="false" autocapitalize="off"></textarea>
+        </div>
+        <div id="f-query-ac" class="query-ac" hidden></div>
+      </div>
+    </div>
+    <div class="filter-row"><span id="f-query-err" class="query-err" hidden></span></div>
+    <div class="filter-row f-range-row" id="f-range-row" hidden>
+      <label>address range</label>
+      <span id="f-range-val" class="range-val"></span>
+      <button id="f-range-clear" title="Clear the address-range filter">×</button>
+    </div>
+    <div class="filter-row">
+      <input id="f-tag-name" placeholder="tag name for matches" size="16" list="tag-names">
+      <button id="f-tag-apply" title="Create/apply a tag to every allocation matching the current filter">tag matches</button>
+    </div>
     <div id="f-sites" class="check-group"></div>
     <div id="f-thrs" class="check-group"></div>
     <div class="an-section">
@@ -218,9 +240,15 @@
 <div id="events-panel" class="panel" hidden>
   <div class="panel-head">Events
     <span class="head-actions">
+      <label title="List only the allocations matching the Filter panel (metadata, site, thread, size, tags)"><input type="checkbox" id="ev-match"> matching only</label>
       <label title="Keep the current event in view while stepping / playing"><input type="checkbox" id="ev-follow" checked> follow</label>
       <button class="panel-close" data-close="events-panel">×</button>
     </span>
+  </div>
+  <div id="events-toolbar" hidden>
+    <span id="ev-match-count" class="count"></span>
+    <input id="ev-tag-name" placeholder="tag name for these" size="14" list="tag-names">
+    <button id="ev-tag-apply" title="Apply this tag to every allocation matching the filter">tag all</button>
   </div>
   <div id="events-scroll" tabindex="0">
     <div id="events-spacer"></div>

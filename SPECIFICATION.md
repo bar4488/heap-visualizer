@@ -80,8 +80,16 @@ Conventional file extension: **`.heapl`** (content is JSONL).
 
 - Each line is a complete, self-contained JSON object. No line spans multiple physical lines.
 - **Field order within an object is not significant.** Parsers must not depend on it.
-- Objects **may** carry fields not defined here; consumers **must** ignore unknown fields.
-  This is the forward-compatibility mechanism — new metadata never breaks old viewers.
+- Objects **may** carry fields not defined here; consumers **must** ignore unknown fields
+  for the purpose of rendering geometry. This is the forward-compatibility mechanism — new
+  metadata never breaks old viewers. A viewer **may** additionally surface such extra
+  key/value fields on `M`/`R` records (this one shows them in the allocation detail panel and
+  lets the Filter panel match allocations with a small query language — `AND`/`OR`/`NOT` and
+  grouping over `key:contains`, `key=exact`, numeric `key>N` / `key<=N`, and `key:lo..hi`
+  range clauses). The query addresses **every** allocation field, not just extra metadata:
+  the built-in columns `size`, `usable`, `id`, `seq`, `t`, `addr` (hex), `op`
+  (`malloc`/`realloc`), `site`, and `thr` are queryable by those same names alongside any
+  caller-defined keys.
 - Numbers (`t`, `size`, `seq`, `id`, `thr`) are JSON integers.
 - **Addresses are strings** (`"0x555555550000"`), because a 64-bit address does not fit
   safely in a JSON double. Hex, `0x`-prefixed, lowercase. The viewer parses them as u64.
@@ -318,7 +326,7 @@ range it covers. Clicking or dragging moves the playhead.
 | Play / pause | Advance the playhead in real time (by `t`) or step-by-step (by `seq`). |
 | Change `row_bytes` | Re-bucket the address-line rows live. |
 | Hover an allocation | Tooltip: `id`, addr range, size, site, thread, age, birth `t`/`seq`. |
-| Filter by `site`/`thr`/size | Dim or hide non-matching allocations everywhere. |
+| Filter by `site`/`thr`/size/metadata | Dim or hide non-matching allocations everywhere; metadata matches via a boolean query (`AND`/`OR`/`NOT`, grouping) over key contains/exact/numeric/range clauses. |
 | Jump to event | Center the address-line on the allocation an event touches. |
 
 ---
