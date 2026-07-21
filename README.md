@@ -1,14 +1,21 @@
 # heap-visualizer
 
-Heap allocation visualizer: renders a `.heapl` (JSONL) stream of
-malloc/free/realloc events on an address-line map with two coordinated
-timelines (temporal and sequential) and full time-travel.
+Program-trace analyzer: renders a `.heapl` (JSONL, format v2) stream of
+malloc/free/realloc events — plus spans (`B`/`E`) and logs (`L`) — on an
+address-line map with coordinated timelines (temporal, sequential, span/log
+lanes) and full time-travel.
 
 Parsing, seeking, and rasterization happen in a Rust - WebAssembly core
 running in a Web Worker with OffscreenCanvas; the page stays fully
 client-side.
 
-Supports analyzing heap-traces, tagging, and naming allocations, marking timestamps and addresses - and saving analysis into a `.heapa` file for later work.
+Work happens in **projects**: a directory with a hand-editable
+`project.json` grouping trace files into runs (a run's files merge by `t`);
+each run's analysis (tags, names, marks, window layout) auto-saves to a
+paired `.heapa` in the project. Directories open via the File System Access
+API, or through `bridge/heapviz-bridge.py` on browsers without it. Dropping
+a single `.heapl` still works as an ephemeral quick-look, with "Save as
+project" to keep it.
 
 ![Heap visualizer showing coordinated time and event timelines above the address map](docs/images/heap-visualizer-overview.png)
 

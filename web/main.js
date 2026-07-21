@@ -1,16 +1,25 @@
 // heap-visualizer main thread: DOM chrome and input. All heavy lifting (parse, seek,
 // raster) happens in the worker; this file forwards input and paints overlays.
+// Projects (directories, runs, .heapa auto-persist) live in project.js.
+
+import * as project from './project.js';
 
 const $ = (id) => document.getElementById(id);
 
 const CAT = ['#58a6ff', '#3fb950', '#f2cc60', '#ff7b72', '#bc8cff', '#39c5cf',
   '#f778ba', '#d29922', '#7ee787', '#ffa657', '#79c0ff', '#d2a8ff'];
 const RAMP = ['#0e4429', '#006d32', '#26a641', '#39d353'];
-const OPS = ['malloc', 'free', 'realloc'];
+const OPS = ['malloc', 'free', 'realloc', 'begin', 'end', 'log'];
+const OP_LETTER = ['M', 'F', 'R', 'B', 'E', 'L'];
+const OP_CLASS = ['m', 'f', 'r', 'b', 'e', 'l'];
 
 const dpr = window.devicePixelRatio || 1;
 
-const worker = new Worker('worker.js', { type: 'module' });
+// cache-bust the worker and (below) the wasm: browsers heuristically cache
+// subresources, so a rebuilt core would otherwise need a devtools
+// disable-cache reload to show up
+const BUILD_V = Date.now();
+const worker = new Worker(`worker.js?v=${BUILD_V}`, { type: 'module' });
 
 const UI = {
   meta: null,
@@ -89,6 +98,18 @@ function fmtNum(x) {
   return Number(x).toLocaleString('en-US');
 }
 
+// one-line description of an event, for the step readout
+function stepReadout(e) {
+  switch (e.op) {
+    case 3: return `begin “${e.name}”${e.thr !== undefined ? ` · thr ${e.thr}` : ' · global'}`;
+    case 4: return `end “${e.name}”${e.thr !== undefined ? ` · thr ${e.thr}` : ' · global'}`;
+    case 5: return `log [${e.lvl}] ${e.msg}`;
+    default:
+      return `${OPS[e.op]} ${e.addr} ${fmtAllocSize(e.size)}` +
+        `${e.invalid ? ' · ⚠ invalid free' : ''}${e.site ? ' · ' + e.site : ''}`;
+  }
+}
+
 function parseSize(s) {
   s = (s || '').trim().toLowerCase();
   if (!s) return 0;
@@ -114,7 +135,7 @@ const overlay = $('addr-overlay');
   const t = tltCanvas.transferControlToOffscreen();
   const s = tlsCanvas.transferControlToOffscreen();
   worker.postMessage(
-    { type: 'init', wasmURL: new URL('heap_visualizer_core.wasm', location.href).href, addr: a, tlt: t, tls: s, dpr },
+    { type: 'init', wasmURL: new URL(`heap_visualizer_core.wasm?v=${BUILD_V}`, location.href).href, addr: a, tlt: t, tls: s, dpr },
     [a, t, s],
   );
 }
@@ -138,11 +159,18 @@ new ResizeObserver(sendResizes).observe($('strip-t'));
 // loading
 // ---------------------------------------------------------------------------
 
-async function loadBuffer(buf, name) {
+// Load one or more trace buffers as a single (merged) stream. Multiple
+// buffers = one run: the core merges them by t.
+async function loadBuffers(buffers, name) {
   $('progress').hidden = false;
   $('progress-pct').textContent = '0%';
   UI.fileName = name;
-  worker.postMessage({ type: 'load', buffer: buf }, [buf]);
+  project.showLanding(false);
+  worker.postMessage({ type: 'load', buffers }, buffers);
+}
+
+async function loadBuffer(buf, name) {
+  loadBuffers([buf], name);
 }
 
 async function loadURL(url) {
@@ -151,6 +179,7 @@ async function loadURL(url) {
     // would resurface warnings that were fixed in the file
     const resp = await fetch(url, { cache: 'no-cache' });
     if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+    project.noteQuickLook({ url });
     loadBuffer(await resp.arrayBuffer(), url.split('/').pop());
   } catch (e) {
     $('st-trace').textContent = `failed to load ${url}: ${e.message}`;
@@ -168,6 +197,7 @@ async function handleFile(f) {
       $('st-trace').textContent = `analysis load failed: ${e.message}`;
     }
   } else {
+    project.noteQuickLook({ files: [f] });
     loadBuffer(await f.arrayBuffer(), f.name);
   }
 }
@@ -247,10 +277,12 @@ worker.onmessage = (ev) => {
         const e = m.event;
         // the worker already selected the allocation this event touches
         if (e.e !== undefined && e.e !== null) UI.selected = e.e;
-        $('st-info').textContent =
-          `${OPS[e.op]} id=${e.id} ${e.addr} ${fmtAllocSize(e.size)}${e.site ? ' · ' + e.site : ''}`;
-        // open the allocation dialog for the malloc/free we stepped onto
+        $('st-info').textContent = stepReadout(e);
+        // open the matching detail window: allocations for M/F/R, the
+        // span/log panel for B/E/L (selection covers every event kind)
         if (m.info) fillDetailPanel(m.info);
+        else if ((e.op === 3 || e.op === 4) && UI.spans && UI.spans[e.span]) selectSpan(UI.spans[e.span]);
+        else if (e.op === 5) selectLog({ lvl: e.lvl, msg: e.msg, src: e.src, thr: e.thr, seq: e.seq, t: e.t });
       }
       break;
     case 'xview':
@@ -299,6 +331,15 @@ worker.onmessage = (ev) => {
     case 'tlhover-result':
       onTlHoverResult(m);
       break;
+    case 'spans':
+      UI.spans = m.spans;
+      buildLanes();
+      break;
+    case 'logs':
+      UI.logs = m.logs;
+      buildLanes();
+      buildLogsPanel();
+      break;
     case 'convert-result':
       onConvertResult(m);
       break;
@@ -346,9 +387,28 @@ function onLoaded(m) {
   UI.xview = { zoom: 1, pan: 0 };
   updateHzButton();
   resetEventsPanel();
+  // span/log lanes: fetch once per trace; the strip appears only when the
+  // run actually has spans or logs
+  UI.spans = null;
+  UI.logs = null;
+  UI.laneVis = null;
+  UI.selSpan = null;
+  $('span-panel').hidden = true;
+  $('btn-logs').hidden = !m.meta.nLog;
+  $('btn-active').hidden = !m.meta.nSpan;
+  lgState.rows = null;
+  $('logs-term').innerHTML = '';
+  activeState.lastSeq = -1;
+  $('active-list').innerHTML = '';
+  if (m.meta.nSpan) worker.postMessage({ type: 'spans' });
+  if (m.meta.nLog) worker.postMessage({ type: 'logs' });
+  if (!m.meta.nSpan && !m.meta.nLog) buildLanes();
   $('trace-title').textContent = m.meta.title || UI.fileName || '';
+  const extraCounts =
+    (m.meta.nSpan ? ` / S ${fmtNum(m.meta.nSpan)}` : '') +
+    (m.meta.nLog ? ` / L ${fmtNum(m.meta.nLog)}` : '');
   $('st-trace').textContent =
-    `${UI.fileName || ''} · ${fmtNum(m.n)} events (M ${fmtNum(m.meta.nMalloc)} / F ${fmtNum(m.meta.nFree)} / R ${fmtNum(m.meta.nRealloc)})` +
+    `${UI.fileName || ''} · ${fmtNum(m.n)} events (M ${fmtNum(m.meta.nMalloc)} / F ${fmtNum(m.meta.nFree)} / R ${fmtNum(m.meta.nRealloc)}${extraCounts})` +
     ` · peak ${fmtBytes(m.meta.peakLive)} · ${m.meta.addrMin}–${m.meta.addrMax}`;
 
   // warnings badge
@@ -365,11 +425,18 @@ function onLoaded(m) {
   $('detail-panel').hidden = true;
   UI.detailInfo = null;
   // pinned allocation windows reference events of the previous trace
-  document.querySelectorAll('.pinned-detail').forEach((w) => w.remove());
+  document.querySelectorAll('.pinned-detail, .pinned-span').forEach((w) => w.remove());
   refreshDrawerDividers('left');
   refreshDrawerDividers('right');
-  restoreSession();
-  restoreMarksAutosave();
+  if (project.isRunOpen()) {
+    // a project run owns its analysis: the paired .heapa is the source of
+    // truth (it also carries the session/window layout)
+    project.afterTraceLoaded();
+  } else {
+    restoreSession();
+    restoreMarksAutosave();
+  }
+  project.onTraceLoaded();
 }
 
 function onState(m) {
@@ -400,6 +467,9 @@ function onState(m) {
   lastAddrMarkYs = m.addrMarkYs || [];
   renderAddrMarkLines();
   updateEventsPanel();
+  renderLanes();
+  updateLogsPanel();
+  updateActivePanel();
 }
 
 // ---------------------------------------------------------------------------
@@ -551,7 +621,7 @@ function buildSearchTargets(q) {
   });
   UI.names.forEach((v, e) => {
     if (match(v.name, v.addr)) items.push({
-      kind: 'alloc', label: v.name, sub: `id ${v.id} · ${v.addr}`,
+      kind: 'alloc', label: v.name, sub: `#${e} · ${v.addr}`,
       action: () => worker.postMessage({ type: 'jump', seq: e + 1, select: true }),
     });
   });
@@ -837,7 +907,8 @@ $('filter-clear').onclick = () => {
 // dockable/floating panels tracked by session (drawers, window positions) —
 // detail-panel and its pinned clones are excluded: they're per-allocation
 // and not meaningful to restore across a session
-const PANEL_IDS = ['play-panel', 'layout-panel', 'filter-panel', 'analysis-panel', 'warnings-panel', 'events-panel'];
+const PANEL_IDS = ['play-panel', 'layout-panel', 'filter-panel', 'analysis-panel', 'warnings-panel', 'events-panel',
+  'lanes-panel', 'span-panel', 'project-panel', 'logs-panel', 'active-panel'];
 
 let panelZ = 40;
 
@@ -845,9 +916,34 @@ function raisePanel(p) {
   p.style.zIndex = ++panelZ;
 }
 
+// docked windows are the default home (editor-style): a window the user has
+// never explicitly placed opens docked at its natural side; dragging it out
+// (or a restored floating position) opts it out via dataset.placed
+const DEFAULT_DOCK = {
+  'events-panel': 'bottom',
+  'logs-panel': 'bottom',
+  'warnings-panel': 'bottom',
+  'analysis-panel': 'right',
+  'span-panel': 'right',
+  'active-panel': 'right',
+  'detail-panel': 'right',
+  'project-panel': 'left',
+  'play-panel': 'left',
+  'layout-panel': 'left',
+  'filter-panel': 'left',
+  'lanes-panel': 'left',
+};
+
 function showPanel(id) {
   const p = $(id);
+  if (!p.dataset.dockSide && !p.dataset.placed) {
+    dockPanel(p, DEFAULT_DOCK[id] || 'right');
+  }
   p.hidden = false;
+  if (p.dataset.dockSide) {
+    uncollapseDock(p.dataset.dockSide);
+    refreshDrawerDividers(p.dataset.dockSide);
+  }
   raisePanel(p);
 }
 
@@ -895,7 +991,7 @@ function makePanelWindow(p) {
       // keep the window tracking the cursor continuously, even while
       // hovering a drop zone — it used to freeze there, which read as stuck
       floatTo(ev);
-      const side = dropSideAt(ev.clientX);
+      const side = dropSideAt(ev.clientX, ev.clientY);
       // refreshDrawerDividers rebuilds divider elements (and their pointer
       // listeners) from scratch — only run it on an actual zone change, not
       // every pointermove tick, or it visibly stutters the drag
@@ -905,7 +1001,7 @@ function makePanelWindow(p) {
       }
       if (side) {
         dropSide = side;
-        dropRef = showDropPreview(p, side, ev.clientY);
+        dropRef = showDropPreview(p, side, ev.clientX, ev.clientY);
       } else {
         dropSide = null;
         clearDropPreview();
@@ -922,10 +1018,11 @@ function makePanelWindow(p) {
       clearDropPreview();
       p.classList.remove('dragging');
       if (moved && dropSide) dockPanelAt(p, dropSide, dropRef);
+      // a deliberate float placement opts this window out of default docking
+      else if (moved) p.dataset.placed = '1';
       // normalizes hidden state for whichever drawer(s) were touched, and is
       // a harmless no-op for any that weren't
-      refreshDrawerDividers('left');
-      refreshDrawerDividers('right');
+      DOCK_SIDES.forEach(refreshDrawerDividers);
     }
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', finish);
@@ -940,55 +1037,71 @@ document.querySelectorAll('.panel').forEach(makePanelWindow);
 // be resized — without changing anything about how floating panels behave
 // ---------------------------------------------------------------------------
 
-// no manual show/hide control: a drawer is visible exactly when it has a
-// docked window in it, empty otherwise — see refreshDrawerDividers
-UI.drawers = { left: [], right: [], widthLeft: 300, widthRight: 300 };
+// a drawer is visible exactly when it has a docked window in it and is not
+// collapsed — see refreshDrawerDividers. Collapsing (the ◧ ⬓ ◨ status-bar
+// toggles) hides the drawer but keeps its windows locked inside, like other
+// editors' panel toggles.
+UI.drawers = {
+  left: [], right: [], bottom: [],
+  widthLeft: 300, widthRight: 300, heightBottom: 240,
+  collapsed: { left: false, right: false, bottom: false },
+};
+
+const DOCK_SIDES = ['left', 'right', 'bottom'];
 
 const panelFloatRect = new Map(); // panel element -> its floating {left,top,right,bottom}, for undock
 
-function drawerEl(side) { return $(side === 'left' ? 'drawer-left' : 'drawer-right'); }
+function drawerEl(side) { return $(`drawer-${side}`); }
+
+// the bottom drawer stacks panels horizontally; left/right stack vertically
+function drawerHoriz(side) { return side === 'bottom'; }
 
 function refreshDrawerDividers(side) {
   const dr = drawerEl(side);
-  dr.querySelectorAll('.drawer-vresize').forEach((d) => d.remove());
+  dr.querySelectorAll('.drawer-vresize, .drawer-hresize').forEach((d) => d.remove());
   // a docked-but-closed (×'d) panel stays a DOM child so re-opening it from
   // the toolbar still works, but it shouldn't hold the drawer open or get a
   // divider of its own
   const panels = [...dr.children].filter((c) => c.classList.contains('panel') && !c.hidden);
+  const horiz = drawerHoriz(side);
   panels.forEach((p, i) => {
     p.style.flex = '1 1 0';
     if (i > 0) {
       const div = document.createElement('div');
-      div.className = 'drawer-vresize';
+      div.className = horiz ? 'drawer-hresize' : 'drawer-vresize';
       dr.insertBefore(div, p);
-      wireVResize(div, panels[i - 1], p);
+      wireSplit(div, panels[i - 1], p, horiz);
     }
   });
-  dr.hidden = panels.length === 0;
+  dr.hidden = panels.length === 0 || UI.drawers.collapsed[side];
+  updateDockToggles();
 }
 
-// Drag the divider between two stacked panels. Snapshot every visible panel at
-// its current pixel height first, then move height only between the two panels
-// adjacent to the handle; otherwise flexbox redistributes the delta across all
-// docked panels in the drawer when there are three or more.
-function wireVResize(div, panelA, panelB) {
+// Drag the divider between two adjacent docked panels. Snapshot every visible
+// panel at its current pixel size first, then move size only between the two
+// panels adjacent to the handle; otherwise flexbox redistributes the delta
+// across all docked panels in the drawer when there are three or more.
+// `horiz` = panels flow horizontally (bottom drawer), so the split is on x.
+function wireSplit(div, panelA, panelB, horiz) {
+  const dim = horiz ? 'width' : 'height';
   div.addEventListener('pointerdown', (e) => {
     e.preventDefault();
     div.setPointerCapture(e.pointerId);
-    const startY = e.clientY;
+    const start = horiz ? e.clientX : e.clientY;
     const panels = [...div.parentElement.children]
       .filter((c) => c.classList.contains('panel') && !c.hidden);
     panels.forEach((p) => {
-      p.style.flex = `0 0 ${p.getBoundingClientRect().height}px`;
+      p.style.flex = `0 0 ${p.getBoundingClientRect()[dim]}px`;
     });
-    const startAH = panelA.getBoundingClientRect().height;
-    const startBH = panelB.getBoundingClientRect().height;
-    const totalH = startAH + startBH;
-    const minH = Math.min(60, totalH / 2);
+    const startA = panelA.getBoundingClientRect()[dim];
+    const startB = panelB.getBoundingClientRect()[dim];
+    const total = startA + startB;
+    const min = Math.min(60, total / 2);
     const move = (ev) => {
-      const ah = Math.max(minH, Math.min(totalH - minH, startAH + (ev.clientY - startY)));
-      panelA.style.flex = `0 0 ${ah}px`;
-      panelB.style.flex = `0 0 ${totalH - ah}px`;
+      const cur = horiz ? ev.clientX : ev.clientY;
+      const a = Math.max(min, Math.min(total - min, startA + (cur - start)));
+      panelA.style.flex = `0 0 ${a}px`;
+      panelB.style.flex = `0 0 ${total - a}px`;
     };
     const up = () => {
       div.removeEventListener('pointermove', move);
@@ -1002,21 +1115,55 @@ function wireVResize(div, panelA, panelB) {
   });
 }
 
+// status-bar dock toggles: collapse/expand a dock without undocking its
+// windows (the drawer just disappears until toggled back or a window opens)
+function toggleDock(side) {
+  UI.drawers.collapsed[side] = !UI.drawers.collapsed[side];
+  refreshDrawerDividers(side);
+}
+
+function uncollapseDock(side) {
+  if (UI.drawers.collapsed[side]) {
+    UI.drawers.collapsed[side] = false;
+    refreshDrawerDividers(side);
+  }
+}
+
+function updateDockToggles() {
+  for (const side of DOCK_SIDES) {
+    const btn = $(`dock-${side}`);
+    if (!btn) continue;
+    const hasPanels = [...drawerEl(side).children]
+      .some((c) => c.classList.contains('panel') && !c.hidden);
+    const collapsed = UI.drawers.collapsed[side];
+    btn.classList.toggle('on', hasPanels && !collapsed);
+    btn.title = `${collapsed ? 'show' : 'hide'} the ${side} dock` +
+      (hasPanels ? '' : ' (empty)');
+  }
+}
+
 function wireDrawerWidthResize(side) {
   const dr = drawerEl(side);
   const handle = document.createElement('div');
   handle.className = 'drawer-resize';
   dr.appendChild(handle);
+  const horiz = side === 'bottom'; // bottom dock resizes its *height*
   handle.addEventListener('pointerdown', (e) => {
     e.preventDefault();
     handle.setPointerCapture(e.pointerId);
-    const startX = e.clientX;
-    const startW = dr.getBoundingClientRect().width;
+    const start = horiz ? e.clientY : e.clientX;
+    const startSz = dr.getBoundingClientRect()[horiz ? 'height' : 'width'];
     const move = (ev) => {
-      const dx = ev.clientX - startX;
-      const w = Math.max(160, Math.min(600, side === 'left' ? startW + dx : startW - dx));
-      dr.style.width = `${w}px`;
-      UI.drawers[side === 'left' ? 'widthLeft' : 'widthRight'] = w;
+      if (horiz) {
+        const h = Math.max(100, Math.min(innerHeight * 0.6, startSz - (ev.clientY - start)));
+        dr.style.height = `${h}px`;
+        UI.drawers.heightBottom = h;
+      } else {
+        const dx = ev.clientX - start;
+        const w = Math.max(160, Math.min(600, side === 'left' ? startSz + dx : startSz - dx));
+        dr.style.width = `${w}px`;
+        UI.drawers[side === 'left' ? 'widthLeft' : 'widthRight'] = w;
+      }
     };
     const up = () => {
       handle.removeEventListener('pointermove', move);
@@ -1028,18 +1175,22 @@ function wireDrawerWidthResize(side) {
 }
 wireDrawerWidthResize('left');
 wireDrawerWidthResize('right');
+wireDrawerWidthResize('bottom');
 
 // dropSideAt/showDropPreview/clearDropPreview drive the drag-and-drop dock
 // path (see makePanelWindow): dock at a specific position, reorder within
 // the same drawer, or move between drawers, all by dragging a panel's header
-function dropSideAt(clientX) {
+function dropSideAt(clientX, clientY) {
   const leftDr = drawerEl('left');
   const rightDr = drawerEl('right');
+  const bottomDr = drawerEl('bottom');
+  if (!bottomDr.hidden && clientY >= bottomDr.getBoundingClientRect().top) return 'bottom';
   if (!leftDr.hidden && clientX <= leftDr.getBoundingClientRect().right) return 'left';
   if (!rightDr.hidden && clientX >= rightDr.getBoundingClientRect().left) return 'right';
   // activation zone at the screen edge, so a currently-empty (hidden) drawer
-  // can still be dropped into
+  // can still be dropped into (the bottom zone sits above the status bar)
   const EDGE = 44;
+  if (clientY >= innerHeight - 26 - EDGE && clientX > EDGE && clientX < innerWidth - EDGE) return 'bottom';
   if (clientX <= EDGE) return 'left';
   if (clientX >= innerWidth - EDGE) return 'right';
   return null;
@@ -1053,34 +1204,45 @@ dndIndicator.hidden = true;
 document.body.appendChild(dndIndicator);
 
 // shows an insertion-line preview at the position `p` would land in `side`'s
-// drawer for a drop at `clientY`, and returns the panel to insert before
+// drawer for a drop at the pointer, and returns the panel to insert before
 // (null = append at the end). Note: dr.children always includes the
 // permanent .drawer-resize width handle, so "empty" is judged by panel count.
-function showDropPreview(p, side, clientY) {
+// Left/right drawers insert by y (stacked); the bottom drawer by x (side by
+// side), with a vertical indicator line.
+function showDropPreview(p, side, clientX, clientY) {
   const dr = drawerEl(side);
   dr.hidden = false; // reveal as a preview even if currently empty
   document.querySelectorAll('.drawer.drop-target').forEach((d) => { if (d !== dr) d.classList.remove('drop-target'); });
   dr.classList.add('drop-target');
+  const horiz = drawerHoriz(side);
   const panels = [...dr.children].filter((c) => c.classList.contains('panel') && !c.hidden && c !== p);
   const ref = panels.find((cand) => {
     const cr = cand.getBoundingClientRect();
-    return clientY < cr.top + cr.height / 2;
+    return horiz ? clientX < cr.left + cr.width / 2 : clientY < cr.top + cr.height / 2;
   }) || null;
   let rect;
-  let y;
+  let pos;
   if (ref) {
     rect = ref.getBoundingClientRect();
-    y = rect.top;
+    pos = horiz ? rect.left : rect.top;
   } else if (panels.length) {
     rect = panels[panels.length - 1].getBoundingClientRect();
-    y = rect.bottom;
+    pos = horiz ? rect.right : rect.bottom;
   } else {
     rect = dr.getBoundingClientRect();
-    y = rect.top + 6;
+    pos = (horiz ? rect.left : rect.top) + 6;
   }
-  dndIndicator.style.left = `${rect.left}px`;
-  dndIndicator.style.width = `${rect.width}px`;
-  dndIndicator.style.top = `${y - 1}px`;
+  if (horiz) {
+    dndIndicator.style.left = `${pos - 1}px`;
+    dndIndicator.style.width = '2px';
+    dndIndicator.style.top = `${rect.top}px`;
+    dndIndicator.style.height = `${rect.height}px`;
+  } else {
+    dndIndicator.style.left = `${rect.left}px`;
+    dndIndicator.style.width = `${rect.width}px`;
+    dndIndicator.style.top = `${pos - 1}px`;
+    dndIndicator.style.height = '2px';
+  }
   dndIndicator.hidden = false;
   return ref;
 }
@@ -1095,6 +1257,7 @@ function dockPanelAt(p, side, beforeEl) {
   if (!oldSide) {
     panelFloatRect.set(p, { left: p.style.left, top: p.style.top, right: p.style.right, bottom: p.style.bottom });
   }
+  uncollapseDock(side); // docking into a hidden dock reveals it
   p.classList.add('docked');
   p.dataset.dockSide = side;
   p.hidden = false;
@@ -1135,7 +1298,7 @@ function undockPanel(p) {
   }
   panelFloatRect.delete(p);
   if (p.id) {
-    const arr = UI.drawers[side === 'left' ? 'left' : 'right'];
+    const arr = UI.drawers[side];
     const i = arr.indexOf(p.id);
     if (i >= 0) arr.splice(i, 1);
   }
@@ -1143,16 +1306,29 @@ function undockPanel(p) {
   raisePanel(p);
 }
 
-// re-dock panels and restore drawer width/visibility from a saved session
+// re-dock panels and restore drawer sizes/visibility from a saved session
 function applyDrawersState(d) {
   if (!d) return;
-  UI.drawers = { left: [], right: [], widthLeft: d.widthLeft || 300, widthRight: d.widthRight || 300 };
+  UI.drawers = {
+    left: [], right: [], bottom: [],
+    widthLeft: d.widthLeft || 300,
+    widthRight: d.widthRight || 300,
+    heightBottom: d.heightBottom || 240,
+    collapsed: { left: false, right: false, bottom: false },
+  };
   drawerEl('left').style.width = `${UI.drawers.widthLeft}px`;
   drawerEl('right').style.width = `${UI.drawers.widthRight}px`;
-  // dockPanel pushes into UI.drawers.left/right itself and shows the drawer
+  drawerEl('bottom').style.height = `${UI.drawers.heightBottom}px`;
+  // dockPanel pushes into UI.drawers.<side> itself and shows the drawer
   // (via refreshDrawerDividers) as soon as it has content
   (d.left || []).forEach((id) => { if ($(id)) dockPanel($(id), 'left'); });
   (d.right || []).forEach((id) => { if ($(id)) dockPanel($(id), 'right'); });
+  (d.bottom || []).forEach((id) => { if ($(id)) dockPanel($(id), 'bottom'); });
+  // collapsed state applies after content is in place
+  if (d.collapsed) {
+    UI.drawers.collapsed = { left: !!d.collapsed.left, right: !!d.collapsed.right, bottom: !!d.collapsed.bottom };
+    DOCK_SIDES.forEach(refreshDrawerDividers);
+  }
 }
 
 // panel open/close plumbing
@@ -1162,12 +1338,22 @@ for (const [btn, panel] of [
   ['btn-filter', 'filter-panel'],
   ['btn-analysis', 'analysis-panel'],
   ['btn-warnings', 'warnings-panel'],
+  ['btn-lanes', 'lanes-panel'],
+  ['btn-logs', 'logs-panel'],
+  ['btn-active', 'active-panel'],
 ]) {
   $(btn).onclick = () => {
     const p = $(panel);
-    p.hidden = !p.hidden;
-    if (!p.hidden) raisePanel(p);
-    if (p.dataset.dockSide) refreshDrawerDividers(p.dataset.dockSide);
+    if (p.hidden) {
+      showPanel(panel);
+      // views that project current state need a fill on open
+      if (panel === 'logs-panel') updateLogsPanel(true);
+      else if (panel === 'active-panel') updateActivePanel(true);
+      else if (panel === 'events-panel') refreshEventsPanel();
+    } else {
+      p.hidden = true;
+      if (p.dataset.dockSide) refreshDrawerDividers(p.dataset.dockSide);
+    }
   };
 }
 document.querySelectorAll('.panel-close').forEach((b) => {
@@ -1190,7 +1376,9 @@ function buildWarningsPanel() {
     html += `<div class="group-title">showing first ${UI.warnings.length} of ${fmtNum(total)}</div>`;
   }
   html += UI.warnings.map((w) =>
-    `<div class="warn-row" data-seq="${w.seq}"><span class="warn-seq">#${w.seq}</span><span class="warn-msg">${esc(w.msg)}</span></div>`).join('');
+    `<div class="warn-row${w.anomaly ? ' anomaly' : ''}" data-seq="${w.seq}">` +
+    `<span class="warn-seq">#${w.seq}</span>` +
+    `<span class="warn-msg">${esc(w.msg)}${w.addr ? ` <span class="dim">${w.addr}</span>` : ''}</span></div>`).join('');
   list.innerHTML = html || '<i>none</i>';
   list.querySelectorAll('.warn-row').forEach((row) => {
     row.onclick = () => worker.postMessage({ type: 'jump', seq: +row.dataset.seq + 1 });
@@ -1232,14 +1420,26 @@ function refreshEventsPanel() {
 function onEventsSlice(m) {
   if (m.reqId !== evState.reqId) return;
   const curSeq = UI.state ? UI.state.seq - 1 : -1;
-  $('events-rows').innerHTML = m.events.map((ev) => `
+  $('events-rows').innerHTML = m.events.map((ev) => {
+    let body;
+    if (ev.op === 3 || ev.op === 4) {
+      body = `<span class="ev-addr">${ev.thr !== undefined ? `thr ${ev.thr}` : 'global'}</span>
+        <span class="ev-site">${esc(ev.name)}</span>`;
+    } else if (ev.op === 5) {
+      body = `<span class="ev-addr">${esc(ev.lvl)}</span>
+        <span class="ev-site" title="${esc(ev.msg)}">${esc(ev.msg)}</span>`;
+    } else {
+      body = `<span class="ev-addr">${ev.addr}</span>
+        <span class="ev-size">${fmtAllocSize(ev.size)}</span>
+        <span class="ev-site">${ev.invalid ? '⚠ invalid free' : ev.site ? esc(ev.site) : ''}</span>`;
+    }
+    return `
     <div class="ev-row${ev.seq === curSeq ? ' cur' : ''}" data-seq="${ev.seq}" title="click: seek here and select the allocation">
       <span class="ev-seq">${fmtNum(ev.seq)}</span>
-      <span class="ev-op ${['m', 'f', 'r'][ev.op]}">${['M', 'F', 'R'][ev.op]}</span>
-      <span class="ev-addr">${ev.addr}</span>
-      <span class="ev-size">${fmtAllocSize(ev.size)}</span>
-      <span class="ev-site">${ev.site ? esc(ev.site) : ''}</span>
-    </div>`).join('');
+      <span class="ev-op ${OP_CLASS[ev.op]}">${OP_LETTER[ev.op]}</span>
+      ${body}
+    </div>`;
+  }).join('');
   $('events-rows').querySelectorAll('.ev-row').forEach((row) => {
     row.onclick = () => {
       const seq = +row.dataset.seq;
@@ -1546,7 +1746,7 @@ function buildNamesSection() {
   list.innerHTML = entries.map(([e, v]) => `<div class="an-row">
       <input type="color" data-ncolor="${e}" value="${UI.allocColors.get(e) || '#3fb950'}" title="highlight color">
       <input type="text" class="grow" data-nname="${e}" value="${esc(v.name)}">
-      <span class="pos" data-ngo="${e}" title="select and jump to birth">id ${v.id} · ${v.addr}</span>
+      <span class="pos" data-ngo="${e}" title="select and jump to birth">#${e} · ${v.addr}</span>
       <button class="x" data-ndel="${e}">×</button>
     </div>`).join('');
   list.querySelectorAll('[data-ncolor]').forEach((inp) => {
@@ -1746,7 +1946,7 @@ async function buildMarks() {
     colorMode: +$('color-mode').value,
     tags: UI.tags.map((t) => ({ name: t.name, color: t.color, visible: t.visible })),
     taggedEvents,
-    names: [...UI.names.entries()].map(([e, v]) => ({ e, name: v.name, id: v.id, addr: v.addr })),
+    names: [...UI.names.entries()].map(([e, v]) => ({ e, name: v.name, addr: v.addr })),
     allocColors: [...UI.allocColors.entries()],
     bookmarks: UI.bookmarks,
     addrMarks: UI.addrMarks,
@@ -1805,7 +2005,7 @@ function applyMarks(obj, quiet) {
       worker.postMessage({ type: 'tag-events', tag, events });
     }
   }
-  UI.names = new Map((obj.names || []).map((r) => [r.e, { name: r.name, id: r.id, addr: r.addr }]));
+  UI.names = new Map((obj.names || []).map((r) => [r.e, { name: r.name, addr: r.addr }]));
   sendNames();
   UI.allocColors = new Map((obj.allocColors || []).filter(([, c]) => /^#[0-9a-f]{6}$/i.test(c)));
   for (const [e, c] of UI.allocColors) {
@@ -1905,6 +2105,7 @@ function buildSession() {
       thrs: [...document.querySelectorAll('#filter-panel input[data-thr]')].map((b) => b.checked),
     },
     playhead: UI.state ? UI.state.seq : 0,
+    laneVis: UI.laneVis,
     windows,
     drawers: UI.drawers || null,
     // pinned allocation windows: re-fetched by creator event index on
@@ -1970,10 +2171,15 @@ function applySession(obj) {
       const p = $(id);
       if (!w || !p) continue;
       p.hidden = w.hidden;
-      if (w.left) { p.style.left = w.left; p.style.top = w.top; p.style.right = w.right; p.style.bottom = w.bottom; }
+      if (w.left) {
+        p.style.left = w.left; p.style.top = w.top; p.style.right = w.right; p.style.bottom = w.bottom;
+        // a restored floating position is a user placement: don't re-dock it
+        p.dataset.placed = '1';
+      }
     }
   }
   if (obj.crop) setCrop(obj.crop.lo, obj.crop.hi);
+  if (obj.laneVis) { UI.laneVis = obj.laneVis; buildLanes(); }
   if (obj.playhead !== undefined) worker.postMessage({ type: 'seek', seq: obj.playhead });
   applyDrawersState(obj.drawers);
   restorePinnedWindows(obj.pinned);
@@ -2036,6 +2242,9 @@ function scheduleSessionAutosave() {
     if (!UI.loaded) return;
     saveSessionNow();
     if (UI.marksDirty) saveMarksAutosave();
+    // project runs also persist the analysis to their .heapa (only writes
+    // when something changed)
+    project.autosave();
   }, 2000);
 }
 scheduleSessionAutosave();
@@ -2530,7 +2739,7 @@ function onPickResult(m) {
     const name = UI.names.get(info.e)?.name;
     const tag = info.tag > 0 ? UI.tags[info.tag - 1] : null;
     const lines = [
-      `<b>${name ? `“${esc(name)}”  ` : ''}id ${info.id}</b>${info.site ? `  <span style="color:${CAT[(info.siteIdx ?? 0) % 12]}">${esc(info.site)}</span>` : ''}${tag ? `  <span style="color:${tag.color}">⬤ ${esc(tag.name)}</span>` : ''}`,
+      `<b>${name ? `“${esc(name)}”  ` : ''}#${info.e}</b>${info.site ? `  <span style="color:${CAT[(info.siteIdx ?? 0) % 12]}">${esc(info.site)}</span>` : ''}${tag ? `  <span style="color:${tag.color}">⬤ ${esc(tag.name)}</span>` : ''}`,
       `${info.addr} – ${info.end}  <span class="g">${fmtAllocSize(info.size)}</span>${info.usable ? ` <span class="dim">(usable ${fmtAllocSize(info.usable)})</span>` : ''}`,
       `<span class="dim">born</span> seq ${fmtNum(info.seq)} · t ${fmtTime(info.t)}   <span class="dim">age</span> ${fmtTime(info.age)}`,
       `${info.thr !== null ? `<span class="dim">thr</span> ${info.thr}   ` : ''}` +
@@ -2551,7 +2760,7 @@ function onPickResult(m) {
 // of pinned windows at once.
 function buildDetailBody(root, info) {
   const rows = [
-    ['id', info.id],
+    ['alloc', `#${info.e} (birth event)`],
     ['range', `${info.addr} – ${info.end}`],
     ['size', fmtAllocSizeDetail(info.size)],
     info.usable ? ['usable', fmtAllocSizeDetail(info.usable)] : null,
@@ -2592,7 +2801,7 @@ function buildDetailBody(root, info) {
   if (dd) dd.onclick = () => worker.postMessage({ type: 'jump', seq: info.deathSeq + 1 });
   q('.d-name').onchange = () => {
     const v = q('.d-name').value.trim();
-    if (v) UI.names.set(info.e, { name: v, id: info.id, addr: info.addr });
+    if (v) UI.names.set(info.e, { name: v, addr: info.addr });
     else UI.names.delete(info.e);
     buildNamesSection();
     sendNames();
@@ -2664,7 +2873,7 @@ function placeLivePanel(panel, reset = false) {
   const nx = clampX(x);
   let moved = Math.abs(nx - x) > 0.5;
   x = nx;
-  const pins = [...document.querySelectorAll('.pinned-detail')].map((w) => w.getBoundingClientRect());
+  const pins = [...document.querySelectorAll('.pinned-detail, .pinned-span')].map((w) => w.getBoundingClientRect());
   const clash = () => pins.some((p) => Math.abs(p.left - x) < 48 && Math.abs(p.top - y) < 48);
   while (clash() && y > 40) {
     x = clampX(x + 28);
@@ -2681,7 +2890,11 @@ function placeLivePanel(panel, reset = false) {
 
 function fillDetailPanel(info) {
   const panel = $('detail-panel');
-  if (!info) { panel.hidden = true; return; }
+  if (!info) {
+    panel.hidden = true;
+    if (panel.dataset.dockSide) refreshDrawerDividers(panel.dataset.dockSide);
+    return;
+  }
   // never two windows for the same allocation: if it is already pinned,
   // bring that window to the front instead of opening a duplicate
   const dup = document.querySelector(`.pinned-detail[data-e="${info.e}"]`);
@@ -2694,12 +2907,14 @@ function fillDetailPanel(info) {
   panel.querySelector('.ph-t').textContent = detailTitle(info);
   buildDetailBody($('detail-body'), info);
   const wasHidden = panel.hidden;
-  panel.hidden = false;
-  // only reset/cascade position when the live panel was just vacated by a
-  // pin (so a fresh window doesn't land on the pinned one); a plain close
-  // (× or Escape) leaves the window where the user left it unless that spot is
-  // now covered by an open drawer
-  if (wasHidden) placeLivePanel(panel, UI.detailWasPinned || !panelHasManualPosition(panel));
+  showPanel('detail-panel'); // docks right by default, like the other windows
+  // floating mode only: reset/cascade position when the live panel was just
+  // vacated by a pin (so a fresh window doesn't land on the pinned one); a
+  // plain close (× or Escape) leaves the window where the user left it
+  // unless that spot is now covered by an open drawer
+  if (!panel.dataset.dockSide && wasHidden) {
+    placeLivePanel(panel, UI.detailWasPinned || !panelHasManualPosition(panel));
+  }
   UI.detailWasPinned = false;
   raisePanel(panel);
 }
@@ -2761,6 +2976,7 @@ $('d-pin').onclick = () => {
   createPinnedWindow(info, live.getBoundingClientRect());
   UI.detailWasPinned = true;
   live.hidden = true;
+  if (live.dataset.dockSide) refreshDrawerDividers(live.dataset.dockSide);
 };
 
 // ---------------------------------------------------------------------------
@@ -2792,4 +3008,618 @@ function positionTooltipNearMouse() {
   if (y + r.height > innerHeight - 8) y = mouse.y - r.height - pad;
   tooltip.style.left = `${Math.max(4, x)}px`;
   tooltip.style.top = `${Math.max(4, y)}px`;
+}
+
+// ---------------------------------------------------------------------------
+// project layer bootstrap (landing screen, runs, .heapa auto-persist)
+// ---------------------------------------------------------------------------
+
+project.init({
+  loadBuffers,
+  loadDemo: () => loadURL('demo.heapl'),
+  buildMarks,
+  applyMarks: (obj) => applyMarks(obj, true),
+  status: (text) => { $('st-info').textContent = text; },
+  isLoaded: () => UI.loaded,
+  raisePanel,
+  showPanel,
+  panelClosed: (p) => { if (p.dataset.dockSide) refreshDrawerDividers(p.dataset.dockSide); },
+});
+
+// ---------------------------------------------------------------------------
+// span/log lanes (spec v2 Part III, first slice): flame ribbons for the
+// global lane and each thread lane, plus level-colored log ticks — temporal
+// axis, sharing the time strip's view range and the playhead. Rendered on
+// the main thread (span counts are small next to event counts); the full
+// axis×content lane model (reorder, sequential-axis lanes, analysis spans)
+// builds on this.
+// ---------------------------------------------------------------------------
+
+const LANE_ROW = 13;      // px per nesting depth row
+const LANE_GAP = 3;       // px between lanes
+const LANE_LOG = 12;      // px for the log tick lane
+const LANE_MAX_DEPTH = 3; // deeper nesting draws into the last row
+
+let laneHits = [];        // hit-test rects of the last render (CSS px)
+
+function laneNameColor(name) {
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+  return CAT[h % CAT.length];
+}
+
+const LOG_LVL_COLOR = {
+  trace: '#484f58', debug: '#6e7681', info: '#58a6ff',
+  warn: '#d29922', error: '#f85149', fatal: '#ff7b72',
+};
+
+// group spans into lanes and assign nesting depths (stack sweep per lane)
+function buildLanes() {
+  const spans = UI.spans || [];
+  const logs = UI.logs || [];
+  const strip = $('lane-strip');
+  const lanes = [];
+  const grouped = new Map(); // lane key -> spans
+  for (const sp of spans) {
+    const key = sp.thr === null ? 'global' : `thr ${sp.thr}`;
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key).push(sp);
+  }
+  // global lane first, then thread lanes in id order
+  const keys = [...grouped.keys()].sort((a, b) => {
+    if (a === 'global') return -1;
+    if (b === 'global') return 1;
+    return +a.slice(4) - +b.slice(4);
+  });
+  // lane visibility: user-chosen set (Lanes panel, persisted per run).
+  // Default keeps the strip calm: global phases + logs on, per-thread
+  // function lanes opt-in.
+  if (!UI.laneVis) {
+    UI.laneVis = { logs: true };
+    for (const k of keys) UI.laneVis[k] = k === 'global';
+    // a run with only thread spans still shows something by default
+    if (!keys.includes('global') && keys.length) UI.laneVis[keys[0]] = true;
+  }
+  const n = UI.meta ? UI.meta.n : 0;
+  for (const key of keys) {
+    const list = grouped.get(key);
+    // depth: number of open ancestors at begin (spans arrive in begin order)
+    const stack = []; // end indices of open ancestors
+    let rows = 1;
+    for (const sp of list) {
+      const b = sp.begin ?? -1;
+      const e = sp.end ?? n;
+      while (stack.length && stack[stack.length - 1] <= b) stack.pop();
+      sp.depth = Math.min(stack.length, LANE_MAX_DEPTH - 1);
+      rows = Math.max(rows, sp.depth + 1);
+      stack.push(e);
+    }
+    lanes.push({ key, spans: list, rows, on: UI.laneVis[key] !== false });
+  }
+  UI.laneAll = { lanes, hasLogs: logs.length > 0 };
+  UI.laneLayout = {
+    lanes: lanes.filter((l) => l.on),
+    hasLogs: logs.length > 0 && UI.laneVis.logs !== false,
+  };
+  $('btn-lanes').hidden = !(lanes.length || logs.length);
+  buildLanesPanel();
+  const shown = UI.laneLayout.lanes.length || UI.laneLayout.hasLogs;
+  strip.hidden = !shown;
+  if (shown) {
+    // the canvas is laid out at full content height; the strip viewport is
+    // capped and scrolls when there are more lanes than fit
+    const h = UI.laneLayout.lanes.reduce((s, l) => s + l.rows * LANE_ROW + LANE_GAP, 0) +
+      (UI.laneLayout.hasLogs ? LANE_LOG : 0) + 4;
+    UI.laneLayout.contentH = h;
+    strip.style.height = `${Math.min(160, h)}px`;
+    renderLanes();
+  }
+}
+
+// the Lanes panel: check = lane shown; choices persist with the session
+function buildLanesPanel() {
+  const box = $('lanes-list');
+  const A = UI.laneAll;
+  if (!A || (!A.lanes.length && !A.hasLogs)) {
+    box.innerHTML = '<div class="empty">this run has no spans or logs</div>';
+    return;
+  }
+  let html = A.lanes.map((l) => `<label><input type="checkbox" data-lane="${esc(l.key)}"
+    ${UI.laneVis[l.key] !== false ? 'checked' : ''}> ${esc(l.key)}
+    <span class="dim">· ${l.spans.length} span${l.spans.length === 1 ? '' : 's'}</span></label>`).join('');
+  if (A.hasLogs) {
+    html += `<label><input type="checkbox" data-lane="logs"
+      ${UI.laneVis.logs !== false ? 'checked' : ''}> logs
+      <span class="dim">· ${(UI.logs || []).length} entries</span></label>`;
+  }
+  box.innerHTML = html;
+  box.querySelectorAll('[data-lane]').forEach((inp) => {
+    inp.onchange = () => {
+      UI.laneVis[inp.dataset.lane] = inp.checked;
+      buildLanes();
+    };
+  });
+  $('lanes-allnone').querySelectorAll('a').forEach((a) => {
+    a.onclick = () => {
+      const on = a.dataset.an === 'all';
+      for (const l of UI.laneAll.lanes) UI.laneVis[l.key] = on;
+      UI.laneVis.logs = on;
+      buildLanes();
+    };
+  });
+}
+
+let laneHover = null;   // hit under the cursor (for highlight)
+
+function renderLanes() {
+  const L = UI.laneLayout;
+  const strip = $('lane-strip');
+  if (!L || strip.hidden || !UI.loaded) return;
+  const cv = $('lanes');
+  const w = strip.clientWidth;
+  const h = Math.max(strip.clientHeight, L.contentH || 0);
+  if (!w || !h) return;
+  if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) {
+    cv.width = Math.round(w * dpr);
+    cv.height = Math.round(h * dpr);
+    cv.style.height = `${h}px`;
+  }
+  const ctx = cv.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  const v = UI.tlT;
+  const span = Math.max(1e-9, v.hi - v.lo);
+  const xOf = (t) => ((t - v.lo) / span) * w;
+  laneHits = [];
+
+  let y = 2;
+  ctx.textBaseline = 'middle';
+  let laneIdx = 0;
+  const labelChips = []; // drawn last so ribbons never cover them
+  for (const lane of L.lanes) {
+    const laneH = lane.rows * LANE_ROW;
+    // alternating lane bands + separators keep rows readable
+    if (laneIdx % 2 === 1) {
+      ctx.fillStyle = 'rgba(230,237,243,0.025)';
+      ctx.fillRect(0, y - 1, w, laneH + LANE_GAP - 1);
+    }
+    ctx.fillStyle = 'rgba(48,54,61,0.6)';
+    ctx.fillRect(0, y + laneH + LANE_GAP - 2, w, 1);
+    for (const sp of lane.spans) {
+      const rx0 = xOf(sp.t0);
+      const rx1 = xOf(sp.t1);
+      if (rx1 < 0 || rx0 > w) continue;
+      const x0 = Math.max(-4, rx0);
+      const bw = Math.max(2, Math.min(w + 8, rx1) - x0);
+      const by = y + sp.depth * LANE_ROW;
+      const color = laneNameColor(sp.name);
+      const hit = { x0, x1: x0 + bw, y0: by, y1: by + LANE_ROW, span: sp, lane: lane.key };
+      laneHits.push(hit);
+      const hovered = laneHover && laneHover.span === sp;
+      const selected = UI.selSpan === sp.i;
+      ctx.beginPath();
+      ctx.roundRect(x0, by + 1, bw, LANE_ROW - 3, 3);
+      ctx.fillStyle = color + (selected ? 'cc' : hovered ? 'aa' : '66');
+      ctx.fill();
+      ctx.lineWidth = selected ? 1.5 : 1;
+      ctx.strokeStyle = selected ? '#e6edf3' : color;
+      ctx.stroke();
+      if (bw > 30) {
+        ctx.font = '10px ui-monospace, monospace';
+        ctx.fillStyle = selected || hovered ? '#ffffff' : '#e6edf3';
+        const avail = bw - 10;
+        const label = sp.name.length * 6 > avail ? sp.name.slice(0, Math.max(1, avail / 6)) : sp.name;
+        ctx.fillText(label, Math.max(2, x0) + 5, by + LANE_ROW / 2);
+      }
+    }
+    labelChips.push({ text: lane.key, y: y + laneH / 2 });
+    y += laneH + LANE_GAP;
+    laneIdx++;
+  }
+
+  if (L.hasLogs) {
+    if (laneIdx % 2 === 1) {
+      ctx.fillStyle = 'rgba(230,237,243,0.025)';
+      ctx.fillRect(0, y - 1, w, LANE_LOG + 1);
+    }
+    for (const lg of UI.logs) {
+      const x = xOf(lg.t);
+      if (x < 0 || x > w) continue;
+      const hovered = laneHover && laneHover.log === lg;
+      ctx.fillStyle = LOG_LVL_COLOR[lg.lvl] || LOG_LVL_COLOR.info;
+      ctx.fillRect(x - (hovered ? 1 : 0), y + 1, hovered ? 3.5 : 1.5, LANE_LOG - 2);
+      laneHits.push({ x0: x - 3, x1: x + 3, y0: y, y1: y + LANE_LOG, log: lg });
+    }
+    labelChips.push({ text: 'logs', y: y + LANE_LOG / 2 });
+  }
+
+  // lane name chips over everything, like the strips' corner tags
+  ctx.font = '9px ui-monospace, monospace';
+  for (const chip of labelChips) {
+    const tw = ctx.measureText(chip.text).width;
+    ctx.fillStyle = 'rgba(13,17,23,0.78)';
+    ctx.beginPath();
+    ctx.roundRect(3, chip.y - 6.5, tw + 10, 13, 4);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(139,148,158,0.95)';
+    ctx.fillText(chip.text, 8, chip.y + 0.5);
+  }
+
+  // playhead (same convention as the strips above)
+  if (UI.state) {
+    const x = xOf(UI.state.t);
+    if (x >= -2 && x <= w + 2) {
+      ctx.fillStyle = 'rgba(230,237,243,0.08)';
+      ctx.fillRect(0, 0, Math.max(0, x), h);
+      ctx.fillStyle = '#e6edf3';
+      ctx.fillRect(Math.round(x), 0, 1.5, h);
+    }
+  }
+}
+
+function laneHitAt(ev) {
+  const strip = $('lane-strip');
+  const r = strip.getBoundingClientRect();
+  const x = ev.clientX - r.left;
+  const y = ev.clientY - r.top + strip.scrollTop; // hits are in content coords
+  // topmost (deepest nested) hit wins
+  for (let i = laneHits.length - 1; i >= 0; i--) {
+    const t = laneHits[i];
+    if (x >= t.x0 && x <= t.x1 && y >= t.y0 && y <= t.y1) return t;
+  }
+  return null;
+}
+
+// span/log detail panel — the lane counterpart of the allocation panel,
+// with the same pinning lifecycle (📌 keeps the window as-is; the next
+// span/log selection opens a fresh live panel)
+
+function buildSpanBody(root, sp) {
+  const laneName = sp.thr === null ? 'global' : `thr ${sp.thr}`;
+  const rows = [
+    ['name', sp.name],
+    ['lane', laneName],
+    ['from', sp.begin !== null ? `event ${fmtNum(sp.begin)} · ${fmtTime(sp.t0)}` : `before trace (${fmtTime(sp.t0)})`],
+    ['to', sp.end !== null ? `event ${fmtNum(sp.end)} · ${fmtTime(sp.t1)}` : `open at end (${fmtTime(sp.t1)})`],
+    ['duration', fmtTime(sp.t1 - sp.t0)],
+    ['events', fmtNum((sp.end ?? (UI.meta.n - 1)) - (sp.begin ?? 0) + 1)],
+  ];
+  let html = rows.map(([k, v2]) => `<div class="row"><span class="k">${k}</span><span>${esc(String(v2))}</span></div>`).join('');
+  html += `<div class="actions">
+    <button class="sp-begin">⏮ go to begin</button>
+    <button class="sp-end">go to end ⏭</button>
+    <button class="sp-zoom" title="Zoom both timelines to this span">🔍 zoom</button>
+    <button class="sp-crop" title="Crop: dim everything not created during this span">✂ crop</button>
+  </div>`;
+  root.innerHTML = html;
+  const b0 = sp.begin ?? 0;
+  const b1 = sp.end ?? Math.max(0, UI.meta.n - 1);
+  root.querySelector('.sp-begin').onclick = () => worker.postMessage({ type: 'jump', seq: b0 + 1, select: false });
+  root.querySelector('.sp-end').onclick = () => worker.postMessage({ type: 'jump', seq: b1 + 1, select: false });
+  root.querySelector('.sp-zoom').onclick = () => {
+    if (UI.setView[0]) UI.setView[0]({ lo: sp.t0, hi: Math.max(sp.t1, sp.t0 + 1) });
+  };
+  root.querySelector('.sp-crop').onclick = () => setCrop(b0, b1 + 1);
+}
+
+function buildLogBody(root, lg) {
+  const rows = [
+    ['level', lg.lvl],
+    ['message', lg.msg],
+    lg.src ? ['source', lg.src] : null,
+    lg.thr !== undefined ? ['thread', lg.thr] : null,
+    ['event', `${fmtNum(lg.seq)} · ${fmtTime(lg.t)}`],
+  ].filter(Boolean);
+  let html = rows.map(([k, v2]) => `<div class="row"><span class="k">${k}</span><span>${esc(String(v2))}</span></div>`).join('');
+  html += `<div class="actions"><button class="sp-begin">⏮ go to event</button></div>`;
+  root.innerHTML = html;
+  root.querySelector('.sp-begin').onclick = () => worker.postMessage({ type: 'jump', seq: lg.seq + 1, select: false });
+}
+
+// info = {kind:'span', sp} | {kind:'log', lg}; key dedupes pinned windows
+function spanInfoKey(info) {
+  return info.kind === 'span' ? `s${info.sp.i}` : `l${info.lg.seq}`;
+}
+
+function spanInfoTitle(info) {
+  return info.kind === 'span' ? `Span · ${info.sp.name}` : `Log · ${info.lg.lvl}`;
+}
+
+function buildSpanInfoBody(root, info) {
+  if (info.kind === 'span') buildSpanBody(root, info.sp);
+  else buildLogBody(root, info.lg);
+}
+
+function openSpanPanel(info) {
+  // never two windows for the same span/log: raise the pinned one instead
+  const dup = document.querySelector(`.pinned-span[data-key="${spanInfoKey(info)}"]`);
+  if (dup) {
+    raisePanel(dup);
+    return;
+  }
+  UI.spanInfo = info;
+  const panel = $('span-panel');
+  panel.querySelector('.ph-t').textContent = spanInfoTitle(info);
+  buildSpanInfoBody($('span-body'), info);
+  const wasHidden = panel.hidden;
+  showPanel('span-panel');
+  if (!panel.dataset.dockSide && wasHidden) {
+    placeLivePanel(panel, UI.spanWasPinned || !panelHasManualPosition(panel));
+  }
+  UI.spanWasPinned = false;
+  raisePanel(panel);
+}
+
+function selectSpan(sp) {
+  UI.selSpan = sp.i;
+  renderLanes();
+  openSpanPanel({ kind: 'span', sp });
+}
+
+function selectLog(lg) {
+  UI.selSpan = null;
+  renderLanes();
+  openSpanPanel({ kind: 'log', lg });
+}
+
+// standalone pinned span/log window — same lifecycle as pinned allocations
+function createPinnedSpanWindow(info, rect) {
+  const live = $('span-panel');
+  const win = document.createElement('div');
+  win.className = 'panel pinned-span';
+  win.dataset.key = spanInfoKey(info);
+  win.innerHTML = `<div class="panel-head"><span class="ph-t">${esc(spanInfoTitle(info))}</span>
+      <span class="head-actions">
+        <button class="d-pin pinned" title="Unpin — return this to the live Span/Log panel">📌</button>
+        <button class="panel-close">×</button>
+      </span></div>
+    <div class="panel-body detail-body"></div>`;
+  document.body.appendChild(win);
+  buildSpanInfoBody(win.querySelector('.panel-body'), info);
+  if (rect) {
+    win.style.left = `${rect.left}px`;
+    win.style.top = `${rect.top}px`;
+    win.style.right = 'auto';
+    win.style.bottom = 'auto';
+  }
+  win.querySelector('.panel-close').onclick = () => {
+    const side = win.dataset.dockSide;
+    win.remove();
+    if (side) refreshDrawerDividers(side);
+  };
+  win.querySelector('.d-pin').onclick = () => {
+    const side = win.dataset.dockSide;
+    const rr = win.getBoundingClientRect();
+    win.remove();
+    if (side) refreshDrawerDividers(side);
+    openSpanPanel(info);
+    if (!live.dataset.dockSide) {
+      live.style.left = `${rr.left}px`;
+      live.style.top = `${rr.top}px`;
+      live.style.right = 'auto';
+      live.style.bottom = 'auto';
+      placeLivePanel(live);
+    }
+  };
+  makePanelWindow(win);
+  raisePanel(win);
+  return win;
+}
+
+$('sp-pin').onclick = () => {
+  const info = UI.spanInfo;
+  if (!info) return;
+  const live = $('span-panel');
+  createPinnedSpanWindow(info, live.getBoundingClientRect());
+  UI.spanWasPinned = true;
+  live.hidden = true;
+  if (live.dataset.dockSide) refreshDrawerDividers(live.dataset.dockSide);
+};
+
+{
+  const strip = $('lane-strip');
+  new ResizeObserver(() => renderLanes()).observe(strip);
+  strip.addEventListener('mousemove', (ev) => {
+    const hit = laneHitAt(ev);
+    if ((hit && hit.span) !== (laneHover && laneHover.span) ||
+        (hit && hit.log) !== (laneHover && laneHover.log)) {
+      laneHover = hit;
+      renderLanes();
+    } else {
+      laneHover = hit;
+    }
+    strip.style.cursor = hit ? 'pointer' : 'crosshair';
+    if (hit && hit.span) {
+      const sp = hit.span;
+      showTooltip('lanes', [
+        `<b>${esc(sp.name)}</b>  <span class="dim">${esc(hit.lane)}</span>`,
+        `${fmtTime(sp.t0)} – ${fmtTime(sp.t1)}  <span class="g">${fmtTime(sp.t1 - sp.t0)}</span>`,
+        '<span class="dim">click: select · dblclick: zoom to span</span>',
+      ].join('\n'));
+      positionTooltipNearMouse();
+    } else if (hit && hit.log) {
+      const lg = hit.log;
+      showTooltip('lanes', [
+        `<b>[${esc(lg.lvl)}]</b> ${esc(lg.msg)}`,
+        `${lg.src ? esc(lg.src) + ' · ' : ''}${fmtTime(lg.t)}${lg.thr !== undefined ? ` · thr ${lg.thr}` : ''}`,
+        '<span class="dim">click: select</span>',
+      ].join('\n'));
+      positionTooltipNearMouse();
+    } else {
+      hideTooltip('lanes');
+    }
+  });
+  strip.addEventListener('mouseleave', () => {
+    hideTooltip('lanes');
+    if (laneHover) { laneHover = null; renderLanes(); }
+  });
+  strip.addEventListener('click', (ev) => {
+    const hit = laneHitAt(ev);
+    if (hit && hit.span) {
+      selectSpan(hit.span);
+    } else if (hit && hit.log) {
+      selectLog(hit.log);
+    } else if (UI.loaded) {
+      // empty area: deselect + plain seek, like the strips
+      if (UI.selSpan !== null && UI.selSpan !== undefined) { UI.selSpan = null; renderLanes(); }
+      const r = strip.getBoundingClientRect();
+      const v = UI.tlT;
+      const t = v.lo + ((ev.clientX - r.left) / r.width) * (v.hi - v.lo);
+      worker.postMessage({ type: 'seek', t });
+    }
+  });
+  strip.addEventListener('dblclick', (ev) => {
+    const hit = laneHitAt(ev);
+    if (hit && hit.span && UI.setView[0]) {
+      // zoom both timelines to the span
+      UI.setView[0]({ lo: hit.span.t0, hi: Math.max(hit.span.t1, hit.span.t0 + 1) });
+    } else if (UI.meta && UI.setView[0]) {
+      UI.setView[0]({ lo: UI.meta.tMin, hi: Math.max(UI.meta.tMax, UI.meta.tMin + 1) });
+    }
+  });
+  // zoom/pan on the lanes themselves — same gestures as the time strip,
+  // driving the shared temporal view (UI.setView[0] mirrors to the events
+  // strip); repaint immediately so the lanes feel attached to the wheel
+  strip.addEventListener('wheel', (e) => {
+    if (!UI.meta || !UI.setView[0]) return;
+    e.preventDefault();
+    const v = UI.tlT;
+    const span = v.hi - v.lo;
+    if (e.shiftKey) {
+      const d = span * (e.deltaY > 0 ? 0.15 : -0.15);
+      UI.setView[0]({ lo: v.lo + d, hi: v.hi + d });
+    } else {
+      const r = strip.getBoundingClientRect();
+      const c = v.lo + ((e.clientX - r.left) / r.width) * span;
+      const f = Math.exp(e.deltaY * 0.0015);
+      UI.setView[0]({ lo: c - (c - v.lo) * f, hi: c + (v.hi - c) * f });
+    }
+    renderLanes();
+  }, { passive: false });
+}
+
+// ---------------------------------------------------------------------------
+// Logs view: the run's L records as a terminal — monospace scrollback,
+// level-colored, click a line to seek there. Lines after the playhead are
+// dimmed ("not printed yet"); follow keeps the newest printed line in view.
+// ---------------------------------------------------------------------------
+
+const lgState = { rows: null, splitIdx: -1 };
+const LVL_BADGE = { trace: 'TRC', debug: 'DBG', info: 'INF', warn: 'WRN', error: 'ERR', fatal: 'FTL' };
+
+function buildLogsPanel() {
+  const term = $('logs-term');
+  const logs = UI.logs || [];
+  $('btn-logs').hidden = !logs.length;
+  lgState.splitIdx = -1;
+  if (!logs.length) {
+    term.innerHTML = '<div class="lg-empty">this run has no log records</div>';
+    lgState.rows = null;
+    return;
+  }
+  term.innerHTML = logs.map((lg, i) => `
+    <div class="lg-row future" data-i="${i}" data-seq="${lg.seq}" title="click: seek to this log">
+      <span class="lg-t">${fmtTime(lg.t)}</span>
+      <span class="lg-lvl ${lg.lvl}">${LVL_BADGE[lg.lvl] || 'INF'}</span>
+      <span class="lg-msg">${esc(lg.msg)}${lg.src ? ` <span class="lg-src">${esc(lg.src)}</span>` : ''}</span>
+    </div>`).join('');
+  lgState.rows = [...term.querySelectorAll('.lg-row')];
+  lgState.rows.forEach((row) => {
+    row.onclick = () => worker.postMessage({ type: 'jump', seq: +row.dataset.seq + 1, select: false });
+  });
+  applyLogsFilter();
+  updateLogsPanel(true);
+}
+
+function updateLogsPanel(force) {
+  if (!lgState.rows || !UI.state || $('logs-panel').hidden) return;
+  const logs = UI.logs;
+  const cur = UI.state.seq;
+  // rows [0, split) are before the playhead ("printed")
+  let lo = 0;
+  let hi = logs.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (logs[mid].seq < cur) lo = mid + 1; else hi = mid;
+  }
+  const split = lo;
+  if (!force && split === lgState.splitIdx) return;
+  const prev = lgState.splitIdx;
+  const a = force || prev < 0 ? 0 : Math.min(prev, split);
+  const b = force || prev < 0 ? lgState.rows.length : Math.max(prev, split);
+  for (let i = a; i < b; i++) lgState.rows[i].classList.toggle('future', i >= split);
+  lgState.splitIdx = split;
+  $('logs-term').querySelector('.lg-row.cur')?.classList.remove('cur');
+  if (split > 0) {
+    const rowEl = lgState.rows[split - 1];
+    rowEl.classList.add('cur');
+    if ($('lg-follow').checked) rowEl.scrollIntoView({ block: 'nearest' });
+  }
+}
+
+function applyLogsFilter() {
+  if (!lgState.rows) return;
+  const q = $('lg-filter').value.trim().toLowerCase();
+  UI.logs.forEach((lg, i) => {
+    const show = !q || lg.msg.toLowerCase().includes(q)
+      || (lg.src || '').toLowerCase().includes(q) || lg.lvl.includes(q);
+    lgState.rows[i].style.display = show ? '' : 'none';
+  });
+}
+$('lg-filter').oninput = applyLogsFilter;
+$('lg-follow').onchange = () => updateLogsPanel(true);
+
+// ---------------------------------------------------------------------------
+// Active spans view: the span stack open at the playhead, per lane, nested —
+// "where is the program right now". Click a row to select the span.
+// ---------------------------------------------------------------------------
+
+const activeState = { lastSeq: -1 };
+
+function updateActivePanel(force) {
+  if ($('active-panel').hidden || !UI.state || !UI.spans) return;
+  const cur = UI.state.seq;
+  if (!force && cur === activeState.lastSeq) return;
+  activeState.lastSeq = cur;
+  const curT = UI.state.t;
+  // a span is active once its B is applied and until its E is applied
+  const active = UI.spans.filter((sp) =>
+    (sp.begin === null || cur > sp.begin) && (sp.end === null || cur <= sp.end));
+  const list = $('active-list');
+  if (!active.length) {
+    list.innerHTML = '<div class="empty">no spans open at the playhead</div>';
+    return;
+  }
+  const byLane = new Map();
+  for (const sp of active) {
+    const key = sp.thr === null ? 'global' : `thr ${sp.thr}`;
+    if (!byLane.has(key)) byLane.set(key, []);
+    byLane.get(key).push(sp);
+  }
+  const keys = [...byLane.keys()].sort((a, b) => {
+    if (a === 'global') return -1;
+    if (b === 'global') return 1;
+    return +a.slice(4) - +b.slice(4);
+  });
+  let html = '';
+  for (const key of keys) {
+    html += `<div class="group-title">${esc(key)}</div>`;
+    for (const sp of byLane.get(key)) {
+      html += `<div class="as-row" data-sp="${sp.i}" style="padding-left:${8 + (sp.depth || 0) * 14}px"
+        title="click: select this span">
+        <span class="as-dot" style="background:${laneNameColor(sp.name)}"></span>
+        <span class="as-name">${esc(sp.name)}</span>
+        <span class="as-open">${fmtTime(Math.max(0, curT - sp.t0))}</span>
+      </div>`;
+    }
+  }
+  list.innerHTML = html;
+  list.querySelectorAll('.as-row').forEach((row) => {
+    row.onclick = () => selectSpan(UI.spans[+row.dataset.sp]);
+  });
+}
+
+// status-bar dock visibility toggles (windows stay locked in, editor-style)
+for (const side of DOCK_SIDES) {
+  $(`dock-${side}`).onclick = () => toggleDock(side);
 }

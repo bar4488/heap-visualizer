@@ -1,56 +1,45 @@
-# heap-visualizer — Heap Allocation Visualizer Specification
+# heap-visualizer — Program-Trace Analyzer Specification (v2)
+
+> v2 supersedes v1 (merged from `docs/spec-v2-draft.md` after the followup
+> notes). The project is in beta: v2 breaks the v1 format freely and carries
+> no compatibility machinery. Old traces are regenerated or converted.
+> Deferred: rendering invalid frees at their address ("ghost flash"), and
+> renaming the repo/tool from *visualizer* to *analyzer* (after the views
+> work lands).
 
 ---
 
 ## 1. Overview & Goals
 
-heap-visualizer visualizes the life of a program's heap. It consumes a **stream of allocation and
-free events** and renders them on an **address-line**: a 2D map of the address space where
-memory that is currently allocated is drawn as filled cells. A time control lets the user
-**time-travel** to any point in the trace and see exactly what was live then.
+heap-visualizer consumes a **program trace** — a stream of events in which
+heap events (malloc/free/realloc) are one kind among several (spans, logs) —
+and lets the user analyze it through coordinated **views**. The address-line
+(a 2D map of the address space where live memory is drawn as filled cells)
+is one view among peers. A time control lets the user **time-travel** to any
+point in the trace and see exactly what was live then.
 
 Design goals, in priority order:
 
-1. **Fast** — smooth interaction on traces with millions of events. Rendering happens in
-   WebAssembly + canvas/WebGL; the JS/DOM layer only handles chrome and input.
-2. **Portable** — runs fully client-side in a browser. A trace file
-   is dropped in and rendered.
-3. **Faithful** — the picture at time *T* is exactly the set of live allocations at *T*,
-   reconstructed deterministically from the stream.
-4. **Legible** — spatial layout (where in the address space) and temporal layout (when, and
-   in what order) are both first-class and shown simultaneously.
+1. **Fast** — smooth interaction on traces with millions of events. Rendering
+   happens in WebAssembly + canvas; the JS/DOM layer only handles chrome and
+   input.
+2. **Portable** — runs fully client-side in a browser. Projects live in a
+   local directory (File System Access API, or the local bridge for browsers
+   without it).
+3. **Faithful** — the picture at time *T* is exactly the set of live
+   allocations at *T*, reconstructed deterministically from the stream.
+4. **Legible** — spatial layout (where in the address space) and temporal
+   layout (when, and in what order) are both first-class and shown
+   simultaneously.
 
-### 1.1 The three coordinated views
+### 1.1 Principles that drive the format
 
-```
-┌───────────────────────────────────────────────────────────────┐
-│  TEMPORAL TIMELINE     x = wall-clock time (t)                  │  ← top strip
-│  ▏ █ ▏  █▏█▏  ▏          ▏█ ▏     █▏  ▏  ▏█▏▏▏▏▏▏  ▏   █          │
-├───────────────────────────────────────────────────────────────┤
-│  SEQUENTIAL TIMELINE   x = event index (seq)                   │  ← 2nd strip
-│  ▏█▏█▏█▏ ▏█▏ █▏█▏█▏ ▏█▏█▏█▏█▏ █▏█▏ ▏█▏█▏█▏ ▏█▏ █▏█▏ █▏█▏ █▏█▏   │
-├───────────────────────────────────────────────────────────────┤
-│                                                                │
-│  ADDRESS-LINE          rows of row_bytes each, empty collapse  │  ← main view
-│  0x...000 ████░░░░████████░░░░░░░░████                          │
-│  0x...040 ░░░░████░░░░░░░░████████████                          │
-│   ⋮ (collapsed empty rows)                                     │
-│  0x...a00 ████████████░░░░████                                 │
-│                                                                │
-└───────────────────────────────────────────────────────────────┘
-                       ▲ playhead (shared by all three views)
-```
-
-The **temporal timeline** and the **sequential timeline** differ precisely when event
-density is uneven in time. Example: 100 allocations packed into 1ms, then 2 allocations
-spread over the next 1ms.
-
-- On the **temporal** strip (x = time) the 100 dense events pile into a thin sliver and the
-  2 sparse events are far apart — you *see* the burst.
-- On the **sequential** strip (x = index) all 102 events are evenly spaced — you *see* the
-  order and count, not the timing.
-
-Both strips share a single playhead. Seeking on either seeks all three views.
+1. The stream is a general **program trace** — heap events are one record
+   kind among several; the address-line is one *view* among several.
+2. The format sheds everything a consumer can derive (`seq`, `id`) — records
+   carry only what the producer uniquely knows.
+3. The tool is a **project editor**, not a drop-target for single files
+   (drop stays as the quick-look path).
 
 ---
 
@@ -58,156 +47,173 @@ Both strips share a single playhead. Seeking on either seeks all three views.
 
 | Term | Meaning |
 |------|---------|
-| **Event** | One record in the stream: an allocation, a free, or a realloc. |
+| **Event** | One record in the stream: heap event (`M`/`F`/`R`), span begin/end (`B`/`E`), or log (`L`). |
 | **Allocation** | A live region `[addr, addr + size)` produced by a malloc/realloc event. |
-| **id** | A stream-unique integer naming one allocation, so frees can reference it. |
-| **seq** | Monotonic 0-based index of an event = its position in the stream. |
+| **Event index** | 0-based position of an event in the (merged) stream. Assigned by the consumer at parse; deterministic on every reparse of the same file set. |
+| **Birth index** | An allocation's internal handle: the event index of its creating `M`/`R`. Unique, stable, deterministic — `.heapa` names/tags/colors key allocations by it. |
 | **t** | Timestamp of an event, in the stream's time unit (default nanoseconds). |
-| **Live set** | The set of allocations that are allocated-and-not-yet-freed at a given point. |
-| **row_bytes** | How many bytes one row of the address-line spans. Viewer config, default `0x1000`. |
-| **Playhead** | The current point in the trace, expressed either as a `t` or a `seq`. |
+| **Live set** | The set of allocations that are allocated-and-not-yet-ended at a given point. |
+| **Lane** | One strip of the timeline stack; lane = axis × content (§6). |
+| **Playhead** | The current position (event index; `t` maps onto it). |
+| **Run** | One execution of the traced program: one or more `.heapl` streams merged by `t` (§5). |
 
 ---
 
-## 3. Event Stream Format (JSONL)
+## 3. Event Stream Format (JSONL, v2)
 
-The stream is **JSON Lines**: UTF-8 text, **one JSON object per line**, `\n`-separated.
-This is the v1 wire format — human-readable, greppable, hand-writable, and streamable.
-
-Conventional file extension: **`.heapl`** (content is JSONL).
+The stream is **JSON Lines**: UTF-8 text, one JSON object per line,
+`\n`-separated. Conventional file extension: **`.heapl`**.
 
 ### 3.1 General rules
 
-- Each line is a complete, self-contained JSON object. No line spans multiple physical lines.
-- **Field order within an object is not significant.** Parsers must not depend on it.
-- Objects **may** carry fields not defined here; consumers **must** ignore unknown fields.
-  This is the forward-compatibility mechanism — new metadata never breaks old viewers.
-- Numbers (`t`, `size`, `seq`, `id`, `thr`) are JSON integers.
-- **Addresses are strings** (`"0x555555550000"`), because a 64-bit address does not fit
-  safely in a JSON double. Hex, `0x`-prefixed, lowercase. The viewer parses them as u64.
-- Empty lines and lines beginning with `#` (after optional whitespace) are ignored, to
-  allow comments and blank separators in hand-authored files.
+- Each line is a complete, self-contained JSON object.
+- Field order within an object is not significant.
+- Objects **may** carry fields not defined here; consumers ignore unknown
+  fields and surface them as extra detail where sensible.
+- Unknown `op` values are skipped (robustness, not a compatibility promise).
+- Numbers (`t`, `size`, `thr`) are JSON integers.
+- **Addresses are strings** (`"0x555555550000"`) — a 64-bit address does not
+  fit safely in a JSON double. Hex, `0x`-prefixed, lowercase.
+- Empty lines and lines beginning with `#` (after optional whitespace) are
+  ignored.
+- **There is no `seq` and no `id`.** Stream order is authoritative; the
+  consumer assigns event indices at parse. Frees name allocations by
+  address (§3.4).
 
 ### 3.2 Record types (`op`)
 
-Every record has an `op` field naming its type:
-
 | `op` | Meaning |
 |------|---------|
-| `H`  | **Header** — stream metadata. See §3.3. |
-| `M`  | **Malloc** — a new allocation becomes live. See §3.4. |
-| `F`  | **Free** — an existing allocation ends. See §3.5. |
-| `R`  | **Realloc** — one allocation ends and a new one begins. See §3.6. |
+| `H`  | Header — stream metadata. |
+| `M`  | Malloc — a new allocation becomes live. |
+| `F`  | Free — the live allocation based at `addr` ends. |
+| `R`  | Realloc — the live allocation based at `old_addr` ends; a new one begins. |
+| `B`  | Span begin (§3.5). |
+| `E`  | Span end. |
+| `L`  | Log record (§3.6). |
 
 ### 3.3 Header record `H`
 
-The header **should** be the first line. At most one header per stream. It carries stream-wide
-metadata and viewer hints.
+Should be the first line; at most one per stream.
 
 ```json
-{"op":"H","v":1,"unit":"ns","arena_base":"0x555555550000","row_bytes":4096,"title":"seed=1"}
+{"op":"H","v":2,"unit":"ns","arena_base":"0x555555550000","row_bytes":4096,"title":"seed=1"}
 ```
 
-| Field | Req | Type | Meaning |
-|-------|-----|------|---------|
-| `op` | ✓ | `"H"` | Record type. |
-| `v` | ✓ | int | Format version. This spec is version `1`. |
-| `unit` | — | string | Time unit of every `t`: `"ns"` (default), `"us"`, `"ms"`, `"s"`, or `"tick"`. Display only; does not change ordering. |
-| `arena_base` | — | string | Lowest address the viewer should expect. A layout hint; the viewer still auto-fits to observed addresses. |
-| `row_bytes` | — | int | Suggested default row width. The viewer's own control overrides this; it is only a starting value. |
-| `title` | — | string | Human label for the trace, shown in the viewer chrome. |
-| `meta` | — | object | Free-form producer metadata (command line, hostname, allocator name, …). |
+| Field | Req | Meaning |
+|-------|-----|---------|
+| `v` | ✓ | Format version; this spec is `2`. The viewer rejects other versions with a clear message (a plain sanity field, not compat machinery). |
+| `unit` | — | Time unit of every `t`: `"ns"` (default), `"us"`, `"ms"`, `"s"`, `"tick"`. Display only. |
+| `arena_base` | — | Layout hint; the viewer still auto-fits. |
+| `row_bytes` | — | Suggested default row width. |
+| `title` | — | Human label shown in the chrome. |
+| `meta` | — | Free-form producer metadata. |
 
-If no header is present, consumers assume `v:1`, `unit:"ns"`, and auto-fit the address range.
+No header ⇒ `v:2`, `unit:"ns"`, auto-fit.
 
-### 3.4 Malloc record `M`
-
-An allocation `[addr, addr + size)` becomes live.
+### 3.4 Heap records `M` / `F` / `R`
 
 ```json
-{"seq":42,"t":10500,"op":"M","id":17,"addr":"0x555555551240","size":128,"thr":0,"site":"json_node"}
+{"op":"M","t":10500,"addr":"0x555555551240","size":128,"thr":0,"site":"json_node"}
+{"op":"F","t":11020,"addr":"0x555555551240","thr":0}
+{"op":"R","t":12030,"old_addr":"0x555555551240","addr":"0x555555560000","size":512,"thr":0}
 ```
 
-| Field | Req | Type | Meaning |
-|-------|-----|------|---------|
-| `op` | ✓ | `"M"` | Record type. |
-| `id` | ✓ | int | Stream-unique allocation id. Never reused, even after the allocation is freed. |
-| `addr` | ✓ | string | Base address (u64 hex string). |
-| `size` | ✓ | int | Size in bytes (the *requested* size; see §4.3 on alignment/overhead). Must be `> 0`. |
-| `t` | rec | int | Timestamp. Required in practice; if absent, treated as equal to the previous event's `t`. |
-| `seq` | — | int | Event index. If absent, the consumer assigns it from line position. See §3.7. |
-| `thr` | — | int | Originating thread id. |
-| `site` | — | string | Allocation-site tag (function name, symbol, or stack-hash). Drives coloring/filtering. |
-| `stack` | — | array | Optional call stack, outermost-last, as strings. |
+| `op` | Required | Optional |
+|------|----------|----------|
+| `M` | `addr`, `size` | `t`, `thr`, `site`, `stack`, `usable` |
+| `F` | `addr` | `t`, `thr` |
+| `R` | `old_addr`, `addr`, `size` | `t`, `thr`, `site`, `stack`, `usable` |
 
-### 3.5 Free record `F`
+- `t` is "required in practice": absent means *same as the previous event of
+  this stream*.
+- The live set guarantees **at most one live allocation per base address**,
+  so the address is the key — exactly what `free(ptr)` receives. `F` names
+  the allocation by `addr`; `R` names the old one by `old_addr`. `F` carries
+  no redundant `size` — geometry comes from the live set.
+- The consumer assigns each allocation its **birth index** at parse.
+- `size` is the requested size and must be `> 0` (zero/missing is flagged
+  and rendered as 1 byte). A producer that knows the real usable size may
+  add `usable` (rendered as a slack band).
 
-An allocation ends. It **must** reference the allocation by `id`.
+**Anomalies instead of errors.** Producer bugs are *detectable and
+showable*, not unparseable:
+
+- `F`/`R` naming an address with no live allocation → **invalid free**
+  anomaly; the live set is untouched.
+- `M`/`R` overlapping live allocations → **overlap** anomaly; the new
+  allocation wins and every overlapped allocation is **implicitly ended** at
+  that event.
+
+Anomalies are collected and surfaced (click-to-seek list; an anomaly view is
+part of the views model, §6).
+
+### 3.5 Span records `B` / `E` — one concept, three uses
 
 ```json
-{"seq":57,"t":11020,"op":"F","id":17,"addr":"0x555555551240","size":128,"thr":0}
+{"op":"B","t":12100,"name":"parse_json","thr":0}
+{"op":"E","t":15800,"thr":0}
+{"op":"B","t":20000,"name":"frame"}
+{"op":"E","t":29000}
 ```
 
-| Field | Req | Type | Meaning |
-|-------|-----|------|---------|
-| `op` | ✓ | `"F"` | Record type. |
-| `id` | ✓ | int | The id of the allocation being freed (from its `M`/`R` record). |
-| `t` | rec | int | Timestamp of the free. |
-| `seq` | — | int | Event index. |
-| `addr` | — | string | Redundant convenience copy of the freed base address. |
-| `size` | — | int | Redundant convenience copy of the freed size. |
-| `thr` | — | int | Thread performing the free. |
+| Field | `B` | `E` | Meaning |
+|-------|-----|-----|---------|
+| `name` | ✓ | opt | Span label. On `E`: cross-check against the span being closed (mismatch → warn, close anyway). |
+| `thr` | opt | opt | **Present** → the span belongs to that thread's lane and nests within it. **Absent** → the span is *global* (whole-program lane). There is no separate "phase" concept — a global span *is* the program-phase / frame / request marker. |
+| `t` | rec | rec | As for heap events. |
+| `args` | opt | — | Free-form payload shown on hover/detail. |
 
-`addr` and `size` are **optional and redundant** — the authoritative geometry comes from the
-matching `M`/`R` record. Producers should include them (cheap, and lets a viewer render a
-free without a fully built id→allocation map); consumers must not require them.
+Matching rules — any producer sloppiness still renders sensibly:
 
-**`free(NULL)` / no-op frees** carry no `id` of a live allocation and **should simply be
-omitted** from the stream. If a producer must record them, it emits `id:0` (the reserved
-null id) which consumers ignore for rendering.
+- `E` closes the **innermost open span on its lane** (lane = its `thr`, or
+  the global lane).
+- `E` with an empty lane stack: the span is treated as having begun **before
+  the trace started** — it renders from the first event to this `E`, named
+  by the `E`'s `name`. An `E` with no open span and no `name` is ignored.
+- Spans still open at end-of-stream extend to the last event.
+- Nesting is required only within a lane; lanes are independent.
 
-### 3.6 Realloc record `R`
+The three uses:
 
-Models `realloc`: the old allocation ends and a new one begins (possibly at a new address,
-possibly the same). Emitting a single `R` (rather than an `F`+`M` pair) preserves the *move*
-relationship so the viewer can draw a link/animation between old and new regions.
+1. **Profiling** (`thr` present): function enter/exit. A heap event on
+   thread `thr` is attributed to the span stack open on that lane at its
+   index — color-by-caller, filter-by-caller, top-allocators-by-path,
+   without per-event `stack` arrays.
+2. **Program phases** (`thr` absent): frames, requests, GC cycles. Repeating
+   names form a series the viewer steps/zooms through; filters can scope to
+   ("during `frame`").
+3. **Analysis annotation** (not in the stream): the user creates spans in
+   the analysis layer (`.heapa`) — same shape (name, lane, start/end index),
+   rendered in the same lanes (including thread lanes), visually
+   distinguished (dashed border). Time marks remain the degenerate point
+   case.
+
+### 3.6 Log record `L`
 
 ```json
-{"seq":88,"t":12030,"op":"R","id":40,"old_id":17,"addr":"0x555555560000","size":512,
- "old_addr":"0x555555551240","old_size":128,"thr":0,"site":"json_node"}
+{"op":"L","t":12110,"lvl":"error","msg":"connection timeout fd=7","thr":2,"fields":{"fd":7}}
 ```
 
-| Field | Req | Type | Meaning |
-|-------|-----|------|---------|
-| `op` | ✓ | `"R"` | Record type. |
-| `id` | ✓ | int | id of the **new** allocation (fresh, never reused). |
-| `old_id` | ✓ | int | id of the allocation being replaced. It becomes dead at this event. |
-| `addr` | ✓ | string | New base address (may equal `old_addr` for an in-place grow/shrink). |
-| `size` | ✓ | int | New size in bytes. |
-| `old_addr` | — | string | Convenience copy of the old base address. |
-| `old_size` | — | int | Convenience copy of the old size. |
-| `t`,`seq`,`thr`,`site`,`stack` | — | | As for `M`. |
+| Field | Req | Meaning |
+|-------|-----|---------|
+| `msg` | ✓ | The log line. |
+| `lvl` | — | `trace`/`debug`/`info`/`warn`/`error`/`fatal`; default `info`; unknown → `info`. |
+| `thr` | — | Emitting thread. |
+| `src` | — | Origin hint (`"server.c:412"`, logger name). |
+| `fields` | — | Structured key→scalar payload; searchable/filterable. |
 
-Semantics equivalent to: free `old_id`, then malloc a new region as `id`, atomically at this
-`seq`/`t`. A viewer that does not care about the move relationship may treat `R` as exactly
-that pair.
+Logs never mutate state: ticks on timeline lanes, rows in the events view,
+searchable, click-to-seek. Existing program logs enter via the **log
+importer**: a timestamp pattern turns a plain log file into an `L`-only
+sidecar (per-file import settings live in `project.json`).
 
-### 3.7 Ordering, `seq`, and timestamps
+### 3.7 Ordering and timestamps
 
-- **Stream order is authoritative.** Events are applied in the order they appear. `seq`, if
-  present, must equal the 0-based line index among event (non-comment, non-header) records
-  and must be strictly increasing; if absent the consumer assigns it. The **sequential
-  timeline** is exactly this `seq` axis.
-- **Timestamps are monotonic non-decreasing** (`t[i+1] >= t[i]`). Ties are allowed and are
-  the whole point of the two-timeline design: many events sharing one `t` form a burst that
-  the temporal view compresses and the sequential view spreads out. A consumer encountering
-  a decreasing `t` should clamp it to the previous value and may warn.
-- The two timelines are two projections of the same events: temporal uses `t`, sequential
-  uses `seq`. Nothing else differs.
-
-### 3.8 Validity rules
-
-Should render overlapping traces / double frees and so on (flag if necessary)
+- **Stream order is authoritative.**
+- `t` is monotonic non-decreasing; a decreasing `t` is clamped to the
+  previous value (warn). Ties are expected — they are what the sequential
+  axis is for.
 
 ---
 
@@ -215,133 +221,147 @@ Should render overlapping traces / double frees and so on (flag if necessary)
 
 ### 4.1 The live set
 
-At any point in the stream, the **live set** is the set of allocations that have been
-created and not yet freed. Applying events left-to-right:
+Applying events left-to-right:
 
-- `M{id,addr,size}` → add `id ↦ (addr,size,meta)` to the live set.
-- `F{id}` → remove `id` from the live set.
-- `R{id,old_id,addr,size}` → remove `old_id`, add `id ↦ (addr,size,meta)`.
+- `M{addr,size}` → add the allocation; implicitly end any live allocation it
+  overlaps (anomaly).
+- `F{addr}` → end the live allocation based at `addr` (none → anomaly,
+  no-op).
+- `R{old_addr,addr,size}` → end the one at `old_addr`, add the new one
+  (overlap rule applies).
+- `B`/`E`/`L` → never touch the live set.
 
-The picture the viewer draws at a playhead position is **the live set at that position** —
-nothing more. This makes the rendering a pure function of (stream, playhead).
+The picture at a playhead position is the live set at that position —
+rendering is a pure function of (stream, playhead).
 
 ### 4.2 Time travel
 
-Seeking to a target (by `t` or by `seq`) means: reconstruct the live set as of that point.
-
-- **Forward seek** replays events from the current position to the target.
-- **Backward seek** cannot simply "undo" cheaply if we only stored forward deltas, so the
-  viewer maintains **periodic snapshots** (checkpoints) of the live set — e.g. every *N*
-  events or every *K* live-set mutations. To reach target *X*: jump to the nearest snapshot
-  ≤ *X*, then replay forward to *X*. This bounds seek cost to *O(snapshot interval)*
-  regardless of trace length. Snapshot interval is a viewer tuning parameter, not part of
-  the stream.
-- Seeking by `t` first maps `t` to the `seq` of the last event with `t' <= t` (binary search
-  over the monotonic `t` array), then seeks by `seq`. So `seq` is the canonical internal
-  coordinate; `t` is a lookup into it.
+Seeking reconstructs the live set at the target event index. The viewer
+keeps periodic snapshots so backward/far seeks cost *O(snapshot interval)*;
+implicit ends (overlap victims) replay correctly in both directions. Seeking
+by `t` maps to the last event with `t' <= t` first; the event index is the
+canonical internal coordinate.
 
 ### 4.3 Requested size vs. real footprint
 
-`size` is the **requested** size. Real allocators round up (alignment, size classes) and add
-header overhead, so the true footprint is usually larger and allocations are spaced apart.
-v1 renders the requested `[addr, addr+size)` only. A producer that knows the real usable size
-may add an optional `usable` field (int, bytes); the viewer may render it as a lighter "slack"
-band after the requested region. Consumers ignore `usable` if unsupported.
+`size` is the requested size; `usable` (optional) may be larger and renders
+as a lighter slack band after the requested region.
 
 ---
 
-## 5. Visualization Model
+## 5. Project model
 
-### 5.1 The address-line
+Dropping a file stays as the quick-look path; the primary experience is a
+**project** — the tool opens like an editor.
 
-The address space is drawn as a grid:
+- A project is a **directory** the user picks once. The landing screen lists
+  recent projects. Two directory transports, one interface:
+  - **File System Access API** (Chromium): fully client-side.
+  - **Local bridge** (`bridge/heapviz-bridge.py`) for browsers without it:
+    a stdlib-only localhost server exposing the same read/write operations,
+    token-protected, bound to 127.0.0.1.
+- Files group into **runs**. A run is one execution of the traced program:
+  one or more `.heapl` streams (interposer output, app-emitted spans/logs)
+  plus imported plain logs. **Opening a run merges its files by `t`**
+  (stable; per-file order preserved on ties; earlier file wins ties). Event
+  indices are assigned over the merged stream — this is why `seq` had to
+  leave the wire format: producer-side indices can't survive a merge.
+- **`project.json`** at the root is the explicit, hand-editable manifest:
+  runs and their member files, per-file import settings (log timestamp
+  pattern), viewer defaults. If absent on first open, it is generated by a
+  scan (top-level `.heapl` files → one run each; a subdirectory with
+  `.heapl` files → one run merging them) and written.
+- **Analysis is auto-persisted.** Each run owns a `.heapa` in the project
+  (auto-paired, auto-saved on change). The `.heapa` also stores the run's
+  window layout, so reopening a run restores the whole workspace.
+- **Quick-look** (bare `.heapl`, no project) is fully ephemeral; on request
+  ("Save as project…") the trace is copied into a chosen directory together
+  with `project.json` and the current analysis.
+- Producers of one run must share a clock and `unit`. Allocation addresses
+  live only in the interposer stream, so the common split (heap file + log
+  file + span file) merges without cross-file identity concerns.
 
-- The viewer picks a **base** `B` (lowest address to show; from observed data or `arena_base`)
-  and a **row width** `row_bytes` `W` (default `0x1000`, changeable live).
-- An address `A` maps to **row** `floor((A − B) / W)` and **column offset** `(A − B) mod W`.
-- Within a row, bytes run **left → right**; rows stack **top → bottom**. So reading order is
-  the natural address order, like a hex dump.
-- An allocation `[addr, addr+size)` fills the cells it covers, wrapping across rows if it
-  spans a row boundary.
+`.heapa` references events by event index and allocations by birth index —
+both deterministic over the merged stream.
 
-**Empty-row collapsing.** Address spaces are sparse (mmap'd arenas far apart, huge gaps). A
-row containing **no live allocation** at the current playhead is **collapsed** to a thin
-gap-marker (e.g. a 1–2px ellipsis rule) instead of a full-height empty row. This keeps the
-picture dense and scrollable even across terabyte-wide address ranges. Collapsing is
-recomputed per playhead position (a row empty now may be full later). The set of non-empty
-rows is derived from the live set — an interval set over rows.
+## 6. Analyzer architecture: views and lanes
 
-**Changing `row_bytes` live.** The control re-buckets addresses into rows on the fly. Powers
-of two keep column offsets aligned to nice boundaries; the default `0x1000` matches a typical
-page so page-level fragmentation reads naturally.
+**One document, many views.** A run parses into a single document: the
+event stream, derived state (live set, span table, anomalies), and the
+analysis layer (tags, names, marks, analysis spans, filters). Every open
+window is a **view** — a projection of that document. Views coordinate
+through exactly three shared objects:
 
-### 5.2 Coloring
+| Shared state | Meaning |
+|--------------|---------|
+| **Playhead** | Current position (event index; `t` maps onto it). |
+| **Filter** | The active predicate; every view shows/dims by it. |
+| **Selection** | The allocation/event/span currently in focus. |
 
-Base semantics fixed by this spec so traces read consistently across viewers:
+A view never talks to another view — only to the document and the shared
+state. That contract is what makes new views cheap.
 
-- **Green** = an allocation event (a region becoming live) — used on the timelines to mark
-  `M`/`R` events, and as the default fill tint for live regions.
-- **Red** = a free event — used on the timelines to mark `F` and the freeing half of `R`.
-- **Collapsed/empty** = neutral gap marker.
+**Views (initial set, extensible):**
 
-Beyond that base, the address-line fill **may** be tinted by a secondary dimension the user
-picks: by `site`, by `thr`, by `size` bucket, or by age (how long the region has been live at
-the playhead). This is a viewer feature; use a categorical palette for `site`/`thr` and a
-sequential ramp for `size`/age. (See the project's data-viz guidance when choosing palettes.)
+| View | Projection |
+|------|-----------|
+| **Address-line** | The live set at the playhead, spatially. *(one view among peers)* |
+| **Events** | The stream as a virtualized list. |
+| **Flame** | Span stacks over an axis, per lane. |
+| **Anomalies** | Invalid frees / overlaps, click-to-seek. |
+| *(future)* **Lifetime** | Allocations as bars from birth to death (gantt). |
+| *(future)* **Stats** | Derived series: live bytes, alloc rate, by tag/site. |
 
-### 5.3 The two top timelines
+**Lanes.** The timeline strip is a stack of **lanes**; a lane =
+**axis × content**:
 
-Both strips span the full width and share the playhead. Each event contributes a tick,
-colored green (`M`/`R`) or red (`F`).
+- **Axis:** `temporal` (x = t) or `sequential` (x = event index) — an
+  attribute of a lane, not a pair of hardcoded strips.
+- **Content:** event density, spans (flame ribbon: global lane, per-thread
+  lanes), log ticks (level-colored), tag lane.
 
-- **Temporal timeline** — x is `t`, linearly scaled from `t_min` to `t_max`. Bursts bunch up;
-  idle gaps show as empty stretches. Answers *"when did this happen, and how bursty is it?"*
-- **Sequential timeline** — x is `seq`, evenly spaced. Answers *"in what order, and how many?"*
+The default lane set is density×temporal + density×sequential. Users
+add/remove/reorder lanes; a run with no spans never shows a span lane; the
+lane set persists in the run's `.heapa`. All lanes share the playhead and
+drag-to-seek. Analysis spans may be created on the global lane *and* on
+thread lanes.
 
-The canonical illustration: 100 allocations in 1ms, then 2 in the next 1ms.
+### 6.1 The address-line view
 
-- Temporal: the 100 collapse into a narrow green band (they share almost the same `t`); the 2
-  sit far to the right, widely spaced. Same-`t` events get the same x — the first two "look
-  the same size" because x is time.
-- Sequential: all 102 are evenly spaced; the 2 late allocations are just the last two ticks —
-  they do **not** look the same, because x is index.
+Unchanged from v1 in substance: rows of `row_bytes` each, address order like
+a hex dump, empty-row collapsing (with pinned rows for marks), live
+`row_bytes` re-bucketing, horizontal zoom.
 
-Density is drawn by binning into columns and summing (a histogram/heat strip) so millions of
-events still render at one tick-per-pixel. Hovering a column shows count and the `t`/`seq`
-range it covers. Clicking or dragging moves the playhead.
+### 6.2 Coloring
 
-### 5.4 Interaction summary
+- **Green** = allocation events / live regions; **red** = frees. Beyond
+  that, fills may be tinted by `site`, `thr`, size bucket, age, or tag
+  (categorical palette for site/thr/tag, sequential ramp for size/age).
+- Log ticks color by level.
+
+### 6.3 Interaction summary
 
 | Action | Result |
 |--------|--------|
-| Drag playhead on either timeline | Seek all three views to that `t` (temporal) or `seq` (sequential). |
-| Play / pause | Advance the playhead in real time (by `t`) or step-by-step (by `seq`). |
-| Change `row_bytes` | Re-bucket the address-line rows live. |
-| Hover an allocation | Tooltip: `id`, addr range, size, site, thread, age, birth `t`/`seq`. |
-| Filter by `site`/`thr`/size | Dim or hide non-matching allocations everywhere. |
+| Drag playhead on any lane | Seek every view (by `t` or event index per the lane's axis). |
+| Play / pause | Advance the playhead in real time or step-by-step. |
+| Hover an allocation | Tooltip: birth index, addr range, size, site, thread, age, birth t. |
+| Filter | Dim or hide non-matching allocations everywhere. |
 | Jump to event | Center the address-line on the allocation an event touches. |
+| Shift-drag a range | Create an analysis span / tag / crop from the range. |
 
 ---
 
-## 6. Viewer Architecture (informative, non-normative)
+## 7. Viewer Architecture (informative)
 
-Not implemented in this phase; recorded so the format choices above stay justified.
-
-- **Load:** parse JSONL → columnar typed arrays (`t: BigInt64Array`, `size: Int32Array`,
-  `addr: BigUint64Array`, `op`, `id`, …). Parsing/geometry live in WASM (Rust or C++);
-  JSON parsing of large files may stream. Addresses parse from hex strings to u64 once, at
-  load, and are never strings again internally.
-- **Index:** build the `seq→t` array (already sorted) for time↔index mapping, and periodic
-  live-set **snapshots** for O(1)-ish seeking (§4.2).
-- **Render:** the live set at the playhead → row interval-set → GPU draw (canvas2d for v1,
-  WebGL/WebGPU instanced quads for scale). The two timelines are pre-binned density textures
-  regenerated only when the viewport/zoom changes.
-- **Threading:** heavy work (parse, snapshot, seek-replay) in a Web Worker; the main thread
-  stays responsive.
-- **Why JSONL now:** debuggability and zero-tooling authoring dominate at this stage; parse
-  cost is a one-time load, hidden in a worker. A fixed-width **binary** format (const-size
-  little-endian records: `u64 t, u8 op, u64 id, u64 addr, u64 size, …`) is the natural next
-  step once load time on huge traces matters — it is a pure encoding change, semantics
-  unchanged, so nothing above needs to move.
-
----
+- **Load:** parse JSONL → columnar typed arrays in WASM (Rust); addresses
+  parse from hex strings to u64 once at load. Runs feed multiple files;
+  records stage per file and merge by `t` before indices are assigned.
+- **Index:** the event-index→t array for time↔index mapping; periodic
+  live-set snapshots for seeking; span table; kill list for implicit ends.
+- **Render:** live set → row interval-set → raster in WASM; timelines are
+  pre-binned density strips.
+- **Threading:** heavy work (parse, seek-replay, raster) in a Web Worker.
+- **Why JSONL still:** debuggability and zero-tooling authoring dominate; a
+  fixed-width binary encoding remains a pure encoding change if load time on
+  huge traces starts to matter.

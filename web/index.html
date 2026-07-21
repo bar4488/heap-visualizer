@@ -10,9 +10,11 @@
 <body>
 <header id="toolbar">
   <div class="brand">heap-visualizer</div>
-  <button id="btn-open" title="Open a .heapl trace">Open…</button>
+  <button id="btn-project" title="Projects: open a project folder, pick a run">⌂ Project</button>
+  <button id="btn-open" title="Quick look: open a single .heapl trace (ephemeral)">Open…</button>
   <input type="file" id="file-input" accept=".heapl,.jsonl,.json,.txt" hidden>
   <button id="btn-demo" title="Load the bundled demo trace">Demo</button>
+  <button id="btn-saveproj" hidden title="Save this quick-look trace and your analysis as a project folder">Save as project…</button>
   <span id="trace-title" class="title"></span>
 
   <span class="sep"></span>
@@ -23,8 +25,11 @@
 
   <button id="hz-reset" hidden title="Horizontal zoom on the address line (ctrl/alt+wheel to zoom around the cursor, shift+wheel or horizontal scroll to pan) — click to reset">×1</button>
   <button id="btn-layout" title="Address-line layout: row bytes, collapsing, zoom, colors">Layout</button>
+  <button id="btn-lanes" hidden title="Choose which span/log lanes are shown">Lanes</button>
   <button id="btn-filter">Filter</button>
   <button id="btn-events" hidden title="Sequenced list of all events">Events</button>
+  <button id="btn-logs" hidden title="The run's log records, terminal-style">Logs</button>
+  <button id="btn-active" hidden title="Spans open at the current playhead">Active</button>
   <button id="btn-analysis" hidden>Marks</button>
   <button id="crop-indicator" hidden title="Crop is active — click to remove it">✂ <span id="crop-range"></span> ×</button>
 
@@ -66,6 +71,11 @@
     <div class="tl-marks"></div>
   </section>
 
+  <section id="lane-strip" hidden>
+    <span class="tl-tag" title="span lanes (global phases + per-thread) and log ticks; x = wall-clock time; click to seek">spans</span>
+    <canvas id="lanes"></canvas>
+  </section>
+
   <section id="addr-scroll">
     <div id="addr-view">
       <canvas id="addr"></canvas>
@@ -79,12 +89,19 @@
 <div id="drawer-right" class="drawer" hidden></div>
 </div>
 
+<div id="drawer-bottom" class="drawer" hidden></div>
+
 <footer id="status">
   <span id="st-pos">—</span>
   <span id="st-live">—</span>
   <span id="st-info"></span>
   <span class="grow"></span>
   <span id="st-trace">drop a .heapl file anywhere</span>
+  <span id="dock-toggles">
+    <button id="dock-left" title="hide/show the left dock">◧</button>
+    <button id="dock-bottom" title="hide/show the bottom dock">⬓</button>
+    <button id="dock-right" title="hide/show the right dock">◨</button>
+  </span>
 </footer>
 
 <div id="tooltip" hidden></div>
@@ -192,6 +209,45 @@
   <div class="panel-body" id="warnings-list"></div>
 </div>
 
+<div id="lanes-panel" class="panel" hidden>
+  <div class="panel-head">Lanes <button class="panel-close" data-close="lanes-panel">×</button></div>
+  <div class="panel-body">
+    <div class="group-title">visible lanes <span class="allnone" id="lanes-allnone"><a data-an="all">all</a> · <a data-an="none">none</a></span></div>
+    <div id="lanes-list" class="check-group"></div>
+  </div>
+</div>
+
+<div id="span-panel" class="panel" hidden>
+  <div class="panel-head"><span class="ph-t">Span</span>
+    <span class="head-actions">
+      <button id="sp-pin" class="d-pin" title="Pin: keep this window as-is; new span/log selections open a fresh panel">📌</button>
+      <button class="panel-close" data-close="span-panel">×</button>
+    </span>
+  </div>
+  <div class="panel-body detail-body" id="span-body"></div>
+</div>
+
+<div id="project-panel" class="panel" hidden>
+  <div class="panel-head">Project <button class="panel-close" data-close="project-panel">×</button></div>
+  <div class="panel-body" id="project-body"></div>
+</div>
+
+<div id="logs-panel" class="panel" hidden>
+  <div class="panel-head">Logs
+    <span class="head-actions">
+      <input id="lg-filter" placeholder="filter" size="10" title="Show only log lines containing this text">
+      <label title="Keep the newest log before the playhead in view"><input type="checkbox" id="lg-follow" checked> follow</label>
+      <button class="panel-close" data-close="logs-panel">×</button>
+    </span>
+  </div>
+  <div id="logs-term" tabindex="0"></div>
+</div>
+
+<div id="active-panel" class="panel" hidden>
+  <div class="panel-head">Active spans <button class="panel-close" data-close="active-panel">×</button></div>
+  <div class="panel-body" id="active-list"></div>
+</div>
+
 <div id="detail-panel" class="panel" hidden>
   <div class="panel-head"><span class="ph-t">Allocation</span>
     <span class="head-actions">
@@ -233,6 +289,29 @@
   <div id="search-box">
     <input id="search-input" placeholder="seq · t:1e6 · 0x… · search marks / names / warnings" autocomplete="off" spellcheck="false">
     <div id="search-results"></div>
+  </div>
+</div>
+
+<div id="landing" hidden>
+  <div id="landing-box">
+    <div class="landing-title">heap-visualizer</div>
+    <div class="landing-sub">open a project folder — runs and analysis live there — or quick-look a single trace</div>
+    <div class="landing-actions">
+      <button id="lp-open-dir">Open project folder…</button>
+      <button id="lp-open-file">Quick look…</button>
+      <button id="lp-demo">Demo</button>
+      <button id="lp-bridge" title="For browsers without folder access: run bridge/heapviz-bridge.py next to your traces and connect">Connect to bridge…</button>
+    </div>
+    <div id="lp-no-fsa" class="landing-sub" hidden>this browser can't open folders directly — run
+      <code>python3 bridge/heapviz-bridge.py</code> in your project folder and connect to it</div>
+    <div id="lp-bridge-row" class="landing-actions" hidden>
+      <input id="lp-bridge-url" placeholder="http://127.0.0.1:8631/?token=…" size="34">
+      <button id="lp-bridge-go">Connect</button>
+    </div>
+    <div class="group-title" id="lp-runs-title" hidden>runs</div>
+    <div id="lp-runs"></div>
+    <div class="group-title">recent projects</div>
+    <div id="lp-recent"></div>
   </div>
 </div>
 

@@ -689,9 +689,8 @@ pub fn alloc_info(
     let ei = e as usize;
     let mut out = String::with_capacity(512);
     out.push_str(&format!(
-        "{{\"e\":{},\"id\":{},\"addr\":\"0x{:x}\",\"end\":\"0x{:x}\",\"size\":{},\"usable\":{}",
+        "{{\"e\":{},\"addr\":\"0x{:x}\",\"end\":\"0x{:x}\",\"size\":{},\"usable\":{}",
         e,
-        s.id[ei],
         a,
         a + s.size[ei],
         s.size[ei],
@@ -806,7 +805,11 @@ pub fn event_rects(s: &Store, v: &mut View, cfg: &Cfg, w: u32, e: u32, scroll: f
         return "[]".to_string();
     }
     let ei = e as usize;
-    let creator = if s.op[ei] == OP_F { s.target[ei] } else { e };
+    let creator = match s.op[ei] {
+        OP_F => s.target[ei],
+        OP_M | OP_R => e,
+        _ => NONE_U32, // spans/logs have no address geometry
+    };
     if creator == NONE_U32 {
         return "[]".to_string();
     }
@@ -826,6 +829,9 @@ pub fn move_link(s: &Store, v: &mut View, cfg: &Cfg, w: u32, scroll: f64) -> Str
     let e = v.cur - 1;
     let ei = e as usize;
     let op = s.op[ei];
+    if op != OP_M && op != OP_F && op != OP_R {
+        return "null".to_string(); // spans/logs: nothing to flash
+    }
     v.ensure_rows();
     let mut out = String::from("{");
     out.push_str(&format!("\"op\":{},\"seq\":{}", op, e));
@@ -885,7 +891,8 @@ pub fn scroll_for_event(s: &Store, v: &mut View, cfg: &Cfg, h: u32, e: u32) -> f
                 return -1.0;
             }
         }
-        _ => e,
+        OP_M | OP_R => e,
+        _ => return -1.0, // spans/logs have no address geometry
     };
     let a = s.addr[creator as usize];
     let r = (a.saturating_sub(v.base)) / v.row_bytes;

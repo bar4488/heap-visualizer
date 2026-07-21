@@ -68,18 +68,23 @@ function writeBuf(bytes) {
 // loading
 // ---------------------------------------------------------------------------
 
-async function loadTrace(buffer) {
-  E.hp_parse_begin();
+async function loadTrace(buffers) {
+  // one buffer = plain trace; several = a run, merged by t in the core
+  if (!Array.isArray(buffers)) buffers = [buffers];
+  E.hp_parse_begin(buffers.length);
   const CH = 8 << 20;
-  const total = buffer.byteLength;
+  const total = buffers.reduce((s, b) => s + b.byteLength, 0);
   let done = 0;
-  for (let off = 0; off < total; off += CH) {
-    const len = Math.min(CH, total - off);
-    const ptr = E.hp_buf_ptr(CH);
-    new Uint8Array(E.memory.buffer, ptr, len).set(new Uint8Array(buffer, off, len));
-    E.hp_parse_chunk(len);
-    done += len;
-    postMessage({ type: 'progress', pct: Math.round((done / total) * 100) });
+  for (const buffer of buffers) {
+    E.hp_file_begin();
+    for (let off = 0; off < buffer.byteLength; off += CH) {
+      const len = Math.min(CH, buffer.byteLength - off);
+      const ptr = E.hp_buf_ptr(CH);
+      new Uint8Array(E.memory.buffer, ptr, len).set(new Uint8Array(buffer, off, len));
+      E.hp_parse_chunk(len);
+      done += len;
+      postMessage({ type: 'progress', pct: Math.round((done / total) * 100) });
+    }
   }
   const n = E.hp_parse_end();
   E.hp_meta_json();
@@ -400,11 +405,23 @@ onmessage = async (ev) => {
     }
     case 'load':
       try {
-        await loadTrace(m.buffer);
+        await loadTrace(m.buffers || m.buffer);
       } catch (err) {
         postMessage({ type: 'error', message: String(err && err.message || err) });
       }
       break;
+    case 'spans': {
+      if (!S.loaded) break;
+      E.hp_spans_json();
+      postMessage({ type: 'spans', reqId: m.reqId, spans: retJson() });
+      break;
+    }
+    case 'logs': {
+      if (!S.loaded) break;
+      E.hp_logs_json();
+      postMessage({ type: 'logs', reqId: m.reqId, logs: retJson() });
+      break;
+    }
     case 'resize': {
       const cv = canvases[m.which];
       if (cv) {

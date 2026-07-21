@@ -179,6 +179,10 @@ impl View {
             }
         }
         if op == OP_M || op == OP_R {
+            // overlap victims are implicitly ended by this event
+            for &(_, victim) in s.kills_of(e) {
+                self.remove_alloc(s, victim);
+            }
             self.insert_alloc(s, e);
         }
     }
@@ -187,6 +191,9 @@ impl View {
         let op = s.op[e as usize];
         if op == OP_M || op == OP_R {
             self.remove_alloc(s, e);
+            for &(_, victim) in s.kills_of(e) {
+                self.insert_alloc(s, victim);
+            }
         }
         if op == OP_F || op == OP_R {
             let tgt = s.target[e as usize];

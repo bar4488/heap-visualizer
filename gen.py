@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""gen.py - synthetic heap-event stream generator for heap-visualizer.
+"""gen.py - synthetic program-trace generator for heap-visualizer.
 
-Emits a JSONL (.heapl) stream of malloc/free/realloc events conforming to
-SPECIFICATION.md v1. It simulates a free-list allocator serving a workload made
-of allocation "sites" (each with a characteristic size range and lifetime) and
-sprinkles in same-timestamp bursts so the temporal and sequential timelines in
-the viewer visibly diverge.
+Emits a JSONL (.heapl) stream of v2 records: malloc/free/realloc heap events
+(frees name allocations by address — no ids), B/E span records (global
+"frame" phases plus per-thread function spans) and L log records. It
+simulates a free-list allocator serving a workload made of allocation
+"sites" (each with a characteristic size range and lifetime) and sprinkles
+in same-timestamp bursts so the temporal and sequential timelines in the
+viewer visibly diverge.
 
 Deterministic: identical --seed and args produce byte-identical output.
 Only the Python standard library is used.
@@ -26,9 +28,20 @@ import random
 import sys
 from dataclasses import dataclass, field
 
-FORMAT_VERSION = 1
-NULL_ID = 0            # reserved; never assigned to a real allocation
+FORMAT_VERSION = 2
 ALIGN = 16            # allocations are aligned to this many bytes
+
+# per-thread span names (function-ish phases) and log messages
+SPAN_NAMES = ["parse_json", "render_tiles", "handle_request", "gc_minor", "flush_cache"]
+LOG_LINES = [
+    ("info", "request served path=/api/items"),
+    ("debug", "cache lookup miss"),
+    ("info", "connection accepted"),
+    ("warn", "slow query took 120ms"),
+    ("error", "connection timeout fd=7"),
+    ("info", "checkpoint written"),
+]
+LOG_WEIGHTS = [6, 5, 4, 2, 1, 3]
 
 # ---------------------------------------------------------------------------
 # Allocation sites: a workload profile.
@@ -168,12 +181,18 @@ class Generator:
         self.next_id = 1
         self.seq = 0
         self.t = 0
+        self.step = 0
         # burst state: when >0 we are inside a same-timestamp burst
         self.burst_left = 0
         # site selection weights
         self._site_weights = [s.weight for s in SITES]
+        # span state: per-thread stack of scheduled close steps; frame counter
+        self.span_stacks: dict[int, list[int]] = {i: [] for i in range(args.threads)}
+        self.frame_open = False
+        self.frame_no = 0
         # stats
         self.n_malloc = self.n_free = self.n_realloc = self.n_leak = 0
+        self.n_span = self.n_log = 0
         self.peak_live_bytes = 0
         self._cur_live_bytes = 0
         self.min_addr = args.arena_base
@@ -207,7 +226,6 @@ class Generator:
     # -- emission -----------------------------------------------------------
 
     def _emit(self, out, rec: dict) -> None:
-        rec["seq"] = self.seq
         self.seq += 1
         out.write(json.dumps(rec, separators=(",", ":")))
         out.write("\n")
@@ -243,7 +261,7 @@ class Generator:
         self.n_malloc += 1
 
         self._emit(out, {
-            "t": self.t, "op": "M", "id": aid,
+            "t": self.t, "op": "M",
             "addr": self._hexaddr(addr), "size": size,
             "thr": thr, "site": site.name,
         })
@@ -256,8 +274,8 @@ class Generator:
         self._cur_live_bytes -= a.size
         self.n_free += 1
         self._emit(out, {
-            "t": self.t, "op": "F", "id": aid,
-            "addr": self._hexaddr(a.addr), "size": a.size, "thr": a.thr,
+            "t": self.t, "op": "F",
+            "addr": self._hexaddr(a.addr), "thr": a.thr,
         })
 
     def _do_realloc(self, out) -> None:
@@ -288,11 +306,42 @@ class Generator:
         self.n_realloc += 1
 
         self._emit(out, {
-            "t": self.t, "op": "R", "id": new_id, "old_id": old_id,
+            "t": self.t, "op": "R",
+            "old_addr": self._hexaddr(old.addr),
             "addr": self._hexaddr(new_addr), "size": new_size,
-            "old_addr": self._hexaddr(old.addr), "old_size": old.size,
             "thr": old.thr, "site": old.site,
         })
+
+    def _do_spans_and_logs(self, out) -> None:
+        """Emit due span closes, new span opens, frame phases, and logs."""
+        args = self.args
+        # global lane: repeating "frame" phase spans
+        if args.frame_ops > 0 and self.step % args.frame_ops == 0:
+            if self.frame_open:
+                self._emit(out, {"t": self.t, "op": "E"})
+            self._emit(out, {"t": self.t, "op": "B", "name": "frame"})
+            self.frame_open = True
+            self.frame_no += 1
+            self.n_span += 1
+        # per-thread lanes: nested function spans with scheduled closes
+        for thr in range(args.threads):
+            stack = self.span_stacks[thr]
+            while stack and stack[-1] <= self.step:
+                stack.pop()
+                self._emit(out, {"t": self.t, "op": "E", "thr": thr})
+            if len(stack) < 3 and self.rng.random() < args.span_prob:
+                name = self.rng.choice(SPAN_NAMES)
+                stack.append(self.step + self.rng.randint(50, 800))
+                self._emit(out, {"t": self.t, "op": "B", "name": name, "thr": thr})
+                self.n_span += 1
+        # logs
+        if self.rng.random() < args.log_prob:
+            lvl, msg = self.rng.choices(LOG_LINES, weights=LOG_WEIGHTS, k=1)[0]
+            rec = {"t": self.t, "op": "L", "lvl": lvl, "msg": msg}
+            if args.threads > 1:
+                rec["thr"] = self.rng.randrange(args.threads)
+            self._emit(out, rec)
+            self.n_log += 1
 
     def _drain_due_frees(self, out) -> None:
         """Emit every scheduled free whose time has arrived."""
@@ -310,10 +359,12 @@ class Generator:
         for _ in range(args.ops):
             self._advance_time()
             self._drain_due_frees(out)
+            self._do_spans_and_logs(out)
             if self.rng.random() < args.realloc_rate:
                 self._do_realloc(out)
             else:
                 self._do_malloc(out)
+            self.step += 1
 
         # flush all remaining scheduled frees in time order
         while self.pending:
@@ -321,6 +372,15 @@ class Generator:
             if aid in self.live:
                 self.t = max(self.t, free_t)
                 self._do_free(out, aid)
+
+        # close whatever spans are still open, innermost-first
+        for thr, stack in self.span_stacks.items():
+            while stack:
+                stack.pop()
+                self._emit(out, {"t": self.t, "op": "E", "thr": thr})
+        if self.frame_open:
+            self._emit(out, {"t": self.t, "op": "E"})
+            self.frame_open = False
 
         self.n_leak = len(self.live)
 
@@ -338,8 +398,6 @@ class Generator:
                 "sites": [s.name for s in SITES],
             },
         }
-        # the header carries no seq: per spec §3.7, seq is the 0-based index
-        # among *event* records (header and comments excluded)
         out.write(json.dumps(header, separators=(",", ":")))
         out.write("\n")
 
@@ -349,7 +407,7 @@ class Generator:
         span = self.max_addr - self.min_addr
         return (
             "heap-visualizer gen.py summary\n"
-            "  events        : %d (M=%d F=%d R=%d)\n"
+            "  events        : %d (M=%d F=%d R=%d, spans=%d logs=%d)\n"
             "  leaked allocs : %d (%d bytes still live at end)\n"
             "  peak live     : %d bytes (%.2f MiB)\n"
             "  address span  : %s .. %s (%d bytes, %.2f MiB)\n"
@@ -357,6 +415,7 @@ class Generator:
             % (
                 self.seq,
                 self.n_malloc, self.n_free, self.n_realloc,
+                self.n_span, self.n_log,
                 self.n_leak, self._cur_live_bytes,
                 self.peak_live_bytes, self.peak_live_bytes / (1 << 20),
                 self._hexaddr(self.min_addr), self._hexaddr(self.max_addr),
@@ -401,6 +460,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="baseline fraction of allocations never freed")
     p.add_argument("--realloc-rate", type=float, default=0.05, dest="realloc_rate",
                    help="fraction of steps that realloc instead of malloc")
+    p.add_argument("--frame-ops", type=int, default=2500, dest="frame_ops",
+                   help="ops per global 'frame' span (0 = no frame spans)")
+    p.add_argument("--span-prob", type=float, default=0.008, dest="span_prob",
+                   help="probability per step of opening a per-thread span")
+    p.add_argument("--log-prob", type=float, default=0.004, dest="log_prob",
+                   help="probability per step of emitting a log record")
     p.add_argument("--unit", default="ns", choices=["ns", "us", "ms", "s", "tick"],
                    help="time unit written to the header")
     p.add_argument("--quiet", action="store_true",

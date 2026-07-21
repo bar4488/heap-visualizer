@@ -96,16 +96,28 @@ pub extern "C" fn hp_buf_ptr(cap: u32) -> *mut u8 {
 // parsing
 // ---------------------------------------------------------------------------
 
+/// Begin parsing a run of `n_files` files (1 = plain single-stream load).
+/// Call hp_file_begin before each file's chunks; files merge by t.
 #[no_mangle]
-pub extern "C" fn hp_parse_begin() {
+pub extern "C" fn hp_parse_begin(n_files: u32) {
     let a = app();
-    a.parser = Some(Parser::new());
+    let mut p = Parser::new();
+    p.begin_files(n_files);
+    a.parser = Some(p);
     a.store = Store::default();
     a.view = View::new();
     a.cfg.selected = NONE_U32;
     a.cfg.filter = Filter::default();
     a.cfg.x_zoom = 1.0;
     a.cfg.x_pan = 0.0;
+}
+
+#[no_mangle]
+pub extern "C" fn hp_file_begin() {
+    let a = app();
+    if let Some(p) = a.parser.as_mut() {
+        p.file_begin();
+    }
 }
 
 #[no_mangle]
@@ -140,13 +152,16 @@ pub extern "C" fn hp_meta_json() {
     o.clear();
     o.push('{');
     o.push_str(&format!(
-        "\"n\":{},\"tMin\":{},\"tMax\":{},\"nMalloc\":{},\"nFree\":{},\"nRealloc\":{}",
+        "\"n\":{},\"v\":{},\"tMin\":{},\"tMax\":{},\"nMalloc\":{},\"nFree\":{},\"nRealloc\":{},\"nSpan\":{},\"nLog\":{}",
         s.len(),
+        s.version,
         s.t_min as f64,
         s.t_max as f64,
         s.n_malloc,
         s.n_free,
-        s.n_realloc
+        s.n_realloc,
+        s.n_span,
+        s.n_log
     ));
     o.push_str(&format!(
         ",\"addrMin\":\"0x{:x}\",\"addrMax\":\"0x{:x}\",\"peakLive\":{},\"totalAlloc\":{}",
@@ -206,9 +221,19 @@ pub extern "C" fn hp_warnings_json() {
         if i > 0 {
             o.push(',');
         }
-        o.push_str(&format!("{{\"seq\":{},\"code\":{},\"msg\":", w.seq, w.code));
+        o.push_str(&format!(
+            "{{\"seq\":{},\"code\":{},\"anomaly\":{},\"msg\":",
+            w.seq,
+            w.code,
+            is_anomaly(w.code)
+        ));
         push_json_str(o, warn_name(w.code));
-        o.push_str(&format!(",\"detail\":{}}}", w.detail as f64));
+        // anomaly details are addresses; report them as hex strings
+        if is_anomaly(w.code) {
+            o.push_str(&format!(",\"addr\":\"0x{:x}\"}}", w.detail));
+        } else {
+            o.push_str(&format!(",\"detail\":{}}}", w.detail as f64));
+        }
     }
     o.push(']');
     ret_str(o);
@@ -325,7 +350,11 @@ pub extern "C" fn hp_center_x_for_event(e: u32) -> f64 {
         return a.cfg.x_pan;
     }
     let ei = e as usize;
-    let creator = if s.op[ei] == OP_F { s.target[ei] } else { e };
+    let creator = match s.op[ei] {
+        OP_F => s.target[ei],
+        OP_M | OP_R => e,
+        _ => NONE_U32, // spans/logs have no address geometry
+    };
     if creator == NONE_U32 {
         return a.cfg.x_pan;
     }
@@ -850,39 +879,162 @@ pub extern "C" fn hp_scroll_for_event(e: u32, h: u32) -> f64 {
     render::scroll_for_event(&a.store, &mut a.view, &a.cfg, h, e)
 }
 
-/// One event as JSON, appended to `o`. `e` also carries the creator event
-/// index (the allocation the event touches — for F that is its target), so
-/// the viewer can select/highlight it.
+/// One event as JSON, appended to `o`. For heap ops, `e` also carries the
+/// creator event index (the allocation the event touches — for F that is its
+/// target), so the viewer can select/highlight it.
 fn push_event_json(o: &mut String, s: &Store, e: u32) {
     if e >= s.len() {
         o.push_str("null");
         return;
     }
     let ei = e as usize;
-    // an F row carries no geometry of its own: report the allocation it kills
-    let gi = if s.op[ei] == OP_F && s.target[ei] != NONE_U32 {
-        s.target[ei] as usize
-    } else {
-        ei
-    };
+    let op = s.op[ei];
     o.push_str(&format!(
-        "{{\"seq\":{},\"op\":{},\"t\":{},\"id\":{},\"e\":{},\"addr\":\"0x{:x}\",\"size\":{}",
-        e, s.op[ei], s.t[ei] as f64, s.id[ei], gi, s.addr[gi], s.size[gi]
+        "{{\"seq\":{},\"op\":{},\"t\":{}",
+        e, op, s.t[ei] as f64
     ));
-    if s.op[ei] == OP_R {
-        o.push_str(&format!(
-            ",\"oldAddr\":\"0x{:x}\",\"oldSize\":{}",
-            s.old_addr[ei], s.old_size[ei]
-        ));
+    if s.thr_idx[ei] != NONE_U16 {
+        o.push_str(&format!(",\"thr\":{}", s.thrs[s.thr_idx[ei] as usize]));
     }
-    o.push_str(",\"site\":");
-    let si = if s.site[gi] != NONE_U32 { gi } else { ei };
-    if s.site[si] != NONE_U32 {
-        push_json_str(o, &s.sites[s.site[si] as usize]);
-    } else {
-        o.push_str("null");
+    match op {
+        OP_B | OP_E => {
+            let sp = &s.spans[s.target[ei] as usize];
+            o.push_str(",\"name\":");
+            push_json_str(o, &s.span_names[sp.name as usize]);
+            o.push_str(&format!(",\"span\":{}", s.target[ei]));
+        }
+        OP_L => {
+            let lg = &s.logs[s.target[ei] as usize];
+            o.push_str(",\"lvl\":");
+            push_json_str(o, lvl_name(lg.lvl));
+            o.push_str(",\"msg\":");
+            push_json_str(o, &lg.msg);
+            if lg.src != NONE_U32 {
+                o.push_str(",\"src\":");
+                push_json_str(o, &s.srcs[lg.src as usize]);
+            }
+        }
+        _ => {
+            // an F row carries no geometry of its own: report the allocation
+            // it kills (an unresolved F is an invalid-free anomaly)
+            let gi = if op == OP_F && s.target[ei] != NONE_U32 {
+                s.target[ei] as usize
+            } else {
+                ei
+            };
+            o.push_str(&format!(
+                ",\"e\":{},\"addr\":\"0x{:x}\",\"size\":{}",
+                gi, s.addr[gi], s.size[gi]
+            ));
+            if op == OP_F && s.target[ei] == NONE_U32 {
+                o.push_str(",\"invalid\":true");
+            }
+            if op == OP_R {
+                o.push_str(&format!(
+                    ",\"oldAddr\":\"0x{:x}\",\"oldSize\":{}",
+                    s.old_addr[ei], s.old_size[ei]
+                ));
+            }
+            o.push_str(",\"site\":");
+            let si = if s.site[gi] != NONE_U32 { gi } else { ei };
+            if s.site[si] != NONE_U32 {
+                push_json_str(o, &s.sites[s.site[si] as usize]);
+            } else {
+                o.push_str("null");
+            }
+        }
     }
     o.push('}');
+}
+
+/// The span table: [{"i":0,"name":"...","thr":2|null,"begin":e|null,"end":e|null},...]
+/// begin null = began before the trace; end null = still open at end-of-stream.
+#[no_mangle]
+pub extern "C" fn hp_spans_json() {
+    let a = app();
+    let s = &a.store;
+    let o = &mut a.out;
+    o.clear();
+    o.push('[');
+    for (i, sp) in s.spans.iter().enumerate() {
+        if i > 0 {
+            o.push(',');
+        }
+        o.push_str(&format!("{{\"i\":{},\"name\":", i));
+        push_json_str(o, &s.span_names[sp.name as usize]);
+        o.push_str(",\"thr\":");
+        if sp.thr_idx != NONE_U16 {
+            o.push_str(&format!("{}", s.thrs[sp.thr_idx as usize]));
+        } else {
+            o.push_str("null");
+        }
+        o.push_str(",\"begin\":");
+        if sp.begin != NONE_U32 {
+            o.push_str(&format!("{}", sp.begin));
+        } else {
+            o.push_str("null");
+        }
+        o.push_str(",\"end\":");
+        if sp.end != NONE_U32 {
+            o.push_str(&format!("{}", sp.end));
+        } else {
+            o.push_str("null");
+        }
+        // resolved t range: pre-trace begins start at t_min, still-open ends
+        // extend to t_max — so lanes can draw without special cases
+        let t0 = if sp.begin != NONE_U32 {
+            s.t[sp.begin as usize]
+        } else {
+            s.t_min
+        };
+        let t1 = if sp.end != NONE_U32 {
+            s.t[sp.end as usize]
+        } else {
+            s.t_max
+        };
+        o.push_str(&format!(",\"t0\":{},\"t1\":{}}}", t0 as f64, t1 as f64));
+    }
+    o.push(']');
+    ret_str(o);
+}
+
+/// All log records: [{"seq":e,"t":..,"lvl":"error","msg":"...","src":...},...]
+#[no_mangle]
+pub extern "C" fn hp_logs_json() {
+    let a = app();
+    let s = &a.store;
+    let o = &mut a.out;
+    o.clear();
+    o.push('[');
+    let mut first = true;
+    for e in 0..s.len() {
+        let ei = e as usize;
+        if s.op[ei] != OP_L {
+            continue;
+        }
+        if !first {
+            o.push(',');
+        }
+        first = false;
+        let lg = &s.logs[s.target[ei] as usize];
+        o.push_str(&format!(
+            "{{\"seq\":{},\"t\":{},\"lvl\":",
+            e, s.t[ei] as f64
+        ));
+        push_json_str(o, lvl_name(lg.lvl));
+        o.push_str(",\"msg\":");
+        push_json_str(o, &lg.msg);
+        if lg.src != NONE_U32 {
+            o.push_str(",\"src\":");
+            push_json_str(o, &s.srcs[lg.src as usize]);
+        }
+        if s.thr_idx[ei] != NONE_U16 {
+            o.push_str(&format!(",\"thr\":{}", s.thrs[s.thr_idx[ei] as usize]));
+        }
+        o.push('}');
+    }
+    o.push(']');
+    ret_str(o);
 }
 
 /// Details of one event (for the step readout / warning jumps).
@@ -960,14 +1112,14 @@ mod tests {
         a
     }
 
-    const SAMPLE: &str = r#"{"op":"H","v":1,"unit":"ns","row_bytes":4096,"title":"test"}
+    const SAMPLE: &str = r#"{"op":"H","v":2,"unit":"ns","row_bytes":4096,"title":"test"}
 # a comment
 
-{"seq":0,"t":100,"op":"M","id":1,"addr":"0x1000","size":64,"thr":0,"site":"a"}
-{"seq":1,"t":200,"op":"M","id":2,"addr":"0x2000","size":128,"thr":1,"site":"b"}
-{"seq":2,"t":200,"op":"F","id":1}
-{"seq":3,"t":300,"op":"R","id":3,"old_id":2,"addr":"0x3000","size":256}
-{"seq":4,"t":400,"op":"F","id":3}
+{"t":100,"op":"M","addr":"0x1000","size":64,"thr":0,"site":"a"}
+{"t":200,"op":"M","addr":"0x2000","size":128,"thr":1,"site":"b"}
+{"t":200,"op":"F","addr":"0x1000"}
+{"t":300,"op":"R","old_addr":"0x2000","addr":"0x3000","size":256}
+{"t":400,"op":"F","addr":"0x3000"}
 "#;
 
     #[test]
@@ -979,17 +1131,20 @@ mod tests {
         assert_eq!(s.n_free, 2);
         assert_eq!(s.n_realloc, 1);
         assert!(s.has_header);
+        assert_eq!(s.version, 2);
         assert_eq!(s.title, "test");
         assert_eq!(s.t_min, 100);
         assert_eq!(s.t_max, 400);
-        // free of id 1 resolves to event 0
+        // free of 0x1000 resolves to event 0
         assert_eq!(s.target[2], 0);
         assert_eq!(s.death[0], 2);
-        // realloc kills event 1, creates event 3, freed by event 4
+        // realloc kills the alloc at 0x2000 (event 1), creates event 3,
+        // freed by event 4
         assert_eq!(s.target[3], 1);
         assert_eq!(s.death[1], 3);
         assert_eq!(s.death[3], 4);
         assert_eq!(s.old_addr[3], 0x2000);
+        assert_eq!(s.old_size[3], 128);
         let total: u32 = s.warn_counts.iter().sum();
         assert_eq!(total, 0);
     }
@@ -1030,31 +1185,130 @@ mod tests {
 
     #[test]
     fn warnings_flagged() {
-        let bad = r#"{"op":"M","id":1,"addr":"0x1000","size":64,"t":100}
-{"op":"F","id":9,"t":150}
-{"op":"F","id":1,"t":200}
-{"op":"F","id":1,"t":90}
+        let bad = r#"{"op":"M","addr":"0x1000","size":64,"t":100}
+{"op":"F","addr":"0x9999","t":150}
+{"op":"F","addr":"0x1000","t":200}
+{"op":"F","addr":"0x1000","t":90}
 not json at all
-{"op":"M","id":2,"addr":"0x1010","size":0,"t":300}
-{"op":"M","id":3,"addr":"0x1010","size":32,"t":300}
+{"op":"M","addr":"0x100000","size":0,"t":300}
 "#;
         let a = load(bad);
         let s = &a.store;
-        assert_eq!(s.warn_counts[W_UNKNOWN_ID as usize], 1);
-        assert_eq!(s.warn_counts[W_DOUBLE_FREE as usize], 1);
+        // free of a never-allocated address + free of an already-freed one
+        assert_eq!(s.warn_counts[W_INVALID_FREE as usize], 2);
         assert_eq!(s.warn_counts[W_T_DECREASE as usize], 1);
         assert_eq!(s.warn_counts[W_MALFORMED as usize], 1);
         assert_eq!(s.warn_counts[W_BAD_SIZE as usize], 1);
-        assert_eq!(s.warn_counts[W_OVERLAP as usize], 1);
+        // invalid frees leave the live set untouched and kill nothing
+        assert_eq!(s.target[1], NONE_U32);
+        assert_eq!(s.target[3], NONE_U32);
+        assert_eq!(s.death[0], 2);
     }
 
     #[test]
-    fn free_null_ignored() {
-        let input = r#"{"op":"M","id":1,"addr":"0x1000","size":64,"t":100}
-{"op":"F","id":0,"t":150}
+    fn overlap_implicitly_ends_victim() {
+        let input = r#"{"op":"M","addr":"0x1000","size":64,"t":10}
+{"op":"M","addr":"0x1020","size":64,"t":20}
+{"op":"F","addr":"0x1020","t":30}
+"#;
+        let mut a = load(input);
+        let s = &a.store;
+        // the new allocation wins; the overlapped one is implicitly ended
+        assert_eq!(s.warn_counts[W_OVERLAP as usize], 1);
+        assert_eq!(s.death[0], 1);
+        assert_eq!(s.kills, vec![(1, 0)]);
+        // replay honors the implicit end, forward and backward
+        a.view.seek(&a.store, 1);
+        assert_eq!(a.view.live_count, 1);
+        assert_eq!(a.view.live_bytes, 64);
+        a.view.seek(&a.store, 2);
+        assert_eq!(a.view.live_count, 1); // e0 gone, e1 live
+        assert!(a.view.live.contains(&(0x1020, 1)));
+        a.view.seek(&a.store, 3);
+        assert_eq!(a.view.live_count, 0);
+        a.view.seek(&a.store, 1); // backward across the kill re-inserts e0
+        assert_eq!(a.view.live_count, 1);
+        assert!(a.view.live.contains(&(0x1000, 0)));
+    }
+
+    #[test]
+    fn spans_matched_per_lane() {
+        let input = r#"{"op":"B","t":10,"name":"frame"}
+{"op":"B","t":11,"name":"parse","thr":0}
+{"op":"B","t":12,"name":"inner","thr":0}
+{"op":"M","t":13,"addr":"0x1000","size":64,"thr":0}
+{"op":"E","t":14,"thr":0}
+{"op":"E","t":15,"name":"wrong","thr":0}
+{"op":"E","t":16}
+{"op":"E","t":17,"name":"pre_existing","thr":1}
+{"op":"E","t":18,"thr":2}
+{"op":"B","t":19,"name":"tail","thr":0}
 "#;
         let a = load(input);
-        assert_eq!(a.store.len(), 1);
+        let s = &a.store;
+        // the nameless E on an empty lane (thr 2) is ignored entirely
+        assert_eq!(s.len(), 9);
+        assert_eq!(s.n_span, 5);
+        // global lane: "frame" opened at 0, closed by the thr-less E
+        let frame = &s.spans[0];
+        assert_eq!(s.span_names[frame.name as usize], "frame");
+        assert_eq!(frame.thr_idx, NONE_U16);
+        assert_eq!((frame.begin, frame.end), (0, 6));
+        // thr 0 lane: inner closes first (E closes the innermost open span)
+        let parse = &s.spans[1];
+        let inner = &s.spans[2];
+        assert_eq!((parse.begin, parse.end), (1, 5));
+        assert_eq!((inner.begin, inner.end), (2, 4));
+        // the mismatched name on parse's E warns but closes anyway
+        assert_eq!(s.warn_counts[W_SPAN_MISMATCH as usize], 1);
+        // named E on an empty lane: span began before the trace
+        let pre = &s.spans[3];
+        assert_eq!(s.span_names[pre.name as usize], "pre_existing");
+        assert_eq!((pre.begin, pre.end), (NONE_U32, 7));
+        // still open at end-of-stream
+        let tail = &s.spans[4];
+        assert_eq!((tail.begin, tail.end), (8, NONE_U32));
+        // B/E rows link back to their span through target
+        assert_eq!(s.target[0], 0);
+        assert_eq!(s.target[4], 2);
+        assert_eq!(s.target[5], 1);
+        // heap events don't disturb span matching
+        assert_eq!(s.n_malloc, 1);
+    }
+
+    #[test]
+    fn logs_parsed() {
+        let input = r#"{"op":"L","t":10,"lvl":"error","msg":"connection timeout fd=7","thr":2,"src":"server.c:412","fields":{"fd":7}}
+{"op":"L","t":20,"msg":"plain"}
+{"op":"L","t":30,"lvl":"nonsense","msg":"unknown level"}
+"#;
+        let a = load(input);
+        let s = &a.store;
+        assert_eq!(s.len(), 3);
+        assert_eq!(s.n_log, 3);
+        assert_eq!(s.logs[0].msg, "connection timeout fd=7");
+        assert_eq!(s.logs[0].lvl, 4);
+        assert_eq!(s.srcs[s.logs[0].src as usize], "server.c:412");
+        // fields lands in the extra column as raw JSON
+        assert_eq!(s.extras[s.extra[0] as usize], "\"fields\":{\"fd\":7}");
+        // lvl defaults to info; unknown levels map to info
+        assert_eq!(s.logs[1].lvl, LVL_INFO);
+        assert_eq!(s.logs[1].src, NONE_U32);
+        assert_eq!(s.logs[2].lvl, LVL_INFO);
+        // logs never mutate heap state
+        assert_eq!(s.n_malloc + s.n_free + s.n_realloc, 0);
+    }
+
+    #[test]
+    fn v1_remnant_keys_skipped() {
+        // seq/id/old_id are gone from the format; they must not flood extras
+        let input = r#"{"seq":0,"op":"M","id":17,"addr":"0x1000","size":64,"t":100}
+{"seq":1,"op":"F","id":17,"addr":"0x1000","old_id":3,"t":200}
+"#;
+        let a = load(input);
+        let s = &a.store;
+        assert!(s.extras.is_empty());
+        assert_eq!(s.target[1], 0);
     }
 
     #[test]
@@ -1062,25 +1316,25 @@ not json at all
         // build a synthetic ~50k event stream and compare snapshot seeks
         // against a fresh forward replay
         let mut input = String::new();
-        let mut id = 1u64;
-        let mut live: Vec<(u64, u64)> = Vec::new(); // (id, addr)
+        let mut live: Vec<u64> = Vec::new(); // live base addresses
         let mut t = 0u64;
         for i in 0..50000u64 {
             t += 3;
             if i % 3 == 2 && !live.is_empty() {
-                let (fid, _) = live.remove((i as usize * 7) % live.len());
-                input.push_str(&format!("{{\"op\":\"F\",\"id\":{},\"t\":{}}}\n", fid, t));
-            } else {
-                let addr = 0x10000 + (i % 1000) * 0x100;
+                let addr = live.remove((i as usize * 7) % live.len());
                 input.push_str(&format!(
-                    "{{\"op\":\"M\",\"id\":{},\"addr\":\"0x{:x}\",\"size\":{},\"t\":{}}}\n",
-                    id,
+                    "{{\"op\":\"F\",\"addr\":\"0x{:x}\",\"t\":{}}}\n",
+                    addr, t
+                ));
+            } else {
+                let addr = 0x10000 + i * 0x100;
+                input.push_str(&format!(
+                    "{{\"op\":\"M\",\"addr\":\"0x{:x}\",\"size\":{},\"t\":{}}}\n",
                     addr,
                     16 + i % 64,
                     t
                 ));
-                live.push((id, addr));
-                id += 1;
+                live.push(addr);
             }
         }
         let mut a = load(&input);
@@ -1111,9 +1365,9 @@ not json at all
     #[test]
     fn collapse_min_keeps_short_runs() {
         // occupied rows 0, 3, 10 (base 0x1000, 4 KiB rows)
-        let input = r#"{"op":"M","id":1,"addr":"0x1000","size":64,"t":10}
-{"op":"M","id":2,"addr":"0x4000","size":64,"t":20}
-{"op":"M","id":3,"addr":"0xb000","size":64,"t":30}
+        let input = r#"{"op":"M","addr":"0x1000","size":64,"t":10}
+{"op":"M","addr":"0x4000","size":64,"t":20}
+{"op":"M","addr":"0xb000","size":64,"t":30}
 "#;
         let mut a = load(input);
         a.view.seek(&a.store, 3);
@@ -1141,10 +1395,10 @@ not json at all
     fn scroll_anchor_stable_across_seek() {
         // three occupied rows; freeing the lowest collapses the row above
         // the anchor, which must not move the anchored address
-        let input = r#"{"op":"M","id":1,"addr":"0x1000","size":64,"t":10}
-{"op":"M","id":2,"addr":"0x9000","size":64,"t":20}
-{"op":"M","id":3,"addr":"0x20000","size":64,"t":30}
-{"op":"F","id":1,"t":40}
+        let input = r#"{"op":"M","addr":"0x1000","size":64,"t":10}
+{"op":"M","addr":"0x9000","size":64,"t":20}
+{"op":"M","addr":"0x20000","size":64,"t":30}
+{"op":"F","addr":"0x1000","t":40}
 "#;
         let mut a = load(input);
         a.view.set_show_all(&a.store, false);
@@ -1197,9 +1451,9 @@ not json at all
 
     #[test]
     fn extra_properties_parsed_and_exposed() {
-        let src = r#"{"op":"H","v":1,"unit":"ns","row_bytes":4096}
-{"seq":0,"t":100,"op":"M","id":1,"addr":"0x1000","size":64,"pool":"gfx","refs":3}
-{"seq":1,"t":200,"op":"M","id":2,"addr":"0x2000","size":32}
+        let src = r#"{"op":"H","v":2,"unit":"ns","row_bytes":4096}
+{"t":100,"op":"M","addr":"0x1000","size":64,"pool":"gfx","refs":3}
+{"t":200,"op":"M","addr":"0x2000","size":32}
 "#;
         let mut a = load(src);
         assert_eq!(a.store.extras, vec!["\"pool\":\"gfx\",\"refs\":3".to_string()]);
@@ -1386,7 +1640,7 @@ not json at all
         a.cfg.x_pan = 0.0;
         // the 64-byte alloc at 0x1000 now spans the first quarter of the width
         let p = render::pick(&a.store, &mut a.view, &a.cfg, 400, 50, 0.0, 0.0);
-        assert!(p.contains("\"id\":1"), "pick got {}", p);
+        assert!(p.contains("\"e\":0"), "pick got {}", p);
         // past the alloc (byte offset 128) there is nothing
         let p = render::pick(&a.store, &mut a.view, &a.cfg, 400, 200, 0.0, 0.0);
         assert_eq!(p, "null");
@@ -1400,14 +1654,14 @@ not json at all
     fn size_label_on_middle_row() {
         // a 3-row allocation (0x1000..0x4000 over 0x1000-byte rows): the
         // label goes on the middle row, not the first
-        let input = r#"{"op":"M","id":1,"addr":"0x1000","size":12288,"t":10}"#;
+        let input = r#"{"op":"M","addr":"0x1000","size":12288,"t":10}"#;
         let mut a = load(input);
         a.view.seek(&a.store, 1);
         let out = render::render_addr(&a.store, &mut a.view, &a.cfg, &mut a.frame, 400, 300, 0.0);
         // rows are contiguous: row_y(1) = row_px = 12
         assert!(out.labels.contains("\"k\":2,\"x\":0,\"y\":12"), "labels: {}", out.labels);
         // a 4-row allocation rounds to the top middle: row index 1 again
-        let input = r#"{"op":"M","id":1,"addr":"0x1000","size":16384,"t":10}"#;
+        let input = r#"{"op":"M","addr":"0x1000","size":16384,"t":10}"#;
         let mut a = load(input);
         a.view.seek(&a.store, 1);
         let out = render::render_addr(&a.store, &mut a.view, &a.cfg, &mut a.frame, 400, 300, 0.0);
@@ -1445,6 +1699,77 @@ not json at all
         assert!(!(0..100).any(|x| at(&px, x, 0) == c || at(&px, x, 39) == c));
     }
 
+    fn load_run(files: &[&str]) -> App {
+        let mut a = App::new();
+        let mut p = Parser::new();
+        p.begin_files(files.len() as u32);
+        for f in files {
+            p.file_begin();
+            let b = f.as_bytes();
+            let mut i = 0;
+            while i < b.len() {
+                let end = (i + 5).min(b.len());
+                p.chunk(&b[i..end]);
+                i = end;
+            }
+        }
+        p.finish();
+        a.store = p.store;
+        a.view.reset(&a.store);
+        a
+    }
+
+    #[test]
+    fn run_files_merge_by_t() {
+        // heap stream + app-emitted span/log stream, merged into one run
+        let heap = r#"{"op":"H","v":2,"title":"run"}
+{"t":100,"op":"M","addr":"0x1000","size":64}
+{"t":300,"op":"F","addr":"0x1000"}"#; // no trailing newline: carry flush path
+        let app_stream = r#"{"t":100,"op":"B","name":"phase"}
+{"op":"L","msg":"hello"}
+{"t":250,"op":"E"}
+"#;
+        let a = load_run(&[heap, app_stream]);
+        let s = &a.store;
+        assert_eq!(s.len(), 5);
+        assert_eq!(s.title, "run");
+        // t ties keep the earlier file: M (file 0) before B (file 1); the
+        // t-less L inherits its own file's previous t (100)... and lands
+        // after B in file order
+        assert_eq!(s.op[0], OP_M);
+        assert_eq!(s.op[1], OP_B);
+        assert_eq!(s.op[2], OP_L);
+        assert_eq!(s.t[2], 100);
+        assert_eq!(s.op[3], OP_E);
+        assert_eq!(s.op[4], OP_F);
+        // cross-file links hold on merged indices
+        assert_eq!(s.target[4], 0);
+        let sp = &s.spans[0];
+        assert_eq!((sp.begin, sp.end), (1, 3));
+        let total: u32 = s.warn_counts.iter().sum();
+        assert_eq!(total, 0);
+    }
+
+    #[test]
+    fn demo_file_parses_clean() {
+        // round-trip gen.py's v2 output through the parser when present
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../web/demo.heapl");
+        let Ok(data) = std::fs::read_to_string(path) else {
+            return;
+        };
+        let a = load(&data);
+        let s = &a.store;
+        assert_eq!(s.version, 2);
+        assert!(s.n_malloc > 0 && s.n_free > 0 && s.n_span > 0 && s.n_log > 0);
+        let total: u32 = s.warn_counts.iter().sum();
+        assert_eq!(total, 0, "demo should parse without warnings");
+        // every span is closed by the generator
+        assert!(s
+            .spans
+            .iter()
+            .all(|sp| sp.begin != NONE_U32 && sp.end != NONE_U32));
+    }
+
     #[test]
     fn render_smoke() {
         let mut a = load(SAMPLE);
@@ -1469,7 +1794,7 @@ not json at all
         assert!(has_fill);
         // pick at the first allocation: row for 0x1000, x=0
         let p = render::pick(&a.store, &mut a.view, &a.cfg, 400, 0, 0.0, 0.0);
-        assert!(p.contains("\"id\":1"), "pick got {}", p);
+        assert!(p.contains("\"e\":0"), "pick got {}", p);
         // timeline render smoke
         let mut px = Vec::new();
         timeline::render(&a.store, &a.cfg, 1, 100, 40, 0.0, 5.0, &mut px);

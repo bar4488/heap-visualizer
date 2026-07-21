@@ -1,8 +1,11 @@
 //! Streaming JSONL parser: feed chunks of bytes, get a populated Store.
 //!
-//! Load-time work beyond raw decoding, all done in this single pass:
-//!   - id -> creating-event resolution (target/death links)
-//!   - liveness bookkeeping for warnings (double free, overlap) and snapshots
+//! v2 wire format (see docs/spec-v2-draft.md): no `seq`, no `id` — stream
+//! order is authoritative and frees name allocations by address. Load-time
+//! work beyond raw decoding, all done in this single pass:
+//!   - addr -> creating-event resolution (target/death links)
+//!   - anomaly detection (invalid free, overlap with implicit end)
+//!   - span (B/E) matching into a span table, log (L) collection
 //!   - periodic live-set snapshots for fast seeking
 //!   - prefix sums for timeline binning
 
@@ -16,11 +19,20 @@ const SNAP_MAX: usize = 96;
 pub struct Parser {
     pub store: Store,
     carry: Vec<u8>,
-    /// id -> creating event index, for every id ever seen (liveness = death[e]).
-    id_map: HashMap<u64, u32>,
-    /// live regions keyed by (addr, event): value = end address. Used for
-    /// overlap warnings and to take snapshots.
-    live: BTreeMap<(u64, u32), u64>,
+    /// Multi-file (run) mode: records are staged per file and merged by `t`
+    /// at finish — stable, per-file order preserved on ties, earlier file
+    /// wins ties. Event indices are assigned over the merged stream.
+    staging: bool,
+    stage: Vec<Vec<Raw>>,
+    /// Decode-time `t` inheritance for the current staged file (an absent
+    /// `t` means "same as the previous event of this file").
+    file_prev_t: u64,
+    /// Live regions: base addr -> (creating event, end addr). The live set
+    /// guarantees at most one live allocation per base address, so the
+    /// address is the key frees resolve through.
+    live: BTreeMap<u64, (u32, u64)>,
+    /// Open-span stacks per lane (thr_idx; NONE_U16 = the global lane).
+    open_spans: HashMap<u16, Vec<u32>>,
     prev_t: u64,
     saw_t: bool,
     cur_live_bytes: u64,
@@ -29,26 +41,28 @@ pub struct Parser {
     thr_map: HashMap<i64, u16>,
     stack_map: HashMap<String, u32>,
     extra_map: HashMap<String, u32>,
-    seq_warned: bool,
+    span_name_map: HashMap<String, u32>,
+    src_map: HashMap<String, u32>,
 }
 
 #[derive(Default)]
 struct Raw {
-    op: u8, // b'M' | b'F' | b'R' | b'H' | 0
-    id: Option<u64>,
-    old_id: Option<u64>,
+    op: u8, // b'M' | b'F' | b'R' | b'B' | b'E' | b'L' | b'H' | 0
     addr: Option<u64>,
     old_addr: Option<u64>,
     size: Option<u64>,
-    old_size: Option<u64>,
     usable: Option<u64>,
     t: Option<u64>,
-    seq: Option<i64>,
     thr: Option<i64>,
     site: Option<String>,
     stack: Option<String>,
+    name: Option<String>,
+    msg: Option<String>,
+    lvl: Option<String>,
+    src: Option<String>,
     /// Raw JSON object body fragment (`"k":v,"k2":v2`) of unrecognized
-    /// top-level keys, verbatim from the source (already valid JSON text).
+    /// top-level keys (incl. B `args` / L `fields`), verbatim from the
+    /// source (already valid JSON text).
     extra: String,
     // header fields
     v: Option<i64>,
@@ -64,8 +78,11 @@ impl Parser {
         Parser {
             store: Store::default(),
             carry: Vec::new(),
-            id_map: HashMap::new(),
+            staging: false,
+            stage: Vec::new(),
+            file_prev_t: 0,
             live: BTreeMap::new(),
+            open_spans: HashMap::new(),
             prev_t: 0,
             saw_t: false,
             cur_live_bytes: 0,
@@ -74,7 +91,27 @@ impl Parser {
             thr_map: HashMap::new(),
             stack_map: HashMap::new(),
             extra_map: HashMap::new(),
-            seq_warned: false,
+            span_name_map: HashMap::new(),
+            src_map: HashMap::new(),
+        }
+    }
+
+    /// Enable multi-file (run) staging when the run has more than one file.
+    /// Must be called before any chunk.
+    pub fn begin_files(&mut self, n: u32) {
+        self.staging = n > 1;
+    }
+
+    /// Start the next file of the run. Flushes a trailing unterminated line
+    /// of the previous file and resets per-file `t` inheritance.
+    pub fn file_begin(&mut self) {
+        let line = std::mem::take(&mut self.carry);
+        if !line.is_empty() {
+            self.line(&line);
+        }
+        self.file_prev_t = 0;
+        if self.staging {
+            self.stage.push(Vec::new());
         }
     }
 
@@ -114,6 +151,32 @@ impl Parser {
         if !line.is_empty() {
             self.line(&line);
         }
+        if self.staging {
+            // k-way merge of the staged files by resolved t; ties keep the
+            // earlier file, and within a file stream order is preserved
+            let stage = std::mem::take(&mut self.stage);
+            let mut iters: Vec<std::iter::Peekable<std::vec::IntoIter<Raw>>> =
+                stage.into_iter().map(|v| v.into_iter().peekable()).collect();
+            loop {
+                let mut best: Option<(u64, usize)> = None;
+                for (i, it) in iters.iter_mut().enumerate() {
+                    if let Some(r) = it.peek() {
+                        let t = r.t.unwrap_or(0);
+                        if best.map_or(true, |(bt, _)| t < bt) {
+                            best = Some((t, i));
+                        }
+                    }
+                }
+                match best {
+                    Some((_, i)) => {
+                        let raw = iters[i].next().unwrap();
+                        self.apply(raw);
+                    }
+                    None => break,
+                }
+            }
+            self.staging = false;
+        }
         let s = &mut self.store;
         s.t_max = self.prev_t;
         if s.len() == 0 {
@@ -124,13 +187,19 @@ impl Parser {
             s.addr_min = s.arena_base;
             s.addr_max = s.arena_base;
         }
+        // spans still open at end-of-stream keep end = NONE_U32: the
+        // consumer renders them to the last event
+        s.n_span = s.spans.len() as u32;
+        s.n_log = s.logs.len() as u32;
         // free load-time maps
-        self.id_map = HashMap::new();
         self.live = BTreeMap::new();
+        self.open_spans = HashMap::new();
         self.site_map = HashMap::new();
         self.thr_map = HashMap::new();
         self.stack_map = HashMap::new();
         self.extra_map = HashMap::new();
+        self.span_name_map = HashMap::new();
+        self.src_map = HashMap::new();
     }
 
     fn line(&mut self, line: &[u8]) {
@@ -148,9 +217,20 @@ impl Parser {
         }
         let line = &line[a..b];
         match parse_raw(line) {
-            Some(raw) => self.apply(raw),
+            Some(mut raw) => {
+                if self.staging && raw.op != b'H' {
+                    // resolve per-file t inheritance now — the merged stream
+                    // has no notion of "this file's previous event"
+                    let t = raw.t.unwrap_or(self.file_prev_t);
+                    self.file_prev_t = t;
+                    raw.t = Some(t);
+                    self.stage.last_mut().expect("file_begin not called").push(raw);
+                } else {
+                    self.apply(raw);
+                }
+            }
             None => {
-                let seq = self.store.len();
+                let seq = if self.staging { NONE_U32 } else { self.store.len() };
                 self.store.warn(seq, W_MALFORMED, 0);
             }
         }
@@ -198,12 +278,32 @@ impl Parser {
         i
     }
 
+    fn intern_span_name(&mut self, name: String) -> u32 {
+        if let Some(&i) = self.span_name_map.get(&name) {
+            return i;
+        }
+        let i = self.store.span_names.len() as u32;
+        self.span_name_map.insert(name.clone(), i);
+        self.store.span_names.push(name);
+        i
+    }
+
+    fn intern_src(&mut self, src: String) -> u32 {
+        if let Some(&i) = self.src_map.get(&src) {
+            return i;
+        }
+        let i = self.store.srcs.len() as u32;
+        self.src_map.insert(src.clone(), i);
+        self.store.srcs.push(src);
+        i
+    }
+
     fn apply(&mut self, mut raw: Raw) {
         if raw.op == b'H' {
             let s = &mut self.store;
             s.has_header = true;
-            s.version = raw.v.unwrap_or(1);
-            if s.version != 1 {
+            s.version = raw.v.unwrap_or(2);
+            if s.version != 2 {
                 let seq = s.len();
                 s.warn(seq, W_VERSION, s.version as u64);
             }
@@ -225,7 +325,34 @@ impl Parser {
             return;
         }
 
+        let op = match raw.op {
+            b'M' => OP_M,
+            b'F' => OP_F,
+            b'R' => OP_R,
+            b'B' => OP_B,
+            b'E' => OP_E,
+            b'L' => OP_L,
+            _ => {
+                // unknown record type: robustness, skip
+                return;
+            }
+        };
+
         let e = self.store.len();
+
+        // required-field checks that make a line unusable
+        let missing = match op {
+            OP_M => raw.addr.is_none(),
+            OP_F => raw.addr.is_none(),
+            OP_R => raw.addr.is_none() || raw.old_addr.is_none(),
+            OP_B => raw.name.is_none(),
+            OP_L => raw.msg.is_none(),
+            _ => false,
+        };
+        if missing {
+            self.store.warn(e, W_MALFORMED, 0);
+            return;
+        }
 
         // timestamp: missing inherits previous; decreasing clamps
         let t = match raw.t {
@@ -239,42 +366,68 @@ impl Parser {
             }
             None => self.prev_t,
         };
+
+        let thr_idx = match raw.thr {
+            Some(v) => self.intern_thr(v),
+            None => NONE_U16,
+        };
+
+        // ---- span matching (B/E). An E with no open span on its lane and
+        // no name is ignored entirely (spec I.3), so resolve before the row
+        // is committed.
+        let mut span_target = NONE_U32;
+        if op == OP_B {
+            let name = self.intern_span_name(raw.name.take().unwrap());
+            let idx = self.store.spans.len() as u32;
+            self.store.spans.push(Span {
+                name,
+                thr_idx,
+                begin: e,
+                end: NONE_U32,
+            });
+            self.open_spans.entry(thr_idx).or_default().push(idx);
+            span_target = idx;
+        } else if op == OP_E {
+            match self.open_spans.entry(thr_idx).or_default().pop() {
+                Some(idx) => {
+                    self.store.spans[idx as usize].end = e;
+                    span_target = idx;
+                    if let Some(name) = raw.name.take() {
+                        let open_name =
+                            &self.store.span_names[self.store.spans[idx as usize].name as usize];
+                        if *open_name != name {
+                            self.store.warn(e, W_SPAN_MISMATCH, idx as u64);
+                        }
+                    }
+                }
+                None => match raw.name.take() {
+                    // began before the trace started: renders from the first
+                    // event to this E
+                    Some(name) => {
+                        let name = self.intern_span_name(name);
+                        let idx = self.store.spans.len() as u32;
+                        self.store.spans.push(Span {
+                            name,
+                            thr_idx,
+                            begin: NONE_U32,
+                            end: e,
+                        });
+                        span_target = idx;
+                    }
+                    None => return, // nothing to close, nothing to name: ignore
+                },
+            }
+        }
+
         if !self.saw_t {
             self.store.t_min = t;
             self.saw_t = true;
         }
         self.prev_t = t;
 
-        // seq sanity (stream order is authoritative regardless)
-        if let Some(sq) = raw.seq {
-            if sq != e as i64 && !self.seq_warned {
-                self.store.warn(e, W_SEQ_MISMATCH, sq as u64);
-                self.seq_warned = true;
-            }
-        }
-
-        let op = match raw.op {
-            b'M' => OP_M,
-            b'F' => OP_F,
-            b'R' => OP_R,
-            _ => {
-                // unknown record type: forward-compat, ignore
-                return;
-            }
-        };
-
-        // op F with the reserved null id is a no-op record
-        if op == OP_F && raw.id == Some(0) {
-            return;
-        }
-
         let site = match raw.site {
             Some(name) => self.intern_site(name),
             None => NONE_U32,
-        };
-        let thr_idx = match raw.thr {
-            Some(v) => self.intern_thr(v),
-            None => NONE_U16,
         };
         let stack = match raw.stack {
             Some(st) => self.intern_stack(st),
@@ -286,43 +439,55 @@ impl Parser {
             self.intern_extra(std::mem::take(&mut raw.extra))
         };
 
-        // resolve the killed allocation for F / R
+        // ---- resolve the ended allocation for F / R by address ----
         let mut target = NONE_U32;
         if op == OP_F || op == OP_R {
-            let kid = if op == OP_F { raw.id } else { raw.old_id };
-            match kid.and_then(|k| self.id_map.get(&k).copied()) {
-                Some(ce) => {
-                    if self.store.death[ce as usize] != NONE_U32 {
-                        self.store.warn(e, W_DOUBLE_FREE, kid.unwrap_or(0));
-                    } else {
-                        target = ce;
-                    }
-                }
-                None => {
-                    self.store.warn(e, W_UNKNOWN_ID, kid.unwrap_or(0));
-                }
+            let key = if op == OP_F { raw.addr } else { raw.old_addr };
+            let key = key.unwrap();
+            match self.live.remove(&key) {
+                Some((ce, _)) => target = ce,
+                None => self.store.warn(e, W_INVALID_FREE, key),
             }
+        } else if op == OP_L {
+            let lvl = match raw.lvl.as_deref() {
+                Some("trace") => 0,
+                Some("debug") => 1,
+                Some("warn") => 3,
+                Some("error") => 4,
+                Some("fatal") => 5,
+                _ => LVL_INFO,
+            };
+            let src = match raw.src.take() {
+                Some(s) => self.intern_src(s),
+                None => NONE_U32,
+            };
+            target = self.store.logs.len() as u32;
+            self.store.logs.push(LogRec {
+                msg: raw.msg.take().unwrap(),
+                lvl,
+                src,
+            });
+        } else if op == OP_B || op == OP_E {
+            target = span_target;
         }
 
         // geometry of the new allocation for M / R
         let (mut addr, mut size, mut usable) = (0u64, 0u64, 0u64);
         if op == OP_M || op == OP_R {
-            addr = match raw.addr {
-                Some(a) => a,
-                None => {
-                    self.store.warn(e, W_MALFORMED, raw.id.unwrap_or(0));
-                    return;
-                }
-            };
+            addr = raw.addr.unwrap();
             size = raw.size.unwrap_or(0);
             if size == 0 {
-                self.store.warn(e, W_BAD_SIZE, raw.id.unwrap_or(0));
+                self.store.warn(e, W_BAD_SIZE, addr);
                 size = 1;
             }
             usable = raw.usable.unwrap_or(0);
             if usable <= size {
                 usable = 0;
             }
+        } else if op == OP_F {
+            // the named address, kept for anomaly display; geometry comes
+            // from the target
+            addr = raw.addr.unwrap();
         }
 
         // old geometry for R (prefer the resolved creator, fall back to record)
@@ -333,7 +498,6 @@ impl Parser {
                 o_size = self.store.size[target as usize];
             } else {
                 o_addr = raw.old_addr.unwrap_or(0);
-                o_size = raw.old_size.unwrap_or(0);
             }
         }
 
@@ -341,7 +505,6 @@ impl Parser {
         let s = &mut self.store;
         s.op.push(op);
         s.t.push(t);
-        s.id.push(raw.id.unwrap_or(0));
         s.addr.push(addr);
         s.size.push(size);
         s.usable.push(usable);
@@ -361,15 +524,12 @@ impl Parser {
             s.green_pre.push(0);
             s.red_pre.push(0);
         }
-        s.green_pre
-            .push(gp + (op == OP_M || op == OP_R) as u32);
+        s.green_pre.push(gp + (op == OP_M || op == OP_R) as u32);
         s.red_pre.push(rp + (op == OP_F || op == OP_R) as u32);
 
         // ---- liveness bookkeeping ----
-        if target != NONE_U32 {
+        if target != NONE_U32 && (op == OP_F || op == OP_R) {
             s.death[target as usize] = e;
-            let ta = s.addr[target as usize];
-            self.live.remove(&(ta, target));
             self.cur_live_bytes = self
                 .cur_live_bytes
                 .saturating_sub(s.size[target as usize]);
@@ -379,28 +539,29 @@ impl Parser {
             let span = size.max(usable);
             let end = addr + span;
 
-            // duplicate-id check + registration
-            if let Some(id) = raw.id {
-                if let Some(&prev) = self.id_map.get(&id) {
-                    if s.death[prev as usize] == NONE_U32 {
-                        s.warn(e, W_DUP_ID, id);
-                    }
+            // overlap anomaly: the new allocation wins; every overlapped
+            // live allocation is implicitly ended here
+            let mut victims: Vec<(u64, u32)> = Vec::new();
+            if let Some((&pa, &(pe, pend))) = self.live.range(..addr).next_back() {
+                if pend > addr {
+                    victims.push((pa, pe));
                 }
-                self.id_map.insert(id, e);
+            }
+            for (&na, &(ne, _)) in self.live.range(addr..) {
+                if na >= end {
+                    break;
+                }
+                victims.push((na, ne));
+            }
+            for (va, ve) in victims {
+                s.warn(e, W_OVERLAP, va);
+                s.death[ve as usize] = e;
+                s.kills.push((e, ve));
+                self.live.remove(&va);
+                self.cur_live_bytes = self.cur_live_bytes.saturating_sub(s.size[ve as usize]);
             }
 
-            // overlap check against neighbours in the live map
-            let mut overlaps = false;
-            if let Some((&(pa, _), &pend)) = self.live.range(..(addr, u32::MAX)).next_back() {
-                overlaps |= pend > addr && pa < end;
-            }
-            if let Some((&(na, _), _)) = self.live.range((addr + 1, 0)..).next() {
-                overlaps |= na < end;
-            }
-            if overlaps {
-                s.warn(e, W_OVERLAP, addr);
-            }
-            self.live.insert((addr, e), end);
+            self.live.insert(addr, (e, end));
 
             self.cur_live_bytes += size;
             s.peak_live_bytes = s.peak_live_bytes.max(self.cur_live_bytes);
@@ -419,13 +580,14 @@ impl Parser {
         match op {
             OP_M => s.n_malloc += 1,
             OP_F => s.n_free += 1,
-            _ => s.n_realloc += 1,
+            OP_R => s.n_realloc += 1,
+            _ => {}
         }
 
         // ---- periodic snapshot ----
         let applied = e + 1;
         if applied % self.snap_interval == 0 {
-            let mut lv: Vec<u32> = self.live.keys().map(|&(_, ev)| ev).collect();
+            let mut lv: Vec<u32> = self.live.values().map(|&(ev, _)| ev).collect();
             lv.sort_unstable();
             s.snaps.push((applied, lv));
             if s.snaps.len() >= SNAP_MAX {
@@ -448,7 +610,6 @@ impl Default for Store {
         Store {
             op: Vec::new(),
             t: Vec::new(),
-            id: Vec::new(),
             addr: Vec::new(),
             size: Vec::new(),
             usable: Vec::new(),
@@ -461,6 +622,7 @@ impl Default for Store {
             old_size: Vec::new(),
             death: Vec::new(),
             tag: Vec::new(),
+            kills: Vec::new(),
             green_pre: Vec::new(),
             red_pre: Vec::new(),
             sites: Vec::new(),
@@ -469,8 +631,12 @@ impl Default for Store {
             thr_count: Vec::new(),
             stacks: Vec::new(),
             extras: Vec::new(),
+            spans: Vec::new(),
+            span_names: Vec::new(),
+            logs: Vec::new(),
+            srcs: Vec::new(),
             has_header: false,
-            version: 1,
+            version: 2,
             unit: "ns".to_string(),
             title: String::new(),
             hdr_row_bytes: 0,
@@ -486,6 +652,8 @@ impl Default for Store {
             n_malloc: 0,
             n_free: 0,
             n_realloc: 0,
+            n_span: 0,
+            n_log: 0,
             warnings: Vec::new(),
             warn_counts: [0; NWARN],
             snaps: Vec::new(),
@@ -515,8 +683,6 @@ fn parse_raw(line: &[u8]) -> Option<Raw> {
                 let (a, b) = sc.string_span()?;
                 raw.op = if b - a == 1 { sc.b[a] } else { 0 };
             }
-            b"id" => raw.id = Some(sc.integer()? as u64),
-            b"old_id" => raw.old_id = Some(sc.integer()? as u64),
             b"addr" => {
                 let (a, b) = sc.string_span()?;
                 raw.addr = parse_addr(&sc.b[a..b]);
@@ -530,16 +696,36 @@ fn parse_raw(line: &[u8]) -> Option<Raw> {
                 raw.arena_base = parse_addr(&sc.b[a..b]);
             }
             b"size" => raw.size = Some(sc.integer()?.max(0) as u64),
-            b"old_size" => raw.old_size = Some(sc.integer()?.max(0) as u64),
             b"usable" => raw.usable = Some(sc.integer()?.max(0) as u64),
             b"t" => raw.t = Some(sc.integer()?.max(0) as u64),
-            b"seq" => raw.seq = Some(sc.integer()?),
             b"thr" => raw.thr = Some(sc.integer()?),
             b"v" => raw.v = Some(sc.integer()?),
             b"row_bytes" => raw.row_bytes = Some(sc.integer()?.max(0) as u64),
+            // v1 remnants: dropped from the format, skipped silently so old
+            // files don't flood the extras table (the version warning is the
+            // real signal)
+            b"seq" | b"id" | b"old_id" | b"old_size" => {
+                let _ = sc.skip_value()?;
+            }
             b"site" => {
                 let (a, b) = sc.string_span()?;
                 raw.site = Some(unescape(&sc.b[a..b]));
+            }
+            b"name" => {
+                let (a, b) = sc.string_span()?;
+                raw.name = Some(unescape(&sc.b[a..b]));
+            }
+            b"msg" => {
+                let (a, b) = sc.string_span()?;
+                raw.msg = Some(unescape(&sc.b[a..b]));
+            }
+            b"lvl" => {
+                let (a, b) = sc.string_span()?;
+                raw.lvl = Some(unescape(&sc.b[a..b]));
+            }
+            b"src" => {
+                let (a, b) = sc.string_span()?;
+                raw.src = Some(unescape(&sc.b[a..b]));
             }
             b"unit" => {
                 let (a, b) = sc.string_span()?;
