@@ -81,3 +81,5 @@ cargo test --manifest-path core/Cargo.toml
 - `web/` — static viewer: `worker.js` owns the WASM + canvases, `main.js` is
   DOM chrome and input.
 - `gen.py` — deterministic synthetic trace generator.
+- `specs/` — the specification, split into modules (start at
+  [specs/README.md](specs/README.md)).

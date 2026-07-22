@@ -2,7 +2,7 @@
 """gen.py - synthetic heap-event stream generator for heap-visualizer.
 
 Emits a JSONL (.heapl) stream of malloc/free/realloc events conforming to
-SPECIFICATION.md v1. It simulates a free-list allocator serving a workload made
+specs/02-trace-format.md v1. It simulates a free-list allocator serving a workload made
 of allocation "sites" (each with a characteristic size range and lifetime) and
 sprinkles in same-timestamp bursts so the temporal and sequential timelines in
 the viewer visibly diverge.
@@ -338,8 +338,9 @@ class Generator:
                 "sites": [s.name for s in SITES],
             },
         }
-        # the header carries no seq: per spec §3.7, seq is the 0-based index
-        # among *event* records (header and comments excluded)
+        # the header carries no seq: per specs/02-trace-format.md §2.7, seq
+        # is the 0-based index among *event* records (header and comments
+        # excluded)
         out.write(json.dumps(header, separators=(",", ":")))
         out.write("\n")
 
