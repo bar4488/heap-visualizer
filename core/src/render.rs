@@ -490,7 +490,7 @@ fn inside_one_alloc(s: &Store, v: &crate::state::View, ra: u64, rb: u64) -> bool
     let rb_bytes = v.row_bytes;
     let gap_start = v.base + (ra + 1) * rb_bytes;
     let gap_end = v.base + rb * rb_bytes;
-    let floor = gap_start.saturating_sub(s.max_span.max(1));
+    let floor = gap_start.saturating_sub(v.max_live_span().max(1));
     v.live
         .range((floor, 0)..=(gap_start, u32::MAX))
         .rev()
@@ -641,7 +641,10 @@ pub fn render_addr(
     let addr_hi = v
         .base
         .saturating_add(v.rows[vis_hi].saturating_add(1).saturating_mul(rb));
-    let floor = addr_lo.saturating_sub(s.max_span.max(1));
+    // Walk-back bound: the widest *currently live* allocation, not
+    // Store::max_span — that global only grows, so one early wide allocation
+    // would tax every frame for the rest of the session.
+    let floor = addr_lo.saturating_sub(v.max_live_span().max(1));
     // Draw in creation order, not address order: where live allocations
     // overlap (nesting), the latest-created one is drawn last and wins the
     // shared pixels — matching picking, which also prefers the newest.

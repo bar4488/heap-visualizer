@@ -16,6 +16,10 @@ pub struct View {
     /// Multiset of live allocations' birth timestamps, so the oldest live
     /// birth (age color mode) is O(log n) instead of a full live-set scan.
     birth_counts: BTreeMap<u64, u32>,
+    /// Multiset of live allocations' rendered spans, so the render-time
+    /// walk-back is bounded by the widest allocation *currently live* rather
+    /// than Store::max_span, a trace-wide maximum that never decreases.
+    span_counts: BTreeMap<u64, u32>,
 
     pub row_bytes: u64,
     pub base: u64,
@@ -57,6 +61,7 @@ impl View {
             live_count: 0,
             live_bytes: 0,
             birth_counts: BTreeMap::new(),
+            span_counts: BTreeMap::new(),
             row_bytes: 0x1000,
             base: 0,
             collapse_rows: 5,
@@ -77,6 +82,7 @@ impl View {
         self.cur = 0;
         self.live.clear();
         self.birth_counts.clear();
+        self.span_counts.clear();
         self.occ.clear();
         self.pins.clear();
         self.anchor_pin = None;
@@ -164,6 +170,7 @@ impl View {
             self.live_count += 1;
             self.live_bytes += s.size[e as usize];
             *self.birth_counts.entry(s.t[e as usize]).or_insert(0) += 1;
+            *self.span_counts.entry(s.span(e)).or_insert(0) += 1;
             self.occ_add(s, e, 1);
         }
     }
@@ -178,6 +185,12 @@ impl View {
                     self.birth_counts.remove(&s.t[e as usize]);
                 }
             }
+            if let Some(c) = self.span_counts.get_mut(&s.span(e)) {
+                *c -= 1;
+                if *c == 0 {
+                    self.span_counts.remove(&s.span(e));
+                }
+            }
             self.occ_add(s, e, -1);
         }
     }
@@ -185,6 +198,14 @@ impl View {
     /// Birth timestamp of the oldest live allocation, if any.
     pub fn min_live_birth(&self) -> Option<u64> {
         self.birth_counts.keys().next().copied()
+    }
+
+    /// Rendered span of the widest allocation currently live (0 when none) —
+    /// the walk-back bound for per-frame live-set range scans. Unlike
+    /// `Store::max_span` it shrinks when the wide allocation is freed, so one
+    /// early arena block does not tax every later frame.
+    pub fn max_live_span(&self) -> u64 {
+        self.span_counts.keys().next_back().copied().unwrap_or(0)
     }
 
     fn apply_fwd(&mut self, s: &Store, e: u32) {
@@ -238,6 +259,7 @@ impl View {
         } else {
             self.live.clear();
             self.birth_counts.clear();
+            self.span_counts.clear();
             self.occ.clear();
             self.live_count = 0;
             self.live_bytes = 0;
