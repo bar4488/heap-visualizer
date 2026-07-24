@@ -1,6 +1,8 @@
 //! Address-line rasterizer: paints the live set into an RGBA buffer with
 //! collapsed empty rows, plus pick (hover) queries and realloc move-links.
 
+use std::fmt::Write as _;
+
 use crate::json::push_json_str;
 use crate::state::View;
 use crate::store::*;
@@ -491,9 +493,16 @@ pub fn age_normalizer(_s: &Store, v: &crate::state::View, cur_t: u64) -> f64 {
     }
 }
 
-pub struct RenderOut {
+/// Reusable per-frame containers for `render_addr` — cleared each frame, so
+/// steady-state rendering allocates nothing once capacities settle.
+#[derive(Default)]
+pub struct RenderScratch {
     /// JSON array of label records for the JS layer to draw as text.
     pub labels: String,
+    draw: Vec<(u32, u64, bool)>,
+    seams: Vec<(u32, u64, i64, i64, i64)>,
+    texts: Vec<(u32, u64, u64, i64, i64, i64)>,
+    covered: std::collections::BTreeMap<u64, u64>,
 }
 
 /// Whether the collapsed rows strictly between display rows `ra` and `rb` are
@@ -511,24 +520,38 @@ fn inside_one_alloc(s: &Store, v: &crate::state::View, ra: u64, rb: u64) -> bool
         .any(|&(a, e)| a <= gap_start && a + s.span(e) >= gap_end)
 }
 
-/// Render the address-line into `frame`. `scroll` is the virtual-y offset in px.
+/// Render the address-line into `frame`. `scroll` is the virtual-y offset in
+/// px. Labels land in `scratch.labels` (a JSON array).
 pub fn render_addr(
     s: &Store,
     v: &mut View,
     cfg: &Cfg,
     frame: &mut Frame,
+    scratch: &mut RenderScratch,
     w: u32,
     h: u32,
     scroll: f64,
-) -> RenderOut {
+) {
     v.ensure_rows();
     frame.resize(w, h);
     frame.clear(BG);
-    let mut labels = String::from("[");
+    let RenderScratch {
+        labels,
+        draw,
+        seams,
+        texts,
+        covered,
+    } = scratch;
+    labels.clear();
+    labels.push('[');
+    draw.clear();
+    seams.clear();
+    texts.clear();
+    covered.clear();
 
     if v.rows.is_empty() || w == 0 || h == 0 {
         labels.push(']');
-        return RenderOut { labels };
+        return;
     }
 
     let row_px = cfg.row_px;
@@ -584,12 +607,13 @@ pub fn render_addr(
                 labels.push(',');
             }
             first = false;
-            labels.push_str(&format!(
+            let _ = write!(
+                labels,
                 "{{\"k\":1,\"y\":{},\"bytes\":{},\"inside\":{}}}",
                 gy,
                 (skipped_rows as u128 * v.row_bytes as u128) as f64,
                 inside
-            ));
+            );
         }
         // row background
         frame.fill(0, w as i64, y, y + row_px as i64 - 1, ROW_BG);
@@ -599,7 +623,7 @@ pub fn render_addr(
             }
             first = false;
             let addr = v.base + v.rows[i] * v.row_bytes;
-            labels.push_str(&format!("{{\"k\":0,\"y\":{},\"addr\":\"0x{:x}\"}}", y, addr));
+            let _ = write!(labels, "{{\"k\":0,\"y\":{},\"addr\":\"0x{:x}\"}}", y, addr);
         }
     }
 
@@ -645,7 +669,7 @@ pub fn render_addr(
     };
     if vis_lo >= v.rows.len() || vis_lo > vis_hi {
         labels.push(']');
-        return RenderOut { labels };
+        return;
     }
     // Bound the live-set walk to allocations that can touch the visible rows:
     // start max_span below the first visible row's address (like `pick`) and
@@ -662,7 +686,6 @@ pub fn render_addr(
     // Draw in creation order, not address order: where live allocations
     // overlap (nesting), the latest-created one is drawn last and wins the
     // shared pixels — matching picking, which also prefers the newest.
-    let mut draw: Vec<(u32, u64, bool)> = Vec::new();
     for &(a, e) in v.live.range((floor, 0)..(addr_hi, 0)) {
         let (hide, dim_it) = visibility(cfg, s, e);
         if !hide {
@@ -674,13 +697,11 @@ pub fn render_addr(
     // loop so a later-created neighbor's fill (edge pixels can overlap by one
     // due to the ceil on x1) cannot paint the boundary away. Only the topmost
     // allocation at each start address gets its seam — a start buried under a
-    // later-created overlap is not a visible boundary.
-    let mut seams: Vec<(u32, u64, i64, i64, i64)> = Vec::new();
-    // Size-label candidates (e, addr range under the visible text span, x, y,
-    // w), deferred like seams: a label is emitted only if no later-created
+    // later-created overlap is not a visible boundary. Size-label candidates
+    // (texts: e, addr range under the visible text span, x, y, w) are
+    // deferred the same way: a label is emitted only if no later-created
     // allocation covers any part of the span the JS layer may draw text in.
-    let mut texts: Vec<(u32, u64, u64, i64, i64, i64)> = Vec::new();
-    for &(e, a, dim_it) in &draw {
+    for &(e, a, dim_it) in draw.iter() {
         let pass = !dim_it;
         let span = s.span(e);
         let size = s.size[e as usize].max(1).min(span);
@@ -795,7 +816,6 @@ pub fn render_addr(
     // drawn (and a size label emitted) only if not under any of them. Both
     // lists were collected in draw order (ascending event), so they zip.
     if !seams.is_empty() || !texts.is_empty() {
-        let mut covered: std::collections::BTreeMap<u64, u64> = Default::default();
         let mut k = seams.len();
         let mut t = texts.len();
         for &(e, a, _) in draw.iter().rev() {
@@ -822,14 +842,15 @@ pub fn render_addr(
                         labels.push(',');
                     }
                     first = false;
-                    labels.push_str(&format!(
+                    let _ = write!(
+                        labels,
                         "{{\"k\":2,\"x\":{},\"y\":{},\"w\":{},\"e\":{},\"size\":{}}}",
                         vx0,
                         y,
                         vw,
                         e,
                         s.size[e as usize]
-                    ));
+                    );
                     n_size_labels += 1;
                 }
             }
@@ -930,8 +951,6 @@ pub fn render_addr(
         }
     }
     labels.push(']');
-
-    RenderOut { labels }
 }
 
 /// Hit-test the address-line at canvas (x, y) given scroll; returns JSON.

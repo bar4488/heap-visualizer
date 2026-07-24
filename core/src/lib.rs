@@ -14,7 +14,7 @@ use std::cell::UnsafeCell;
 
 use json::push_json_str;
 use parse::Parser;
-use render::{Cfg, Filter, Frame};
+use render::{Cfg, Filter, Frame, RenderScratch};
 use state::View;
 use store::*;
 
@@ -30,9 +30,11 @@ struct App {
     cfg: Cfg,
     frame: Frame,
     tl_px: Vec<u8>,
-    buf: Vec<u8>,    // input buffer (file chunks, filter JSON)
-    out: String,     // reused JSON output
-    labels: String,  // labels from the last address render
+    buf: Vec<u8>, // input buffer (file chunks, filter JSON)
+    out: String,  // reused JSON output
+    /// Reused render containers; `scratch.labels` holds the labels from the
+    /// last address render.
+    scratch: RenderScratch,
     /// Event indices passing the active filter (see `ensure_ev_filtered`);
     /// rebuilt lazily after any filter or tag change. Not materialized when
     /// no filter is active — the identity mapping is used instead.
@@ -51,7 +53,7 @@ impl App {
             tl_px: Vec::new(),
             buf: Vec::new(),
             out: String::new(),
-            labels: String::new(),
+            scratch: RenderScratch::default(),
             ev_filtered: Vec::new(),
             ev_dirty: true,
         }
@@ -794,8 +796,16 @@ pub extern "C" fn hp_layout() -> f64 {
 #[no_mangle]
 pub extern "C" fn hp_render_addr(w: u32, h: u32, scroll: f64) {
     let a = app();
-    let out = render::render_addr(&a.store, &mut a.view, &a.cfg, &mut a.frame, w, h, scroll);
-    a.labels = out.labels;
+    render::render_addr(
+        &a.store,
+        &mut a.view,
+        &a.cfg,
+        &mut a.frame,
+        &mut a.scratch,
+        w,
+        h,
+        scroll,
+    );
     let r = ret();
     r[0] = a.frame.px.as_ptr() as u32;
     r[1] = a.frame.px.len() as u32;
@@ -804,7 +814,7 @@ pub extern "C" fn hp_render_addr(w: u32, h: u32, scroll: f64) {
 #[no_mangle]
 pub extern "C" fn hp_labels_json() {
     let a = app();
-    ret_str(&a.labels);
+    ret_str(&a.scratch.labels);
 }
 
 #[no_mangle]
@@ -1268,10 +1278,10 @@ not json at all
                 .any(|c| c[0] == render::OVERLAP[0] && c[1] == render::OVERLAP[1] && c[2] == render::OVERLAP[2])
         };
         a.cfg.overlap_mode = render::OVERLAP_HIGHLIGHT;
-        render::render_addr(&a.store, &mut a.view, &a.cfg, &mut a.frame, 256, 100, 0.0);
+        render::render_addr(&a.store, &mut a.view, &a.cfg, &mut a.frame, &mut a.scratch, 256, 100, 0.0);
         assert!(has_orange(&a.frame));
         a.cfg.overlap_mode = render::OVERLAP_IGNORE;
-        render::render_addr(&a.store, &mut a.view, &a.cfg, &mut a.frame, 256, 100, 0.0);
+        render::render_addr(&a.store, &mut a.view, &a.cfg, &mut a.frame, &mut a.scratch, 256, 100, 0.0);
         assert!(!has_orange(&a.frame));
     }
 
@@ -1288,7 +1298,7 @@ not json at all
         a.view.seek(&a.store, 2);
         a.cfg.color_mode = render::MODE_SIZE; // 64 vs 160 → distinct colors
         a.cfg.overlap_mode = render::OVERLAP_IGNORE;
-        render::render_addr(&a.store, &mut a.view, &a.cfg, &mut a.frame, 256, 100, 0.0);
+        render::render_addr(&a.store, &mut a.view, &a.cfg, &mut a.frame, &mut a.scratch, 256, 100, 0.0);
         let px_at = |f: &Frame, x: usize| {
             let p = (2 * f.w as usize + x) * 4;
             [f.px[p], f.px[p + 1], f.px[p + 2]]
@@ -1337,19 +1347,19 @@ not json at all
             (g[2] as u32 * 3 / 5) as u8,
         ];
         a.view.seek(&a.store, 3);
-        render::render_addr(&a.store, &mut a.view, &a.cfg, &mut a.frame, 256, 100, 0.0);
+        render::render_addr(&a.store, &mut a.view, &a.cfg, &mut a.frame, &mut a.scratch, 256, 100, 0.0);
         assert_eq!(px_at(&a.frame, 0x50, 2), interior, "ghost interior recessed");
         assert_eq!(px_at(&a.frame, 0x20, 2), g, "outside the ghost: plain fill");
         // divider edge at the ghost boundary is darker than the interior
         assert!(px_at(&a.frame, 0x40, 2)[1] < interior[1], "edge divider");
         // while the inner is still live there is no ghost
         a.view.seek(&a.store, 2);
-        render::render_addr(&a.store, &mut a.view, &a.cfg, &mut a.frame, 256, 100, 0.0);
+        render::render_addr(&a.store, &mut a.view, &a.cfg, &mut a.frame, &mut a.scratch, 256, 100, 0.0);
         assert_ne!(px_at(&a.frame, 0x50, 2), interior);
         // and the toggle turns it off
         a.cfg.ghosts = false;
         a.view.seek(&a.store, 3);
-        render::render_addr(&a.store, &mut a.view, &a.cfg, &mut a.frame, 256, 100, 0.0);
+        render::render_addr(&a.store, &mut a.view, &a.cfg, &mut a.frame, &mut a.scratch, 256, 100, 0.0);
         assert_eq!(px_at(&a.frame, 0x50, 2), g);
     }
 
@@ -1511,7 +1521,7 @@ not json at all
         // tag color mode renders tagged colors
         a.view.seek(&a.store, 4);
         a.cfg.color_mode = render::MODE_TAG;
-        let _ = render::render_addr(&a.store, &mut a.view, &a.cfg, &mut a.frame, 200, 100, 0.0);
+        let _ = render::render_addr(&a.store, &mut a.view, &a.cfg, &mut a.frame, &mut a.scratch, 200, 100, 0.0);
         let cat = render::CAT[1]; // tag 2 -> palette index 1
         let has_tag_color = a
             .frame
@@ -1729,15 +1739,17 @@ not json at all
         let input = r#"{"op":"M","id":1,"addr":"0x1000","size":12288,"t":10}"#;
         let mut a = load(input);
         a.view.seek(&a.store, 1);
-        let out = render::render_addr(&a.store, &mut a.view, &a.cfg, &mut a.frame, 400, 300, 0.0);
+        render::render_addr(&a.store, &mut a.view, &a.cfg, &mut a.frame, &mut a.scratch, 400, 300, 0.0);
         // rows are contiguous: row_y(1) = row_px = 12
-        assert!(out.labels.contains("\"k\":2,\"x\":0,\"y\":12"), "labels: {}", out.labels);
+        let labels = &a.scratch.labels;
+        assert!(labels.contains("\"k\":2,\"x\":0,\"y\":12"), "labels: {}", labels);
         // a 4-row allocation rounds to the top middle: row index 1 again
         let input = r#"{"op":"M","id":1,"addr":"0x1000","size":16384,"t":10}"#;
         let mut a = load(input);
         a.view.seek(&a.store, 1);
-        let out = render::render_addr(&a.store, &mut a.view, &a.cfg, &mut a.frame, 400, 300, 0.0);
-        assert!(out.labels.contains("\"k\":2,\"x\":0,\"y\":12"), "labels: {}", out.labels);
+        render::render_addr(&a.store, &mut a.view, &a.cfg, &mut a.frame, &mut a.scratch, 400, 300, 0.0);
+        let labels = &a.scratch.labels;
+        assert!(labels.contains("\"k\":2,\"x\":0,\"y\":12"), "labels: {}", labels);
     }
 
     #[test]
@@ -1775,16 +1787,17 @@ not json at all
     fn render_smoke() {
         let mut a = load(SAMPLE);
         a.view.seek(&a.store, 2);
-        let out = render::render_addr(
+        render::render_addr(
             &a.store,
             &mut a.view,
             &a.cfg,
             &mut a.frame,
+            &mut a.scratch,
             400,
             300,
             0.0,
         );
-        assert!(out.labels.starts_with('['));
+        assert!(a.scratch.labels.starts_with('['));
         assert_eq!(a.frame.px.len(), 400 * 300 * 4);
         // some green pixels present
         let has_fill = a
