@@ -1,6 +1,8 @@
 // heap-visualizer worker: owns the WASM engine and all OffscreenCanvas rendering.
 // The main thread only sends input events and receives state/query results.
 
+import { fmtBytes, fmtAllocSize as fmtAllocSizeMode, clampView } from './fmt.js';
+
 let E = null;            // wasm exports
 let wasmModule = null;   // compiled module, re-instantiated per trace load
 const td = new TextDecoder();
@@ -319,22 +321,8 @@ function postState() {
   });
 }
 
-// Mirrored in main.js (`fmtBytes`/`fmtAllocSize`) — the worker draws
-// in-allocation labels, the main thread the panels/tooltips, and the two must
-// format identically; change both together.
-function fmtBytes(b) {
-  if (b < 1024) return `${Math.round(b)} B`;
-  const u = ['KiB', 'MiB', 'GiB', 'TiB', 'PiB'];
-  let i = -1;
-  do { b /= 1024; i++; } while (b >= 1024 && i < u.length - 1);
-  return `${b >= 100 ? b.toFixed(0) : b.toFixed(1)} ${u[i]}`;
-}
-
 function fmtAllocSize(b) {
-  if (S.allocSizeFormat === 'hex') {
-    return `0x${Math.max(0, Math.round(Number(b) || 0)).toString(16)}`;
-  }
-  return fmtBytes(b);
+  return fmtAllocSizeMode(b, S.allocSizeFormat);
 }
 
 // ---------------------------------------------------------------------------
@@ -402,18 +390,6 @@ function frame(now) {
 // ---------------------------------------------------------------------------
 // message handling
 // ---------------------------------------------------------------------------
-
-// Mirrored in main.js (`clampView`) for optimistic local zoom updates — the
-// two must stay identical; change both together.
-function clampView(view, min, max, minSpan) {
-  let { lo, hi } = view;
-  if (hi - lo < minSpan) hi = lo + minSpan;
-  const span = hi - lo;
-  if (span >= max - min) return { lo: min, hi: Math.max(max, min + minSpan) };
-  if (lo < min) { lo = min; hi = min + span; }
-  if (hi > max) { hi = max; lo = max - span; }
-  return { lo, hi };
-}
 
 onmessage = async (ev) => {
   const m = ev.data;

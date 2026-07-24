@@ -1,6 +1,11 @@
 // heap-visualizer main thread: DOM chrome and input. All heavy lifting (parse, seek,
 // raster) happens in the worker; this file forwards input and paints overlays.
 
+import {
+  fmtBytes, fmtHexSize, fmtAllocSize as fmtAllocSizeMode, fmtNum, parseSize,
+  esc, clampView,
+} from './fmt.js';
+
 const $ = (id) => document.getElementById(id);
 
 // Mirrored from core/src/render.rs (CAT / RAMP): the engine paints
@@ -51,26 +56,12 @@ UI.seek = (seq) => worker.postMessage({ type: 'seek', seq });
 // formatting
 // ---------------------------------------------------------------------------
 
-// Mirrored in worker.js (`fmtBytes`/`fmtAllocSize`), which formats the labels
-// drawn inside allocations — the two must agree; change both together.
-function fmtBytes(b) {
-  if (b < 1024) return `${Math.round(b)} B`;
-  const u = ['KiB', 'MiB', 'GiB', 'TiB', 'PiB'];
-  let i = -1;
-  do { b /= 1024; i++; } while (b >= 1024 && i < u.length - 1);
-  return `${b >= 100 ? b.toFixed(0) : b.toFixed(1)} ${u[i]}`;
-}
-
-function fmtHexSize(b) {
-  return `0x${Math.max(0, Math.round(Number(b) || 0)).toString(16)}`;
-}
-
 function allocSizeFormat() {
   return $('alloc-size-format')?.value === 'hex' ? 'hex' : 'human';
 }
 
 function fmtAllocSize(b) {
-  return allocSizeFormat() === 'hex' ? fmtHexSize(b) : fmtBytes(b);
+  return fmtAllocSizeMode(b, allocSizeFormat());
 }
 
 function fmtAllocSizeDetail(b) {
@@ -89,25 +80,6 @@ function fmtTime(t) {
   if (ns < 1e6) return `${(ns / 1e3).toFixed(2)} µs`;
   if (ns < 1e9) return `${(ns / 1e6).toFixed(2)} ms`;
   return `${(ns / 1e9).toFixed(3)} s`;
-}
-
-function fmtNum(x) {
-  return Number(x).toLocaleString('en-US');
-}
-
-// Returns 0 for an empty input ("no value"), null for one that does not
-// parse — callers show the failure (red border) instead of silently treating
-// a typo as "unbounded". Exponent notation (1e6) is accepted, matching the
-// jump box.
-function parseSize(s) {
-  s = (s || '').trim().toLowerCase();
-  if (!s) return 0;
-  const m = s.match(/^(0x[\da-f]+|[\d.]+(?:e[+-]?\d+)?)\s*([kmgt]?)i?b?$/);
-  if (!m) return null;
-  const mult = { '': 1, k: 1024, m: 1 << 20, g: 1 << 30, t: 2 ** 40 }[m[2]];
-  const value = m[1].startsWith('0x') ? parseInt(m[1], 16) : parseFloat(m[1]);
-  if (!Number.isFinite(value)) return null;
-  return Math.round(value * mult);
 }
 
 // ---------------------------------------------------------------------------
@@ -816,10 +788,6 @@ function buildLegend() {
   el.innerHTML = html;
   el.hidden = html === '';
   sendResizes();
-}
-
-function esc(s) {
-  return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 }
 
 // ---------------------------------------------------------------------------
@@ -2482,18 +2450,6 @@ document.addEventListener('keydown', (e) => {
 // ---------------------------------------------------------------------------
 // timeline interaction
 // ---------------------------------------------------------------------------
-
-// Mirror of the worker's clamping (worker.js `clampView`) so optimistic local
-// updates agree with it — the two must stay identical; change both together.
-function clampView(v, min, max, minSpan) {
-  let { lo, hi } = v;
-  if (hi - lo < minSpan) hi = lo + minSpan;
-  const span = hi - lo;
-  if (span >= max - min) return { lo: min, hi: Math.max(max, min + minSpan) };
-  if (lo < min) { lo = min; hi = min + span; }
-  if (hi > max) { hi = max; lo = max - span; }
-  return { lo, hi };
-}
 
 function setupTimeline(stripId, canvas, kind) {
   const strip = $(stripId);
