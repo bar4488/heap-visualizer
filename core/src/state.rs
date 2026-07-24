@@ -2,7 +2,7 @@
 //! bidirectional replay, snapshot-accelerated seeks, and the collapsed-row
 //! layout of the address-line.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::store::*;
 
@@ -31,8 +31,9 @@ pub struct View {
     /// so it tracks row_bytes changes.
     pub collapse_bytes: u64,
 
-    /// row index -> number of live allocations touching it.
-    occ: HashMap<u64, u32>,
+    /// row index -> number of live allocations touching it. Ordered so the
+    /// live-rows layout comes out sorted without a per-rebuild sort.
+    occ: BTreeMap<u64, u32>,
     /// Pinned addresses (user address marks): their rows stay in the layout
     /// even when nothing is live there, so they are always scrollable to.
     pub pins: Vec<u64>,
@@ -66,7 +67,7 @@ impl View {
             base: 0,
             collapse_rows: 5,
             collapse_bytes: 0,
-            occ: HashMap::new(),
+            occ: BTreeMap::new(),
             pins: Vec::new(),
             anchor_pin: None,
             show_all: true,
@@ -277,7 +278,14 @@ impl View {
                 self.cur += 1;
             }
         }
-        self.rows_dirty = true;
+        // show_all's layout comes from all_rows (playhead-independent by
+        // construction) plus pins — a seek cannot change it, so don't pay a
+        // rebuild on every step. Everything that *can* change it
+        // (set_row_bytes / set_pins / set_anchor_pin / set_show_all) marks
+        // dirty itself.
+        if !self.show_all {
+            self.rows_dirty = true;
+        }
     }
 
     /// Rebuild the sorted display-row list if needed. Empty runs shorter
@@ -287,24 +295,57 @@ impl View {
             return;
         }
         let collapse_min = self.effective_collapse_min();
-        // show_all lays out the union of rows any allocation ever touches
-        // (a superset of the live rows), keeping the map stable over time
-        let mut occupied: Vec<u64> = if self.show_all {
-            self.all_rows.clone()
-        } else {
-            self.occ.keys().copied().collect()
-        };
         // pinned addresses keep their rows laid out even when empty
-        for &p in self.pins.iter().chain(self.anchor_pin.iter()) {
-            occupied.push(self.row_of(p));
-        }
-        occupied.sort_unstable();
-        occupied.dedup();
+        let mut pin_rows: Vec<u64> = self
+            .pins
+            .iter()
+            .chain(self.anchor_pin.iter())
+            .map(|&p| self.row_of(p))
+            .collect();
+        pin_rows.sort_unstable();
+        pin_rows.dedup();
+        // show_all lays out the union of rows any allocation ever touches
+        // (a superset of the live rows), keeping the map stable over time.
+        // Both sources are already sorted and deduped (all_rows by
+        // build_all_rows, occ by being an ordered map), so the pin rows are
+        // merged in rather than concatenated and re-sorted.
+        let live_rows: Vec<u64>;
+        let occupied: &[u64] = if self.show_all {
+            &self.all_rows
+        } else {
+            live_rows = self.occ.keys().copied().collect();
+            &live_rows
+        };
         self.rows.clear();
         self.gaps_before.clear();
         let mut gaps = 0u32;
         let mut prev: Option<u64> = None;
-        for r in occupied {
+        let (mut oi, mut pi) = (0usize, 0usize);
+        loop {
+            let r = match (occupied.get(oi), pin_rows.get(pi)) {
+                (Some(&a), Some(&b)) if a == b => {
+                    oi += 1;
+                    pi += 1;
+                    a
+                }
+                (Some(&a), Some(&b)) if a < b => {
+                    oi += 1;
+                    a
+                }
+                (Some(_), Some(&b)) => {
+                    pi += 1;
+                    b
+                }
+                (Some(&a), None) => {
+                    oi += 1;
+                    a
+                }
+                (None, Some(&b)) => {
+                    pi += 1;
+                    b
+                }
+                (None, None) => break,
+            };
             if let Some(p) = prev {
                 let run = r - p - 1;
                 if run > 0 {
