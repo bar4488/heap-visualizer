@@ -231,13 +231,16 @@ impl Frame {
     }
 
     fn clear(&mut self, c: [u8; 3]) {
-        let mut i = 0;
-        while i < self.px.len() {
-            self.px[i] = c[0];
-            self.px[i + 1] = c[1];
-            self.px[i + 2] = c[2];
-            self.px[i + 3] = 255;
-            i += 4;
+        if self.px.is_empty() {
+            return;
+        }
+        // write one pixel, then double it with copy_within (memcpy speed)
+        self.px[..4].copy_from_slice(&[c[0], c[1], c[2], 255]);
+        let mut filled = 4;
+        while filled < self.px.len() {
+            let n = filled.min(self.px.len() - filled);
+            self.px.copy_within(..n, filled);
+            filled += n;
         }
     }
 
@@ -245,14 +248,15 @@ impl Frame {
     fn fill(&mut self, x0: i64, x1: i64, y0: i64, y1: i64, c: [u8; 3]) {
         let (x0, x1) = (x0.max(0) as usize, x1.min(self.w as i64).max(0) as usize);
         let (y0, y1) = (y0.max(0) as usize, y1.min(self.h as i64).max(0) as usize);
+        if x1 <= x0 {
+            return;
+        }
+        let w = self.w as usize;
+        let pat = [c[0], c[1], c[2], 255];
         for y in y0..y1 {
-            let row = y * self.w as usize;
-            for x in x0..x1 {
-                let p = (row + x) * 4;
-                self.px[p] = c[0];
-                self.px[p + 1] = c[1];
-                self.px[p + 2] = c[2];
-                self.px[p + 3] = 255;
+            let row = &mut self.px[(y * w + x0) * 4..(y * w + x1) * 4];
+            for px in row.chunks_exact_mut(4) {
+                px.copy_from_slice(&pat);
             }
         }
     }
@@ -276,36 +280,42 @@ impl Frame {
         let (x0, x1) = (x0.max(0) as usize, x1.min(self.w as i64).max(0) as usize);
         let (y0, y1) = (y0.max(0) as usize, y1.min(self.h as i64).max(0) as usize);
         let (c0, c1) = (c0.max(0) as usize, c1.min(self.w as i64).max(0) as usize);
+        if x1 <= x0 {
+            return;
+        }
+        let w = self.w as usize;
         for y in y0..y1 {
-            let row = y * self.w as usize;
-            for x in x0..x1 {
-                let i = row + x;
-                let p = i * 4;
+            let base = y * w;
+            let cov = &mut self.cov[base + x0..base + x1];
+            let px = &mut self.px[(base + x0) * 4..(base + x1) * 4];
+            let mut x = x0;
+            for (p, cv) in px.chunks_exact_mut(4).zip(cov.iter_mut()) {
                 let core = x >= c0 && x < c1;
-                if core && self.cov[i] != 0 {
+                x += 1;
+                if core && *cv != 0 {
                     // count covers (capped below GHOST_MARK) so the ghost
                     // pass can tell "outer only" from "outer + live inner"
-                    self.cov[i] = (self.cov[i] + 1).min(GHOST_MARK - 1);
+                    *cv = (*cv + 1).min(GHOST_MARK - 1);
                     if overlap_mode == OVERLAP_IGNORE {
                         // draw order is creation order, so the latest-created
                         // allocation wins the pixel
-                        self.px[p] = c[0];
-                        self.px[p + 1] = c[1];
-                        self.px[p + 2] = c[2];
+                        p[0] = c[0];
+                        p[1] = c[1];
+                        p[2] = c[2];
                     } else {
-                        self.px[p] = OVERLAP[0];
-                        self.px[p + 1] = OVERLAP[1];
-                        self.px[p + 2] = OVERLAP[2];
+                        p[0] = OVERLAP[0];
+                        p[1] = OVERLAP[1];
+                        p[2] = OVERLAP[2];
                     }
                 } else {
                     if core {
-                        self.cov[i] = 1;
+                        *cv = 1;
                     }
-                    self.px[p] = c[0];
-                    self.px[p + 1] = c[1];
-                    self.px[p + 2] = c[2];
+                    p[0] = c[0];
+                    p[1] = c[1];
+                    p[2] = c[2];
                 }
-                self.px[p + 3] = 255;
+                p[3] = 255;
             }
         }
     }
@@ -315,16 +325,18 @@ impl Frame {
     fn fill_slack(&mut self, x0: i64, x1: i64, y0: i64, y1: i64, c: [u8; 3]) {
         let (x0, x1) = (x0.max(0) as usize, x1.min(self.w as i64).max(0) as usize);
         let (y0, y1) = (y0.max(0) as usize, y1.min(self.h as i64).max(0) as usize);
+        if x1 <= x0 {
+            return;
+        }
+        let w = self.w as usize;
+        let pat = [c[0], c[1], c[2], 255];
         for y in y0..y1 {
-            let row = y * self.w as usize;
-            for x in x0..x1 {
-                let i = row + x;
-                if self.cov[i] == 0 {
-                    let p = i * 4;
-                    self.px[p] = c[0];
-                    self.px[p + 1] = c[1];
-                    self.px[p + 2] = c[2];
-                    self.px[p + 3] = 255;
+            let base = y * w;
+            let cov = &self.cov[base + x0..base + x1];
+            let px = &mut self.px[(base + x0) * 4..(base + x1) * 4];
+            for (p, &cv) in px.chunks_exact_mut(4).zip(cov.iter()) {
+                if cv == 0 {
+                    p.copy_from_slice(&pat);
                 }
             }
         }
@@ -342,22 +354,24 @@ impl Frame {
         if x1 <= x0 {
             return;
         }
+        let w = self.w as usize;
+        let n = x1 - x0;
         for y in y0..y1 {
-            let row = y * self.w as usize;
-            for x in x0..x1 {
-                let i = row + x;
-                let c = self.cov[i];
+            let base = y * w;
+            let cov = &mut self.cov[base + x0..base + x1];
+            let px = &mut self.px[(base + x0) * 4..(base + x1) * 4];
+            for (i, (p, cv)) in px.chunks_exact_mut(4).zip(cov.iter_mut()).enumerate() {
+                let c = *cv;
                 if c & GHOST_MARK != 0 || c & !GHOST_MARK >= 2 {
                     // already ghosted (overlapping dead generations darken a
                     // slot once), or a live nested allocation owns the pixel
                     continue;
                 }
-                self.cov[i] = c | GHOST_MARK;
-                let edge = x == x0 || x + 1 == x1;
-                let p = i * 4;
+                *cv = c | GHOST_MARK;
+                let edge = i == 0 || i + 1 == n;
                 for k in 0..3 {
-                    let v = self.px[p + k] as u32;
-                    self.px[p + k] = if edge { v * 2 / 5 } else { v * 3 / 5 } as u8;
+                    let v = p[k] as u32;
+                    p[k] = if edge { v * 2 / 5 } else { v * 3 / 5 } as u8;
                 }
             }
         }
