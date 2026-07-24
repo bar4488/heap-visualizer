@@ -401,6 +401,22 @@ function setHtml(el, html) {
   return true;
 }
 
+// One delegated listener per (container, event type): the handler fires for
+// the closest element carrying the given data-* attribute, so the
+// build*Section functions can rebuild a list's markup without rewiring N
+// per-element handlers each time. Handlers get (element, dataset value).
+function delegate(el, type, handlers) {
+  el.addEventListener(type, (ev) => {
+    for (const [attr, fn] of Object.entries(handlers)) {
+      const t = ev.target.closest(`[data-${attr}]`);
+      if (t && el.contains(t)) {
+        fn(t, t.dataset[attr]);
+        return;
+      }
+    }
+  });
+}
+
 function drawMoveLink(ml) {
   const svg = overlay;
   let content = '';
@@ -843,22 +859,22 @@ function addAddrRange(loHex, hiHex) {
 function buildAddrRangesSection() {
   const list = $('f-addrs');
   if (!UI.addrRanges.length) {
-    list.innerHTML = '<div class="empty">none — all addresses pass</div>';
+    setHtml(list, '<div class="empty">none — all addresses pass</div>');
     return;
   }
-  list.innerHTML = UI.addrRanges.map((r, i) => `<div class="an-row">
+  setHtml(list, UI.addrRanges.map((r, i) => `<div class="an-row">
       <span class="grow">${esc(r.lo)} – ${esc(r.hi)}</span>
       <span class="count">${fmtBytes(Number(BigInt(r.hi) - BigInt(r.lo)))}</span>
       <button class="x" data-ardel="${i}" title="remove this range">×</button>
-    </div>`).join('');
-  list.querySelectorAll('[data-ardel]').forEach((el) => {
-    el.onclick = () => {
-      UI.addrRanges.splice(+el.dataset.ardel, 1);
-      buildAddrRangesSection();
-      sendFilter();
-    };
-  });
+    </div>`).join(''));
 }
+delegate($('f-addrs'), 'click', {
+  ardel: (_, i) => {
+    UI.addrRanges.splice(+i, 1);
+    buildAddrRangesSection();
+    sendFilter();
+  },
+});
 
 $('f-addr-add').onclick = () => {
   if (addAddrRange($('f-addr-lo').value, $('f-addr-hi').value)) {
@@ -1599,44 +1615,40 @@ function buildMarksPanel() {
 function buildBookmarksSection() {
   const list = $('an-bookmarks');
   if (!UI.bookmarks.length) {
-    list.innerHTML = '<div class="empty">none — press “＋ mark” (or m) to bookmark the current position</div>';
+    setHtml(list, '<div class="empty">none — press “＋ mark” (or m) to bookmark the current position</div>');
     return;
   }
-  list.innerHTML = UI.bookmarks.map((b, i) => `<div class="an-row">
+  setHtml(list, UI.bookmarks.map((b, i) => `<div class="an-row">
       <input type="text" class="grow" data-bmname="${i}" value="${esc(b.name)}">
       <span class="pos" data-bmgo="${i}" title="jump in time — the address view stays where it is">seq ${fmtNum(b.seq)} · ${fmtTime(b.t)}</span>
       <button class="x" data-bmloc="${i}" title="jump in time and center where that event happened">⌖</button>
       <button class="x" data-bmdel="${i}">×</button>
-    </div>`).join('');
-  list.querySelectorAll('[data-bmname]').forEach((inp) => {
-    inp.onchange = () => {
-      UI.bookmarks[+inp.dataset.bmname].name = inp.value.trim() || `mark ${+inp.dataset.bmname + 1}`;
-      updateMarkers();
-      markDirty();
-    };
-  });
-  list.querySelectorAll('[data-bmgo]').forEach((el) => {
-    // time-only: anchored seek keeps the current address in the viewport
-    el.onclick = () => worker.postMessage({ type: 'seek', seq: UI.bookmarks[+el.dataset.bmgo].seq });
-  });
-  list.querySelectorAll('[data-bmloc]').forEach((el) => {
-    // time + place: centers the allocation the event touched
-    el.onclick = () => worker.postMessage({ type: 'jump', seq: UI.bookmarks[+el.dataset.bmloc].seq });
-  });
-  list.querySelectorAll('[data-bmdel]').forEach((el) => {
-    el.onclick = () => {
-      UI.bookmarks.splice(+el.dataset.bmdel, 1);
-      buildBookmarksSection();
-      updateMarkers();
-      markDirty();
-    };
-  });
+    </div>`).join(''));
 }
+delegate($('an-bookmarks'), 'change', {
+  bmname: (inp, i) => {
+    UI.bookmarks[+i].name = inp.value.trim() || `mark ${+i + 1}`;
+    updateMarkers();
+    markDirty();
+  },
+});
+delegate($('an-bookmarks'), 'click', {
+  // time-only: anchored seek keeps the current address in the viewport
+  bmgo: (_, i) => worker.postMessage({ type: 'seek', seq: UI.bookmarks[+i].seq }),
+  // time + place: centers the allocation the event touched
+  bmloc: (_, i) => worker.postMessage({ type: 'jump', seq: UI.bookmarks[+i].seq }),
+  bmdel: (_, i) => {
+    UI.bookmarks.splice(+i, 1);
+    buildBookmarksSection();
+    updateMarkers();
+    markDirty();
+  },
+});
 
 function buildTagsSection() {
   const list = $('tags-list');
   if (!UI.tags.length) {
-    list.innerHTML = '<div class="empty">none — shift-drag a range on a timeline, or tag an allocation from its panel</div>';
+    setHtml(list, '<div class="empty">none — shift-drag a range on a timeline, or tag an allocation from its panel</div>');
     return;
   }
   let html = UI.tags.map((t, i) => `<div class="an-row">
@@ -1652,37 +1664,34 @@ function buildTagsSection() {
       <span class="grow">untagged</span>
       <span class="count">${fmtNum(UI.tagCounts[0] || 0)}</span>
     </div>`;
-  list.innerHTML = html;
-  list.querySelectorAll('input[data-tagvis]').forEach((inp) => {
-    inp.onchange = () => {
-      const id = +inp.dataset.tagvis;
-      if (id === 0) UI.untaggedVisible = inp.checked;
-      else UI.tags[id - 1].visible = inp.checked;
-      sendFilter();
-      markDirty();
-    };
-  });
-  list.querySelectorAll('input[data-tagcolor]').forEach((inp) => {
-    inp.oninput = () => {
-      UI.tags[+inp.dataset.tagcolor - 1].color = inp.value;
-      sendTagColors();
-      buildLegend();
-      markDirty();
-    };
-  });
-  list.querySelectorAll('input[data-tagname]').forEach((inp) => {
-    inp.onchange = () => {
-      const v = inp.value.trim();
-      if (v) UI.tags[+inp.dataset.tagname - 1].name = v;
-      syncTagDatalist();
-      buildLegend();
-      markDirty();
-    };
-  });
-  list.querySelectorAll('[data-tagdel]').forEach((el) => {
-    el.onclick = () => deleteTag(+el.dataset.tagdel);
-  });
+  setHtml(list, html);
 }
+delegate($('tags-list'), 'change', {
+  tagvis: (inp, id) => {
+    if (+id === 0) UI.untaggedVisible = inp.checked;
+    else UI.tags[+id - 1].visible = inp.checked;
+    sendFilter();
+    markDirty();
+  },
+  tagname: (inp, id) => {
+    const v = inp.value.trim();
+    if (v) UI.tags[+id - 1].name = v;
+    syncTagDatalist();
+    buildLegend();
+    markDirty();
+  },
+});
+delegate($('tags-list'), 'input', {
+  tagcolor: (inp, id) => {
+    UI.tags[+id - 1].color = inp.value;
+    sendTagColors();
+    buildLegend();
+    markDirty();
+  },
+});
+delegate($('tags-list'), 'click', {
+  tagdel: (_, id) => deleteTag(+id),
+});
 
 // all / none visibility toggles for the tags list (untagged included)
 document.querySelectorAll('#tags-allnone a').forEach((a) => {
@@ -1719,52 +1728,45 @@ function buildNamesSection() {
   const list = $('an-names');
   const entries = [...UI.names.entries()];
   if (!entries.length) {
-    list.innerHTML = '<div class="empty">none — click an allocation and name it in its panel</div>';
+    setHtml(list, '<div class="empty">none — click an allocation and name it in its panel</div>');
     return;
   }
-  list.innerHTML = entries.map(([e, v]) => `<div class="an-row">
+  setHtml(list, entries.map(([e, v]) => `<div class="an-row">
       <input type="color" data-ncolor="${e}" value="${UI.allocColors.get(e) || '#3fb950'}" title="highlight color">
       <input type="text" class="grow" data-nname="${e}" value="${esc(v.name)}">
       <span class="pos" data-ngo="${e}" title="select and jump to birth">id ${v.id} · ${v.addr}</span>
       <button class="x" data-ndel="${e}">×</button>
-    </div>`).join('');
-  list.querySelectorAll('[data-ncolor]').forEach((inp) => {
-    inp.oninput = () => {
-      const e = +inp.dataset.ncolor;
-      UI.allocColors.set(e, inp.value);
-      worker.postMessage({ type: 'alloc-color', e, rgb: parseInt(inp.value.slice(1), 16) });
-      markDirty();
-    };
-  });
-  list.querySelectorAll('[data-nname]').forEach((inp) => {
-    inp.onchange = () => {
-      const e = +inp.dataset.nname;
-      const v = inp.value.trim();
-      if (v) UI.names.get(e).name = v;
-      else { UI.names.delete(e); buildNamesSection(); }
-      sendNames();
-      markDirty();
-    };
-  });
-  list.querySelectorAll('[data-ngo]').forEach((el) => {
-    el.onclick = () => {
-      // select, jump to birth, and open the allocation info window
-      worker.postMessage({ type: 'jump', seq: +el.dataset.ngo + 1, select: true });
-    };
-  });
-  list.querySelectorAll('[data-ndel]').forEach((el) => {
-    el.onclick = () => {
-      const e = +el.dataset.ndel;
-      UI.names.delete(e);
-      if (UI.allocColors.delete(e)) {
-        worker.postMessage({ type: 'alloc-color', e, rgb: null });
-      }
-      buildNamesSection();
-      sendNames();
-      markDirty();
-    };
-  });
+    </div>`).join(''));
 }
+delegate($('an-names'), 'input', {
+  ncolor: (inp, e) => {
+    UI.allocColors.set(+e, inp.value);
+    worker.postMessage({ type: 'alloc-color', e: +e, rgb: parseInt(inp.value.slice(1), 16) });
+    markDirty();
+  },
+});
+delegate($('an-names'), 'change', {
+  nname: (inp, e) => {
+    const v = inp.value.trim();
+    if (v) UI.names.get(+e).name = v;
+    else { UI.names.delete(+e); buildNamesSection(); }
+    sendNames();
+    markDirty();
+  },
+});
+delegate($('an-names'), 'click', {
+  // select, jump to birth, and open the allocation info window
+  ngo: (_, e) => worker.postMessage({ type: 'jump', seq: +e + 1, select: true }),
+  ndel: (_, e) => {
+    UI.names.delete(+e);
+    if (UI.allocColors.delete(+e)) {
+      worker.postMessage({ type: 'alloc-color', e: +e, rgb: null });
+    }
+    buildNamesSection();
+    sendNames();
+    markDirty();
+  },
+});
 
 // ---------------------------------------------------------------------------
 // address marks
@@ -1801,33 +1803,31 @@ function addAddrMark(addrHex) {
 function buildAddrMarksSection() {
   const list = $('an-addrmarks');
   if (!UI.addrMarks.length) {
-    list.innerHTML = '<div class="empty">none — shift-click the address map to mark an address</div>';
+    setHtml(list, '<div class="empty">none — shift-click the address map to mark an address</div>');
     return;
   }
-  list.innerHTML = UI.addrMarks.map((m, i) => `<div class="an-row">
+  setHtml(list, UI.addrMarks.map((m, i) => `<div class="an-row">
       <input type="text" class="grow" data-amname="${i}" value="${esc(m.name)}">
       <span class="pos" data-amgo="${i}" title="center on this address">${esc(m.addr)}</span>
       <button class="x" data-amdel="${i}">×</button>
-    </div>`).join('');
-  list.querySelectorAll('[data-amname]').forEach((inp) => {
-    inp.onchange = () => {
-      UI.addrMarks[+inp.dataset.amname].name = inp.value.trim() || `addr ${+inp.dataset.amname + 1}`;
-      renderAddrMarkLines();
-      markDirty();
-    };
-  });
-  list.querySelectorAll('[data-amgo]').forEach((el) => {
-    el.onclick = () => gotoAddr(UI.addrMarks[+el.dataset.amgo].addr);
-  });
-  list.querySelectorAll('[data-amdel]').forEach((el) => {
-    el.onclick = () => {
-      UI.addrMarks.splice(+el.dataset.amdel, 1);
-      markDirty();
-      sendAddrMarks();
-      buildAddrMarksSection();
-    };
-  });
+    </div>`).join(''));
 }
+delegate($('an-addrmarks'), 'change', {
+  amname: (inp, i) => {
+    UI.addrMarks[+i].name = inp.value.trim() || `addr ${+i + 1}`;
+    renderAddrMarkLines();
+    markDirty();
+  },
+});
+delegate($('an-addrmarks'), 'click', {
+  amgo: (_, i) => gotoAddr(UI.addrMarks[+i].addr),
+  amdel: (_, i) => {
+    UI.addrMarks.splice(+i, 1);
+    markDirty();
+    sendAddrMarks();
+    buildAddrMarksSection();
+  },
+});
 
 let lastAddrMarkYs = [];
 function renderAddrMarkLines() {
@@ -1837,11 +1837,11 @@ function renderAddrMarkLines() {
     if (y === null || y === undefined) return '';
     return `<div class="amark" style="top:${y}px" data-am="${i}" data-label="⚑ ${esc(m.name)} ${esc(m.addr)}"></div>`;
   }).join('');
-  if (!setHtml(box, html)) return;
-  box.querySelectorAll('.amark').forEach((el) => {
-    el.onclick = () => gotoAddr(UI.addrMarks[+el.dataset.am].addr);
-  });
+  setHtml(box, html);
 }
+delegate($('addr-mark-lines'), 'click', {
+  am: (_, i) => gotoAddr(UI.addrMarks[+i].addr),
+});
 
 // ---------------------------------------------------------------------------
 // time marks (bookmarks)
@@ -2769,11 +2769,18 @@ function buildDetailBody(root, info) {
   const curColor = UI.allocColors.get(info.e);
   if (curColor) q('.d-color').value = curColor;
   q('.d-color').oninput = () => {
-    UI.allocColors.set(info.e, q('.d-color').value);
-    worker.postMessage({ type: 'alloc-color', e: info.e, rgb: parseInt(q('.d-color').value.slice(1), 16) });
-    buildNamesSection();
+    const v = q('.d-color').value;
+    UI.allocColors.set(info.e, v);
+    worker.postMessage({ type: 'alloc-color', e: info.e, rgb: parseInt(v.slice(1), 16) });
+    // oninput fires on every tick of a live picker drag: update only this
+    // allocation's swatch in the names list — a full rebuild here would
+    // replace elements while the user is mid-gesture on them
+    const sw = $('an-names').querySelector(`input[data-ncolor="${info.e}"]`);
+    if (sw) sw.value = v;
     markDirty();
   };
+  // the full names-list rebuild waits for the committed value
+  q('.d-color').onchange = () => buildNamesSection();
   q('.d-color-clear').onclick = () => {
     UI.allocColors.delete(info.e);
     worker.postMessage({ type: 'alloc-color', e: info.e, rgb: null });
