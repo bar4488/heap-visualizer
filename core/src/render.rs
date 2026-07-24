@@ -699,7 +699,9 @@ pub fn render_addr(
         } else {
             None
         };
-        let mut idx = j;
+        // start at the first *visible* row — walking up from the allocation's
+        // first row is O(rows above the viewport) for a large allocation
+        let mut idx = j.max(vis_lo);
         while idx < v.rows.len() && v.rows[idx] <= r1 {
             let r = v.rows[idx];
             let cur_idx = idx;
@@ -879,6 +881,8 @@ pub fn render_addr(
                     Ok(i) => i,
                     Err(i) => i,
                 };
+                // clip to the visible range, same as the allocation pass
+                idx = idx.max(vis_lo);
                 while idx < v.rows.len() && v.rows[idx] <= gr1 {
                     let r = v.rows[idx];
                     let y = v.row_y(idx, row_px, gap_px) as i64 - scroll as i64;
