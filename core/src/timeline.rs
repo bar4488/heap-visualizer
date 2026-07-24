@@ -54,7 +54,7 @@ pub fn bin(s: &Store, kind: u32, w: u32, lo: f64, hi: f64) -> Bins {
 /// created (the alloc half); along the bottom edge, columns where tagged
 /// allocations are freed (the free half).
 pub fn render(
-    s: &Store,
+    s: &mut Store,
     cfg: &crate::render::Cfg,
     kind: u32,
     w: u32,
@@ -111,27 +111,29 @@ pub fn render(
     }
 
     // --- tag lanes: creations on top, frees on the bottom ---
+    // Untagged traces (the common case) skip this entirely. With tags, each
+    // column is a binary search over the sorted tagged-event indexes instead
+    // of a scan of every event in its bin, keeping the strip O(width log n)
+    // like the density bars above it.
+    if s.tagged == 0 {
+        return;
+    }
+    s.ensure_tag_index();
+    let (alloc_idx, free_idx) = (&s.tag_alloc_idx, &s.tag_free_idx);
     let lane = ((h / 14) as i64).clamp(2, 5);
     for x in 0..w as usize {
         let (a, b) = (bins.from[x], bins.from[x + 1]);
-        let mut alloc_c: Option<[u8; 3]> = None;
-        let mut free_c: Option<[u8; 3]> = None;
-        for e in a..b {
-            let ei = e as usize;
-            let op = s.op[ei];
-            if alloc_c.is_none() && (op == OP_M || op == OP_R) && s.tag[ei] != 0 {
-                alloc_c = Some(cfg.tag_color(s.tag[ei]));
-            }
-            if free_c.is_none() && (op == OP_F || op == OP_R) {
-                let tgt = s.target[ei];
-                if tgt != NONE_U32 && s.tag[tgt as usize] != 0 {
-                    free_c = Some(cfg.tag_color(s.tag[tgt as usize]));
-                }
-            }
-            if alloc_c.is_some() && free_c.is_some() {
-                break;
-            }
-        }
+        // first tagged event in [a, b) of each kind, as before
+        let i = alloc_idx.partition_point(|&e| e < a);
+        let alloc_c = alloc_idx
+            .get(i)
+            .filter(|&&e| e < b)
+            .map(|&e| cfg.tag_color(s.tag[e as usize]));
+        let i = free_idx.partition_point(|&e| e < a);
+        let free_c = free_idx
+            .get(i)
+            .filter(|&&e| e < b)
+            .map(|&e| cfg.tag_color(s.tag[s.target[e as usize] as usize]));
         if let Some(c) = alloc_c {
             for y in 0..lane {
                 put(x as i64, y, c);

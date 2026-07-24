@@ -565,7 +565,7 @@ pub extern "C" fn hp_set_crop(lo: i32, hi: i32) {
 pub extern "C" fn hp_tag_event(e: u32, tag: u32) {
     let a = app();
     if (e as usize) < a.store.tag.len() {
-        a.store.tag[e as usize] = tag.min(255) as u8;
+        a.store.set_tag(e, tag.min(255) as u8);
         a.ev_dirty = true; // tags participate in the filter
     }
 }
@@ -608,7 +608,7 @@ fn tag_seq_range(a: &mut App, lo: u32, hi: u32, tag: u32, by_free: u32) -> u32 {
     to_tag.dedup();
     let n = to_tag.len() as u32;
     for e in to_tag {
-        a.store.tag[e as usize] = tag;
+        a.store.set_tag(e, tag);
     }
     a.ev_dirty = true;
     n
@@ -678,7 +678,7 @@ pub extern "C" fn hp_tag_events(count: u32, tag: u32) -> u32 {
         if e < n {
             let op = s.op[e as usize];
             if op == OP_M || op == OP_R {
-                s.tag[e as usize] = tag;
+                s.set_tag(e, tag);
                 applied += 1;
             }
         }
@@ -692,9 +692,7 @@ pub extern "C" fn hp_tag_events(count: u32, tag: u32) -> u32 {
 #[no_mangle]
 pub extern "C" fn hp_tags_clear() {
     let a = app();
-    for t in a.store.tag.iter_mut() {
-        *t = 0;
-    }
+    a.store.clear_tags();
     a.ev_dirty = true;
 }
 
@@ -705,9 +703,9 @@ pub extern "C" fn hp_retag(from: u32, to: u32) -> u32 {
     let a = app();
     let (from, to) = (from.min(255) as u8, to.min(255) as u8);
     let mut n = 0;
-    for t in a.store.tag.iter_mut() {
-        if *t == from {
-            *t = to;
+    for e in 0..a.store.len() {
+        if a.store.tag[e as usize] == from {
+            a.store.set_tag(e, to);
             n += 1;
         }
     }
@@ -1089,7 +1087,7 @@ pub extern "C" fn hp_events_filtered_pos(seq: u32) -> u32 {
 #[no_mangle]
 pub extern "C" fn hp_tl_render(kind: u32, w: u32, h: u32, lo: f64, hi: f64) {
     let a = app();
-    timeline::render(&a.store, &a.cfg, kind, w, h, lo, hi, &mut a.tl_px);
+    timeline::render(&mut a.store, &a.cfg, kind, w, h, lo, hi, &mut a.tl_px);
     let r = ret();
     r[0] = a.tl_px.as_ptr() as u32;
     r[1] = a.tl_px.len() as u32;
@@ -1510,7 +1508,7 @@ not json at all
             for e in 0..s.len() {
                 let op = s.op[e as usize];
                 if (op == OP_M || op == OP_R) && e < 4 {
-                    s.tag[e as usize] = 2;
+                    s.set_tag(e, 2);
                     n += 1;
                 }
             }
@@ -1630,7 +1628,7 @@ not json at all
                 .collect()
         };
         for &e in &to_tag {
-            a.store.tag[e as usize] = 1;
+            a.store.set_tag(e, 1);
         }
         // creators: 0 (site a → filtered out), 1 (site b → tagged),
         // 3 (realloc without a site field → unconstrained, passes)
@@ -1764,9 +1762,9 @@ not json at all
     #[test]
     fn timeline_tag_lanes() {
         let mut a = load(SAMPLE);
-        a.store.tag[0] = 1; // tag the first malloc (freed by event 2)
+        a.store.set_tag(0, 1); // tag the first malloc (freed by event 2)
         let mut px = Vec::new();
-        timeline::render(&a.store, &a.cfg, 1, 100, 40, 0.0, 5.0, &mut px);
+        timeline::render(&mut a.store, &a.cfg, 1, 100, 40, 0.0, 5.0, &mut px);
         let at = |px: &[u8], x: usize, y: usize| {
             let p = (y * 100 + x) * 4;
             [px[p], px[p + 1], px[p + 2]]
@@ -1776,10 +1774,8 @@ not json at all
         assert!((0..100).any(|x| at(&px, x, 0) == c), "no tagged-alloc lane");
         assert!((0..100).any(|x| at(&px, x, 39) == c), "no tagged-free lane");
         // untagged: both lanes empty
-        for t in a.store.tag.iter_mut() {
-            *t = 0;
-        }
-        timeline::render(&a.store, &a.cfg, 1, 100, 40, 0.0, 5.0, &mut px);
+        a.store.clear_tags();
+        timeline::render(&mut a.store, &a.cfg, 1, 100, 40, 0.0, 5.0, &mut px);
         assert!(!(0..100).any(|x| at(&px, x, 0) == c || at(&px, x, 39) == c));
     }
 
@@ -1811,7 +1807,7 @@ not json at all
         assert!(p.contains("\"id\":1"), "pick got {}", p);
         // timeline render smoke
         let mut px = Vec::new();
-        timeline::render(&a.store, &a.cfg, 1, 100, 40, 0.0, 5.0, &mut px);
+        timeline::render(&mut a.store, &a.cfg, 1, 100, 40, 0.0, 5.0, &mut px);
         assert_eq!(px.len(), 100 * 40 * 4);
     }
 }

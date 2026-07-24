@@ -71,8 +71,18 @@ pub struct Store {
     /// For creator events (M/R): the event index that kills this allocation.
     pub death: Vec<u32>,
     /// User-assigned tag per creator event (0 = untagged). Session state,
-    /// mutated by the viewer, not part of the wire format.
+    /// mutated by the viewer, not part of the wire format. Written through
+    /// `set_tag`/`clear_tags` so the count and index below stay correct.
     pub tag: Vec<u8>,
+    /// Number of creator events currently tagged — lets per-frame consumers
+    /// (the timeline tag lanes) skip tag work for untagged traces.
+    pub tagged: u32,
+    /// Sorted event indexes feeding the timeline tag lanes: creators with a
+    /// tag, and F/R events whose target is tagged. Rebuilt lazily via
+    /// `ensure_tag_index` after any tag mutation.
+    pub(crate) tag_alloc_idx: Vec<u32>,
+    pub(crate) tag_free_idx: Vec<u32>,
+    pub(crate) tag_idx_dirty: bool,
 
     // prefix sums for timeline binning: count of green (M/R) and red (F/R)
     // marks in events [0, i). An R contributes to both.
@@ -177,6 +187,54 @@ impl Store {
     #[inline]
     pub fn span(&self, e: u32) -> u64 {
         self.size[e as usize].max(self.usable_at(e)).max(1)
+    }
+
+    /// Write a tag assignment. Not `self.tag[..] = ..` directly: this keeps
+    /// `tagged` and the timeline's tagged-event index in sync.
+    pub fn set_tag(&mut self, e: u32, tag: u8) {
+        let old = std::mem::replace(&mut self.tag[e as usize], tag);
+        if old != tag {
+            self.tag_idx_dirty = true;
+            if old == 0 {
+                self.tagged += 1;
+            } else if tag == 0 {
+                self.tagged -= 1;
+            }
+        }
+    }
+
+    /// Remove every tag assignment.
+    pub fn clear_tags(&mut self) {
+        for t in self.tag.iter_mut() {
+            *t = 0;
+        }
+        self.tagged = 0;
+        self.tag_idx_dirty = true;
+    }
+
+    /// Rebuild `tag_alloc_idx` / `tag_free_idx` if tags changed since the
+    /// last build. O(n), but only after a tag mutation — the per-column
+    /// timeline reads are binary searches over the result.
+    pub fn ensure_tag_index(&mut self) {
+        if !self.tag_idx_dirty {
+            return;
+        }
+        self.tag_alloc_idx.clear();
+        self.tag_free_idx.clear();
+        for e in 0..self.len() {
+            let ei = e as usize;
+            let op = self.op[ei];
+            if (op == OP_M || op == OP_R) && self.tag[ei] != 0 {
+                self.tag_alloc_idx.push(e);
+            }
+            if op == OP_F || op == OP_R {
+                let tgt = self.target[ei];
+                if tgt != NONE_U32 && self.tag[tgt as usize] != 0 {
+                    self.tag_free_idx.push(e);
+                }
+            }
+        }
+        self.tag_idx_dirty = false;
     }
 
     /// Timestamp of the playhead "after `applied` events".
