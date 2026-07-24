@@ -10,6 +10,14 @@ half-acknowledge.
 
 ## F7 — `app()` hands out aliasing `&'static mut`
 
+**Fixed** in `9ea5201` ("F7: stop handing out aliasing &'static mut App").
+`app()` now returns `*mut App`; every use site narrows the borrow to its own
+scope (`let a = unsafe { &mut *app() };`). The nested-call sites
+(`hp_events_filtered_json`, `hp_tag_t_range`) go through private helpers
+(`events_json`, `tag_seq_range`) taking `&mut App` instead of re-entering
+another export while holding a borrow — the leaf-entry-point invariant this
+relies on is documented on `app()` itself.
+
 **Where** `core/src/lib.rs:64`; demonstrated at `core/src/lib.rs:1042`.
 
 **What**
@@ -72,6 +80,12 @@ either way — `hp_events_filtered_json` should call a private helper that takes
 
 ## F8 — Reset responsibility is split between two incomplete mechanisms
 
+**Fixed** in `37f5764` ("F8: make hp_parse_begin a complete reset") — the
+first option in the fix list below. `hp_parse_begin` now does `a.cfg =
+Cfg::new()` (plus the store/view/parser reset it already did), so the engine
+is correct standalone; `specs/08-architecture.md` §8.2 was updated to state
+that re-instantiation is purely the memory measure, not the reset mechanism.
+
 **Where** `core/src/lib.rs:107` (`hp_parse_begin`) and `web/worker.js:82`
 (re-instantiation).
 
@@ -113,6 +127,14 @@ The first is one line and keeps the native path honest.
 <a id="f9"></a>
 
 ## F9 — JSON strings on the per-frame boundary
+
+**Not fixed — reassessed as not worth it yet.** F1–F3 shipped and dominated
+the measured cost by an order of magnitude, which is exactly the condition
+this entry's "why it matters" says to wait for. F5 (also fixed) removed the
+per-frame `format!` allocation churn around this same label list without
+changing its JSON shape, which was the cheap part of this finding. The
+binary-record redesign below is unclaimed; revisit if the label budget is
+ever raised past 400 or profiling shows it matters again.
 
 **Where** `core/src/lib.rs:805` (`hp_labels_json`), consumed at
 `web/worker.js:191`.

@@ -43,6 +43,10 @@ The two amplifications are separable: 6,530 wasted row iterations (F1) and
 
 ## F1 — Per-allocation row loop never clips to the visible range
 
+**Fixed** in `2825b31` ("F1: clip per-allocation row walk to the visible
+range"). Both loops now start at `j.max(vis_lo)`, exactly the fix proposed
+below.
+
 **Where** `core/src/render.rs:702` (pass 2), and the same pattern at
 `core/src/render.rs:878` (the ghost pass).
 
@@ -93,6 +97,14 @@ identical shape.
 
 ## F2 — Live-set walk is bounded by `max_span`, a global worst case
 
+**Fixed** in `1fd15c5` ("F2: bound the render live-set walk by the widest
+live allocation") — option 1 from the fix list below. `View` now keeps a
+`span_counts` multiset (same shape as `birth_counts`) maintained in
+`insert_alloc`/`remove_alloc`, exposed as `max_live_span()`, and both the
+per-frame render walk and `inside_one_alloc`'s gap check use it instead of
+`Store::max_span`. `pick` and `live_at_addr` were left on the conservative
+bound, as the fix note suggests.
+
 **Where** `core/src/render.rs:644`, and the identical idiom in `pick`
 (`render.rs:940`), `live_at_addr` (`lib.rs:853`), `inside_one_alloc`
 (`render.rs:493`) and the load-time overlap check (`parse.rs:408`).
@@ -135,6 +147,12 @@ conservative version.
 <a id="f3"></a>
 
 ## F3 — `ensure_rows()` fully rebuilds on every seek
+
+**Fixed** in `c789075` ("F3: stop rebuilding the row layout on every seek") —
+fixes 1 and 2 from the list below (not 3, which was optional). `seek` only
+sets `rows_dirty` when `!show_all`; `occ` is now a `BTreeMap` so live-mode
+rows come out pre-sorted; and `ensure_rows` merges the sorted pin rows into
+the sorted source instead of cloning, appending, and re-sorting.
 
 **Where** `core/src/state.rs:258` (`seek` sets `rows_dirty` unconditionally),
 rebuild at `core/src/state.rs:263`.
@@ -183,6 +201,11 @@ that must not change.
 
 ## F4 — Rasterizer inner loops are element-indexed
 
+**Fixed** in `24eafa2` ("F4: give the rasterizer inner loops provable
+bounds"). Each row is sliced once and walked with `chunks_exact_mut(4)` (`cov`
+zipped alongside where it's read); `clear` writes one pixel and doubles it
+with `copy_within`, as suggested below.
+
 **Where** `core/src/render.rs:233` (`clear`), `:245` (`fill`), `:265`
 (`fill_alloc`), `:315` (`fill_slack`), `:339` (`fill_ghost`).
 
@@ -215,6 +238,12 @@ and can take the same treatment.
 
 ## F5 — Per-frame allocation churn in `render_addr`
 
+**Fixed** in `cb4f494` ("F5: reuse render_addr's per-frame containers").
+`draw`/`seams`/`texts`/`covered` and the label string now live in a
+`RenderScratch` owned by `App` (the `tl_px`/`out` pattern), cleared per frame;
+labels are written in place with `write!` instead of
+`push_str(&format!(..))`.
+
 **Where** `core/src/render.rs:648` (`draw`), `:661` (`seams`), `:665`
 (`texts`), `:779` (`covered`), plus 11 `format!` sites.
 
@@ -235,6 +264,13 @@ demonstrates the pattern: `tl_px`, `out` and `labels` are reused buffers.
 <a id="f6"></a>
 
 ## F6 — Timeline tag lanes are O(events in view)
+
+**Fixed** in `1021d20` ("F6: make timeline tag lanes O(width log n) and free
+for untagged traces"). `Store` now tracks a `tagged` count and lazily
+rebuilds sorted `tag_alloc_idx`/`tag_free_idx` indexes (rebuilt once per tag
+mutation, via `set_tag`/`clear_tags`); the lane pass returns immediately when
+`tagged == 0` and binary-searches per column otherwise, restoring the O(width
+log n) cost the strip was supposed to have.
 
 **Where** `core/src/timeline.rs:119`.
 

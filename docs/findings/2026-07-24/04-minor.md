@@ -8,6 +8,10 @@ Small, self-contained items. Neither affects correctness of output today.
 
 ## F16 — `to_tag.dedup()` is dead code
 
+**Fixed** in `57661a8` ("F16: replace dead to_tag.dedup() with the invariant
+it guarded") — the second option in the fix below: the line was deleted and
+replaced with a comment recording the `death`-written-once invariant.
+
 **Where** `core/src/lib.rs:606`.
 
 **What**
@@ -41,6 +45,13 @@ which is the fact worth keeping. `tag_freed_range` already covers the behavior.
 <a id="f17"></a>
 
 ## F17 — `parseSize` fails silently, unlike its sibling inputs
+
+**Fixed** in `6984e55` ("F17: give parseSize a distinguishable failure"),
+folded into `web/fmt.js` by the later F15 fix. `parseSize` returns `null` on
+an unparsable input (0 stays "empty"), accepts exponent notation matching the
+jump box, and the size-filter inputs now get the same red-border treatment
+`row-bytes`/`collapse-min` already had, keeping the previous constraint
+instead of clearing it.
 
 **Where** `web/main.js:98`, used by `sendFilter` (`main.js:926`) and
 `rowBytesValue` (`main.js:680`).

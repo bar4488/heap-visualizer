@@ -29,6 +29,16 @@ one job. This is entirely about `web/`.
 
 ## F10 — `main.js` is 3k lines in one flat scope
 
+**Partially addressed, not fixed.** `fmt.js` and `rpc.js` — the two modules
+this entry's fix list says to do first — were extracted as part of F15 and
+F11 respectively, and the `setHtml`/event-delegation work from F12 removed
+some of the list-rebuild churn this entry also names. The remaining split
+(`panels.js`, `events-panel.js`, `analysis.js`, `session.js`, `timeline.js`,
+`addr-view.js`) was deliberately left undone: see the root
+[README's "F10: why it's still open"](README.md#f10-why-its-still-open) for
+the reasoning (call-site fan-out + no runtime verification available on the
+fixing side). `main.js` is smaller than it was but still one flat scope.
+
 **Where** `web/main.js` throughout.
 
 **What** Trace loading, panel drag-docking, drawer management, the virtualized
@@ -77,6 +87,14 @@ else, and `rpc.js` deletes duplication rather than just moving it.
 
 ## F11 — Five hand-rolled worker request/response mechanisms
 
+**Fixed** in `095829e` ("F11: one worker request/response layer
+(web/rpc.js)"). `rpc.js` provides `request()` (one-shot) and
+`requestLatest()` (coalesced per key — a superseded request's promise is
+dropped, not resolved), sharing one `reqId → resolver` map; the five reply
+cases in `worker.onmessage` collapsed to one default branch. The worker now
+answers `pick`/`tlhover`/`tags-dump` even before a trace loads (previously a
+request made before load could leave the in-flight slot stuck forever).
+
 **Where** `web/main.js:2730` (pick), `:2584` (timeline hover), `:2619`
 (convert), `:1920` (`allocInfoWaiters`), `:1932` (`dumpWaiters`).
 
@@ -118,6 +136,15 @@ resolves by `reqId`.
 <a id="f12"></a>
 
 ## F12 — `innerHTML` rebuild + rewire on every state change
+
+**Fixed** in `b2b10c5` ("F12: stop rebuilding + rewiring lists on every state
+change"). The color-picker handler now updates only the affected row's
+swatch on `oninput` and rebuilds the names list on `change`, so a live drag
+no longer destroys the input the user is dragging. Structurally, the
+`build*Section` family goes through `setHtml` (skips when markup is
+unchanged) plus a small `delegate()` helper — one listener per (container,
+event type), dispatching on `data-*` — removing 17 of the 45
+`querySelectorAll` rewiring loops.
 
 **Where** 25 sites; the pattern is `build*Section()` — e.g. `web/main.js:1666`
 (`buildTagsSection`), `:1748` (`buildNamesSection`), `:1831`
@@ -163,6 +190,14 @@ user is mid-gesture on is replaced underneath them.
 
 ## F13 — Three coordinate systems reconciled ad hoc
 
+**Fixed** in `a275866` ("F13: one conversion boundary between device px and
+CSS px"). `toCss(rect, minWH)`/`toCssLen` on the main-thread side and
+`toDevice` on the worker side replace the scattered `/dpr`/`*dpr`
+expressions at `drawMoveLink`, `flashRects`, the scroll-spacer computations,
+and the pick/addr-at/tlhover/scroll/rowPx message handlers. Canvas-drawing
+constants (fonts, label padding) kept their explicit `dpr` factors — those
+are device-px layout, not boundary crossings, per the fix note below.
+
 **Where** 30 `/dpr` divisions scattered across `web/main.js`; the reverse
 `* dpr` conversions in `web/worker.js`.
 
@@ -191,6 +226,14 @@ in one place per direction.
 <a id="f14"></a>
 
 ## F14 — `onmessage` switch with a hand-synced allowlist
+
+**Fixed** in `770ee97` ("F14: settings table replaces the hand-synced
+pre-load allowlist"), matching the fix shape below: a `SETTINGS` table keyed
+by setting name, each entry carrying its `preLoad` flag next to its `apply`
+function. The outer 30-case switch (playback, tags, filter, etc.) was left
+as-is — the entry's "same treatment suits the outer switch" was noted but not
+required by this fix, since that switch's `!S.loaded` guards aren't a
+duplicated-list problem the way `set`'s allowlist was.
 
 **Where** `web/worker.js:418` (30 cases), `:603` (`set`, 15 nested cases),
 allowlist at `web/worker.js:604`.
@@ -230,6 +273,12 @@ appear 25 times in all).
 <a id="f15"></a>
 
 ## F15 — `fmtBytes` / `clampView` duplicated between the two JS layers
+
+**Fixed** in `0d3ffdd` ("F15: extract shared web/fmt.js for the two JS
+layers"). `web/fmt.js` now holds `fmtBytes`/`fmtHexSize`/`fmtAllocSize`
+(format mode passed as an argument, as suggested)/`fmtNum`/`parseSize`/`esc`/
+`clampView`, imported by both `main.js` and `worker.js`. The Rust ↔ JS
+palette mirror was left alone, as this entry recommends.
 
 **Where** `web/main.js:56` ↔ `web/worker.js:325` (`fmtBytes`, `fmtAllocSize`);
 `web/main.js:2473` ↔ `web/worker.js:408` (`clampView`); `CAT`/`RAMP` at
