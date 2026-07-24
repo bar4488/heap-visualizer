@@ -63,7 +63,14 @@ impl App {
 static APP: Global<Option<App>> = Global(UnsafeCell::new(None));
 static RET: Global<[u32; 8]> = Global(UnsafeCell::new([0; 8]));
 
-fn app() -> &'static mut App {
+/// Pointer to the singleton App. Use as `let a = unsafe { &mut *app() };`,
+/// which scopes the borrow to the calling function instead of minting an
+/// unchecked `&'static mut` (aliasing two of those is undefined behavior).
+/// The invariant that keeps each borrow exclusive: exports are leaf entry
+/// points — they never call another export while holding the borrow; shared
+/// logic lives in private helpers taking `&mut App`. (The target is
+/// single-threaded, so there is no cross-thread aliasing to consider.)
+fn app() -> *mut App {
     unsafe {
         let slot = &mut *APP.0.get();
         if slot.is_none() {
@@ -94,7 +101,7 @@ pub extern "C" fn hp_ret() -> *const u32 {
 
 #[no_mangle]
 pub extern "C" fn hp_buf_ptr(cap: u32) -> *mut u8 {
-    let a = app();
+    let a = unsafe { &mut *app() };
     if a.buf.len() < cap as usize {
         a.buf.resize(cap as usize, 0);
     }
@@ -107,7 +114,7 @@ pub extern "C" fn hp_buf_ptr(cap: u32) -> *mut u8 {
 
 #[no_mangle]
 pub extern "C" fn hp_parse_begin() {
-    let a = app();
+    let a = unsafe { &mut *app() };
     a.parser = Some(Parser::new());
     a.store = Store::default();
     a.view = View::new();
@@ -119,7 +126,7 @@ pub extern "C" fn hp_parse_begin() {
 
 #[no_mangle]
 pub extern "C" fn hp_parse_chunk(len: u32) {
-    let a = app();
+    let a = unsafe { &mut *app() };
     if let Some(p) = a.parser.as_mut() {
         let data = &a.buf[..len as usize];
         p.chunk(data);
@@ -128,7 +135,7 @@ pub extern "C" fn hp_parse_chunk(len: u32) {
 
 #[no_mangle]
 pub extern "C" fn hp_parse_end() -> u32 {
-    let a = app();
+    let a = unsafe { &mut *app() };
     if let Some(mut p) = a.parser.take() {
         p.finish();
         a.store = p.store;
@@ -145,7 +152,7 @@ pub extern "C" fn hp_parse_end() -> u32 {
 
 #[no_mangle]
 pub extern "C" fn hp_meta_json() {
-    let a = app();
+    let a = unsafe { &mut *app() };
     let s = &a.store;
     let o = &mut a.out;
     o.clear();
@@ -208,7 +215,7 @@ pub extern "C" fn hp_meta_json() {
 
 #[no_mangle]
 pub extern "C" fn hp_warnings_json() {
-    let a = app();
+    let a = unsafe { &mut *app() };
     let s = &a.store;
     let o = &mut a.out;
     o.clear();
@@ -231,46 +238,46 @@ pub extern "C" fn hp_warnings_json() {
 
 #[no_mangle]
 pub extern "C" fn hp_seek_seq(seq: u32) {
-    let a = app();
+    let a = unsafe { &mut *app() };
     a.view.seek(&a.store, seq);
 }
 
 #[no_mangle]
 pub extern "C" fn hp_seek_t(t: f64) {
-    let a = app();
+    let a = unsafe { &mut *app() };
     let seq = a.store.seq_for_t(t.max(0.0) as u64);
     a.view.seek(&a.store, seq);
 }
 
 #[no_mangle]
 pub extern "C" fn hp_cur() -> u32 {
-    app().view.cur
+    unsafe { &mut *app() }.view.cur
 }
 
 #[no_mangle]
 pub extern "C" fn hp_cur_t() -> f64 {
-    let a = app();
+    let a = unsafe { &mut *app() };
     a.store.t_at(a.view.cur) as f64
 }
 
 #[no_mangle]
 pub extern "C" fn hp_live_count() -> u32 {
-    app().view.live_count
+    unsafe { &mut *app() }.view.live_count
 }
 
 #[no_mangle]
 pub extern "C" fn hp_live_bytes() -> f64 {
-    app().view.live_bytes as f64
+    unsafe { &mut *app() }.view.live_bytes as f64
 }
 
 #[no_mangle]
 pub extern "C" fn hp_seq_for_t(t: f64) -> u32 {
-    app().store.seq_for_t(t.max(0.0) as u64)
+    unsafe { &mut *app() }.store.seq_for_t(t.max(0.0) as u64)
 }
 
 #[no_mangle]
 pub extern "C" fn hp_t_for_seq(seq: u32) -> f64 {
-    let a = app();
+    let a = unsafe { &mut *app() };
     a.store.t_at(seq.min(a.store.len())) as f64
 }
 
@@ -280,47 +287,47 @@ pub extern "C" fn hp_t_for_seq(seq: u32) -> f64 {
 
 #[no_mangle]
 pub extern "C" fn hp_set_row_bytes(w: f64) {
-    let a = app();
+    let a = unsafe { &mut *app() };
     a.view.set_row_bytes(&a.store, w.max(16.0) as u64);
 }
 
 #[no_mangle]
 pub extern "C" fn hp_row_bytes() -> f64 {
-    app().view.row_bytes as f64
+    unsafe { &mut *app() }.view.row_bytes as f64
 }
 
 #[no_mangle]
 pub extern "C" fn hp_set_collapse_min(n: u32) {
-    app().view.set_collapse_min(n as u64);
+    unsafe { &mut *app() }.view.set_collapse_min(n as u64);
 }
 
 #[no_mangle]
 pub extern "C" fn hp_set_collapse_min_bytes(bytes: f64) {
-    app().view.set_collapse_min_bytes(bytes.max(1.0) as u64);
+    unsafe { &mut *app() }.view.set_collapse_min_bytes(bytes.max(1.0) as u64);
 }
 
 #[no_mangle]
 pub extern "C" fn hp_set_row_px(row_px: u32, gap_px: u32) {
-    let a = app();
+    let a = unsafe { &mut *app() };
     a.cfg.row_px = row_px.clamp(2, 64);
     a.cfg.gap_px = gap_px.clamp(2, 32);
 }
 
 #[no_mangle]
 pub extern "C" fn hp_set_color_mode(mode: u32) {
-    app().cfg.color_mode = mode as u8;
+    unsafe { &mut *app() }.cfg.color_mode = mode as u8;
 }
 
 #[no_mangle]
 pub extern "C" fn hp_set_selected(e: u32) {
-    app().cfg.selected = e;
+    unsafe { &mut *app() }.cfg.selected = e;
 }
 
 /// Horizontal zoom/pan on the byte axis of each row. `zoom` >= 1 (1 = the
 /// whole row fits the width); `pan` is a fraction of the row [0, 1 - 1/zoom].
 #[no_mangle]
 pub extern "C" fn hp_set_xview(zoom: f64, pan: f64) {
-    let a = app();
+    let a = unsafe { &mut *app() };
     a.cfg.x_zoom = if zoom.is_finite() { zoom.max(1.0) } else { 1.0 };
     let max_pan = 1.0 - 1.0 / a.cfg.x_zoom;
     a.cfg.x_pan = if pan.is_finite() { pan.clamp(0.0, max_pan) } else { 0.0 };
@@ -330,7 +337,7 @@ pub extern "C" fn hp_set_xview(zoom: f64, pan: f64) {
 /// (no-op when not zoomed). Returns the resulting pan fraction.
 #[no_mangle]
 pub extern "C" fn hp_center_x_for_event(e: u32) -> f64 {
-    let a = app();
+    let a = unsafe { &mut *app() };
     let s = &a.store;
     if e >= s.len() || a.cfg.x_zoom <= 1.0 {
         return a.cfg.x_pan;
@@ -350,28 +357,28 @@ pub extern "C" fn hp_center_x_for_event(e: u32) -> f64 {
 /// Show/hide the size labels drawn inside allocations.
 #[no_mangle]
 pub extern "C" fn hp_set_size_labels(on: u32) {
-    app().cfg.size_labels = on != 0;
+    unsafe { &mut *app() }.cfg.size_labels = on != 0;
 }
 
 /// How overlapping allocations render: 0 = highlight shared pixels orange,
 /// 1 = ignore (the latest-created allocation wins the pixel).
 #[no_mangle]
 pub extern "C" fn hp_set_overlap_mode(mode: u32) {
-    app().cfg.overlap_mode = mode.min(1) as u8;
+    unsafe { &mut *app() }.cfg.overlap_mode = mode.min(1) as u8;
 }
 
 /// Show/hide freed-nested "ghosts": the recessed fill + divider edges drawn
 /// where an allocation that lived inside a still-live one has been freed.
 #[no_mangle]
 pub extern "C" fn hp_set_ghosts(on: u32) {
-    app().cfg.ghosts = on != 0;
+    unsafe { &mut *app() }.cfg.ghosts = on != 0;
 }
 
 /// Toggle the stable "all rows" layout: every row any allocation ever
 /// touches stays laid out regardless of the playhead.
 #[no_mangle]
 pub extern "C" fn hp_set_show_all(on: u32) {
-    let a = app();
+    let a = unsafe { &mut *app() };
     a.view.set_show_all(&a.store, on != 0);
 }
 
@@ -380,21 +387,21 @@ pub extern "C" fn hp_set_show_all(on: u32) {
 #[no_mangle]
 pub extern "C" fn hp_set_anchor_pin(lo: u32, hi: u32) {
     let addr = (hi as u64) << 32 | lo as u64;
-    app().view.set_anchor_pin(Some(addr));
+    unsafe { &mut *app() }.view.set_anchor_pin(Some(addr));
 }
 
 /// Drop the transient anchor pin (the user navigated away from the anchored
 /// row) so an empty pinned row doesn't stay laid out forever.
 #[no_mangle]
 pub extern "C" fn hp_clear_anchor_pin() {
-    app().view.set_anchor_pin(None);
+    unsafe { &mut *app() }.view.set_anchor_pin(None);
 }
 
 /// Pinned addresses, written into the input buffer as consecutive u64 LE
 /// values. Their rows stay laid out even when empty (see View::pins).
 #[no_mangle]
 pub extern "C" fn hp_set_pins(count: u32) {
-    let a = app();
+    let a = unsafe { &mut *app() };
     let mut pins = Vec::with_capacity(count as usize);
     for i in 0..count as usize {
         let b = &a.buf[i * 8..i * 8 + 8];
@@ -538,7 +545,7 @@ fn parse_filter_json(data: &[u8]) -> Filter {
 
 #[no_mangle]
 pub extern "C" fn hp_set_filter(len: u32) {
-    let a = app();
+    let a = unsafe { &mut *app() };
     let data: Vec<u8> = a.buf[..len as usize].to_vec();
     a.cfg.filter = parse_filter_json(&data);
     a.ev_dirty = true;
@@ -549,7 +556,7 @@ pub extern "C" fn hp_set_filter(len: u32) {
 /// own dim/hide mode (see `Cfg::crop`). Negative `lo` or `hi <= lo` clears it.
 #[no_mangle]
 pub extern "C" fn hp_set_crop(lo: i32, hi: i32) {
-    let a = app();
+    let a = unsafe { &mut *app() };
     a.cfg.crop = if lo >= 0 && hi > lo {
         Some((lo as u32, hi as u32))
     } else {
@@ -563,7 +570,7 @@ pub extern "C" fn hp_set_crop(lo: i32, hi: i32) {
 
 #[no_mangle]
 pub extern "C" fn hp_tag_event(e: u32, tag: u32) {
-    let a = app();
+    let a = unsafe { &mut *app() };
     if (e as usize) < a.store.tag.len() {
         a.store.set_tag(e, tag.min(255) as u8);
         a.ev_dirty = true; // tags participate in the filter
@@ -578,7 +585,7 @@ pub extern "C" fn hp_tag_event(e: u32, tag: u32) {
 /// Returns the number tagged.
 #[no_mangle]
 pub extern "C" fn hp_tag_seq_range(lo: u32, hi: u32, tag: u32, by_free: u32) -> u32 {
-    tag_seq_range(app(), lo, hi, tag, by_free)
+    tag_seq_range(unsafe { &mut *app() }, lo, hi, tag, by_free)
 }
 
 fn tag_seq_range(a: &mut App, lo: u32, hi: u32, tag: u32, by_free: u32) -> u32 {
@@ -618,21 +625,17 @@ fn tag_seq_range(a: &mut App, lo: u32, hi: u32, tag: u32, by_free: u32) -> u32 {
 /// [lo, hi]. Returns count.
 #[no_mangle]
 pub extern "C" fn hp_tag_t_range(lo: f64, hi: f64, tag: u32, by_free: u32) -> u32 {
-    let (b0, b1) = {
-        let s = &app().store;
-        (
-            s.lower_bound_t(lo.max(0.0).ceil() as u64),
-            s.seq_for_t(hi.max(0.0).floor() as u64),
-        )
-    };
-    hp_tag_seq_range(b0, b1, tag, by_free)
+    let a = unsafe { &mut *app() };
+    let b0 = a.store.lower_bound_t(lo.max(0.0).ceil() as u64);
+    let b1 = a.store.seq_for_t(hi.max(0.0).floor() as u64);
+    tag_seq_range(a, b0, b1, tag, by_free)
 }
 
 /// Tag colors are written into the input buffer as consecutive u32 LE rgb
 /// values (0xRRGGBB), one per tag id starting at 1.
 #[no_mangle]
 pub extern "C" fn hp_set_tag_colors(count: u32) {
-    let a = app();
+    let a = unsafe { &mut *app() };
     a.cfg.tag_colors.clear();
     for i in 0..count as usize {
         let b = &a.buf[i * 4..i * 4 + 4];
@@ -648,7 +651,7 @@ pub extern "C" fn hp_set_tag_colors(count: u32) {
 /// Per-allocation color override (any color mode).
 #[no_mangle]
 pub extern "C" fn hp_set_alloc_color(e: u32, rgb: u32) {
-    app().cfg.overrides.insert(
+    unsafe { &mut *app() }.cfg.overrides.insert(
         e,
         [
             ((rgb >> 16) & 0xff) as u8,
@@ -660,14 +663,14 @@ pub extern "C" fn hp_set_alloc_color(e: u32, rgb: u32) {
 
 #[no_mangle]
 pub extern "C" fn hp_clear_alloc_color(e: u32) {
-    app().cfg.overrides.remove(&e);
+    unsafe { &mut *app() }.cfg.overrides.remove(&e);
 }
 
 /// Bulk-apply a tag: the input buffer holds `count` u32 LE creator-event
 /// indices. Invalid indices are ignored. Used by analysis-file import.
 #[no_mangle]
 pub extern "C" fn hp_tag_events(count: u32, tag: u32) -> u32 {
-    let a = app();
+    let a = unsafe { &mut *app() };
     let s = &mut a.store;
     let tag = tag.min(255) as u8;
     let n = s.len();
@@ -691,7 +694,7 @@ pub extern "C" fn hp_tag_events(count: u32, tag: u32) -> u32 {
 /// unlike range tagging this ignores the active filter).
 #[no_mangle]
 pub extern "C" fn hp_tags_clear() {
-    let a = app();
+    let a = unsafe { &mut *app() };
     a.store.clear_tags();
     a.ev_dirty = true;
 }
@@ -700,7 +703,7 @@ pub extern "C" fn hp_tags_clear() {
 /// and shift higher ids down when a tag is removed from the list).
 #[no_mangle]
 pub extern "C" fn hp_retag(from: u32, to: u32) -> u32 {
-    let a = app();
+    let a = unsafe { &mut *app() };
     let (from, to) = (from.min(255) as u8, to.min(255) as u8);
     let mut n = 0;
     for e in 0..a.store.len() {
@@ -716,7 +719,7 @@ pub extern "C" fn hp_retag(from: u32, to: u32) -> u32 {
 /// All tag assignments, for analysis export: {"1":[e,e,...],"2":[...]}.
 #[no_mangle]
 pub extern "C" fn hp_tags_dump_json() {
-    let a = app();
+    let a = unsafe { &mut *app() };
     let s = &a.store;
     let mut lists: Vec<Vec<u32>> = vec![Vec::new(); 256];
     for e in 0..s.len() {
@@ -754,7 +757,7 @@ pub extern "C" fn hp_tags_dump_json() {
 /// (tag 0 reports the untagged creator count).
 #[no_mangle]
 pub extern "C" fn hp_tag_counts_json() {
-    let a = app();
+    let a = unsafe { &mut *app() };
     let s = &a.store;
     let mut counts = [0u32; 256];
     for e in 0..s.len() as usize {
@@ -786,14 +789,14 @@ pub extern "C" fn hp_tag_counts_json() {
 
 #[no_mangle]
 pub extern "C" fn hp_layout() -> f64 {
-    let a = app();
+    let a = unsafe { &mut *app() };
     a.view.ensure_rows();
     a.view.virtual_height(a.cfg.row_px, a.cfg.gap_px) as f64
 }
 
 #[no_mangle]
 pub extern "C" fn hp_render_addr(w: u32, h: u32, scroll: f64) {
-    let a = app();
+    let a = unsafe { &mut *app() };
     render::render_addr(
         &a.store,
         &mut a.view,
@@ -811,20 +814,20 @@ pub extern "C" fn hp_render_addr(w: u32, h: u32, scroll: f64) {
 
 #[no_mangle]
 pub extern "C" fn hp_labels_json() {
-    let a = app();
+    let a = unsafe { &mut *app() };
     ret_str(&a.scratch.labels);
 }
 
 #[no_mangle]
 pub extern "C" fn hp_pick(w: u32, x: u32, y: f64, scroll: f64) {
-    let a = app();
+    let a = unsafe { &mut *app() };
     a.out = render::pick(&a.store, &mut a.view, &a.cfg, w, x, y, scroll);
     ret_str(&a.out);
 }
 
 #[no_mangle]
 pub extern "C" fn hp_move_link(w: u32, scroll: f64) {
-    let a = app();
+    let a = unsafe { &mut *app() };
     a.out = render::move_link(&a.store, &mut a.view, &a.cfg, w, scroll);
     ret_str(&a.out);
 }
@@ -832,7 +835,7 @@ pub extern "C" fn hp_move_link(w: u32, scroll: f64) {
 /// Rects covering the allocation event `e` touches (for the event-list flash).
 #[no_mangle]
 pub extern "C" fn hp_event_rects(e: u32, w: u32, scroll: f64) {
-    let a = app();
+    let a = unsafe { &mut *app() };
     a.out = render::event_rects(&a.store, &mut a.view, &a.cfg, w, e, scroll);
     ret_str(&a.out);
 }
@@ -841,7 +844,7 @@ pub extern "C" fn hp_event_rects(e: u32, w: u32, scroll: f64) {
 /// as hp_pick); null if `e` is not a creator (M/R) event.
 #[no_mangle]
 pub extern "C" fn hp_alloc_info(e: u32, w: u32, scroll: f64) {
-    let a = app();
+    let a = unsafe { &mut *app() };
     let is_creator = {
         let s = &a.store;
         e < s.len() && (s.op[e as usize] == OP_M || s.op[e as usize] == OP_R)
@@ -873,7 +876,7 @@ fn live_at_addr(s: &Store, v: &View, addr: u64) -> i32 {
 /// address" to auto-select a hit.
 #[no_mangle]
 pub extern "C" fn hp_live_at_addr(addr_lo: u32, addr_hi: u32) -> i32 {
-    let a = app();
+    let a = unsafe { &mut *app() };
     let addr = (addr_lo as u64) | ((addr_hi as u64) << 32);
     live_at_addr(&a.store, &a.view, addr)
 }
@@ -883,7 +886,7 @@ pub extern "C" fn hp_live_at_addr(addr_lo: u32, addr_hi: u32) -> i32 {
 /// (0 when the pixel is in a gap marker or outside the layout).
 #[no_mangle]
 pub extern "C" fn hp_addr_at(w: u32, x: u32, y: f64, scroll: f64) {
-    let a = app();
+    let a = unsafe { &mut *app() };
     let v = &mut a.view;
     v.ensure_rows();
     let r = ret();
@@ -908,7 +911,7 @@ pub extern "C" fn hp_addr_at(w: u32, x: u32, y: f64, scroll: f64) {
 /// (i32 bits), ret[3] = 1 if an anchor exists.
 #[no_mangle]
 pub extern "C" fn hp_scroll_anchor(scroll: f64) {
-    let a = app();
+    let a = unsafe { &mut *app() };
     let r = ret();
     match a.view.anchor_at(scroll, a.cfg.row_px, a.cfg.gap_px) {
         Some((addr, off)) => {
@@ -927,7 +930,7 @@ pub extern "C" fn hp_scroll_anchor(scroll: f64) {
 /// current layout; -1 if nothing is laid out.
 #[no_mangle]
 pub extern "C" fn hp_scroll_for_addr(addr_lo: u32, addr_hi: u32, offset: i32) -> f64 {
-    let a = app();
+    let a = unsafe { &mut *app() };
     let addr = (addr_hi as u64) << 32 | addr_lo as u64;
     a.view
         .scroll_for_addr(addr, offset, a.cfg.row_px, a.cfg.gap_px)
@@ -935,7 +938,7 @@ pub extern "C" fn hp_scroll_for_addr(addr_lo: u32, addr_hi: u32, offset: i32) ->
 
 #[no_mangle]
 pub extern "C" fn hp_scroll_for_event(e: u32, h: u32) -> f64 {
-    let a = app();
+    let a = unsafe { &mut *app() };
     render::scroll_for_event(&a.store, &mut a.view, &a.cfg, h, e)
 }
 
@@ -975,7 +978,7 @@ fn push_event_json(o: &mut String, s: &Store, e: u32) {
 /// Details of one event (for the step readout / warning jumps).
 #[no_mangle]
 pub extern "C" fn hp_event_json(e: u32) {
-    let a = app();
+    let a = unsafe { &mut *app() };
     let s = &a.store;
     let o = &mut a.out;
     o.clear();
@@ -986,7 +989,10 @@ pub extern "C" fn hp_event_json(e: u32) {
 /// A slice of events [from, from + count) for the event-list panel.
 #[no_mangle]
 pub extern "C" fn hp_events_json(from: u32, count: u32) {
-    let a = app();
+    events_json(unsafe { &mut *app() }, from, count);
+}
+
+fn events_json(a: &mut App, from: u32, count: u32) {
     let s = &a.store;
     let o = &mut a.out;
     o.clear();
@@ -1036,7 +1042,7 @@ fn ensure_ev_filtered(a: &mut App) {
 /// Number of events passing the active filter (all of them when none).
 #[no_mangle]
 pub extern "C" fn hp_events_filtered_count() -> u32 {
-    let a = app();
+    let a = unsafe { &mut *app() };
     if !ev_filter_active(a) {
         return a.store.len();
     }
@@ -1048,9 +1054,11 @@ pub extern "C" fn hp_events_filtered_count() -> u32 {
 /// each record still carries its real seq.
 #[no_mangle]
 pub extern "C" fn hp_events_filtered_json(from: u32, count: u32) {
-    let a = app();
+    let a = unsafe { &mut *app() };
     if !ev_filter_active(a) {
-        return hp_events_json(from, count);
+        // same borrow, not a re-entry into the hp_events_json export — the
+        // exports are leaf entry points (see `app()`)
+        return events_json(a, from, count);
     }
     ensure_ev_filtered(a);
     let s = &a.store;
@@ -1072,7 +1080,7 @@ pub extern "C" fn hp_events_filtered_json(from: u32, count: u32) {
 /// itself is filtered out) — lets the panel follow / scroll to the playhead.
 #[no_mangle]
 pub extern "C" fn hp_events_filtered_pos(seq: u32) -> u32 {
-    let a = app();
+    let a = unsafe { &mut *app() };
     if !ev_filter_active(a) {
         return seq.min(a.store.len());
     }
@@ -1086,7 +1094,7 @@ pub extern "C" fn hp_events_filtered_pos(seq: u32) -> u32 {
 
 #[no_mangle]
 pub extern "C" fn hp_tl_render(kind: u32, w: u32, h: u32, lo: f64, hi: f64) {
-    let a = app();
+    let a = unsafe { &mut *app() };
     timeline::render(&mut a.store, &a.cfg, kind, w, h, lo, hi, &mut a.tl_px);
     let r = ret();
     r[0] = a.tl_px.as_ptr() as u32;
@@ -1095,7 +1103,7 @@ pub extern "C" fn hp_tl_render(kind: u32, w: u32, h: u32, lo: f64, hi: f64) {
 
 #[no_mangle]
 pub extern "C" fn hp_tl_hover(kind: u32, w: u32, x: u32, lo: f64, hi: f64) {
-    let a = app();
+    let a = unsafe { &mut *app() };
     a.out = timeline::hover(&a.store, kind, w, x, lo, hi);
     ret_str(&a.out);
 }
