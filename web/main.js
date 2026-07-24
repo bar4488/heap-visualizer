@@ -95,13 +95,18 @@ function fmtNum(x) {
   return Number(x).toLocaleString('en-US');
 }
 
+// Returns 0 for an empty input ("no value"), null for one that does not
+// parse — callers show the failure (red border) instead of silently treating
+// a typo as "unbounded". Exponent notation (1e6) is accepted, matching the
+// jump box.
 function parseSize(s) {
   s = (s || '').trim().toLowerCase();
   if (!s) return 0;
-  const m = s.match(/^(0x[\da-f]+|[\d.]+)\s*([kmgt]?)i?b?$/);
-  if (!m) return 0;
+  const m = s.match(/^(0x[\da-f]+|[\d.]+(?:e[+-]?\d+)?)\s*([kmgt]?)i?b?$/);
+  if (!m) return null;
   const mult = { '': 1, k: 1024, m: 1 << 20, g: 1 << 30, t: 2 ** 40 }[m[2]];
   const value = m[1].startsWith('0x') ? parseInt(m[1], 16) : parseFloat(m[1]);
+  if (!Number.isFinite(value)) return null;
   return Math.round(value * mult);
 }
 
@@ -917,14 +922,24 @@ $('f-addr-clear').onclick = () => {
   sendFilter();
 };
 
+// Last size constraints that parsed; an unparsable input keeps the previous
+// constraint (marked red) instead of silently matching everything.
+const lastSizeFilter = { min: 0, max: 0 };
+
 function sendFilter() {
   const panel = $('filter-panel');
   const siteBoxes = [...panel.querySelectorAll('input[data-site]')];
   const thrBoxes = [...panel.querySelectorAll('input[data-thr]')];
   const sites = siteBoxes.filter((b) => b.checked).map((b) => +b.dataset.site);
   const thrs = thrBoxes.filter((b) => b.checked).map((b) => +b.dataset.thr);
-  const sizeMin = parseSize($('f-size-min').value);
-  const sizeMax = parseSize($('f-size-max').value);
+  const rawMin = parseSize($('f-size-min').value);
+  const rawMax = parseSize($('f-size-max').value);
+  $('f-size-min').style.borderColor = rawMin === null ? 'var(--red)' : '';
+  $('f-size-max').style.borderColor = rawMax === null ? 'var(--red)' : '';
+  const sizeMin = rawMin === null ? lastSizeFilter.min : rawMin;
+  const sizeMax = rawMax === null ? lastSizeFilter.max : rawMax;
+  lastSizeFilter.min = sizeMin;
+  lastSizeFilter.max = sizeMax;
   const allSites = sites.length === siteBoxes.length;
   const allThrs = thrs.length === thrBoxes.length;
   // tag visibility (from the tags panel; bit 0 = untagged)
@@ -1952,7 +1967,7 @@ async function buildMarks() {
       tMax: UI.meta.tMax,
     },
     playhead: UI.state ? UI.state.seq : 0,
-    rowBytes: rowBytesValue(),
+    rowBytes: rowBytesValue() || DEFAULT_ROW_BYTES,
     collapseMin: $('collapse-min').value.trim(),
     colorMode: +$('color-mode').value,
     tags: UI.tags.map((t) => ({ name: t.name, color: t.color, visible: t.visible })),
