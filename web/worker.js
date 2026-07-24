@@ -396,6 +396,120 @@ function frame(now) {
 // message handling
 // ---------------------------------------------------------------------------
 
+// Settables, one table entry per key: `preLoad` marks the ones that work
+// before a trace is loaded, right next to how the key applies — no separate
+// allowlist to keep in sync with the handlers. The preLoad appliers guard on
+// `E` (no instance exists before the first load); main.js re-sends every
+// setting after 'loaded', so nothing is lost.
+const SETTINGS = {
+  rowBytes: {
+    apply(m) {
+      const anchor = captureAnchor();
+      E.hp_set_row_bytes(m.value);
+      restoreAnchor(anchor);
+      S.dirty.addr = true;
+    },
+  },
+  collapseMin: {
+    apply(m) {
+      const anchor = captureAnchor();
+      if (m.mode === 'bytes') E.hp_set_collapse_min_bytes(m.value);
+      else E.hp_set_collapse_min(m.value);
+      restoreAnchor(anchor);
+      S.dirty.addr = true;
+    },
+  },
+  rowPx: {
+    preLoad: true,
+    apply(m) {
+      S.rowPx = toDevice(m.value);
+      S.gapPx = Math.max(8, Math.round(S.rowPx * 0.6));
+      if (E) applyRowPx();
+      S.dirty.addr = true;
+    },
+  },
+  locked: {
+    preLoad: true,
+    apply(m) {
+      S.locked = !!m.value;
+    },
+  },
+  sizeLabels: {
+    preLoad: true,
+    apply(m) {
+      if (E) E.hp_set_size_labels(m.value ? 1 : 0);
+      S.dirty.addr = true;
+    },
+  },
+  overlapMode: {
+    preLoad: true,
+    apply(m) {
+      if (E) E.hp_set_overlap_mode(m.value | 0);
+      S.dirty.addr = true;
+    },
+  },
+  ghostMode: {
+    preLoad: true,
+    apply(m) {
+      if (E) E.hp_set_ghosts(m.value ? 1 : 0);
+      S.dirty.addr = true;
+    },
+  },
+  addrLabels: {
+    preLoad: true,
+    apply(m) {
+      S.addrLabels = !!m.value;
+      S.dirty.addr = true;
+    },
+  },
+  allocSizeFormat: {
+    preLoad: true,
+    apply(m) {
+      S.allocSizeFormat = m.value === 'hex' ? 'hex' : 'human';
+      S.dirty.addr = true;
+    },
+  },
+  showAll: {
+    apply(m) {
+      const anchor = captureAnchor();
+      E.hp_set_show_all(m.value ? 1 : 0);
+      restoreAnchor(anchor);
+      S.dirty.addr = true;
+    },
+  },
+  xview: {
+    apply(m) {
+      E.hp_set_xview(m.value.zoom, m.value.pan);
+      S.dirty.addr = true;
+    },
+  },
+  colorMode: {
+    apply(m) {
+      E.hp_set_color_mode(m.value);
+      S.dirty.addr = true;
+    },
+  },
+  selected: {
+    apply(m) {
+      E.hp_set_selected(m.value === null ? 0xffffffff : m.value);
+      S.dirty.addr = true;
+    },
+  },
+  filter: {
+    apply(m) {
+      const len = writeBuf(te.encode(JSON.stringify(m.value)));
+      E.hp_set_filter(len);
+      S.dirty.addr = true;
+    },
+  },
+  crop: {
+    apply(m) {
+      E.hp_set_crop(m.value ? Math.round(m.value.lo) : -1, m.value ? Math.round(m.value.hi) : -1);
+      S.dirty.addr = true;
+    },
+  },
+};
+
 onmessage = async (ev) => {
   const m = ev.data;
   switch (m.type) {
@@ -582,82 +696,9 @@ onmessage = async (ev) => {
       break;
     }
     case 'set': {
-      if (!S.loaded && !['rowPx', 'locked', 'sizeLabels', 'addrLabels', 'allocSizeFormat', 'overlapMode', 'ghostMode'].includes(m.key)) break;
-      switch (m.key) {
-        case 'rowBytes': {
-          const anchor = captureAnchor();
-          E.hp_set_row_bytes(m.value);
-          restoreAnchor(anchor);
-          S.dirty.addr = true;
-          break;
-        }
-        case 'collapseMin': {
-          const anchor = captureAnchor();
-          if (m.mode === 'bytes') E.hp_set_collapse_min_bytes(m.value);
-          else E.hp_set_collapse_min(m.value);
-          restoreAnchor(anchor);
-          S.dirty.addr = true;
-          break;
-        }
-        case 'rowPx':
-          S.rowPx = toDevice(m.value);
-          S.gapPx = Math.max(8, Math.round(S.rowPx * 0.6));
-          if (E) applyRowPx();
-          S.dirty.addr = true;
-          break;
-        case 'locked':
-          S.locked = !!m.value;
-          break;
-        case 'sizeLabels':
-          if (E) E.hp_set_size_labels(m.value ? 1 : 0);
-          S.dirty.addr = true;
-          break;
-        case 'overlapMode':
-          if (E) E.hp_set_overlap_mode(m.value | 0);
-          S.dirty.addr = true;
-          break;
-        case 'ghostMode':
-          if (E) E.hp_set_ghosts(m.value ? 1 : 0);
-          S.dirty.addr = true;
-          break;
-        case 'addrLabels':
-          S.addrLabels = !!m.value;
-          S.dirty.addr = true;
-          break;
-        case 'allocSizeFormat':
-          S.allocSizeFormat = m.value === 'hex' ? 'hex' : 'human';
-          S.dirty.addr = true;
-          break;
-        case 'showAll': {
-          const anchor = captureAnchor();
-          E.hp_set_show_all(m.value ? 1 : 0);
-          restoreAnchor(anchor);
-          S.dirty.addr = true;
-          break;
-        }
-        case 'xview':
-          E.hp_set_xview(m.value.zoom, m.value.pan);
-          S.dirty.addr = true;
-          break;
-        case 'colorMode':
-          E.hp_set_color_mode(m.value);
-          S.dirty.addr = true;
-          break;
-        case 'selected':
-          E.hp_set_selected(m.value === null ? 0xffffffff : m.value);
-          S.dirty.addr = true;
-          break;
-        case 'filter': {
-          const len = writeBuf(te.encode(JSON.stringify(m.value)));
-          E.hp_set_filter(len);
-          S.dirty.addr = true;
-          break;
-        }
-        case 'crop':
-          E.hp_set_crop(m.value ? Math.round(m.value.lo) : -1, m.value ? Math.round(m.value.hi) : -1);
-          S.dirty.addr = true;
-          break;
-      }
+      const s = SETTINGS[m.key];
+      if (!s || (!S.loaded && !s.preLoad)) break;
+      s.apply(m);
       break;
     }
     // domain conversion: given a [lo,hi] range in the `kind` domain (0 = time,
