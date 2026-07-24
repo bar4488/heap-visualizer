@@ -5,6 +5,9 @@ import {
   fmtBytes, fmtHexSize, fmtAllocSize as fmtAllocSizeMode, fmtNum, parseSize,
   esc, clampView,
 } from './fmt.js';
+import {
+  initRpc, request, requestLatest, cancelLatest, handleReply,
+} from './rpc.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -19,6 +22,7 @@ const OPS = ['malloc', 'free', 'realloc'];
 const dpr = window.devicePixelRatio || 1;
 
 const worker = new Worker('worker.js', { type: 'module' });
+initRpc(worker);
 
 const UI = {
   meta: null,
@@ -184,8 +188,6 @@ document.addEventListener('drop', (e) => {
 // worker messages
 // ---------------------------------------------------------------------------
 
-const pending = { pick: null, tl: null };
-
 worker.onmessage = (ev) => {
   const m = ev.data;
   switch (m.type) {
@@ -253,9 +255,6 @@ worker.onmessage = (ev) => {
     case 'flash-rects':
       flashRects(m.rects);
       break;
-    case 'pick-result':
-      onPickResult(m);
-      break;
     case 'addr-at':
       if (m.addr) addAddrMark(m.addr);
       break;
@@ -278,22 +277,10 @@ worker.onmessage = (ev) => {
       buildTagsSection();
       buildLegend();
       break;
-    case 'tags-dump': {
-      const w = dumpWaiters.get(m.reqId);
-      if (w) { dumpWaiters.delete(m.reqId); w(m.tags); }
-      break;
-    }
-    case 'tlhover-result':
-      onTlHoverResult(m);
-      break;
-    case 'convert-result':
-      onConvertResult(m);
-      break;
-    case 'alloc-info-result': {
-      const w = allocInfoWaiters.get(m.reqId);
-      if (w) { allocInfoWaiters.delete(m.reqId); w(m.info); }
-      break;
-    }
+    default:
+      // rpc replies (pick / tlhover / convert / alloc-info / tags-dump):
+      // resolved by reqId in one place, see rpc.js
+      handleReply(m);
   }
 };
 
@@ -1900,26 +1887,14 @@ function updateMarkers() {
 // analysis save / load
 // ---------------------------------------------------------------------------
 
-const allocInfoWaiters = new Map();
-
 // fetch alloc_info for a creator event directly (not via pixel pick) — used
 // to recreate pinned allocation windows from a saved session
 function requestAllocInfo(e) {
-  return new Promise((resolve) => {
-    const reqId = UI.reqId++;
-    allocInfoWaiters.set(reqId, resolve);
-    worker.postMessage({ type: 'alloc-info', e, reqId });
-  });
+  return request('alloc-info', { e }).then((m) => m.info);
 }
 
-const dumpWaiters = new Map();
-
 function requestTagsDump() {
-  return new Promise((resolve) => {
-    const reqId = UI.reqId++;
-    dumpWaiters.set(reqId, resolve);
-    worker.postMessage({ type: 'tags-dump', reqId });
-  });
+  return request('tags-dump').then((m) => m.tags);
 }
 
 async function buildMarks() {
@@ -2552,21 +2527,11 @@ function setupTimeline(stripId, canvas, kind) {
 setupTimeline('strip-t', tltCanvas, 0);
 setupTimeline('strip-s', tlsCanvas, 1);
 
-let tlHoverReq = null;
-function queryTlHover(kind, x, clientY) {
-  tlHoverReq = { kind, x, clientY };
-  if (!pending.tl) flushTlHover();
-}
-function flushTlHover() {
-  if (!tlHoverReq || !UI.loaded) { pending.tl = null; return; }
-  const q = tlHoverReq;
-  tlHoverReq = null;
-  pending.tl = UI.reqId++;
-  worker.postMessage({ type: 'tlhover', kind: q.kind, x: q.x, reqId: pending.tl });
+function queryTlHover(kind, x) {
+  if (!UI.loaded) return;
+  requestLatest('tl', 'tlhover', { kind, x }).then(onTlHoverResult);
 }
 function onTlHoverResult(m) {
-  if (m.reqId !== pending.tl) return;
-  pending.tl = null;
   if (m.info) {
     const i = m.info;
     const range = m.kind === 0
@@ -2578,7 +2543,6 @@ function onTlHoverResult(m) {
       `<span class="g">▲ ${fmtNum(i.g)} alloc</span>  <span class="r">▼ ${fmtNum(i.r)} free</span>\n<span class="dim">${range} · events ${fmtNum(i.seqFrom)}–${fmtNum(i.seqTo)}</span>`);
     positionTooltipNearMouse();
   }
-  if (tlHoverReq) flushTlHover();
 }
 
 // ---------------------------------------------------------------------------
@@ -2587,29 +2551,9 @@ function onTlHoverResult(m) {
 // fast drag never queues more than one in-flight request
 // ---------------------------------------------------------------------------
 
-let convertReq = null;   // {kind, lo, hi, cb} waiting to be sent
-let convertInFlight = null;
-let convertCb = null;
-
 function requestConvert(kind, lo, hi, cb) {
-  convertReq = { kind, lo, hi, cb };
-  if (!convertInFlight) flushConvert();
-}
-function flushConvert() {
-  if (!convertReq || !UI.loaded) { convertInFlight = null; return; }
-  const q = convertReq;
-  convertReq = null;
-  convertInFlight = UI.reqId++;
-  convertCb = q.cb;
-  worker.postMessage({ type: 'convert', kind: q.kind, lo: q.lo, hi: q.hi, reqId: convertInFlight });
-}
-function onConvertResult(m) {
-  if (m.reqId !== convertInFlight) return;
-  convertInFlight = null;
-  const cb = convertCb;
-  convertCb = null;
-  if (cb) cb(m.lo, m.hi);
-  if (convertReq) flushConvert();
+  if (!UI.loaded) return;
+  requestLatest('convert', 'convert', { kind, lo, hi }).then((m) => cb(m.lo, m.hi));
 }
 
 // ---------------------------------------------------------------------------
@@ -2698,14 +2642,15 @@ addrScroll.addEventListener('wheel', (e) => {
   }
 }, { passive: false });
 
-let pickQueue = null;
 addrScroll.addEventListener('pointermove', (e) => {
+  if (!UI.loaded) return;
   const r = addrCanvas.getBoundingClientRect();
-  pickQueue = { x: e.clientX - r.left, y: e.clientY - r.top };
-  if (!pending.pick) flushPick(false);
+  requestLatest('pick', 'pick', {
+    x: e.clientX - r.left, y: e.clientY - r.top, forClick: false,
+  }).then(onPickResult);
 });
 addrScroll.addEventListener('pointerleave', () => {
-  pickQueue = null;
+  cancelLatest('pick');
   hoverRects = [];
   hideTooltip('addr');
   drawMoveLink(UI.state && UI.state.moveLink);
@@ -2719,24 +2664,13 @@ addrScroll.addEventListener('click', (e) => {
     });
     return;
   }
-  pending.pick = UI.reqId++;
-  worker.postMessage({
-    type: 'pick', x: e.clientX - r.left, y: e.clientY - r.top,
-    reqId: pending.pick, forClick: true,
-  });
+  if (!UI.loaded) return;
+  requestLatest('pick', 'pick', {
+    x: e.clientX - r.left, y: e.clientY - r.top, forClick: true,
+  }).then(onPickResult);
 });
 
-function flushPick(forClick) {
-  if (!pickQueue || !UI.loaded) { pending.pick = null; return; }
-  const q = pickQueue;
-  pickQueue = null;
-  pending.pick = UI.reqId++;
-  worker.postMessage({ type: 'pick', x: q.x, y: q.y, reqId: pending.pick, forClick });
-}
-
 function onPickResult(m) {
-  if (m.reqId !== pending.pick) return;
-  pending.pick = null;
   const info = m.info;
   if (m.forClick) {
     UI.selected = info ? info.e : null;
@@ -2761,7 +2695,6 @@ function onPickResult(m) {
     drawMoveLink(UI.state && UI.state.moveLink);
     hideTooltip('addr');
   }
-  if (pickQueue) flushPick(false);
 }
 
 // Render allocation info into `root` and wire its controls. Scoped by class

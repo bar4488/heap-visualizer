@@ -687,7 +687,10 @@ onmessage = async (ev) => {
       break;
     }
     case 'tags-dump': {
-      if (!S.loaded) break;
+      if (!S.loaded) {
+        postMessage({ type: 'tags-dump', reqId: m.reqId, tags: {} });
+        break;
+      }
       E.hp_tags_dump_json();
       postMessage({ type: 'tags-dump', reqId: m.reqId, tags: retJson() });
       break;
@@ -729,7 +732,12 @@ onmessage = async (ev) => {
       S.dirty.addr = true;
       break;
     case 'pick': {
-      if (!S.loaded || !canvases.addr) break;
+      // rpc contract: every request gets a reply, even before a trace loads,
+      // or the main thread's coalescer would wait forever
+      if (!S.loaded || !canvases.addr) {
+        postMessage({ type: 'pick-result', reqId: m.reqId, info: null, forClick: m.forClick });
+        break;
+      }
       E.hp_pick(canvases.addr.width, Math.round(m.x * dpr), m.y * dpr, S.scroll);
       postMessage({ type: 'pick-result', reqId: m.reqId, info: retJson(), forClick: m.forClick });
       break;
@@ -782,7 +790,10 @@ onmessage = async (ev) => {
       break;
     }
     case 'tlhover': {
-      if (!S.loaded) break;
+      if (!S.loaded) {
+        postMessage({ type: 'tlhover-result', reqId: m.reqId, kind: m.kind, info: null });
+        break;
+      }
       const view = m.kind === 0 ? S.tlT : S.tlS;
       const cv = m.kind === 0 ? canvases.tlt : canvases.tls;
       E.hp_tl_hover(m.kind, cv.width, Math.min(cv.width - 1, Math.round(m.x * dpr)), view.lo, view.hi);
