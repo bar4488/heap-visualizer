@@ -5,9 +5,9 @@ is the app's central performance decision: the DOM never touches trace data,
 and the main thread never blocks on trace-sized work.
 
 ```
-main thread (main.js, DOM)  ←messages→  worker (worker.js)  ←C ABI→  WASM core (Rust)
-   chrome, input, overlays               canvases, frame loop,        trace, playhead,
-   panels, persistence                   playback clock               layout, pixels
+main thread (DOM)           ←messages→  worker (worker.js)  ←C ABI→  WASM core (Rust)
+  main.js + shell/ + heap/               canvases, frame loop,        trace, playhead,
+  chrome, input, overlays, persistence   playback clock               layout, pixels
 ```
 
 ## 8.1 The WASM core
@@ -85,6 +85,31 @@ selection bands, marks, tooltips), keyboard, drag-and-drop, and persistence
 (`localStorage` + file export/import). It holds *view* state (selections,
 tags list, names, marks) but never trace data; anything requiring the trace
 is a message round-trip.
+
+### Module layout
+
+It is split on one seam: code whose meaning depends on heap traces, and code
+whose meaning does not. **The directory a file sits in states who owns it**,
+and "does the shell know about heaps" is a question `grep -r heap web/shell/`
+answers.
+
+| | |
+|---|---|
+| `web/shell/` | `dom.js` (`$`, `setHtml`, `delegate`, device↔CSS px), `panels.js` (draggable windows, z-stack), `drawers.js` (dockable left/right drawers), `tooltip.js`. **No domain identifiers.** |
+| `web/heap/` | `analysis.js` (tags, names, colors, marks, `.heapa`), `events-panel.js`, `addr.js` |
+| `web/session.js` | The boundary: serializes shell state (window/drawer geometry) *and* heap state (view, crop, filters, playhead) into the one per-trace session blob |
+| `web/main.js` | Trace/worker/toolbar wiring and the three coordinated views |
+| `web/fmt.js`, `web/rpc.js` | Shared with the worker; the request/response layer |
+
+Two rules keep the seam from eroding. **No module imports the shared `UI`
+object** — each receives what it needs through an `init*(deps)` call, so the
+coupling is written down instead of ambient, and there is no circular-import
+initialization hazard. **`panels.js` never imports `drawers.js`**: the drag
+path that can end in a dock receives the dock API as an argument.
+
+The destination this serves is a domain-independent shell hosting several
+analysis domains, heap being the first; see
+[docs/findings/2026-07-24-2/web-architecture-direction](../docs/findings/2026-07-24-2/web-architecture-direction.md).
 
 ## 8.4 Protocol conventions
 

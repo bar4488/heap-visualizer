@@ -54,6 +54,28 @@ show-all layout, tagging (range, by-free, filter-scoped), filter semantics
 label placement, move links, timeline tag lanes, and render smoke tests over
 the raw pixel buffer.
 
-The JS layers have no automated tests; they are kept thin enough to verify by
-manual smoke test with the demo trace (`window.__heap_visualizer` exposes UI
-state for console poking).
+`node --test 'web/**/*.test.js'` runs the JS suite. It needs no npm packages
+and no browser: `web/test/dom-stub.js` is a ~200-line stand-in implementing
+only the DOM surface `web/` actually touches. Coverage is deliberately narrow
+and aimed at what a refactor breaks silently:
+
+- `web/fmt.js` in full, `clampView` included — it is the one function both
+  threads run on the same input, so the main thread's optimistic local zoom
+  agreeing with the worker's authoritative clamp rests on it;
+- `normAddr` (`web/heap/addr.js`);
+- the **session round-trip** — `buildSession → applySession → buildSession`
+  must be a fixed point, plus drawer docking, address-range validation and
+  playhead restore;
+- the **`.heapa` round-trip** — `buildMarks → applyMarks → buildMarks`, plus
+  the validation `applyMarks` does on a file off disk (tag color fallback,
+  address-mark and per-allocation-color rejection, trace-count mismatch).
+
+This replaces an earlier stance that the JS layers would carry no automated
+tests at all. That held while `main.js` was one flat scope with nothing
+importable; it stopped holding once the shell/domain split made the persisted
+shapes testable in isolation, and the split itself needed something to lean on.
+
+Rendering, pointer interaction and the real worker round trip are still
+verified by hand against the demo trace, to a fixed script:
+[docs/smoke-checklist.md](../docs/smoke-checklist.md).
+`window.__heap_visualizer` exposes UI state for console poking.

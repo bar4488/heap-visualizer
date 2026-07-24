@@ -8,8 +8,29 @@ import {
 import {
   initRpc, request, requestLatest, cancelLatest, handleReply,
 } from './rpc.js';
-
-const $ = (id) => document.getElementById(id);
+import {
+  $, dpr, setHtml, delegate, toCss, toCssLen,
+} from './shell/dom.js';
+import { raisePanel, showPanel, makePanelWindow } from './shell/panels.js';
+import { showTooltip, hideTooltip, positionTooltipNearMouse } from './shell/tooltip.js';
+import { normAddr } from './heap/addr.js';
+import {
+  initAnalysis, markDirty, tagIdFor, syncTagDatalist, buildMarksPanel,
+  buildTagsSection, buildNamesSection, sendAddrMarks, gotoAddr, addAddrMark,
+  renderAddrMarkLines, setAddrMarkYs, addBookmark, updateMarkers,
+  requestAllocInfo, buildMarks, applyMarks,
+} from './heap/analysis.js';
+import {
+  initEventsPanel, evState, refreshEventsPanel, onEventsSlice, flashRects,
+  updateEventsPanel, onEvPos, resetEventsPanel, updateEventsSelBand,
+} from './heap/events-panel.js';
+import {
+  initSession, applySession, restoreSession,
+  restoreMarksAutosave, resetSessionSnapshot,
+} from './session.js';
+import {
+  drawersState, dock, initDrawers, drawerEl, refreshDrawerDividers,
+} from './shell/drawers.js';
 
 // Mirrored from core/src/render.rs (CAT / RAMP): the engine paints
 // allocations, this file paints the matching legend chips and filter
@@ -18,8 +39,6 @@ const CAT = ['#58a6ff', '#3fb950', '#f2cc60', '#ff7b72', '#bc8cff', '#39c5cf',
   '#f778ba', '#d29922', '#7ee787', '#ffa657', '#79c0ff', '#d2a8ff'];
 const RAMP = ['#0e4429', '#006d32', '#26a641', '#39d353'];
 const OPS = ['malloc', 'free', 'realloc'];
-
-const dpr = window.devicePixelRatio || 1;
 
 const worker = new Worker('worker.js', { type: 'module' });
 initRpc(worker);
@@ -300,7 +319,7 @@ function onLoaded(m) {
   UI.marksDirty = false;
   UI.crop = null;
   UI.addrRanges = [];
-  lastSessionJson = null; // new trace: the previous snapshot says nothing
+  resetSessionSnapshot(); // new trace: the previous snapshot says nothing
   updateCropIndicator();
   sendAddrMarks();
   sendNames();
@@ -378,7 +397,7 @@ function onState(m) {
   updateSelOverlay();
   drawCropBands();
   updateMarkers();
-  lastAddrMarkYs = m.addrMarkYs || [];
+  setAddrMarkYs(m.addrMarkYs || []);
   renderAddrMarkLines();
   updateEventsPanel();
 }
@@ -388,50 +407,6 @@ function onState(m) {
 // ---------------------------------------------------------------------------
 
 let hoverRects = [];
-
-// Every worker state message (i.e. every rendered frame during playback or a
-// drag) used to rebuild innerHTML for the overlay, both strips' bookmark
-// flags, the address-mark lines and the crop/selection bands. The content is
-// usually identical frame to frame, so each of those rebuilds now goes
-// through this: assign only when the markup actually changed.
-function setHtml(el, html) {
-  if (el._lastHtml === html) return false;
-  el._lastHtml = html;
-  el.innerHTML = html;
-  return true;
-}
-
-// One delegated listener per (container, event type): the handler fires for
-// the closest element carrying the given data-* attribute, so the
-// build*Section functions can rebuild a list's markup without rewiring N
-// per-element handlers each time. Handlers get (element, dataset value).
-function delegate(el, type, handlers) {
-  el.addEventListener(type, (ev) => {
-    for (const [attr, fn] of Object.entries(handlers)) {
-      const t = ev.target.closest(`[data-${attr}]`);
-      if (t && el.contains(t)) {
-        fn(t, t.dataset[attr]);
-        return;
-      }
-    }
-  });
-}
-
-// Engine geometry is device px, the DOM overlay layer is CSS px. These are
-// the conversion boundary — worker rect/point geometry entering the DOM goes
-// through them instead of ad-hoc /dpr at each use. (Pointer coordinates go
-// the other way as CSS px and are converted worker-side, see toDevice there.)
-function toCss(r, minWH = 1) {
-  return {
-    x: r.x / dpr,
-    y: r.y / dpr,
-    w: Math.max(minWH, r.w / dpr),
-    h: Math.max(minWH, r.h / dpr),
-  };
-}
-function toCssLen(v) {
-  return v / dpr;
-}
 
 function svgRect(cls, r) {
   const c = toCss(r);
@@ -859,14 +834,6 @@ function buildFilterPanel() {
 // Ranges are added by hand here or by "match range" in an allocation panel.
 // ---------------------------------------------------------------------------
 
-function normAddr(v) {
-  v = (v || '').trim().toLowerCase();
-  if (!v) return null;
-  if (!v.startsWith('0x')) v = `0x${v}`;
-  if (!/^0x[0-9a-f]+$/.test(v)) return null;
-  try { return `0x${BigInt(v).toString(16)}`; } catch { return null; }
-}
-
 function addAddrRange(loHex, hiHex) {
   const lo = normAddr(loHex);
   const hi = normAddr(hiHex);
@@ -974,8 +941,8 @@ $('filter-clear').onclick = () => {
 };
 
 // ---------------------------------------------------------------------------
-// panels as draggable windows: drag by the header, and keep a z-stack where
-// the last panel opened or dragged sits on top
+// panel wiring. The windowing itself — dragging, the z-stack, docking into
+// the left/right drawers — lives in web/shell/ and knows nothing about heaps.
 // ---------------------------------------------------------------------------
 
 // dockable/floating panels tracked by session (drawers, window positions) —
@@ -983,321 +950,11 @@ $('filter-clear').onclick = () => {
 // and not meaningful to restore across a session
 const PANEL_IDS = ['play-panel', 'layout-panel', 'appearance-panel', 'filter-panel', 'analysis-panel', 'warnings-panel', 'events-panel'];
 
-let panelZ = 40;
-
-function raisePanel(p) {
-  p.style.zIndex = ++panelZ;
-}
-
-function showPanel(id) {
-  const p = $(id);
-  p.hidden = false;
-  raisePanel(p);
-}
-
-function makePanelWindow(p) {
-  // any interaction with a window brings it to the front
-  p.addEventListener('pointerdown', () => raisePanel(p));
-  const head = p.querySelector('.panel-head');
-  head.addEventListener('pointerdown', (e) => {
-    if (e.button !== 0) return;
-    // header buttons/inputs (close, save, follow…) still work normally
-    if (e.target.closest('button, input, select, a')) return;
-    e.preventDefault();
-    head.setPointerCapture(e.pointerId);
-    const startX = e.clientX;
-    const startY = e.clientY;
-    const r = p.getBoundingClientRect();
-    const dx = e.clientX - r.left;
-    const dy = e.clientY - r.top;
-    let moved = false;
-    let dropSide = null;
-    let dropRef = null;
-    let zoneSide = null; // last side reported by dropSideAt, for edge-transition detection
-
-    const floatTo = (ev) => {
-      p.style.left = `${Math.min(innerWidth - 60, Math.max(4 - r.width + 60, ev.clientX - dx))}px`;
-      p.style.top = `${Math.min(innerHeight - 40, Math.max(0, ev.clientY - dy))}px`;
-      p.style.right = 'auto';
-      p.style.bottom = 'auto';
-    };
-    const move = (ev) => {
-      if ((ev.buttons & 1) === 0) {
-        finish();
-        return;
-      }
-      if (!moved && Math.hypot(ev.clientX - startX, ev.clientY - startY) < 4) return;
-      if (!moved) {
-        moved = true;
-        // pick up immediately: a docked panel pops out of its drawer the
-        // instant a drag starts (rather than only on drop), so it's always
-        // obviously "in your hand" and never looks stuck mid-drag — it only
-        // re-docks if actually dropped on a drawer, below
-        if (p.classList.contains('docked')) undockPanel(p);
-        p.classList.add('dragging');
-      }
-      // keep the window tracking the cursor continuously, even while
-      // hovering a drop zone — it used to freeze there, which read as stuck
-      floatTo(ev);
-      const side = dropSideAt(ev.clientX);
-      // refreshDrawerDividers rebuilds divider elements (and their pointer
-      // listeners) from scratch — only run it on an actual zone change, not
-      // every pointermove tick, or it visibly stutters the drag
-      if (side !== zoneSide) {
-        if (zoneSide) refreshDrawerDividers(zoneSide);
-        zoneSide = side;
-      }
-      if (side) {
-        dropSide = side;
-        dropRef = showDropPreview(p, side, ev.clientY);
-      } else {
-        dropSide = null;
-        clearDropPreview();
-      }
-    };
-    let finished = false;
-    function finish() {
-      if (finished) return;
-      finished = true;
-      window.removeEventListener('pointermove', move);
-      window.removeEventListener('pointerup', finish);
-      window.removeEventListener('pointercancel', finish);
-      if (head.hasPointerCapture?.(e.pointerId)) head.releasePointerCapture(e.pointerId);
-      clearDropPreview();
-      p.classList.remove('dragging');
-      if (moved && dropSide) dockPanelAt(p, dropSide, dropRef);
-      // normalizes hidden state for whichever drawer(s) were touched, and is
-      // a harmless no-op for any that weren't
-      refreshDrawerDividers('left');
-      refreshDrawerDividers('right');
-    }
-    window.addEventListener('pointermove', move);
-    window.addEventListener('pointerup', finish);
-    window.addEventListener('pointercancel', finish);
-  });
-}
-document.querySelectorAll('.panel').forEach(makePanelWindow);
-
-// ---------------------------------------------------------------------------
-// dockable left/right drawers: panels float by default (above); this adds an
-// alternate home where any of PANEL_IDS can stack, get hidden as a group, and
-// be resized — without changing anything about how floating panels behave
-// ---------------------------------------------------------------------------
-
-// no manual show/hide control: a drawer is visible exactly when it has a
-// docked window in it, empty otherwise — see refreshDrawerDividers
-UI.drawers = { left: [], right: [], widthLeft: 300, widthRight: 300 };
-
-const panelFloatRect = new Map(); // panel element -> its floating {left,top,right,bottom}, for undock
-
-function drawerEl(side) { return $(side === 'left' ? 'drawer-left' : 'drawer-right'); }
-
-function refreshDrawerDividers(side) {
-  const dr = drawerEl(side);
-  dr.querySelectorAll('.drawer-vresize').forEach((d) => d.remove());
-  // a docked-but-closed (×'d) panel stays a DOM child so re-opening it from
-  // the toolbar still works, but it shouldn't hold the drawer open or get a
-  // divider of its own
-  const panels = [...dr.children].filter((c) => c.classList.contains('panel') && !c.hidden);
-  panels.forEach((p, i) => {
-    p.style.flex = '1 1 0';
-    if (i > 0) {
-      const div = document.createElement('div');
-      div.className = 'drawer-vresize';
-      dr.insertBefore(div, p);
-      wireVResize(div, panels[i - 1], p);
-    }
-  });
-  dr.hidden = panels.length === 0;
-}
-
-// Drag the divider between two stacked panels. Snapshot every visible panel at
-// its current pixel height first, then move height only between the two panels
-// adjacent to the handle; otherwise flexbox redistributes the delta across all
-// docked panels in the drawer when there are three or more.
-function wireVResize(div, panelA, panelB) {
-  div.addEventListener('pointerdown', (e) => {
-    e.preventDefault();
-    div.setPointerCapture(e.pointerId);
-    const startY = e.clientY;
-    const panels = [...div.parentElement.children]
-      .filter((c) => c.classList.contains('panel') && !c.hidden);
-    panels.forEach((p) => {
-      p.style.flex = `0 0 ${p.getBoundingClientRect().height}px`;
-    });
-    const startAH = panelA.getBoundingClientRect().height;
-    const startBH = panelB.getBoundingClientRect().height;
-    const totalH = startAH + startBH;
-    const minH = Math.min(60, totalH / 2);
-    const move = (ev) => {
-      const ah = Math.max(minH, Math.min(totalH - minH, startAH + (ev.clientY - startY)));
-      panelA.style.flex = `0 0 ${ah}px`;
-      panelB.style.flex = `0 0 ${totalH - ah}px`;
-    };
-    const up = () => {
-      div.removeEventListener('pointermove', move);
-      div.removeEventListener('pointerup', up);
-      div.removeEventListener('pointercancel', up);
-      if (div.hasPointerCapture?.(e.pointerId)) div.releasePointerCapture(e.pointerId);
-    };
-    div.addEventListener('pointermove', move);
-    div.addEventListener('pointerup', up);
-    div.addEventListener('pointercancel', up);
-  });
-}
-
-function wireDrawerWidthResize(side) {
-  const dr = drawerEl(side);
-  const handle = document.createElement('div');
-  handle.className = 'drawer-resize';
-  dr.appendChild(handle);
-  handle.addEventListener('pointerdown', (e) => {
-    e.preventDefault();
-    handle.setPointerCapture(e.pointerId);
-    const startX = e.clientX;
-    const startW = dr.getBoundingClientRect().width;
-    const move = (ev) => {
-      const dx = ev.clientX - startX;
-      const w = Math.max(160, Math.min(600, side === 'left' ? startW + dx : startW - dx));
-      dr.style.width = `${w}px`;
-      UI.drawers[side === 'left' ? 'widthLeft' : 'widthRight'] = w;
-    };
-    const up = () => {
-      handle.removeEventListener('pointermove', move);
-      handle.removeEventListener('pointerup', up);
-    };
-    handle.addEventListener('pointermove', move);
-    handle.addEventListener('pointerup', up);
-  });
-}
-wireDrawerWidthResize('left');
-wireDrawerWidthResize('right');
-
-// dropSideAt/showDropPreview/clearDropPreview drive the drag-and-drop dock
-// path (see makePanelWindow): dock at a specific position, reorder within
-// the same drawer, or move between drawers, all by dragging a panel's header
-function dropSideAt(clientX) {
-  const leftDr = drawerEl('left');
-  const rightDr = drawerEl('right');
-  if (!leftDr.hidden && clientX <= leftDr.getBoundingClientRect().right) return 'left';
-  if (!rightDr.hidden && clientX >= rightDr.getBoundingClientRect().left) return 'right';
-  // activation zone at the screen edge, so a currently-empty (hidden) drawer
-  // can still be dropped into
-  const EDGE = 44;
-  if (clientX <= EDGE) return 'left';
-  if (clientX >= innerWidth - EDGE) return 'right';
-  return null;
-}
-
-// the docked panel (if any) just before which `p` should land, given a
-// pointer y position — null means "append at the end"
-const dndIndicator = document.createElement('div');
-dndIndicator.id = 'dnd-indicator';
-dndIndicator.hidden = true;
-document.body.appendChild(dndIndicator);
-
-// shows an insertion-line preview at the position `p` would land in `side`'s
-// drawer for a drop at `clientY`, and returns the panel to insert before
-// (null = append at the end). Note: dr.children always includes the
-// permanent .drawer-resize width handle, so "empty" is judged by panel count.
-function showDropPreview(p, side, clientY) {
-  const dr = drawerEl(side);
-  dr.hidden = false; // reveal as a preview even if currently empty
-  document.querySelectorAll('.drawer.drop-target').forEach((d) => { if (d !== dr) d.classList.remove('drop-target'); });
-  dr.classList.add('drop-target');
-  const panels = [...dr.children].filter((c) => c.classList.contains('panel') && !c.hidden && c !== p);
-  const ref = panels.find((cand) => {
-    const cr = cand.getBoundingClientRect();
-    return clientY < cr.top + cr.height / 2;
-  }) || null;
-  let rect;
-  let y;
-  if (ref) {
-    rect = ref.getBoundingClientRect();
-    y = rect.top;
-  } else if (panels.length) {
-    rect = panels[panels.length - 1].getBoundingClientRect();
-    y = rect.bottom;
-  } else {
-    rect = dr.getBoundingClientRect();
-    y = rect.top + 6;
-  }
-  dndIndicator.style.left = `${rect.left}px`;
-  dndIndicator.style.width = `${rect.width}px`;
-  dndIndicator.style.top = `${y - 1}px`;
-  dndIndicator.hidden = false;
-  return ref;
-}
-
-function clearDropPreview() {
-  dndIndicator.hidden = true;
-  document.querySelectorAll('.drawer.drop-target').forEach((d) => d.classList.remove('drop-target'));
-}
-
-function dockPanelAt(p, side, beforeEl) {
-  const oldSide = p.dataset.dockSide;
-  if (!oldSide) {
-    panelFloatRect.set(p, { left: p.style.left, top: p.style.top, right: p.style.right, bottom: p.style.bottom });
-  }
-  p.classList.add('docked');
-  p.dataset.dockSide = side;
-  p.hidden = false;
-  drawerEl(side).insertBefore(p, beforeEl || null);
-  // id-keyed bookkeeping is only for session persistence of the fixed
-  // PANEL_IDS windows — dynamically-created pinned allocation windows have
-  // no stable id and dock/reorder/undock fine without being tracked here
-  if (oldSide && oldSide !== side && p.id) {
-    const oldArr = UI.drawers[oldSide];
-    const oi = oldArr.indexOf(p.id);
-    if (oi >= 0) oldArr.splice(oi, 1);
-  }
-  if (p.id) {
-    // rebuild from actual DOM order: correct for both a fresh dock and a
-    // same-drawer reorder, no manual index bookkeeping needed
-    UI.drawers[side] = [...drawerEl(side).children]
-      .filter((c) => c.classList.contains('panel') && c.id)
-      .map((c) => c.id);
-  }
-  refreshDrawerDividers(side);
-  if (oldSide && oldSide !== side) refreshDrawerDividers(oldSide);
-}
-
-function dockPanel(p, side) {
-  dockPanelAt(p, side, null);
-}
-
-function undockPanel(p) {
-  const side = p.dataset.dockSide;
-  if (!side) return;
-  delete p.dataset.dockSide;
-  p.classList.remove('docked');
-  p.style.flex = '';
-  document.body.appendChild(p);
-  const r = panelFloatRect.get(p);
-  if (r) {
-    p.style.left = r.left; p.style.top = r.top; p.style.right = r.right; p.style.bottom = r.bottom;
-  }
-  panelFloatRect.delete(p);
-  if (p.id) {
-    const arr = UI.drawers[side === 'left' ? 'left' : 'right'];
-    const i = arr.indexOf(p.id);
-    if (i >= 0) arr.splice(i, 1);
-  }
-  refreshDrawerDividers(side);
-  raisePanel(p);
-}
-
-// re-dock panels and restore drawer width/visibility from a saved session
-function applyDrawersState(d) {
-  if (!d) return;
-  UI.drawers = { left: [], right: [], widthLeft: d.widthLeft || 300, widthRight: d.widthRight || 300 };
-  drawerEl('left').style.width = `${UI.drawers.widthLeft}px`;
-  drawerEl('right').style.width = `${UI.drawers.widthRight}px`;
-  // dockPanel pushes into UI.drawers.left/right itself and shows the drawer
-  // (via refreshDrawerDividers) as soon as it has content
-  (d.left || []).forEach((id) => { if ($(id)) dockPanel($(id), 'left'); });
-  (d.right || []).forEach((id) => { if ($(id)) dockPanel($(id), 'right'); });
-}
+// the shell owns the window/drawer machinery (web/shell/); this is the
+// domain side of the handoff: which panels exist, and the startup wiring.
+UI.drawers = drawersState;
+document.querySelectorAll('.panel').forEach((p) => makePanelWindow(p, dock));
+initDrawers();
 
 // panel open/close plumbing
 for (const [btn, panel] of [
@@ -1343,927 +1000,64 @@ function buildWarningsPanel() {
 }
 
 // ---------------------------------------------------------------------------
-// events panel (virtualized sequential list)
+// events panel (web/heap/events-panel.js): the virtualized sequential list.
 // ---------------------------------------------------------------------------
 
-const EV_ROW = 18;            // px per row
-// Browsers cap how tall an element may be, so beyond this the spacer stops
-// being 1:1 with the event count (~700 k events at EV_ROW) and scroll
-// position is index-mapped instead. Two things degrade past that point and
-// must keep working when this is touched: the scroll position is approximate
-// (a given scrollTop maps to a proportional event index, not an exact row),
-// and drag-selection in the list (`yToSeq`) inherits the same approximation.
-const EV_MAX_SPACER = 12e6;
-// total = row count in filtered mode (engine-reported, -1 until known);
-// seqs = the seq of each currently loaded row, needed because filtered rows
-// are no longer 1:1 with event indices
-const evState = { from: 0, count: 0, reqId: 0, lastSeq: -1, total: -1, seqs: [], posReqId: 0 };
-
-const evFiltered = () => $('ev-filtered').checked;
-
-function evLayout() {
-  const all = UI.meta ? UI.meta.n : 0;
-  const n = evFiltered() && evState.total >= 0 ? evState.total : all;
-  const viewH = $('events-scroll').clientHeight;
-  const spacerH = Math.min(n * EV_ROW, EV_MAX_SPACER);
-  const visN = Math.max(1, Math.ceil(viewH / EV_ROW) + 1);
-  const maxFrom = Math.max(0, n - visN + 1);
-  return { n, viewH, spacerH, visN, maxFrom };
-}
-
-function refreshEventsPanel() {
-  if (!UI.loaded || $('events-panel').hidden) return;
-  const L = evLayout();
-  $('events-spacer').style.height = `${L.spacerH}px`;
-  const sc = $('events-scroll');
-  const denom = Math.max(1, L.spacerH - L.viewH);
-  const from = Math.min(L.maxFrom, Math.round((sc.scrollTop / denom) * L.maxFrom));
-  $('events-rows').style.top = `${sc.scrollTop}px`;
-  evState.from = from;
-  evState.count = L.visN;
-  evState.reqId = UI.reqId++;
-  worker.postMessage({ type: 'events', from, count: L.visN, reqId: evState.reqId, filtered: evFiltered() });
-  updateEventsSelBand();
-}
-
-function onEventsSlice(m) {
-  if (m.reqId !== evState.reqId) return;
-  if (evFiltered() && m.total !== undefined && m.total !== evState.total) {
-    // filtered count (re)learned: re-lay out the virtual list once — the
-    // follow-up reply carries the same total, so this converges immediately
-    evState.total = m.total;
-    refreshEventsPanel();
-  }
-  evState.seqs = m.events.map((ev) => ev.seq);
-  const curSeq = UI.state ? UI.state.seq - 1 : -1;
-  $('events-rows').innerHTML = m.events.map((ev) => `
-    <div class="ev-row${ev.seq === curSeq ? ' cur' : ''}" data-seq="${ev.seq}" title="click: seek here and select the allocation">
-      <span class="ev-seq">${fmtNum(ev.seq)}</span>
-      <span class="ev-op ${['m', 'f', 'r'][ev.op]}">${['M', 'F', 'R'][ev.op]}</span>
-      <span class="ev-addr">${ev.addr}</span>
-      <span class="ev-size">${fmtAllocSize(ev.size)}</span>
-      <span class="ev-site">${ev.site ? esc(ev.site) : ''}</span>
-    </div>`).join('');
-  $('events-rows').querySelectorAll('.ev-row').forEach((row) => {
-    row.onclick = () => {
-      const seq = +row.dataset.seq;
-      if (UI.state && seq === UI.state.seq - 1) {
-        // already the current event: flash exactly where it is on the map
-        worker.postMessage({ type: 'flash-event', seq });
-      } else {
-        worker.postMessage({ type: 'jump', seq: seq + 1, select: true });
-      }
-    };
-  });
-}
-
-// pulse overlay marking the exact location of an allocation (from the event
-// list); a ping ring makes even sub-pixel allocations findable
-function flashRects(rects) {
-  const view = $('addr-view');
-  for (const r of (rects || []).slice(0, 16)) {
-    const { x, y, w, h } = toCss(r, 3);
-    const el = document.createElement('div');
-    el.className = 'rect-flash';
-    el.style.left = `${x}px`;
-    el.style.top = `${y}px`;
-    el.style.width = `${w}px`;
-    el.style.height = `${h}px`;
-    view.appendChild(el);
-    const ping = document.createElement('div');
-    ping.className = 'rect-ping';
-    ping.style.left = `${x + w / 2}px`;
-    ping.style.top = `${y + h / 2}px`;
-    view.appendChild(ping);
-    setTimeout(() => { el.remove(); ping.remove(); }, 1500);
-  }
-}
-
-// keep the highlight (and, with follow on, the scroll position) on the
-// current event as the playhead moves
-function updateEventsPanel() {
-  if (!UI.loaded || $('events-panel').hidden || !UI.state) return;
-  const cur = UI.state.seq - 1;
-  if (cur === evState.lastSeq) return;
-  evState.lastSeq = cur;
-  // filtered rows are not 1:1 with seq, so visibility is judged from the
-  // loaded rows' actual seq span instead of index arithmetic
-  const visible = evFiltered()
-    ? evState.seqs.length > 0 && cur >= evState.seqs[0] && cur <= evState.seqs[evState.seqs.length - 1]
-    : cur >= evState.from && cur < evState.from + evState.count - 1;
-  if ($('ev-follow').checked && !visible) {
-    evScrollToSeq(cur);
-    return;
-  }
-  $('events-rows').querySelectorAll('.ev-row').forEach((row) => {
-    row.classList.toggle('cur', +row.dataset.seq === cur);
-  });
-}
-
-function evScrollToSeq(seq) {
-  if (evFiltered()) {
-    // seq -> row index in the filtered list is an engine query
-    evState.posReqId = UI.reqId++;
-    worker.postMessage({ type: 'ev-pos', seq, reqId: evState.posReqId });
-    return;
-  }
-  evScrollToIndex(seq);
-}
-
-function onEvPos(m) {
-  if (m.reqId !== evState.posReqId) return;
-  evState.total = m.total;
-  evScrollToIndex(m.pos);
-}
-
-function evScrollToIndex(idx) {
-  const L = evLayout();
-  const target = Math.max(0, Math.min(L.maxFrom, idx - Math.floor(L.visN / 2)));
-  const y = (target / Math.max(1, L.maxFrom)) * Math.max(0, L.spacerH - L.viewH);
-  $('events-scroll').scrollTop = y;
-  refreshEventsPanel();
-}
-
-function stepEventsSelection(delta) {
-  if (!UI.loaded || !UI.state || !UI.state.n) return;
-  const cur = UI.state.seq - 1;
-  let target = cur + delta;
-  if (evFiltered() && evState.seqs.length) {
-    // step along the filtered rows, not raw seq
-    const i = evState.seqs.indexOf(cur);
-    if (i >= 0) {
-      const j = i + delta;
-      if (j < 0 || j >= evState.seqs.length) return; // edge of the loaded slice
-      target = evState.seqs[j];
-    } else {
-      const next = delta > 0
-        ? evState.seqs.find((s) => s > cur)
-        : [...evState.seqs].reverse().find((s) => s < cur);
-      if (next === undefined) return;
-      target = next;
-    }
-  }
-  target = Math.max(0, Math.min(UI.state.n - 1, target));
-  worker.postMessage({ type: 'jump', seq: target + 1, select: true });
-}
-
-function resetEventsPanel() {
-  evState.lastSeq = -1;
-  evState.total = -1;
-  evState.seqs = [];
-  $('events-scroll').scrollTop = 0;
-  $('events-rows').innerHTML = '';
-  if (!$('events-panel').hidden) refreshEventsPanel();
-}
-
-$('ev-filtered').onchange = () => {
-  resetEventsPanel();
-  updateEventsPanel();
-};
-
-{
-  const scEl = $('events-scroll');
-  scEl.addEventListener('scroll', refreshEventsPanel);
-  scEl.addEventListener('pointerdown', () => scEl.focus({ preventScroll: true }));
-  scEl.addEventListener('keydown', (e) => {
-    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
-    e.preventDefault();
-    stepEventsSelection(e.key === 'ArrowDown' ? 1 : -1);
-  });
-}
-new ResizeObserver(() => refreshEventsPanel()).observe($('events-scroll'));
-
-// drag a seq range directly in the Events list — feeds the same UI.sel path
-// as shift-dragging the events (strip-s) timeline, so zoom/tag/crop from the
-// selection popover and the mirrored band on both strips all just work
-{
-  const scEl = $('events-scroll');
-  let dragFromY = null;
-  let dragFromSeq = 0;
-  let dragCaptured = false;
-  const yToSeq = (y) => {
-    const row = (y - scEl.getBoundingClientRect().top) / EV_ROW;
-    if (evFiltered()) {
-      // filtered rows carry arbitrary seqs: read the nearest loaded row
-      const seqs = evState.seqs;
-      if (!seqs.length) return 0;
-      return seqs[Math.max(0, Math.min(seqs.length - 1, Math.floor(row)))];
-    }
-    return evState.from + row;
-  };
-  scEl.addEventListener('pointerdown', (e) => {
-    if (e.button !== 0 || !UI.loaded) return;
-    dragFromY = e.clientY;
-    dragFromSeq = yToSeq(e.clientY);
-    dragCaptured = false;
-    // don't capture yet: setPointerCapture re-targets the eventual click to
-    // this element too, which would swallow plain row clicks (jump-to-event)
-  });
-  scEl.addEventListener('pointermove', (e) => {
-    if (dragFromY === null || Math.abs(e.clientY - dragFromY) < 3) return;
-    if (!dragCaptured) { scEl.setPointerCapture(e.pointerId); dragCaptured = true; }
-    const n = UI.state ? UI.state.n : (UI.meta ? UI.meta.n : 0);
-    const b = yToSeq(e.clientY);
-    UI.sel = { kind: 1, lo: Math.max(0, Math.min(dragFromSeq, b)), hi: Math.min(n, Math.max(dragFromSeq, b)) };
-    updateSelOverlay();
-    requestSelMirror();
-  });
-  scEl.addEventListener('pointerup', (e) => {
-    if (dragFromY === null) return;
-    const moved = dragCaptured;
-    dragFromY = null;
-    dragCaptured = false;
-    if (moved && UI.sel && UI.sel.kind === 1) openSelPopover(e.clientX, e.clientY);
-  });
-}
-$('btn-events').onclick = () => {
-  const p = $('events-panel');
-  p.hidden = !p.hidden;
-  if (!p.hidden) {
-    raisePanel(p);
-    evState.lastSeq = -1;
-    refreshEventsPanel();
-    updateEventsPanel();
-  }
-  if (p.dataset.dockSide) refreshDrawerDividers(p.dataset.dockSide);
-};
-$('ev-follow').onchange = () => {
-  evState.lastSeq = -1;
-  updateEventsPanel();
-};
-
-// ---------------------------------------------------------------------------
-// tags & range selection
-// ---------------------------------------------------------------------------
-
-function tagIdFor(name) {
-  name = name.trim();
-  if (!name) return 0;
-  let i = UI.tags.findIndex((t) => t.name === name);
-  if (i === -1) {
-    i = UI.tags.length;
-    UI.tags.push({ name, color: CAT[i % 12], visible: true });
-    syncTagDatalist();
-    sendTagColors();
-    buildTagsSection();
-    $('btn-analysis').hidden = false;
-    markDirty();
-  }
-  return i + 1;
-}
-
-function syncTagDatalist() {
-  document.querySelectorAll('datalist.tag-names, #tag-names').forEach((dl) => {
-    dl.innerHTML = UI.tags.map((t) => `<option value="${esc(t.name)}">`).join('');
-  });
-}
-
-function sendTagColors() {
-  worker.postMessage({
-    type: 'tag-colors',
-    colors: UI.tags.map((t) => parseInt(t.color.slice(1), 16)),
-  });
-}
-
-function buildMarksPanel() {
-  buildBookmarksSection();
-  buildAddrMarksSection();
-  buildNamesSection();
-}
-
-function buildBookmarksSection() {
-  const list = $('an-bookmarks');
-  if (!UI.bookmarks.length) {
-    setHtml(list, '<div class="empty">none — press “＋ mark” (or m) to bookmark the current position</div>');
-    return;
-  }
-  setHtml(list, UI.bookmarks.map((b, i) => `<div class="an-row">
-      <input type="text" class="grow" data-bmname="${i}" value="${esc(b.name)}">
-      <span class="pos" data-bmgo="${i}" title="jump in time — the address view stays where it is">seq ${fmtNum(b.seq)} · ${fmtTime(b.t)}</span>
-      <button class="x" data-bmloc="${i}" title="jump in time and center where that event happened">⌖</button>
-      <button class="x" data-bmdel="${i}">×</button>
-    </div>`).join(''));
-}
-delegate($('an-bookmarks'), 'change', {
-  bmname: (inp, i) => {
-    UI.bookmarks[+i].name = inp.value.trim() || `mark ${+i + 1}`;
-    updateMarkers();
-    markDirty();
-  },
-});
-delegate($('an-bookmarks'), 'click', {
-  // time-only: anchored seek keeps the current address in the viewport
-  bmgo: (_, i) => worker.postMessage({ type: 'seek', seq: UI.bookmarks[+i].seq }),
-  // time + place: centers the allocation the event touched
-  bmloc: (_, i) => worker.postMessage({ type: 'jump', seq: UI.bookmarks[+i].seq }),
-  bmdel: (_, i) => {
-    UI.bookmarks.splice(+i, 1);
-    buildBookmarksSection();
-    updateMarkers();
-    markDirty();
-  },
-});
-
-function buildTagsSection() {
-  const list = $('tags-list');
-  if (!UI.tags.length) {
-    setHtml(list, '<div class="empty">none — shift-drag a range on a timeline, or tag an allocation from its panel</div>');
-    return;
-  }
-  let html = UI.tags.map((t, i) => `<div class="an-row">
-      <input type="checkbox" data-tagvis="${i + 1}" ${t.visible ? 'checked' : ''} title="visible">
-      <input type="color" data-tagcolor="${i + 1}" value="${t.color}">
-      <input type="text" class="grow" data-tagname="${i + 1}" value="${esc(t.name)}">
-      <span class="count">${fmtNum(UI.tagCounts[i + 1] || 0)}</span>
-      <button class="x" data-tagdel="${i + 1}" title="delete tag (untags its allocations)">×</button>
-    </div>`).join('');
-  html += `<div class="an-row">
-      <input type="checkbox" data-tagvis="0" ${UI.untaggedVisible ? 'checked' : ''} title="visible">
-      <span class="swatch" style="background:#39414a"></span>
-      <span class="grow">untagged</span>
-      <span class="count">${fmtNum(UI.tagCounts[0] || 0)}</span>
-    </div>`;
-  setHtml(list, html);
-}
-delegate($('tags-list'), 'change', {
-  tagvis: (inp, id) => {
-    if (+id === 0) UI.untaggedVisible = inp.checked;
-    else UI.tags[+id - 1].visible = inp.checked;
-    sendFilter();
-    markDirty();
-  },
-  tagname: (inp, id) => {
-    const v = inp.value.trim();
-    if (v) UI.tags[+id - 1].name = v;
-    syncTagDatalist();
-    buildLegend();
-    markDirty();
-  },
-});
-delegate($('tags-list'), 'input', {
-  tagcolor: (inp, id) => {
-    UI.tags[+id - 1].color = inp.value;
-    sendTagColors();
-    buildLegend();
-    markDirty();
-  },
-});
-delegate($('tags-list'), 'click', {
-  tagdel: (_, id) => deleteTag(+id),
-});
-
-// all / none visibility toggles for the tags list (untagged included)
-document.querySelectorAll('#tags-allnone a').forEach((a) => {
-  a.onclick = () => {
-    const on = a.dataset.an === 'all';
-    UI.untaggedVisible = on;
-    UI.tags.forEach((t) => { t.visible = on; });
-    buildTagsSection();
-    sendFilter();
-    markDirty();
-  };
-});
-
-function deleteTag(id) {
-  worker.postMessage({ type: 'retag', from: id, to: 0 });
-  for (let k = id + 1; k <= UI.tags.length; k++) {
-    worker.postMessage({ type: 'retag', from: k, to: k - 1 });
-  }
-  UI.tags.splice(id - 1, 1);
-  // with no tags left, buildTagsSection renders only the "none yet" hint —
-  // no checkbox survives to undo an "untagged" filter, which would strand
-  // the user with everything hidden and no obvious way back except the
-  // Filter panel's unrelated "clear" button; auto-restore visibility instead
-  if (UI.tags.length === 0) UI.untaggedVisible = true;
-  syncTagDatalist();
-  sendTagColors();
-  buildTagsSection();
-  sendFilter();
-  buildLegend();
-  markDirty();
-}
-
-function buildNamesSection() {
-  const list = $('an-names');
-  const entries = [...UI.names.entries()];
-  if (!entries.length) {
-    setHtml(list, '<div class="empty">none — click an allocation and name it in its panel</div>');
-    return;
-  }
-  setHtml(list, entries.map(([e, v]) => `<div class="an-row">
-      <input type="color" data-ncolor="${e}" value="${UI.allocColors.get(e) || '#3fb950'}" title="highlight color">
-      <input type="text" class="grow" data-nname="${e}" value="${esc(v.name)}">
-      <span class="pos" data-ngo="${e}" title="select and jump to birth">id ${v.id} · ${v.addr}</span>
-      <button class="x" data-ndel="${e}">×</button>
-    </div>`).join(''));
-}
-delegate($('an-names'), 'input', {
-  ncolor: (inp, e) => {
-    UI.allocColors.set(+e, inp.value);
-    worker.postMessage({ type: 'alloc-color', e: +e, rgb: parseInt(inp.value.slice(1), 16) });
-    markDirty();
-  },
-});
-delegate($('an-names'), 'change', {
-  nname: (inp, e) => {
-    const v = inp.value.trim();
-    if (v) UI.names.get(+e).name = v;
-    else { UI.names.delete(+e); buildNamesSection(); }
-    sendNames();
-    markDirty();
-  },
-});
-delegate($('an-names'), 'click', {
-  // select, jump to birth, and open the allocation info window
-  ngo: (_, e) => worker.postMessage({ type: 'jump', seq: +e + 1, select: true }),
-  ndel: (_, e) => {
-    UI.names.delete(+e);
-    if (UI.allocColors.delete(+e)) {
-      worker.postMessage({ type: 'alloc-color', e: +e, rgb: null });
-    }
-    buildNamesSection();
-    sendNames();
-    markDirty();
-  },
+initEventsPanel({
+  ui: UI,
+  post: (msg) => worker.postMessage(msg),
+  fmtAllocSize,
+  updateSelOverlay,
+  requestSelMirror,
+  openSelPopover,
 });
 
 // ---------------------------------------------------------------------------
-// address marks
+// analysis layer (web/heap/analysis.js): tags, names, colors, time marks,
+// address marks, and the `.heapa` file. Wired here with what it still needs
+// from this scope.
 // ---------------------------------------------------------------------------
 
-function sendAddrMarks() {
-  worker.postMessage({
-    type: 'addr-marks',
-    marks: UI.addrMarks.map((m) => {
-      const a = BigInt(m.addr);
-      return { lo: Number(a & 0xffffffffn), hi: Number((a >> 32n) & 0xffffffffn) };
-    }),
-  });
-}
-
-function gotoAddr(addrHex) {
-  const a = BigInt(addrHex);
-  worker.postMessage({
-    type: 'goto-addr',
-    lo: Number(a & 0xffffffffn),
-    hi: Number((a >> 32n) & 0xffffffffn),
-  });
-}
-
-function addAddrMark(addrHex) {
-  UI.addrMarks.push({ name: `addr ${UI.addrMarks.length + 1}`, addr: addrHex });
-  sendAddrMarks();
-  buildAddrMarksSection();
-  $('st-info').textContent = `marked ${addrHex} — rename it in the Marks panel`;
-  showPanel('analysis-panel');
-  markDirty();
-}
-
-function buildAddrMarksSection() {
-  const list = $('an-addrmarks');
-  if (!UI.addrMarks.length) {
-    setHtml(list, '<div class="empty">none — shift-click the address map to mark an address</div>');
-    return;
-  }
-  setHtml(list, UI.addrMarks.map((m, i) => `<div class="an-row">
-      <input type="text" class="grow" data-amname="${i}" value="${esc(m.name)}">
-      <span class="pos" data-amgo="${i}" title="center on this address">${esc(m.addr)}</span>
-      <button class="x" data-amdel="${i}">×</button>
-    </div>`).join(''));
-}
-delegate($('an-addrmarks'), 'change', {
-  amname: (inp, i) => {
-    UI.addrMarks[+i].name = inp.value.trim() || `addr ${+i + 1}`;
-    renderAddrMarkLines();
-    markDirty();
-  },
-});
-delegate($('an-addrmarks'), 'click', {
-  amgo: (_, i) => gotoAddr(UI.addrMarks[+i].addr),
-  amdel: (_, i) => {
-    UI.addrMarks.splice(+i, 1);
-    markDirty();
-    sendAddrMarks();
-    buildAddrMarksSection();
-  },
-});
-
-let lastAddrMarkYs = [];
-function renderAddrMarkLines() {
-  const box = $('addr-mark-lines');
-  const html = UI.addrMarks.map((m, i) => {
-    const y = lastAddrMarkYs[i];
-    if (y === null || y === undefined) return '';
-    return `<div class="amark" style="top:${y}px" data-am="${i}" data-label="⚑ ${esc(m.name)} ${esc(m.addr)}"></div>`;
-  }).join('');
-  setHtml(box, html);
-}
-delegate($('addr-mark-lines'), 'click', {
-  am: (_, i) => gotoAddr(UI.addrMarks[+i].addr),
+initAnalysis({
+  ui: UI,
+  post: (msg) => worker.postMessage(msg),
+  CAT,
+  DEFAULT_ROW_BYTES,
+  fmtTime,
+  buildLegend,
+  sendFilter,
+  sendNames,
+  rowBytesValue,
+  setRowBytesInput,
+  sendCollapseMin,
 });
 
 // ---------------------------------------------------------------------------
-// time marks (bookmarks)
+// session (web/session.js): filters, layout, view/zoom, crop, window & drawer
+// state, playhead — everything *except* marks. It is the one module that
+// serializes both shell and heap state, so everything it needs from here is
+// handed over explicitly rather than shared through this scope.
 // ---------------------------------------------------------------------------
 
-function addBookmark() {
-  if (!UI.state) return;
-  const b = { name: `mark ${UI.bookmarks.length + 1}`, seq: UI.state.seq, t: UI.state.t };
-  UI.bookmarks.push(b);
-  buildBookmarksSection();
-  updateMarkers();
-  $('st-info').textContent = `bookmarked seq ${fmtNum(b.seq)} · ${fmtTime(b.t)} — rename it in the Marks panel`;
-  showPanel('analysis-panel');
-  markDirty();
-}
-$('btn-mark').onclick = addBookmark;
-
-function updateMarkers() {
-  for (const [stripId, kind] of [['strip-t', 0], ['strip-s', 1]]) {
-    const strip = $(stripId);
-    const marks = strip.querySelector('.tl-marks');
-    const v = kind === 0 ? UI.tlT : UI.tlS;
-    const w = strip.clientWidth;
-    const html = UI.bookmarks.map((b, i) => {
-      const val = kind === 0 ? b.t : b.seq;
-      const x = ((val - v.lo) / (v.hi - v.lo)) * w;
-      if (x < 0 || x > w) return '';
-      return `<div class="mark" style="left:${x}px" data-bm="${i}" data-label="⚑ ${esc(b.name)}" title="${esc(b.name)} — click: jump in time · shift+click: also center the place"></div>`;
-    }).join('');
-    if (!setHtml(marks, html)) continue;
-    marks.querySelectorAll('.mark').forEach((el) => {
-      // plain click: time only (stay at the same address); shift+click: also
-      // center where the event happened
-      el.onclick = (ev) => worker.postMessage({
-        type: ev.shiftKey ? 'jump' : 'seek',
-        seq: UI.bookmarks[+el.dataset.bm].seq,
-      });
-    });
-  }
-}
-
-// ---------------------------------------------------------------------------
-// analysis save / load
-// ---------------------------------------------------------------------------
-
-// fetch alloc_info for a creator event directly (not via pixel pick) — used
-// to recreate pinned allocation windows from a saved session
-function requestAllocInfo(e) {
-  return request('alloc-info', { e }).then((m) => m.info);
-}
-
-function requestTagsDump() {
-  return request('tags-dump').then((m) => m.tags);
-}
-
-async function buildMarks() {
-  const taggedEvents = await requestTagsDump();
-  return {
-    heapVisualizerAnalysis: 1,
-    saved: new Date().toISOString(),
-    trace: {
-      file: UI.fileName || null,
-      title: UI.meta.title,
-      n: UI.meta.n,
-      tMin: UI.meta.tMin,
-      tMax: UI.meta.tMax,
-    },
-    playhead: UI.state ? UI.state.seq : 0,
-    rowBytes: rowBytesValue() || DEFAULT_ROW_BYTES,
-    collapseMin: $('collapse-min').value.trim(),
-    colorMode: +$('color-mode').value,
-    tags: UI.tags.map((t) => ({ name: t.name, color: t.color, visible: t.visible })),
-    taggedEvents,
-    names: [...UI.names.entries()].map(([e, v]) => ({ e, name: v.name, id: v.id, addr: v.addr })),
-    allocColors: [...UI.allocColors.entries()],
-    bookmarks: UI.bookmarks,
-    addrMarks: UI.addrMarks,
-    // layout/filters/crop/drawers/window positions — folded in so the one
-    // manually-exported file is a complete snapshot, not just the "marks"
-    session: buildSession(),
-  };
-}
-
-// tracks whether marks changed since the last save/load/autosave — drives
-// the periodic marks autosave below, not a refresh warning: marks (like
-// session/layout state) now auto-persist to localStorage, so there's nothing
-// a plain refresh can actually lose
-function markDirty() { UI.marksDirty = true; }
-
-async function saveMarks() {
-  if (!UI.loaded) return;
-  const obj = await buildMarks();
-  const base = (UI.fileName || 'trace').replace(/\.(heapl|jsonl|json|txt)$/, '');
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([JSON.stringify(obj)], { type: 'application/json' }));
-  a.download = `${base}.heapa.json`;
-  a.click();
-  URL.revokeObjectURL(a.href);
-  $('st-info').textContent = `marks saved to ${a.download}`;
-  UI.marksDirty = false;
-}
-
-function applyMarks(obj, quiet) {
-  if (!obj || obj.heapVisualizerAnalysis !== 1) {
-    if (!quiet) $('st-trace').textContent = 'not a heap-visualizer marks file';
-    return;
-  }
-  if (!UI.loaded) {
-    $('st-trace').textContent = 'load the matching trace first, then load the marks';
-    return;
-  }
-  if (obj.trace && obj.trace.n !== UI.meta.n) {
-    $('st-info').textContent =
-      `⚠ analysis was saved for a trace with ${fmtNum(obj.trace.n)} events (this one has ${fmtNum(UI.meta.n)}) — applying anyway`;
-  }
-  // clear existing per-alloc colors, then rebuild everything from the file
-  for (const e of UI.allocColors.keys()) {
-    worker.postMessage({ type: 'alloc-color', e, rgb: null });
-  }
-  worker.postMessage({ type: 'tags-clear' });
-  UI.tags = (obj.tags || []).map((t, i) => ({
-    name: t.name || `tag ${i + 1}`,
-    color: /^#[0-9a-f]{6}$/i.test(t.color) ? t.color : CAT[i % 12],
-    visible: t.visible !== false,
-  }));
-  sendTagColors();
-  for (const [tagStr, events] of Object.entries(obj.taggedEvents || {})) {
-    const tag = +tagStr;
-    if (tag >= 1 && tag <= UI.tags.length && Array.isArray(events)) {
-      worker.postMessage({ type: 'tag-events', tag, events });
-    }
-  }
-  UI.names = new Map((obj.names || []).map((r) => [r.e, { name: r.name, id: r.id, addr: r.addr }]));
-  sendNames();
-  UI.allocColors = new Map((obj.allocColors || []).filter(([, c]) => /^#[0-9a-f]{6}$/i.test(c)));
-  for (const [e, c] of UI.allocColors) {
-    worker.postMessage({ type: 'alloc-color', e, rgb: parseInt(c.slice(1), 16) });
-  }
-  UI.bookmarks = (obj.bookmarks || []).map((b) => ({ name: String(b.name), seq: b.seq | 0, t: +b.t }));
-  UI.addrMarks = (obj.addrMarks || []).filter((m) => /^0x[0-9a-f]+$/i.test(m.addr))
-    .map((m) => ({ name: String(m.name), addr: m.addr.toLowerCase() }));
-  sendAddrMarks();
-  if (obj.rowBytes) {
-    setRowBytesInput(obj.rowBytes);
-    worker.postMessage({ type: 'set', key: 'rowBytes', value: obj.rowBytes });
-  }
-  if (obj.collapseMin) {
-    $('collapse-min').value = String(obj.collapseMin);
-    sendCollapseMin();
-  }
-  if (obj.colorMode !== undefined) {
-    $('color-mode').value = String(obj.colorMode);
-    worker.postMessage({ type: 'set', key: 'colorMode', value: obj.colorMode });
-  }
-  if (obj.playhead !== undefined) {
-    worker.postMessage({ type: 'seek', seq: obj.playhead });
-  }
-  syncTagDatalist();
-  sendFilter();
-  buildMarksPanel();
-  buildLegend();
-  updateMarkers();
-  // layout/filters/crop/drawers/window positions, if this file has them
-  // (buildMarks folds in buildSession()) — applied last so they win over the
-  // legacy rowBytes/collapseMin/colorMode/playhead fields above
-  applySession(obj.session);
-  if (!quiet) {
-    showPanel('analysis-panel');
-    $('st-info').textContent =
-      `marks loaded: ${UI.tags.length} tags, ${UI.names.size} names, ${UI.bookmarks.length} time marks, ${UI.addrMarks.length} addr marks`;
-  }
-  UI.marksDirty = false;
-}
-
-UI.buildMarks = buildMarks;
-UI.applyMarks = applyMarks;
-
-$('an-save').onclick = saveMarks;
-$('an-load').onclick = () => $('analysis-file').click();
-$('analysis-file').onchange = async (ev) => {
-  const f = ev.target.files[0];
-  if (f) {
-    try {
-      applyMarks(JSON.parse(await f.text()));
-    } catch (e) {
-      $('st-trace').textContent = `marks load failed: ${e.message}`;
-    }
-  }
-  ev.target.value = '';
-};
-
-// ---------------------------------------------------------------------------
-// session: filters, layout, view/zoom, crop, window & drawer state, playhead —
-// everything *except* marks (tags/bookmarks/addr marks/names/colors, which
-// stay manual Save…/Load… since they're meant to be portable/shared).
-// Auto-persisted to localStorage per trace file name; restored silently on
-// load. No manual UI for this — it's working state, not a deliverable.
-// ---------------------------------------------------------------------------
-
-function sessionKey() {
-  return UI.fileName ? `heapviz:session:${UI.fileName}` : null;
-}
-
-function buildSession() {
-  const windows = {};
-  for (const id of PANEL_IDS) {
-    const p = $(id);
-    windows[id] = { hidden: p.hidden, left: p.style.left, top: p.style.top, right: p.style.right, bottom: p.style.bottom };
-  }
-  const fmode = document.querySelector('input[name=fmode]:checked');
-  return {
-    heapVisualizerSession: 1,
-    rowBytes: $('row-bytes').value,
-    collapseMin: $('collapse-min').value,
-    rowPx: $('row-px').value,
-    colorMode: $('color-mode').value,
-    allocSizeFormat: allocSizeFormat(),
-    showAll: $('show-all').checked,
-    evFiltered: $('ev-filtered').checked,
-    sizeLabels: $('show-sizes').checked,
-    addrLabels: $('show-addrs').checked,
-    xview: UI.xview,
-    crop: UI.crop,
-    filter: {
-      fmode: fmode ? fmode.value : '1',
-      sizeMin: $('f-size-min').value,
-      sizeMax: $('f-size-max').value,
-      // checkbox states by index — meaningful only against the same trace's
-      // site/thread list, which is exactly what the file-name-scoped key gives us
-      sites: [...document.querySelectorAll('#filter-panel input[data-site]')].map((b) => b.checked),
-      thrs: [...document.querySelectorAll('#filter-panel input[data-thr]')].map((b) => b.checked),
-      addrRanges: UI.addrRanges,
-    },
-    playhead: UI.state ? UI.state.seq : 0,
-    windows,
-    drawers: UI.drawers || null,
-    // pinned allocation windows: re-fetched by creator event index on
-    // restore (see applySession), since only the trace — not the info blob
-    // itself — is worth persisting
-    pinned: [...document.querySelectorAll('.pinned-detail')].map((win) => ({
-      e: +win.dataset.e,
-      dockSide: win.dataset.dockSide || null,
-      left: win.style.left, top: win.style.top, right: win.style.right, bottom: win.style.bottom,
-    })),
-  };
-}
-
-function applySession(obj) {
-  if (!obj || obj.heapVisualizerSession !== 1) return;
-  if (obj.rowBytes !== undefined) {
-    $('row-bytes').value = obj.rowBytes;
-    const v = rowBytesValue();
-    if (v > 0) worker.postMessage({ type: 'set', key: 'rowBytes', value: v });
-  }
-  if (obj.collapseMin !== undefined) { $('collapse-min').value = obj.collapseMin; sendCollapseMin(); }
-  if (obj.rowPx !== undefined) {
-    $('row-px').value = obj.rowPx;
-    worker.postMessage({ type: 'set', key: 'rowPx', value: +$('row-px').value });
-  }
-  if (obj.colorMode !== undefined) {
-    $('color-mode').value = obj.colorMode;
-    worker.postMessage({ type: 'set', key: 'colorMode', value: +$('color-mode').value });
-    buildLegend();
-  }
-  if (obj.allocSizeFormat !== undefined) {
-    $('alloc-size-format').value = obj.allocSizeFormat === 'hex' ? 'hex' : 'human';
-    sendAllocSizeFormat();
-  }
-  // (a legacy per-trace overlapMode is deliberately ignored here — overlap
-  // display is a global preference now, see savePrefs/restorePrefs)
-  if (obj.evFiltered !== undefined) {
-    $('ev-filtered').checked = !!obj.evFiltered;
-    resetEventsPanel();
-  }
-  if (obj.showAll !== undefined) {
-    $('show-all').checked = obj.showAll;
-    worker.postMessage({ type: 'set', key: 'showAll', value: obj.showAll });
-  }
-  if (obj.sizeLabels !== undefined) {
-    $('show-sizes').checked = obj.sizeLabels;
-    worker.postMessage({ type: 'set', key: 'sizeLabels', value: obj.sizeLabels });
-  }
-  if (obj.addrLabels !== undefined) {
-    $('show-addrs').checked = obj.addrLabels;
-    worker.postMessage({ type: 'set', key: 'addrLabels', value: obj.addrLabels });
-  }
-  if (obj.xview) { UI.xview = obj.xview; sendXView(); }
-  if (obj.filter) {
-    const f = obj.filter;
-    const fr = document.querySelector(`input[name=fmode][value="${f.fmode}"]`);
-    if (fr) fr.checked = true;
-    if (f.sizeMin !== undefined) $('f-size-min').value = f.sizeMin;
-    if (f.sizeMax !== undefined) $('f-size-max').value = f.sizeMax;
-    const siteBoxes = [...document.querySelectorAll('#filter-panel input[data-site]')];
-    (f.sites || []).forEach((checked, i) => { if (siteBoxes[i]) siteBoxes[i].checked = checked; });
-    const thrBoxes = [...document.querySelectorAll('#filter-panel input[data-thr]')];
-    (f.thrs || []).forEach((checked, i) => { if (thrBoxes[i]) thrBoxes[i].checked = checked; });
-    UI.addrRanges = (f.addrRanges || []).filter((r) => normAddr(r.lo) && normAddr(r.hi));
-    buildAddrRangesSection();
-    sendFilter();
-  }
-  if (obj.windows) {
-    for (const id of PANEL_IDS) {
-      const w = obj.windows[id];
-      const p = $(id);
-      if (!w || !p) continue;
-      p.hidden = w.hidden;
-      if (w.left) { p.style.left = w.left; p.style.top = w.top; p.style.right = w.right; p.style.bottom = w.bottom; }
-    }
-  }
-  if (obj.crop) setCrop(obj.crop.lo, obj.crop.hi);
-  if (obj.playhead !== undefined) worker.postMessage({ type: 'seek', seq: obj.playhead });
-  applyDrawersState(obj.drawers);
-  restorePinnedWindows(obj.pinned);
-}
-
-// re-fetches each pinned allocation's info by creator event index (the trace
-// itself, not the info blob, is what's persisted) and recreates its window,
-// docked or floating exactly as saved
-async function restorePinnedWindows(pinned) {
-  if (!pinned || !pinned.length) return;
-  document.querySelectorAll('.pinned-detail').forEach((w) => w.remove()); // avoid dupes on repeated restore
-  for (const pw of pinned) {
-    const info = await requestAllocInfo(pw.e);
-    if (!info) continue; // stale/unknown event (e.g. mismatched trace): skip
-    const win = createPinnedWindow(info, null);
-    win.style.left = pw.left; win.style.top = pw.top; win.style.right = pw.right; win.style.bottom = pw.bottom;
-    if (pw.dockSide) dockPanelAt(win, pw.dockSide, null);
-  }
-}
-
-let lastSessionJson = null;
-
-function saveSessionNow() {
-  const key = sessionKey();
-  if (!key || !UI.loaded) return;
-  try {
-    const json = JSON.stringify(buildSession());
-    // the periodic autosave fires while idle too; skip the write (and the
-    // storage churn) when nothing in the snapshot actually moved
-    if (json === lastSessionJson) return;
-    lastSessionJson = json;
-    localStorage.setItem(key, json);
-  } catch { /* storage full/unavailable: silently skip */ }
-}
-
-function marksKey() {
-  return UI.fileName ? `heapviz:marks:${UI.fileName}` : null;
-}
-
-// marks (tags/bookmarks/addr marks/names/colors) also auto-persist to
-// localStorage alongside the session — the manual Save…/Load… buttons are
-// still there for a portable/shareable file, but there's no reason a plain
-// refresh should lose work that was never explicitly exported
-async function saveMarksAutosave() {
-  const key = marksKey();
-  if (!key || !UI.loaded) return;
-  try {
-    localStorage.setItem(key, JSON.stringify(await buildMarks()));
-  } catch { /* storage full/unavailable: silently skip */ }
-}
-
-// returns true when a marks blob was applied (it carries its own session
-// snapshot, so the caller must not also run restoreSession — see onLoaded)
-function restoreMarksAutosave() {
-  const key = marksKey();
-  if (!key) return false;
-  try {
-    const raw = localStorage.getItem(key);
-    if (!raw) return false;
-    const obj = JSON.parse(raw);
-    if (!obj || obj.heapVisualizerAnalysis !== 1) return false;
-    applyMarks(obj, true);
-    // a pre-session marks blob still needs the standalone session restored
-    return !!obj.session;
-  } catch { /* corrupt/unavailable: ignore, nothing to restore */ }
-  return false;
-}
-
-// cheap periodic autosave rather than hooking every single input's change
-// event — a full session snapshot is a handful of DOM reads, negligible next
-// to render/scroll work, and this keeps every future settable from needing
-// to remember to call a save function
-let sessionSaveTimer = null;
-function scheduleSessionAutosave() {
-  if (sessionSaveTimer) return;
-  sessionSaveTimer = setInterval(() => {
-    if (!UI.loaded) return;
-    saveSessionNow();
-    if (UI.marksDirty) saveMarksAutosave();
-  }, 2000);
-}
-scheduleSessionAutosave();
-window.addEventListener('beforeunload', saveSessionNow);
-
-function restoreSession() {
-  const key = sessionKey();
-  if (!key) return;
-  try {
-    const raw = localStorage.getItem(key);
-    if (raw) applySession(JSON.parse(raw));
-  } catch { /* corrupt/unavailable: ignore, defaults stand */ }
-}
+initSession({
+  ui: UI,
+  post: (msg) => worker.postMessage(msg),
+  PANEL_IDS,
+  allocSizeFormat,
+  rowBytesValue,
+  sendCollapseMin,
+  buildLegend,
+  sendAllocSizeFormat,
+  resetEventsPanel,
+  sendXView,
+  buildAddrRangesSection,
+  sendFilter,
+  setCrop,
+  requestAllocInfo,
+  createPinnedWindow,
+  buildMarks,
+  applyMarks,
+});
 
 function clearSelection() {
   UI.sel = null;
@@ -2308,41 +1102,6 @@ function requestSelMirror() {
     UI.selMirror = { kind: sel.kind === 0 ? 1 : 0, lo, hi };
     updateSelOverlay();
   });
-}
-
-// thin band in the Events panel's scroll gutter spanning the seq range of
-// the current selection (direct if kind is seq, mirrored if kind is time)
-function updateEventsSelBand() {
-  const band = $('events-sel-band');
-  if (!UI.sel) { band.hidden = true; return; }
-  const seqRange = UI.sel.kind === 1 ? UI.sel : UI.selMirror;
-  if (!seqRange || $('events-panel').hidden) { band.hidden = true; return; }
-  const L = evLayout();
-  const sc = $('events-scroll');
-  // viewport-relative y, from the currently-visible row window (evState.from)
-  // — what refreshEventsPanel keeps accurate even once the spacer height is
-  // capped for very long traces (EV_MAX_SPACER); #events-sel-band is a plain
-  // sibling of the scroll content (unlike #events-rows, which self-cancels
-  // scrollTop via its own `top` style), so re-add scrollTop to place it in
-  // the scroll container's coordinate space
-  let y0, y1;
-  if (evFiltered()) {
-    // filtered rows: the band covers the loaded rows whose seq is in range
-    // (rows filtered out in between simply collapse)
-    const seqs = evState.seqs;
-    y0 = seqs.filter((s) => s < seqRange.lo).length * EV_ROW;
-    y1 = seqs.filter((s) => s < seqRange.hi).length * EV_ROW;
-  } else {
-    y0 = (seqRange.lo - evState.from) * EV_ROW;
-    y1 = (seqRange.hi - evState.from) * EV_ROW;
-  }
-  band.hidden = y1 <= 0 || y0 >= L.viewH;
-  if (!band.hidden) {
-    const top = Math.max(0, Math.min(L.viewH, y0));
-    const bot = Math.max(0, Math.min(L.viewH, y1));
-    band.style.top = `${top + sc.scrollTop}px`;
-    band.style.height = `${Math.max(2, bot - top)}px`;
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2928,7 +1687,7 @@ function createPinnedWindow(info, rect) {
     live.style.bottom = 'auto';
     placeLivePanel(live);
   };
-  makePanelWindow(win);
+  makePanelWindow(win, dock);
   raisePanel(win);
   return win;
 }
@@ -2946,34 +1705,3 @@ $('d-pin').onclick = () => {
   UI.detailWasPinned = true;
   live.hidden = true;
 };
-
-// ---------------------------------------------------------------------------
-// tooltip
-// ---------------------------------------------------------------------------
-
-const tooltip = $('tooltip');
-let tooltipOwner = null;
-let mouse = { x: 0, y: 0 };
-document.addEventListener('pointermove', (e) => { mouse = { x: e.clientX, y: e.clientY }; });
-
-function showTooltip(owner, html) {
-  tooltipOwner = owner;
-  tooltip.innerHTML = html;
-  tooltip.hidden = false;
-}
-function hideTooltip(owner) {
-  if (tooltipOwner === owner) {
-    tooltip.hidden = true;
-    tooltipOwner = null;
-  }
-}
-function positionTooltipNearMouse() {
-  const pad = 14;
-  const r = tooltip.getBoundingClientRect();
-  let x = mouse.x + pad;
-  let y = mouse.y + pad;
-  if (x + r.width > innerWidth - 8) x = mouse.x - r.width - pad;
-  if (y + r.height > innerHeight - 8) y = mouse.y - r.height - pad;
-  tooltip.style.left = `${Math.max(4, x)}px`;
-  tooltip.style.top = `${Math.max(4, y)}px`;
-}
