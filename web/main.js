@@ -222,7 +222,7 @@ worker.onmessage = (ev) => {
     }
     case 'scrollTo':
       if (m.virtualH !== undefined) {
-        const wantSpacer = Math.max(0, m.virtualH / dpr - addrScroll.clientHeight);
+        const wantSpacer = Math.max(0, toCssLen(m.virtualH) - addrScroll.clientHeight);
         $('addr-spacer').style.height = `${wantSpacer}px`;
       }
       noteProgScroll(m.y);
@@ -368,7 +368,7 @@ function onState(m) {
   $('st-live').innerHTML =
     `live <b>${fmtNum(m.liveCount)}</b> allocs · <b>${fmtBytes(m.liveBytes)}</b>`;
   const viewH = addrScroll.clientHeight;
-  const wantSpacer = Math.max(0, m.virtualH / dpr - viewH);
+  const wantSpacer = Math.max(0, toCssLen(m.virtualH) - viewH);
   const spacer = $('addr-spacer');
   if (Math.abs(spacer.offsetHeight - wantSpacer) > 1) {
     spacer.style.height = `${wantSpacer}px`;
@@ -417,31 +417,53 @@ function delegate(el, type, handlers) {
   });
 }
 
+// Engine geometry is device px, the DOM overlay layer is CSS px. These are
+// the conversion boundary — worker rect/point geometry entering the DOM goes
+// through them instead of ad-hoc /dpr at each use. (Pointer coordinates go
+// the other way as CSS px and are converted worker-side, see toDevice there.)
+function toCss(r, minWH = 1) {
+  return {
+    x: r.x / dpr,
+    y: r.y / dpr,
+    w: Math.max(minWH, r.w / dpr),
+    h: Math.max(minWH, r.h / dpr),
+  };
+}
+function toCssLen(v) {
+  return v / dpr;
+}
+
+function svgRect(cls, r) {
+  const c = toCss(r);
+  return `<rect class="${cls}" x="${c.x}" y="${c.y}" width="${c.w}" height="${c.h}"/>`;
+}
+
 function drawMoveLink(ml) {
   const svg = overlay;
   let content = '';
   for (const r of hoverRects) {
-    content += `<rect class="hover-rect" x="${r.x / dpr}" y="${r.y / dpr}" width="${Math.max(1, r.w / dpr)}" height="${Math.max(1, r.h / dpr)}"/>`;
+    content += svgRect('hover-rect', r);
   }
   if (ml && ml.op === 2) {
     for (const r of ml.old) {
-      content += `<rect class="ml-old" x="${r.x / dpr}" y="${r.y / dpr}" width="${Math.max(1, r.w / dpr)}" height="${Math.max(1, r.h / dpr)}"/>`;
+      content += svgRect('ml-old', r);
     }
     for (const r of ml.new) {
-      content += `<rect class="ml-new" x="${r.x / dpr}" y="${r.y / dpr}" width="${Math.max(1, r.w / dpr)}" height="${Math.max(1, r.h / dpr)}"/>`;
+      content += svgRect('ml-new', r);
     }
     if (ml.old.length && ml.new.length) {
-      const o = ml.old[0], n = ml.new[0];
-      content += `<line class="ml-line" x1="${(o.x + o.w / 2) / dpr}" y1="${(o.y + o.h / 2) / dpr}" x2="${(n.x + n.w / 2) / dpr}" y2="${(n.y + n.h / 2) / dpr}"/>`;
+      const o = toCss(ml.old[0], 0);
+      const n = toCss(ml.new[0], 0);
+      content += `<line class="ml-line" x1="${o.x + o.w / 2}" y1="${o.y + o.h / 2}" x2="${n.x + n.w / 2}" y2="${n.y + n.h / 2}"/>`;
     }
   } else if (ml && ml.op === 1) {
     for (const r of ml.old) {
-      content += `<rect class="ml-old" x="${r.x / dpr}" y="${r.y / dpr}" width="${Math.max(1, r.w / dpr)}" height="${Math.max(1, r.h / dpr)}"/>`;
+      content += svgRect('ml-old', r);
     }
   } else if (ml && ml.op === 0) {
     // fresh malloc: outline the new allocation so small ones are findable
     for (const r of ml.new) {
-      content += `<rect class="ml-new" x="${r.x / dpr}" y="${r.y / dpr}" width="${Math.max(1, r.w / dpr)}" height="${Math.max(1, r.h / dpr)}"/>`;
+      content += svgRect('ml-new', r);
     }
   }
   setHtml(svg, content);
@@ -1400,10 +1422,7 @@ function onEventsSlice(m) {
 function flashRects(rects) {
   const view = $('addr-view');
   for (const r of (rects || []).slice(0, 16)) {
-    const x = r.x / dpr;
-    const y = r.y / dpr;
-    const w = Math.max(3, r.w / dpr);
-    const h = Math.max(3, r.h / dpr);
+    const { x, y, w, h } = toCss(r, 3);
     const el = document.createElement('div');
     el.className = 'rect-flash';
     el.style.left = `${x}px`;

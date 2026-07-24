@@ -12,6 +12,11 @@ const canvases = { addr: null, tlt: null, tls: null }; // OffscreenCanvas
 const ctxs = { addr: null, tlt: null, tls: null };
 let dpr = 1;
 
+// Pointer/scroll geometry arrives from the main thread in CSS px; engine
+// geometry is device px. Convert once, on the way in (main.js's toCss /
+// toCssLen are the opposite direction of the same boundary).
+const toDevice = (v) => v * dpr;
+
 const S = {
   loaded: false,
   n: 0,
@@ -506,7 +511,7 @@ onmessage = async (ev) => {
       break;
     }
     case 'scroll':
-      S.scroll = Math.max(0, m.y * dpr);
+      S.scroll = Math.max(0, toDevice(m.y));
       // the anchor pin only exists to hold the viewport's top row in place
       // across a seek; once the user scrolls somewhere else it would linger
       // as an empty phantom row, so drop it here (main.js swallows echoes of
@@ -516,7 +521,7 @@ onmessage = async (ev) => {
       break;
     case 'addr-at': {
       if (!S.loaded || !canvases.addr) break;
-      E.hp_addr_at(canvases.addr.width, Math.round(m.x * dpr), m.y * dpr, S.scroll);
+      E.hp_addr_at(canvases.addr.width, Math.round(toDevice(m.x)), toDevice(m.y), S.scroll);
       const r = new Uint32Array(E.memory.buffer, E.hp_ret(), 8);
       const addr = r[3] ? '0x' + ((BigInt(r[1]) << 32n) | BigInt(r[0])).toString(16) : null;
       postMessage({ type: 'addr-at', reqId: m.reqId, addr });
@@ -595,7 +600,7 @@ onmessage = async (ev) => {
           break;
         }
         case 'rowPx':
-          S.rowPx = m.value * dpr;
+          S.rowPx = toDevice(m.value);
           S.gapPx = Math.max(8, Math.round(S.rowPx * 0.6));
           if (E) applyRowPx();
           S.dirty.addr = true;
@@ -738,7 +743,7 @@ onmessage = async (ev) => {
         postMessage({ type: 'pick-result', reqId: m.reqId, info: null, forClick: m.forClick });
         break;
       }
-      E.hp_pick(canvases.addr.width, Math.round(m.x * dpr), m.y * dpr, S.scroll);
+      E.hp_pick(canvases.addr.width, Math.round(toDevice(m.x)), toDevice(m.y), S.scroll);
       postMessage({ type: 'pick-result', reqId: m.reqId, info: retJson(), forClick: m.forClick });
       break;
     }
@@ -796,7 +801,7 @@ onmessage = async (ev) => {
       }
       const view = m.kind === 0 ? S.tlT : S.tlS;
       const cv = m.kind === 0 ? canvases.tlt : canvases.tls;
-      E.hp_tl_hover(m.kind, cv.width, Math.min(cv.width - 1, Math.round(m.x * dpr)), view.lo, view.hi);
+      E.hp_tl_hover(m.kind, cv.width, Math.min(cv.width - 1, Math.round(toDevice(m.x))), view.lo, view.hi);
       postMessage({ type: 'tlhover-result', reqId: m.reqId, kind: m.kind, info: retJson() });
       break;
     }
