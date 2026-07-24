@@ -33,6 +33,11 @@ struct App {
     buf: Vec<u8>,    // input buffer (file chunks, filter JSON)
     out: String,     // reused JSON output
     labels: String,  // labels from the last address render
+    /// Event indices passing the active filter (see `ensure_ev_filtered`);
+    /// rebuilt lazily after any filter or tag change. Not materialized when
+    /// no filter is active — the identity mapping is used instead.
+    ev_filtered: Vec<u32>,
+    ev_dirty: bool,
 }
 
 impl App {
@@ -47,6 +52,8 @@ impl App {
             buf: Vec::new(),
             out: String::new(),
             labels: String::new(),
+            ev_filtered: Vec::new(),
+            ev_dirty: true,
         }
     }
 }
@@ -124,6 +131,8 @@ pub extern "C" fn hp_parse_end() -> u32 {
         p.finish();
         a.store = p.store;
         a.view.reset(&a.store);
+        a.ev_filtered = Vec::new();
+        a.ev_dirty = true;
     }
     a.store.len()
 }
@@ -342,6 +351,20 @@ pub extern "C" fn hp_set_size_labels(on: u32) {
     app().cfg.size_labels = on != 0;
 }
 
+/// How overlapping allocations render: 0 = highlight shared pixels orange,
+/// 1 = ignore (the latest-created allocation wins the pixel).
+#[no_mangle]
+pub extern "C" fn hp_set_overlap_mode(mode: u32) {
+    app().cfg.overlap_mode = mode.min(1) as u8;
+}
+
+/// Show/hide freed-nested "ghosts": the recessed fill + divider edges drawn
+/// where an allocation that lived inside a still-live one has been freed.
+#[no_mangle]
+pub extern "C" fn hp_set_ghosts(on: u32) {
+    app().cfg.ghosts = on != 0;
+}
+
 /// Toggle the stable "all rows" layout: every row any allocation ever
 /// touches stays laid out regardless of the playhead.
 #[no_mangle]
@@ -356,6 +379,13 @@ pub extern "C" fn hp_set_show_all(on: u32) {
 pub extern "C" fn hp_set_anchor_pin(lo: u32, hi: u32) {
     let addr = (hi as u64) << 32 | lo as u64;
     app().view.set_anchor_pin(Some(addr));
+}
+
+/// Drop the transient anchor pin (the user navigated away from the anchored
+/// row) so an empty pinned row doesn't stay laid out forever.
+#[no_mangle]
+pub extern "C" fn hp_clear_anchor_pin() {
+    app().view.set_anchor_pin(None);
 }
 
 /// Pinned addresses, written into the input buffer as consecutive u64 LE
@@ -398,6 +428,50 @@ fn parse_filter_json(data: &[u8]) -> Filter {
                 }
                 b"sizeMax" => {
                     f.size_max = sc.integer().unwrap_or(0).max(0) as u64;
+                }
+                b"addrRanges" => {
+                    // array of [loHex, hiHex] pairs: [["0x1000","0x2000"],...]
+                    sc.ws();
+                    if sc.peek() == b'[' {
+                        sc.i += 1;
+                        loop {
+                            sc.ws();
+                            if sc.peek() == b']' {
+                                sc.i += 1;
+                                break;
+                            }
+                            if sc.peek() == b'[' {
+                                sc.i += 1;
+                                let lo = sc
+                                    .string_span()
+                                    .and_then(|(a, b)| json::parse_addr(&data[a..b]));
+                                sc.ws();
+                                if sc.peek() == b',' {
+                                    sc.i += 1;
+                                }
+                                let hi = sc
+                                    .string_span()
+                                    .and_then(|(a, b)| json::parse_addr(&data[a..b]));
+                                sc.ws();
+                                if sc.peek() == b']' {
+                                    sc.i += 1;
+                                }
+                                if let (Some(lo), Some(hi)) = (lo, hi) {
+                                    if hi > lo {
+                                        f.addr_ranges.push((lo, hi));
+                                    }
+                                }
+                            } else if sc.skip_value().is_none() {
+                                break;
+                            }
+                            sc.ws();
+                            if sc.peek() == b',' {
+                                sc.i += 1;
+                            }
+                        }
+                    } else {
+                        let _ = sc.skip_value();
+                    }
                 }
                 b"sites" | b"thrs" | b"tags" => {
                     // collect into a scratch Vec first: an empty JSON array is
@@ -465,6 +539,7 @@ pub extern "C" fn hp_set_filter(len: u32) {
     let a = app();
     let data: Vec<u8> = a.buf[..len as usize].to_vec();
     a.cfg.filter = parse_filter_json(&data);
+    a.ev_dirty = true;
 }
 
 /// Crop the address-line to creator events with `lo <= e < hi` — always dims
@@ -489,6 +564,7 @@ pub extern "C" fn hp_tag_event(e: u32, tag: u32) {
     let a = app();
     if (e as usize) < a.store.tag.len() {
         a.store.tag[e as usize] = tag.min(255) as u8;
+        a.ev_dirty = true; // tags participate in the filter
     }
 }
 
@@ -532,6 +608,7 @@ fn tag_seq_range(a: &mut App, lo: u32, hi: u32, tag: u32, by_free: u32) -> u32 {
     for e in to_tag {
         a.store.tag[e as usize] = tag;
     }
+    a.ev_dirty = true;
     n
 }
 
@@ -604,6 +681,7 @@ pub extern "C" fn hp_tag_events(count: u32, tag: u32) -> u32 {
             }
         }
     }
+    a.ev_dirty = true;
     applied
 }
 
@@ -611,9 +689,11 @@ pub extern "C" fn hp_tag_events(count: u32, tag: u32) -> u32 {
 /// unlike range tagging this ignores the active filter).
 #[no_mangle]
 pub extern "C" fn hp_tags_clear() {
-    for t in app().store.tag.iter_mut() {
+    let a = app();
+    for t in a.store.tag.iter_mut() {
         *t = 0;
     }
+    a.ev_dirty = true;
 }
 
 /// Replace every occurrence of tag `from` with `to` (delete = retag to 0,
@@ -629,6 +709,7 @@ pub extern "C" fn hp_retag(from: u32, to: u32) -> u32 {
             n += 1;
         }
     }
+    a.ev_dirty = true;
     n
 }
 
@@ -870,10 +951,8 @@ fn push_event_json(o: &mut String, s: &Store, e: u32) {
         e, s.op[ei], s.t[ei] as f64, s.id[ei], gi, s.addr[gi], s.size[gi]
     ));
     if s.op[ei] == OP_R {
-        o.push_str(&format!(
-            ",\"oldAddr\":\"0x{:x}\",\"oldSize\":{}",
-            s.old_addr[ei], s.old_size[ei]
-        ));
+        let (oa, os) = s.old_geom_at(e);
+        o.push_str(&format!(",\"oldAddr\":\"0x{:x}\",\"oldSize\":{}", oa, os));
     }
     o.push_str(",\"site\":");
     let si = if s.site[gi] != NONE_U32 { gi } else { ei };
@@ -913,6 +992,84 @@ pub extern "C" fn hp_events_json(from: u32, count: u32) {
     }
     o.push(']');
     ret_str(o);
+}
+
+/// Whether the event list has a real filter to apply; without one the
+/// filtered views below fall back to the identity mapping instead of
+/// materializing an index of every event.
+fn ev_filter_active(a: &App) -> bool {
+    a.cfg.filter.mode != render::FILTER_OFF
+}
+
+/// Rebuild the filtered event list if a filter or tag changed. Membership:
+/// creators (M/R) that pass the filter, plus each F whose freed allocation
+/// passes — an F of an unknown id has nothing to evaluate and drops out.
+fn ensure_ev_filtered(a: &mut App) {
+    if !a.ev_dirty {
+        return;
+    }
+    a.ev_dirty = false;
+    let s = &a.store;
+    let f = &a.cfg.filter;
+    let mut list = Vec::new();
+    for e in 0..s.len() {
+        let creator = if s.op[e as usize] == OP_F {
+            s.target[e as usize]
+        } else {
+            e
+        };
+        if creator != NONE_U32 && f.pass(s, creator) {
+            list.push(e);
+        }
+    }
+    a.ev_filtered = list;
+}
+
+/// Number of events passing the active filter (all of them when none).
+#[no_mangle]
+pub extern "C" fn hp_events_filtered_count() -> u32 {
+    let a = app();
+    if !ev_filter_active(a) {
+        return a.store.len();
+    }
+    ensure_ev_filtered(a);
+    a.ev_filtered.len() as u32
+}
+
+/// Like `hp_events_json`, but `from` indexes the *filtered* event list;
+/// each record still carries its real seq.
+#[no_mangle]
+pub extern "C" fn hp_events_filtered_json(from: u32, count: u32) {
+    let a = app();
+    if !ev_filter_active(a) {
+        return hp_events_json(from, count);
+    }
+    ensure_ev_filtered(a);
+    let s = &a.store;
+    let o = &mut a.out;
+    o.clear();
+    o.push('[');
+    let hi = (from.saturating_add(count.min(2000)) as usize).min(a.ev_filtered.len());
+    for (i, &e) in a.ev_filtered[(from as usize).min(hi)..hi].iter().enumerate() {
+        if i > 0 {
+            o.push(',');
+        }
+        push_event_json(o, s, e);
+    }
+    o.push(']');
+    ret_str(o);
+}
+
+/// Position of `seq` in the filtered list (the insertion point when seq
+/// itself is filtered out) — lets the panel follow / scroll to the playhead.
+#[no_mangle]
+pub extern "C" fn hp_events_filtered_pos(seq: u32) -> u32 {
+    let a = app();
+    if !ev_filter_active(a) {
+        return seq.min(a.store.len());
+    }
+    ensure_ev_filtered(a);
+    a.ev_filtered.partition_point(|&e| e < seq) as u32
 }
 
 // ---------------------------------------------------------------------------
@@ -989,7 +1146,7 @@ mod tests {
         assert_eq!(s.target[3], 1);
         assert_eq!(s.death[1], 3);
         assert_eq!(s.death[3], 4);
-        assert_eq!(s.old_addr[3], 0x2000);
+        assert_eq!(s.old_geom_at(3), (0x2000, 128));
         let total: u32 = s.warn_counts.iter().sum();
         assert_eq!(total, 0);
     }
@@ -1049,6 +1206,180 @@ not json at all
     }
 
     #[test]
+    fn nested_overlap_flagged() {
+        // A covers 0x1000..0x11000; B (0x5000) sits inside it, then C
+        // (0x6000) lands inside A but is *not* A's nearest live neighbour by
+        // start address (B is) — the old nearest-only check missed C
+        let input = r#"{"op":"M","id":1,"addr":"0x1000","size":65536,"t":10}
+{"op":"M","id":2,"addr":"0x5000","size":16,"t":20}
+{"op":"M","id":3,"addr":"0x6000","size":16,"t":30}
+"#;
+        let a = load(input);
+        assert_eq!(a.store.warn_counts[W_OVERLAP as usize], 2);
+    }
+
+    #[test]
+    fn surrogate_pairs_decoded() {
+        // "😀" is the surrogate-pair escape for U+1F600 😀
+        assert_eq!(json::unescape(br"\ud83d\ude00ok"), "\u{1f600}ok");
+        // unpaired high surrogate: one replacement char, rest intact
+        assert_eq!(json::unescape(br"\ud83dxy"), "\u{fffd}xy");
+    }
+
+    #[test]
+    fn skipped_line_warning_points_at_previous_event() {
+        let input = r#"{"op":"M","id":1,"addr":"0x1000","size":64,"t":10}
+not json at all
+{"op":"M","id":2,"addr":"0x2000","size":64,"t":20}
+"#;
+        let a = load(input);
+        let w = a
+            .store
+            .warnings
+            .iter()
+            .find(|w| w.code == W_MALFORMED)
+            .unwrap();
+        // attached to the event *before* the bad line, so a jump lands there
+        assert_eq!(w.seq, 0);
+    }
+
+    #[test]
+    fn addr_range_filter() {
+        let f = parse_filter_json(br#"{"mode":1,"addrRanges":[["0x1000","0x1040"]]}"#);
+        assert_eq!(f.addr_ranges, vec![(0x1000, 0x1040)]);
+        let mut a = load(SAMPLE);
+        a.cfg.filter = f;
+        assert!(a.cfg.filter.pass(&a.store, 0)); // 0x1000+64 intersects
+        assert!(!a.cfg.filter.pass(&a.store, 1)); // 0x2000+128 does not
+        assert!(!a.cfg.filter.pass(&a.store, 3)); // 0x3000+256 does not
+    }
+
+    #[test]
+    fn overlap_modes() {
+        // two overlapping allocations in one 256-byte row, 1 px per byte
+        let input = r#"{"op":"H","v":1,"row_bytes":256}
+{"op":"M","id":1,"addr":"0x1000","size":128,"t":10}
+{"op":"M","id":2,"addr":"0x1020","size":32,"t":20}
+"#;
+        let mut a = load(input);
+        a.view.seek(&a.store, 2);
+        let has_orange = |f: &Frame| {
+            f.px.chunks(4)
+                .any(|c| c[0] == render::OVERLAP[0] && c[1] == render::OVERLAP[1] && c[2] == render::OVERLAP[2])
+        };
+        a.cfg.overlap_mode = render::OVERLAP_HIGHLIGHT;
+        render::render_addr(&a.store, &mut a.view, &a.cfg, &mut a.frame, 256, 100, 0.0);
+        assert!(has_orange(&a.frame));
+        a.cfg.overlap_mode = render::OVERLAP_IGNORE;
+        render::render_addr(&a.store, &mut a.view, &a.cfg, &mut a.frame, 256, 100, 0.0);
+        assert!(!has_orange(&a.frame));
+    }
+
+    #[test]
+    fn latest_created_wins_shared_pixels() {
+        // creation order differs from address order: the *older* allocation
+        // sits at the higher address, so an address-ordered draw would paint
+        // it last — creation order must put the newer one on top
+        let input = r#"{"op":"H","v":1,"row_bytes":256}
+{"op":"M","id":1,"addr":"0x1080","size":64,"t":10}
+{"op":"M","id":2,"addr":"0x1000","size":160,"t":20}
+"#;
+        let mut a = load(input);
+        a.view.seek(&a.store, 2);
+        a.cfg.color_mode = render::MODE_SIZE; // 64 vs 160 → distinct colors
+        a.cfg.overlap_mode = render::OVERLAP_IGNORE;
+        render::render_addr(&a.store, &mut a.view, &a.cfg, &mut a.frame, 256, 100, 0.0);
+        let px_at = |f: &Frame, x: usize| {
+            let p = (2 * f.w as usize + x) * 4;
+            [f.px[p], f.px[p + 1], f.px[p + 2]]
+        };
+        // 1 px per byte: x=0x90 is shared, x=0x40 is only the newer
+        // allocation, x=0xa8 only the older one
+        assert_ne!(px_at(&a.frame, 0x40), px_at(&a.frame, 0xa8));
+        assert_eq!(px_at(&a.frame, 0x90), px_at(&a.frame, 0x40), "newest must win");
+    }
+
+    #[test]
+    fn pick_prefers_newest_overlapped() {
+        // inner (event 1) nested in outer (event 0): picking inside the
+        // inner range must return the newer creator, not the enclosing block
+        let input = r#"{"op":"H","v":1,"row_bytes":256}
+{"op":"M","id":1,"addr":"0x1000","size":128,"t":10}
+{"op":"M","id":2,"addr":"0x1020","size":32,"t":20}
+"#;
+        let mut a = load(input);
+        a.view.seek(&a.store, 2);
+        // 1 px per byte at w=256; row 0 starts at 0x1000
+        let inner = render::pick(&a.store, &mut a.view, &a.cfg, 256, 0x28, 4.0, 0.0);
+        assert!(inner.starts_with("{\"e\":1,"), "got {}", inner);
+        let outer = render::pick(&a.store, &mut a.view, &a.cfg, 256, 0x10, 4.0, 0.0);
+        assert!(outer.starts_with("{\"e\":0,"), "got {}", outer);
+    }
+
+    #[test]
+    fn ghost_marks_freed_nested() {
+        // inner freed while the outer lives on: its range renders recessed
+        // (darkened) inside the outer instead of disappearing without trace
+        let input = r#"{"op":"H","v":1,"row_bytes":256}
+{"op":"M","id":1,"addr":"0x1000","size":256,"t":10}
+{"op":"M","id":2,"addr":"0x1040","size":64,"t":20}
+{"op":"F","id":2,"t":30}
+"#;
+        let mut a = load(input);
+        let px_at = |f: &Frame, x: usize, y: usize| {
+            let p = (y * f.w as usize + x) * 4;
+            [f.px[p], f.px[p + 1], f.px[p + 2]]
+        };
+        let g = render::GREEN;
+        let interior = [
+            (g[0] as u32 * 3 / 5) as u8,
+            (g[1] as u32 * 3 / 5) as u8,
+            (g[2] as u32 * 3 / 5) as u8,
+        ];
+        a.view.seek(&a.store, 3);
+        render::render_addr(&a.store, &mut a.view, &a.cfg, &mut a.frame, 256, 100, 0.0);
+        assert_eq!(px_at(&a.frame, 0x50, 2), interior, "ghost interior recessed");
+        assert_eq!(px_at(&a.frame, 0x20, 2), g, "outside the ghost: plain fill");
+        // divider edge at the ghost boundary is darker than the interior
+        assert!(px_at(&a.frame, 0x40, 2)[1] < interior[1], "edge divider");
+        // while the inner is still live there is no ghost
+        a.view.seek(&a.store, 2);
+        render::render_addr(&a.store, &mut a.view, &a.cfg, &mut a.frame, 256, 100, 0.0);
+        assert_ne!(px_at(&a.frame, 0x50, 2), interior);
+        // and the toggle turns it off
+        a.cfg.ghosts = false;
+        a.view.seek(&a.store, 3);
+        render::render_addr(&a.store, &mut a.view, &a.cfg, &mut a.frame, 256, 100, 0.0);
+        assert_eq!(px_at(&a.frame, 0x50, 2), g);
+    }
+
+    #[test]
+    fn events_filtered_list() {
+        let mut a = load(SAMPLE);
+        // site "a" only (index 0): M(b) drops out; F events follow the
+        // allocation they free; the site-less R passes (site-less passes)
+        a.cfg.filter = parse_filter_json(br#"{"mode":1,"sites":[0]}"#);
+        a.ev_dirty = true;
+        ensure_ev_filtered(&mut a);
+        assert_eq!(a.ev_filtered, vec![0, 2, 3, 4]);
+        assert_eq!(a.ev_filtered.partition_point(|&e| e < 3), 2);
+    }
+
+    #[test]
+    fn age_normalizer_incremental_matches_scan() {
+        let mut a = load(SAMPLE);
+        for target in [1, 2, 3, 4, 5, 2, 0] {
+            a.view.seek(&a.store, target);
+            let mut min = u64::MAX;
+            for &(_, e) in a.view.live.iter() {
+                min = min.min(a.store.t[e as usize]);
+            }
+            let expect = if min == u64::MAX { None } else { Some(min) };
+            assert_eq!(a.view.min_live_birth(), expect, "target {}", target);
+        }
+    }
+
+    #[test]
     fn free_null_ignored() {
         let input = r#"{"op":"M","id":1,"addr":"0x1000","size":64,"t":100}
 {"op":"F","id":0,"t":150}
@@ -1087,15 +1418,10 @@ not json at all
         assert!(!a.store.snaps.is_empty());
         for &target in &[49999u32, 20000, 33333, 5, 0, 47000] {
             a.view.seek(&a.store, target);
-            let mut fresh = View::new();
-            fresh.reset(&a.store);
+            // compare against a fresh forward-incremental replay from 0
             let mut f2 = View::new();
             f2.reset(&a.store);
-            f2.seek(&a.store, target); // fresh always: forward incremental from 0
-            // compare against a pure forward replay by stepping
-            for e in 0..target {
-                let _ = e;
-            }
+            f2.seek(&a.store, target);
             assert_eq!(a.view.cur, target);
             assert_eq!(a.view.live_count, f2.live_count, "target {}", target);
             assert_eq!(a.view.live_bytes, f2.live_bytes, "target {}", target);

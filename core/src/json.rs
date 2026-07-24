@@ -174,9 +174,35 @@ pub fn unescape(raw: &[u8]) -> String {
                     if i + 4 < raw.len() {
                         let hex = core::str::from_utf8(&raw[i + 1..i + 5]).unwrap_or("");
                         if let Ok(cp) = u32::from_str_radix(hex, 16) {
-                            out.push(char::from_u32(cp).unwrap_or('\u{fffd}'));
+                            i += 4;
+                            if (0xd800..0xdc00).contains(&cp) {
+                                // high surrogate: combine with the following
+                                // \uDC00-\uDFFF escape into one code point
+                                let lo = if raw.len() >= i + 7
+                                    && raw[i + 1] == b'\\'
+                                    && raw[i + 2] == b'u'
+                                {
+                                    core::str::from_utf8(&raw[i + 3..i + 7])
+                                        .ok()
+                                        .and_then(|h| u32::from_str_radix(h, 16).ok())
+                                        .filter(|c| (0xdc00..0xe000).contains(c))
+                                } else {
+                                    None
+                                };
+                                match lo {
+                                    Some(lo) => {
+                                        let c = 0x10000 + ((cp - 0xd800) << 10) + (lo - 0xdc00);
+                                        out.push(char::from_u32(c).unwrap_or('\u{fffd}'));
+                                        i += 6; // the "\uXXXX" of the low half
+                                    }
+                                    None => out.push('\u{fffd}'), // unpaired
+                                }
+                            } else {
+                                out.push(char::from_u32(cp).unwrap_or('\u{fffd}'));
+                            }
+                        } else {
+                            i += 4;
                         }
-                        i += 4;
                     }
                 }
                 other => out.push(other as char),

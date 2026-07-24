@@ -35,12 +35,27 @@ the filter below.
 
 ## 7.3 Filter
 
-The Filter panel selects by **site**, **thread**, **size range**, and **tag
-visibility** (including "untagged"). Two application modes, chosen by the
-user: **dim others** (default — context stays visible) or **hide others**.
-Empty selections are real constraints: unchecking every site means "no site
-qualifies", not "no constraint". The filter applies everywhere allocations
-render, and (deliberately) also scopes range tagging (§7.2).
+The Filter panel selects by **site**, **thread**, **size range**, **address
+range**, and **tag visibility** (including "untagged"). Two application modes,
+chosen by the user: **dim others** (default — context stays visible) or **hide
+others**. Empty selections are real constraints: unchecking every site means
+"no site qualifies", not "no constraint". The filter applies everywhere
+allocations render, (deliberately) also scopes range tagging (§7.2), and
+drives the Events panel's "filtered" toggle
+([06-playback-navigation §6.5](06-playback-navigation.md)).
+
+Address ranges are a list, added by hand (two hex addresses) or from an
+allocation's **match range** button, which seeds the list with that
+allocation's own span. An allocation qualifies if it touches *any* range in
+the list, so several ranges read as "or", matching how the site and thread
+checkboxes already behave.
+
+**Allocations without a site (or thread) are unconstrained by that
+selection** — selecting "none" still shows them. Settled deliberately: the
+site filter answers "which sites do I care about", and a record that never
+named a site is not a member of any answer to that question; the alternative
+(a "no site" pseudo-bucket with its own checkbox) buys precision that no
+observed trace needs. Pinned by tests; do not change casually.
 
 ## 7.4 Crop
 
@@ -83,6 +98,12 @@ Two deliberately different persistence channels:
   crop, view zooms, window/drawer positions, pinned allocation windows (by
   creator event), playhead. Autosaved to `localStorage` keyed by trace file
   name and restored silently on load; no UI.
+
+A third, tiny channel sits above both: **app preferences** (the overlap
+display mode and the freed-nested ghost toggle) are how the user wants
+*every* trace drawn, so they persist globally (`localStorage`, one key, not
+trace-scoped) and restore at startup; a legacy per-trace `overlapMode` in an
+old session blob is ignored rather than allowed to clobber them.
 
 Marks additionally autosave to `localStorage` on the same key scheme, so a
 plain refresh never loses un-exported work; the manual Save/Load buttons

@@ -5,6 +5,8 @@ use crate::json::push_json_str;
 use crate::state::View;
 use crate::store::*;
 
+// NOTE: BG/CAT/RAMP are mirrored in web/main.js (CAT/RAMP consts) for legend
+// chips and filter swatches — keep the two in sync by hand.
 pub const BG: [u8; 3] = [0x0d, 0x11, 0x17];
 pub const ROW_BG: [u8; 3] = [0x16, 0x1b, 0x22];
 pub const GAP_FG: [u8; 3] = [0x3d, 0x44, 0x4d];
@@ -53,6 +55,14 @@ pub const FILTER_OFF: u8 = 0;
 pub const FILTER_DIM: u8 = 1;
 pub const FILTER_HIDE: u8 = 2;
 
+/// How overlapping live allocations render where they share pixels.
+pub const OVERLAP_HIGHLIGHT: u8 = 0; // flag shared pixels orange
+pub const OVERLAP_IGNORE: u8 = 1; // latest-created allocation wins the pixel
+
+/// Coverage-buffer bit marking a pixel already ghost-darkened (see
+/// `Frame::fill_ghost`); the low bits below it stay a plain cover count.
+const GHOST_MARK: u8 = 0x80;
+
 #[derive(Default)]
 pub struct Filter {
     pub mode: u8,
@@ -69,6 +79,9 @@ pub struct Filter {
     pub tags_set: bool,
     pub size_min: u64,
     pub size_max: u64, // 0 = unbounded
+    /// Address ranges [lo, hi): when non-empty, an allocation passes only if
+    /// its rendered span intersects at least one range.
+    pub addr_ranges: Vec<(u64, u64)>,
 }
 
 impl Filter {
@@ -103,6 +116,13 @@ impl Filter {
         }
         if self.size_max > 0 && sz > self.size_max {
             return false;
+        }
+        if !self.addr_ranges.is_empty() {
+            let a = s.addr[ei];
+            let end = a + s.span(e);
+            if !self.addr_ranges.iter().any(|&(lo, hi)| a < hi && end > lo) {
+                return false;
+            }
         }
         true
     }
@@ -140,6 +160,12 @@ pub struct Cfg {
     pub tag_colors: Vec<[u8; 3]>,
     /// Per-allocation color overrides (creator event -> rgb), any mode.
     pub overrides: std::collections::HashMap<u32, [u8; 3]>,
+    /// How overlapping allocations render (OVERLAP_* above).
+    pub overlap_mode: u8,
+    /// Mark freed nested allocations: a recessed darker fill with divider
+    /// edges where an allocation that lived inside a still-live one has been
+    /// freed at the playhead, so its end stays visible inside the parent.
+    pub ghosts: bool,
 }
 
 impl Cfg {
@@ -156,6 +182,8 @@ impl Cfg {
             size_labels: true,
             tag_colors: Vec::new(),
             overrides: std::collections::HashMap::new(),
+            overlap_mode: OVERLAP_HIGHLIGHT,
+            ghosts: true,
         }
     }
 
@@ -229,11 +257,22 @@ impl Frame {
         }
     }
 
-    /// Allocation fill. Coverage (and therefore the orange overlap flag) is
+    /// Allocation fill. Coverage (and therefore the overlap handling) is
     /// only tracked on pixels *fully* covered by the byte range — `c0..c1` —
     /// so two adjacent allocations sharing an edge pixel are not falsely
-    /// flagged as overlapping.
-    fn fill_alloc(&mut self, x0: i64, x1: i64, c0: i64, c1: i64, y0: i64, y1: i64, c: [u8; 3]) {
+    /// flagged as overlapping. `overlap_mode` decides what happens where a
+    /// covered pixel is painted again (see the OVERLAP_* constants).
+    fn fill_alloc(
+        &mut self,
+        x0: i64,
+        x1: i64,
+        c0: i64,
+        c1: i64,
+        y0: i64,
+        y1: i64,
+        c: [u8; 3],
+        overlap_mode: u8,
+    ) {
         let (x0, x1) = (x0.max(0) as usize, x1.min(self.w as i64).max(0) as usize);
         let (y0, y1) = (y0.max(0) as usize, y1.min(self.h as i64).max(0) as usize);
         let (c0, c1) = (c0.max(0) as usize, c1.min(self.w as i64).max(0) as usize);
@@ -244,9 +283,20 @@ impl Frame {
                 let p = i * 4;
                 let core = x >= c0 && x < c1;
                 if core && self.cov[i] != 0 {
-                    self.px[p] = OVERLAP[0];
-                    self.px[p + 1] = OVERLAP[1];
-                    self.px[p + 2] = OVERLAP[2];
+                    // count covers (capped below GHOST_MARK) so the ghost
+                    // pass can tell "outer only" from "outer + live inner"
+                    self.cov[i] = (self.cov[i] + 1).min(GHOST_MARK - 1);
+                    if overlap_mode == OVERLAP_IGNORE {
+                        // draw order is creation order, so the latest-created
+                        // allocation wins the pixel
+                        self.px[p] = c[0];
+                        self.px[p + 1] = c[1];
+                        self.px[p + 2] = c[2];
+                    } else {
+                        self.px[p] = OVERLAP[0];
+                        self.px[p + 1] = OVERLAP[1];
+                        self.px[p + 2] = OVERLAP[2];
+                    }
                 } else {
                     if core {
                         self.cov[i] = 1;
@@ -276,6 +326,56 @@ impl Frame {
                     self.px[p + 2] = c[2];
                     self.px[p + 3] = 255;
                 }
+            }
+        }
+    }
+
+    /// Recessed "ghost" fill marking a freed allocation nested inside a live
+    /// one: darkens pixels the parent alone covers (skipping any live nested
+    /// allocation, cov >= 2) and cuts stronger divider edges along the
+    /// region's sides, so an ended allocation stays readable inside its
+    /// parent instead of merging into it. Idempotent via GHOST_MARK, so many
+    /// dead generations at one address darken the slot once, not to black.
+    fn fill_ghost(&mut self, x0: i64, x1: i64, y0: i64, y1: i64) {
+        let (x0, x1) = (x0.max(0) as usize, x1.min(self.w as i64).max(0) as usize);
+        let (y0, y1) = (y0.max(0) as usize, y1.min(self.h as i64).max(0) as usize);
+        if x1 <= x0 {
+            return;
+        }
+        for y in y0..y1 {
+            let row = y * self.w as usize;
+            for x in x0..x1 {
+                let i = row + x;
+                let c = self.cov[i];
+                if c & GHOST_MARK != 0 || c & !GHOST_MARK >= 2 {
+                    // already ghosted (overlapping dead generations darken a
+                    // slot once), or a live nested allocation owns the pixel
+                    continue;
+                }
+                self.cov[i] = c | GHOST_MARK;
+                let edge = x == x0 || x + 1 == x1;
+                let p = i * 4;
+                for k in 0..3 {
+                    let v = self.px[p + k] as u32;
+                    self.px[p + k] = if edge { v * 2 / 5 } else { v * 3 / 5 } as u8;
+                }
+            }
+        }
+    }
+
+    /// 1-px divider seam at an allocation's start edge: darkens whatever was
+    /// painted there so adjacent allocations stay separable even when their
+    /// fill colors are identical.
+    fn seam(&mut self, x: i64, y0: i64, y1: i64) {
+        if x < 0 || x >= self.w as i64 {
+            return;
+        }
+        let x = x as usize;
+        let (y0, y1) = (y0.max(0) as usize, y1.min(self.h as i64).max(0) as usize);
+        for y in y0..y1 {
+            let p = (y * self.w as usize + x) * 4;
+            for k in 0..3 {
+                self.px[p + k] = (self.px[p + k] as u32 * 2 / 5) as u8;
             }
         }
     }
@@ -361,15 +461,13 @@ pub fn alloc_color(s: &Store, cfg: &Cfg, e: u32, cur_t: u64, age_norm: f64) -> [
     }
 }
 
-/// Per-frame normalizer for MODE_AGE: 1/ln(1 + oldest live age).
-pub fn age_normalizer(s: &Store, v: &crate::state::View, cur_t: u64) -> f64 {
-    let mut min_birth = u64::MAX;
-    for &(_, e) in v.live.iter() {
-        min_birth = min_birth.min(s.t[e as usize]);
-    }
-    if min_birth == u64::MAX {
-        return 0.0;
-    }
+/// Per-frame normalizer for MODE_AGE: 1/ln(1 + oldest live age). O(log n)
+/// via the View's incrementally maintained birth-time multiset.
+pub fn age_normalizer(_s: &Store, v: &crate::state::View, cur_t: u64) -> f64 {
+    let min_birth = match v.min_live_birth() {
+        Some(b) => b,
+        None => return 0.0,
+    };
     let max_age = cur_t.saturating_sub(min_birth) as f64;
     let d = (1.0 + max_age).ln();
     if d > 0.0 {
@@ -382,6 +480,21 @@ pub fn age_normalizer(s: &Store, v: &crate::state::View, cur_t: u64) -> f64 {
 pub struct RenderOut {
     /// JSON array of label records for the JS layer to draw as text.
     pub labels: String,
+}
+
+/// Whether the collapsed rows strictly between display rows `ra` and `rb` are
+/// covered end to end by one live allocation. True only for allocations wider
+/// than `View`'s span cap, whose middle rows are left out of the layout even
+/// though they are entirely inside the allocation.
+fn inside_one_alloc(s: &Store, v: &crate::state::View, ra: u64, rb: u64) -> bool {
+    let rb_bytes = v.row_bytes;
+    let gap_start = v.base + (ra + 1) * rb_bytes;
+    let gap_end = v.base + rb * rb_bytes;
+    let floor = gap_start.saturating_sub(s.max_span.max(1));
+    v.live
+        .range((floor, 0)..=(gap_start, u32::MAX))
+        .rev()
+        .any(|&(a, e)| a <= gap_start && a + s.span(e) >= gap_end)
 }
 
 /// Render the address-line into `frame`. `scroll` is the virtual-y offset in px.
@@ -447,14 +560,21 @@ pub fn render_addr(
                 x += 9;
             }
             let skipped_rows = v.rows[i] - v.rows[i - 1] - 1;
+            // A single allocation larger than the layout's span cap only
+            // occupies its first and last rows, so the rows between them
+            // collapse into a gap even though they are entirely *inside* that
+            // allocation. Say so, instead of "N skipped" — which reads as
+            // "nothing here" when it is the opposite.
+            let inside = inside_one_alloc(s, v, v.rows[i - 1], v.rows[i]);
             if !first {
                 labels.push(',');
             }
             first = false;
             labels.push_str(&format!(
-                "{{\"k\":1,\"y\":{},\"bytes\":{}}}",
+                "{{\"k\":1,\"y\":{},\"bytes\":{},\"inside\":{}}}",
                 gy,
-                (skipped_rows as u128 * v.row_bytes as u128) as f64
+                (skipped_rows as u128 * v.row_bytes as u128) as f64,
+                inside
             ));
         }
         // row background
@@ -478,8 +598,6 @@ pub fn render_addr(
     };
     let rb = v.row_bytes;
     let (scale, pan) = cfg.x_map(w, rb);
-    let mut j = 0usize; // pointer into v.rows
-    let mut sel_rect: Option<(i64, i64, i64, i64)> = None;
     // size labels: drawn by the JS layer, emitted only where they can fit
     let label_sizes = cfg.size_labels && row_px >= 9;
     let mut n_size_labels = 0u32;
@@ -511,22 +629,50 @@ pub fn render_addr(
         }
         (first, lo.saturating_sub(1))
     };
-    for &(a, e) in v.live.iter() {
+    if vis_lo >= v.rows.len() || vis_lo > vis_hi {
+        labels.push(']');
+        return RenderOut { labels };
+    }
+    // Bound the live-set walk to allocations that can touch the visible rows:
+    // start max_span below the first visible row's address (like `pick`) and
+    // stop at the last visible row's end. O(visible + log live) instead of a
+    // full O(live) scan every frame.
+    let addr_lo = v.base + v.rows[vis_lo] * rb;
+    let addr_hi = v
+        .base
+        .saturating_add(v.rows[vis_hi].saturating_add(1).saturating_mul(rb));
+    let floor = addr_lo.saturating_sub(s.max_span.max(1));
+    // Draw in creation order, not address order: where live allocations
+    // overlap (nesting), the latest-created one is drawn last and wins the
+    // shared pixels — matching picking, which also prefers the newest.
+    let mut draw: Vec<(u32, u64, bool)> = Vec::new();
+    for &(a, e) in v.live.range((floor, 0)..(addr_hi, 0)) {
         let (hide, dim_it) = visibility(cfg, s, e);
-        if hide {
-            continue;
+        if !hide {
+            draw.push((e, a, dim_it));
         }
+    }
+    draw.sort_unstable();
+    // Divider seams at allocation start edges, applied after the whole draw
+    // loop so a later-created neighbor's fill (edge pixels can overlap by one
+    // due to the ceil on x1) cannot paint the boundary away. Only the topmost
+    // allocation at each start address gets its seam — a start buried under a
+    // later-created overlap is not a visible boundary.
+    let mut seams: Vec<(u32, u64, i64, i64, i64)> = Vec::new();
+    // Size-label candidates (e, addr range under the visible text span, x, y,
+    // w), deferred like seams: a label is emitted only if no later-created
+    // allocation covers any part of the span the JS layer may draw text in.
+    let mut texts: Vec<(u32, u64, u64, i64, i64, i64)> = Vec::new();
+    for &(e, a, dim_it) in &draw {
         let pass = !dim_it;
         let span = s.span(e);
         let size = s.size[e as usize].max(1).min(span);
         let end = a + span;
         let r0 = (a - v.base) / rb;
         let r1 = (end - 1 - v.base) / rb;
-        while j < v.rows.len() && v.rows[j] < r0 {
-            j += 1;
-        }
+        let j = v.rows.partition_point(|&r| r < r0);
         if j >= v.rows.len() {
-            break;
+            continue;
         }
         let mut color = alloc_color(s, cfg, e, cur_t, age_norm);
         if !pass {
@@ -580,6 +726,11 @@ pub fn render_addr(
                 continue; // panned/zoomed out of the horizontal window
             }
             let y1 = y + row_px as i64 - 1;
+            // seam only on the row holding the true start, and only when the
+            // allocation is wide enough that a body remains beside the line
+            if a >= row_start && x1 - x0 >= 2 {
+                seams.push((e, a, x0, y, y1));
+            }
             // requested part vs slack band
             let req_end = (a + size).min(hi).max(lo);
             let xm = if req_end >= hi {
@@ -593,7 +744,7 @@ pub fn render_addr(
                 // fully covered pixels of the requested part
                 let c0 = (((lo - row_start) as f64 - pan) * scale).ceil() as i64;
                 let c1 = (((req_end - row_start) as f64 - pan) * scale).floor() as i64;
-                frame.fill_alloc(x0, xm, c0, c1, y, y1, color);
+                frame.fill_alloc(x0, xm, c0, c1, y, y1, color, cfg.overlap_mode);
             }
             if x1 > xm {
                 frame.fill_slack(xm, x1, y, y1, slack_color);
@@ -605,31 +756,155 @@ pub fn render_addr(
             // in-allocation label on the middle visible segment; the JS layer
             // picks "name · size" / name / size by what actually fits (it
             // knows the names and measures the text)
-            if label_target == Some(cur_idx) && n_size_labels < 400 {
+            if label_target == Some(cur_idx) {
                 let vx0 = x0.max(0);
                 let vw = x1.min(w as i64) - vx0;
                 if vw >= 18 {
+                    let a_lo = lo.max(row_start + (pan + vx0 as f64 / scale) as u64);
+                    let a_hi =
+                        hi.min(row_start + (pan + (vx0 + vw) as f64 / scale).ceil() as u64);
+                    texts.push((e, a_lo, a_hi, vx0, y, vw));
+                }
+            }
+            if e == cfg.selected {
+                frame.outline(x0, x1, y, y1, [0xff, 0xff, 0xff]);
+            }
+        }
+    }
+    // Topmost check: walk the draw list newest-first keeping a merged set of
+    // address ranges already covered by later-created allocations; a seam is
+    // drawn (and a size label emitted) only if not under any of them. Both
+    // lists were collected in draw order (ascending event), so they zip.
+    if !seams.is_empty() || !texts.is_empty() {
+        let mut covered: std::collections::BTreeMap<u64, u64> = Default::default();
+        let mut k = seams.len();
+        let mut t = texts.len();
+        for &(e, a, _) in draw.iter().rev() {
+            if k > 0 && seams[k - 1].0 == e {
+                k -= 1;
+                let (_, sa, x, y0, y1) = seams[k];
+                let buried = covered
+                    .range(..=sa)
+                    .next_back()
+                    .is_some_and(|(_, &end)| end > sa);
+                if !buried {
+                    frame.seam(x, y0, y1);
+                }
+            }
+            if t > 0 && texts[t - 1].0 == e {
+                t -= 1;
+                let (_, a_lo, a_hi, vx0, y, vw) = texts[t];
+                let hidden = covered
+                    .range(..a_hi)
+                    .next_back()
+                    .is_some_and(|(_, &end)| end > a_lo);
+                if !hidden && n_size_labels < 400 {
                     if !first {
                         labels.push(',');
                     }
                     first = false;
                     labels.push_str(&format!(
-                        "{{\"k\":2,\"x\":{},\"y\":{},\"w\":{},\"e\":{},\"size\":{},\"text\":\"0x{:x}\"}}",
+                        "{{\"k\":2,\"x\":{},\"y\":{},\"w\":{},\"e\":{},\"size\":{}}}",
                         vx0,
                         y,
                         vw,
                         e,
-                        s.size[e as usize],
                         s.size[e as usize]
                     ));
                     n_size_labels += 1;
                 }
             }
-            if e == cfg.selected && sel_rect.is_none() {
-                sel_rect = Some((x0, x1, y, y1));
+            // insert [a, a + span) into the set, merging what it touches
+            let mut s0 = a;
+            let mut s1 = a + s.span(e);
+            if let Some((&ps, &pe)) = covered.range(..=s0).next_back() {
+                if pe >= s0 {
+                    covered.remove(&ps);
+                    s0 = ps;
+                    s1 = s1.max(pe);
+                }
             }
-            if e == cfg.selected {
-                frame.outline(x0, x1, y, y1, [0xff, 0xff, 0xff]);
+            while let Some((&ns, &ne)) = covered.range(s0..=s1).next() {
+                covered.remove(&ns);
+                s1 = s1.max(ne);
+            }
+            covered.insert(s0, s1);
+        }
+    }
+
+    // --- pass 3: ghosts — allocations that ended *inside* a live one ---
+    // A free normally shows as the region emptying; nested inside a live
+    // parent it would be invisible, so the freed range gets a recessed
+    // darker fill with divider edges. Candidates come from the load-time
+    // overlap index (only creators that overlapped something live at birth),
+    // so traces without nesting skip this entirely.
+    if cfg.ghosts && !s.overlap_index.is_empty() {
+        // scan cap: heavy same-address churn cannot stall a frame — worst
+        // case some ghosts at the bottom of the viewport go undrawn
+        let mut budget = 20_000u32;
+        'ghosts: for &(a, e) in v.live.range((floor, 0)..(addr_hi, 0)) {
+            let (hide, _) = visibility(cfg, s, e);
+            if hide {
+                continue;
+            }
+            let end = a + s.span(e);
+            // dead creators fully inside [a, end) and born after `e` — truly
+            // nested in this allocation, not an earlier tenant of reused
+            // address space (those died before `e` existed and mean nothing
+            // inside it)
+            let from = s.overlap_index.partition_point(|&(ga, _)| ga < a);
+            for &(ga, g) in &s.overlap_index[from..] {
+                if ga >= end {
+                    break;
+                }
+                if budget == 0 {
+                    break 'ghosts;
+                }
+                budget -= 1;
+                if g <= e {
+                    continue;
+                }
+                let d = s.death[g as usize];
+                if d == NONE_U32 || d >= v.cur {
+                    continue; // still live (or never freed): not a ghost
+                }
+                let gspan = s.span(g);
+                let gend = ga + gspan;
+                if gend > end {
+                    continue; // partial overlap: corruption, not nesting
+                }
+                let gr0 = (ga - v.base) / rb;
+                let gr1 = (gend - 1 - v.base) / rb;
+                let mut idx = match v.rows.binary_search(&gr0) {
+                    Ok(i) => i,
+                    Err(i) => i,
+                };
+                while idx < v.rows.len() && v.rows[idx] <= gr1 {
+                    let r = v.rows[idx];
+                    let y = v.row_y(idx, row_px, gap_px) as i64 - scroll as i64;
+                    idx += 1;
+                    if y >= h as i64 {
+                        break;
+                    }
+                    if y + (row_px as i64) < 0 {
+                        continue;
+                    }
+                    let row_start = v.base + r * rb;
+                    let lo = ga.max(row_start);
+                    let hi = gend.min(row_start + rb);
+                    if hi <= lo {
+                        continue;
+                    }
+                    let x0 = (((lo - row_start) as f64 - pan) * scale) as i64;
+                    let mut x1 = ((((hi - row_start) as f64 - pan) * scale)).ceil() as i64;
+                    if x1 <= x0 {
+                        x1 = x0 + 1;
+                    }
+                    if x1 <= 0 || x0 >= w as i64 {
+                        continue;
+                    }
+                    frame.fill_ghost(x0, x1, y, y + row_px as i64 - 1);
+                }
             }
         }
     }
@@ -658,13 +933,15 @@ pub fn pick(
     let (scale, pan) = cfg.x_map(w, v.row_bytes);
     let addr_at = row_start + ((pan + x as f64 / scale) as u64).min(v.row_bytes - 1);
 
-    // scan live allocs whose start is <= addr_at, newest-start first
+    // scan live allocs whose start is <= addr_at; when several cover the
+    // address (overlap/nesting), the *most recently created* one wins — it
+    // is the allocation conceptually on top, and picking by address order
+    // instead would make the enclosing block shadow everything inside it
     let floor = addr_at.saturating_sub(s.max_span.max(1));
     let mut found: Option<(u64, u32)> = None;
-    for &(a, e) in v.live.range((floor, 0)..=(addr_at, u32::MAX)).rev() {
-        if a + s.span(e) > addr_at {
+    for &(a, e) in v.live.range((floor, 0)..=(addr_at, u32::MAX)) {
+        if a + s.span(e) > addr_at && found.map_or(true, |(_, fe)| e > fe) {
             found = Some((a, e));
-            break;
         }
     }
     let (a, e) = match found {
@@ -695,7 +972,7 @@ pub fn alloc_info(
         a,
         a + s.size[ei],
         s.size[ei],
-        s.usable[ei]
+        s.usable_at(e)
     ));
     out.push_str(",\"site\":");
     if s.site[ei] != NONE_U32 {
@@ -729,13 +1006,13 @@ pub fn alloc_info(
     } else {
         out.push_str(",\"deathSeq\":null");
     }
-    if s.stack[ei] != NONE_U32 {
+    if s.stack_at(e) != NONE_U32 {
         out.push_str(",\"stack\":");
-        push_json_str(&mut out, &s.stacks[s.stack[ei] as usize]);
+        push_json_str(&mut out, &s.stacks[s.stack_at(e) as usize]);
     }
-    if s.extra[ei] != NONE_U32 {
+    if s.extra_at(e) != NONE_U32 {
         out.push_str(",\"extra\":{");
-        out.push_str(&s.extras[s.extra[ei] as usize]);
+        out.push_str(&s.extras[s.extra_at(e) as usize]);
         out.push('}');
     }
     // highlight rects across visible rows
@@ -834,7 +1111,7 @@ pub fn move_link(s: &Store, v: &mut View, cfg: &Cfg, w: u32, scroll: f64) -> Str
         out.push_str(&region_rects(s, v, cfg, w, s.addr[ei], s.span(e), scroll, 4));
         out.push(']');
     } else if op == OP_R {
-        let (oa, os) = (s.old_addr[ei], s.old_size[ei]);
+        let (oa, os) = s.old_geom_at(e);
         out.push_str(",\"old\":[");
         if os > 0 {
             out.push_str(&region_rects(s, v, cfg, w, oa, os, scroll, 4));

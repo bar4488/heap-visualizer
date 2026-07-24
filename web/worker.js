@@ -2,6 +2,7 @@
 // The main thread only sends input events and receives state/query results.
 
 let E = null;            // wasm exports
+let wasmModule = null;   // compiled module, re-instantiated per trace load
 const td = new TextDecoder();
 const te = new TextEncoder();
 
@@ -69,6 +70,19 @@ function writeBuf(bytes) {
 // ---------------------------------------------------------------------------
 
 async function loadTrace(buffer) {
+  // Fresh wasm instance per load: Rust frees into its own allocator, never
+  // back to the browser, so reusing one instance ratchets linear memory up to
+  // the high-water mark of every trace opened this session. A new instance
+  // starts from zero and lets the old memory be collected. (Every setting the
+  // engine holds is re-sent right after 'loaded' — see main.js onLoaded — and
+  // hp_parse_begin resets the rest, so nothing carries over that shouldn't.)
+  // stop the frame loop from rendering against a half-swapped engine
+  S.loaded = false;
+  S.playing = false;
+  if (wasmModule) {
+    E = (await WebAssembly.instantiate(wasmModule, {})).exports;
+    applyRowPx();
+  }
   E.hp_parse_begin();
   const CH = 8 << 20;
   const total = buffer.byteLength;
@@ -178,27 +192,38 @@ function renderAddr() {
   const labels = retJson();
   const ctx = ctxs.addr;
   ctx.textBaseline = 'middle';
+  // In-allocation labels of overlapping allocations land on the same rows, so
+  // they are collision-culled: draw the nested (narrower) allocation's label
+  // first and skip any label whose text would sit on already-drawn text.
+  const allocLabels = labels.filter((lb) => lb.k === 2);
+  allocLabels.sort((p, q) => p.w - q.w);
+  const drawn = new Map(); // y -> [[x0, x1]] of drawn text rects
+  for (const lb of allocLabels) {
+    // centered: "name · size" if it fits, else the name, else the formatted
+    // size, else nothing
+    const fs = Math.min(10 * dpr, S.rowPx - 3);
+    if (fs < 6) continue;
+    ctx.font = `${Math.round(fs)}px ui-monospace, SFMono-Regular, Menlo, monospace`;
+    const avail = lb.w - 5 * dpr;
+    const name = S.names.get(lb.e);
+    const sizeText = fmtAllocSize(lb.size);
+    const candidates = name ? [`${name} · ${sizeText}`, name, sizeText] : [sizeText];
+    for (const text of candidates) {
+      const tw = ctx.measureText(text).width;
+      if (tw > avail) continue;
+      const x0 = lb.x + (lb.w - tw) / 2;
+      const row = drawn.get(lb.y) || [];
+      if (row.some(([a, b]) => x0 < b + 4 * dpr && x0 + tw + 4 * dpr > a)) continue; // try shorter text
+      row.push([x0, x0 + tw]);
+      drawn.set(lb.y, row);
+      ctx.fillStyle = 'rgba(8,14,18,0.92)';
+      ctx.fillText(text, x0, lb.y + S.rowPx / 2 + dpr);
+      break;
+    }
+  }
   for (const lb of labels) {
-    if (lb.k === 2) {
-      // in-allocation label, centered: "name · size" if it fits, else the
-      // name, else the formatted size, else nothing
-      const fs = Math.min(10 * dpr, S.rowPx - 3);
-      if (fs >= 6) {
-        ctx.font = `${Math.round(fs)}px ui-monospace, SFMono-Regular, Menlo, monospace`;
-        const avail = lb.w - 5 * dpr;
-        const name = S.names.get(lb.e);
-        const sizeText = lb.size === undefined ? lb.text : fmtAllocSize(lb.size);
-        const candidates = name ? [`${name} · ${sizeText}`, name, sizeText] : [sizeText];
-        for (const text of candidates) {
-          const tw = ctx.measureText(text).width;
-          if (tw <= avail) {
-            ctx.fillStyle = 'rgba(8,14,18,0.92)';
-            ctx.fillText(text, lb.x + (lb.w - tw) / 2, lb.y + S.rowPx / 2 + dpr);
-            break;
-          }
-        }
-      }
-    } else if (lb.k === 0) {
+    if (lb.k === 2) continue; // drawn above
+    if (lb.k === 0) {
       if (S.addrLabels) {
         ctx.font = `${Math.round(10 * dpr)}px ui-monospace, SFMono-Regular, Menlo, monospace`;
         const text = lb.addr;
@@ -211,7 +236,11 @@ function renderAddr() {
       }
     } else {
       ctx.font = `${Math.round(9 * dpr)}px ui-monospace, monospace`;
-      const text = `${fmtBytes(lb.bytes)} skipped`;
+      // `inside`: the collapsed rows are the middle of one huge allocation,
+      // not empty space — saying "skipped" there would read as "nothing here"
+      const text = lb.inside
+        ? `${fmtBytes(lb.bytes)} more of this allocation`
+        : `${fmtBytes(lb.bytes)} skipped`;
       const tw = ctx.measureText(text).width;
       const x = (w - tw) / 2;
       ctx.fillStyle = '#0d1117';
@@ -272,7 +301,9 @@ function postState() {
   });
   postMessage({
     type: 'state',
-    anchor: anchor ? '0x' + ((anchor.hi * 0x100000000) + anchor.lo).toString(16) : null,
+    // BigInt like every other address crossing: Number arithmetic silently
+    // loses precision past 2^53
+    anchor: anchor ? '0x' + ((BigInt(anchor.hi) << 32n) | BigInt(anchor.lo)).toString(16) : null,
     addrMarkYs,
     seq: E.hp_cur(),
     n: S.n,
@@ -288,6 +319,9 @@ function postState() {
   });
 }
 
+// Mirrored in main.js (`fmtBytes`/`fmtAllocSize`) — the worker draws
+// in-allocation labels, the main thread the panels/tooltips, and the two must
+// format identically; change both together.
 function fmtBytes(b) {
   if (b < 1024) return `${Math.round(b)} B`;
   const u = ['KiB', 'MiB', 'GiB', 'TiB', 'PiB'];
@@ -369,6 +403,8 @@ function frame(now) {
 // message handling
 // ---------------------------------------------------------------------------
 
+// Mirrored in main.js (`clampView`) for optimistic local zoom updates — the
+// two must stay identical; change both together.
 function clampView(view, min, max, minSpan) {
   let { lo, hi } = view;
   if (hi - lo < minSpan) hi = lo + minSpan;
@@ -392,8 +428,8 @@ onmessage = async (ev) => {
       }
       const resp = await fetch(m.wasmURL, { cache: 'no-cache' });
       const bytes = await resp.arrayBuffer();
-      const { instance } = await WebAssembly.instantiate(bytes, {});
-      E = instance.exports;
+      wasmModule = await WebAssembly.compile(bytes);
+      E = (await WebAssembly.instantiate(wasmModule, {})).exports;
       postMessage({ type: 'ready' });
       raf(frame);
       break;
@@ -495,6 +531,11 @@ onmessage = async (ev) => {
     }
     case 'scroll':
       S.scroll = Math.max(0, m.y * dpr);
+      // the anchor pin only exists to hold the viewport's top row in place
+      // across a seek; once the user scrolls somewhere else it would linger
+      // as an empty phantom row, so drop it here (main.js swallows echoes of
+      // our own programmatic scrolls, so this only fires on real user scrolls)
+      if (S.loaded) E.hp_clear_anchor_pin();
       S.dirty.addr = true;
       break;
     case 'addr-at': {
@@ -560,7 +601,7 @@ onmessage = async (ev) => {
       break;
     }
     case 'set': {
-      if (!S.loaded && !['rowPx', 'locked', 'sizeLabels', 'addrLabels', 'allocSizeFormat'].includes(m.key)) break;
+      if (!S.loaded && !['rowPx', 'locked', 'sizeLabels', 'addrLabels', 'allocSizeFormat', 'overlapMode', 'ghostMode'].includes(m.key)) break;
       switch (m.key) {
         case 'rowBytes': {
           const anchor = captureAnchor();
@@ -588,6 +629,14 @@ onmessage = async (ev) => {
           break;
         case 'sizeLabels':
           if (E) E.hp_set_size_labels(m.value ? 1 : 0);
+          S.dirty.addr = true;
+          break;
+        case 'overlapMode':
+          if (E) E.hp_set_overlap_mode(m.value | 0);
+          S.dirty.addr = true;
+          break;
+        case 'ghostMode':
+          if (E) E.hp_set_ghosts(m.value ? 1 : 0);
           S.dirty.addr = true;
           break;
         case 'addrLabels':
@@ -718,8 +767,25 @@ onmessage = async (ev) => {
     }
     case 'events': {
       if (!S.loaded) break;
-      E.hp_events_json(m.from, m.count);
-      postMessage({ type: 'events', reqId: m.reqId, from: m.from, events: retJson() });
+      // filtered mode indexes into the engine's filtered event list; `total`
+      // sizes the panel's virtual scroll either way
+      let total = S.n;
+      if (m.filtered) {
+        total = E.hp_events_filtered_count();
+        E.hp_events_filtered_json(m.from, m.count);
+      } else {
+        E.hp_events_json(m.from, m.count);
+      }
+      postMessage({ type: 'events', reqId: m.reqId, from: m.from, events: retJson(), total });
+      break;
+    }
+    // position of a seq in the filtered event list (follow / scroll-to)
+    case 'ev-pos': {
+      if (!S.loaded) break;
+      postMessage({
+        type: 'ev-pos', reqId: m.reqId,
+        pos: E.hp_events_filtered_pos(m.seq), total: E.hp_events_filtered_count(),
+      });
       break;
     }
     case 'flash-event': {

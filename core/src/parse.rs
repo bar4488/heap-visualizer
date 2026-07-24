@@ -124,6 +124,8 @@ impl Parser {
             s.addr_min = s.arena_base;
             s.addr_max = s.arena_base;
         }
+        // ghost candidates are queried by address range at render time
+        s.overlap_index.sort_unstable();
         // free load-time maps
         self.id_map = HashMap::new();
         self.live = BTreeMap::new();
@@ -150,7 +152,9 @@ impl Parser {
         match parse_raw(line) {
             Some(raw) => self.apply(raw),
             None => {
-                let seq = self.store.len();
+                // no event row is produced: attach to the previous event so
+                // "jump to warning" lands where the bad line sat in the stream
+                let seq = self.store.len().saturating_sub(1);
                 self.store.warn(seq, W_MALFORMED, 0);
             }
         }
@@ -204,7 +208,7 @@ impl Parser {
             s.has_header = true;
             s.version = raw.v.unwrap_or(1);
             if s.version != 1 {
-                let seq = s.len();
+                let seq = s.len().saturating_sub(1);
                 s.warn(seq, W_VERSION, s.version as u64);
             }
             if let Some(u) = raw.unit {
@@ -310,7 +314,10 @@ impl Parser {
             addr = match raw.addr {
                 Some(a) => a,
                 None => {
-                    self.store.warn(e, W_MALFORMED, raw.id.unwrap_or(0));
+                    // record is dropped (no event row): attach to the previous
+                    // event, not the yet-unpushed next one
+                    self.store
+                        .warn(e.saturating_sub(1), W_MALFORMED, raw.id.unwrap_or(0));
                     return;
                 }
             };
@@ -344,14 +351,17 @@ impl Parser {
         s.id.push(raw.id.unwrap_or(0));
         s.addr.push(addr);
         s.size.push(size);
-        s.usable.push(usable);
+        // lazy columns: materialize (backfilled with the default) only once a
+        // real value appears, so traces without them pay no per-event memory
+        push_lazy(&mut s.usable, e as usize, usable, 0);
         s.thr_idx.push(thr_idx);
         s.site.push(site);
-        s.stack.push(stack);
-        s.extra.push(extra);
+        push_lazy(&mut s.stack, e as usize, stack, NONE_U32);
+        push_lazy(&mut s.extra, e as usize, extra, NONE_U32);
         s.target.push(target);
-        s.old_addr.push(o_addr);
-        s.old_size.push(o_size);
+        if op == OP_R && (o_addr != 0 || o_size != 0) {
+            s.old_geom.insert(e, (o_addr, o_size));
+        }
         s.death.push(NONE_U32);
         s.tag.push(0);
 
@@ -389,16 +399,25 @@ impl Parser {
                 self.id_map.insert(id, e);
             }
 
-            // overlap check against neighbours in the live map
+            // overlap check against the live map. Walking left, the nearest
+            // block by start address is not enough: a large earlier block can
+            // cover `addr` even with other (non-overlapping) blocks between —
+            // scan the whole window a live block could span, bounded by
+            // max_span like the pick path.
             let mut overlaps = false;
-            if let Some((&(pa, _), &pend)) = self.live.range(..(addr, u32::MAX)).next_back() {
-                overlaps |= pend > addr && pa < end;
+            let floor = addr.saturating_sub(s.max_span.max(1));
+            for (&(_, _), &pend) in self.live.range((floor, 0)..=(addr, u32::MAX)).rev() {
+                if pend > addr {
+                    overlaps = true;
+                    break;
+                }
             }
             if let Some((&(na, _), _)) = self.live.range((addr + 1, 0)..).next() {
                 overlaps |= na < end;
             }
             if overlaps {
                 s.warn(e, W_OVERLAP, addr);
+                s.overlap_index.push((addr, e));
             }
             self.live.insert((addr, e), end);
 
@@ -457,8 +476,7 @@ impl Default for Store {
             stack: Vec::new(),
             extra: Vec::new(),
             target: Vec::new(),
-            old_addr: Vec::new(),
-            old_size: Vec::new(),
+            old_geom: std::collections::HashMap::new(),
             death: Vec::new(),
             tag: Vec::new(),
             green_pre: Vec::new(),
@@ -488,9 +506,22 @@ impl Default for Store {
             n_realloc: 0,
             warnings: Vec::new(),
             warn_counts: [0; NWARN],
+            overlap_index: Vec::new(),
             snaps: Vec::new(),
         }
     }
+}
+
+/// Push to a lazy column: while every value so far equals `default` the
+/// column stays empty; the first real value backfills `default` up to `e`.
+fn push_lazy<T: Copy + PartialEq>(col: &mut Vec<T>, e: usize, v: T, default: T) {
+    if col.is_empty() {
+        if v == default {
+            return;
+        }
+        col.resize(e, default);
+    }
+    col.push(v);
 }
 
 fn parse_raw(line: &[u8]) -> Option<Raw> {

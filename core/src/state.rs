@@ -2,7 +2,7 @@
 //! bidirectional replay, snapshot-accelerated seeks, and the collapsed-row
 //! layout of the address-line.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::store::*;
 
@@ -13,6 +13,9 @@ pub struct View {
     pub live: BTreeSet<(u64, u32)>,
     pub live_count: u32,
     pub live_bytes: u64,
+    /// Multiset of live allocations' birth timestamps, so the oldest live
+    /// birth (age color mode) is O(log n) instead of a full live-set scan.
+    birth_counts: BTreeMap<u64, u32>,
 
     pub row_bytes: u64,
     pub base: u64,
@@ -53,6 +56,7 @@ impl View {
             live: BTreeSet::new(),
             live_count: 0,
             live_bytes: 0,
+            birth_counts: BTreeMap::new(),
             row_bytes: 0x1000,
             base: 0,
             collapse_rows: 5,
@@ -72,6 +76,7 @@ impl View {
     pub fn reset(&mut self, s: &Store) {
         self.cur = 0;
         self.live.clear();
+        self.birth_counts.clear();
         self.occ.clear();
         self.pins.clear();
         self.anchor_pin = None;
@@ -158,6 +163,7 @@ impl View {
         if self.live.insert((s.addr[e as usize], e)) {
             self.live_count += 1;
             self.live_bytes += s.size[e as usize];
+            *self.birth_counts.entry(s.t[e as usize]).or_insert(0) += 1;
             self.occ_add(s, e, 1);
         }
     }
@@ -166,8 +172,19 @@ impl View {
         if self.live.remove(&(s.addr[e as usize], e)) {
             self.live_count -= 1;
             self.live_bytes = self.live_bytes.saturating_sub(s.size[e as usize]);
+            if let Some(c) = self.birth_counts.get_mut(&s.t[e as usize]) {
+                *c -= 1;
+                if *c == 0 {
+                    self.birth_counts.remove(&s.t[e as usize]);
+                }
+            }
             self.occ_add(s, e, -1);
         }
+    }
+
+    /// Birth timestamp of the oldest live allocation, if any.
+    pub fn min_live_birth(&self) -> Option<u64> {
+        self.birth_counts.keys().next().copied()
     }
 
     fn apply_fwd(&mut self, s: &Store, e: u32) {
@@ -220,6 +237,7 @@ impl View {
             }
         } else {
             self.live.clear();
+            self.birth_counts.clear();
             self.occ.clear();
             self.live_count = 0;
             self.live_bytes = 0;

@@ -71,9 +71,14 @@ twin of the sequential strip.
   "where is this 16-byte allocation?").
 - **Follow** (default on) keeps the current event scrolled into view during
   stepping/playback.
-- Arrow keys step the selection; dragging vertically makes a seq range
-  selection feeding the same popover as timeline shift-drag
-  ([07-analysis](07-analysis.md)).
+- **Filtered** (default off) lists only events whose allocation passes the
+  active Filter — an `F` follows the allocation it frees, so an allocation's
+  birth and death both stay in the list. Rows keep their real seq; the
+  engine owns the filtered index (count, slice, seq→row position), rebuilt
+  lazily after any filter or tag change.
+- Arrow keys step the selection (along the filtered rows when the toggle is
+  on); dragging vertically makes a seq range selection feeding the same
+  popover as timeline shift-drag ([07-analysis](07-analysis.md)).
 
 ## 6.6 Scroll ownership
 

@@ -1,131 +1,108 @@
-# Findings from the full code read (2026-07-22)
+# Tasks
 
-Issues noticed while grounding `specs/` in the code: bugs, performance risks,
-redundancy, and design choices worth revisiting. None is a hard blocker at the
-current target scale (millions of events); items are ordered by severity
-within each section.
+Findings from the full code read (2026-07-22), worked through 2026-07-24.
+Everything below is done; the notes say what the resolution was, since a few
+of them were judgement calls rather than mechanical fixes.
 
 ## Bugs
 
-- [ ] **Overlap warning misses nested overlaps** — `core/src/parse.rs`
-  (overlap check in `apply`): only the nearest live block *by start address*
-  on each side is tested. A new allocation landing inside an earlier, larger
-  block whose start is not adjacent (e.g. A `0x1000+0x10000`, B `0x5000+0x10`,
-  new alloc at `0x6000`) is not flagged, even though A covers it. The
-  rasterizer's orange pixel-overlap flag partially compensates, but only for
-  on-screen, fully-covered pixels. Fix: query an interval structure (e.g. walk
-  back while `prev.end > addr`, bounded by `max_span` like the pick path).
-- [ ] **`\u` surrogate pairs are not decoded** — `core/src/json.rs`
-  (`unescape`): a supplementary-plane character escaped as a surrogate pair
-  (`"😀"`) decodes to two U+FFFD replacement chars. Site names /
-  titles with emoji or CJK-extension chars are garbled.
-- [ ] **Anchor pin is never cleared** — `hp_set_anchor_pin` (`core/src/lib.rs`)
-  only ever sets `Some`; nothing clears it until the next trace load. After
-  any anchored seek, the last anchor row stays laid out forever, even when
-  empty and no longer at the top of the viewport — a phantom row in
-  live-rows mode. Worker should clear the pin once the anchor is restored (or
-  the engine should treat it as valid for one layout only).
-- [ ] **Warning `seq` attribution is off for skipped lines** —
-  `core/src/parse.rs`: warnings for records that produce no event row
-  (malformed line, creator without `addr`) are attached to `store.len()`,
-  i.e. the *next* event's index. "Jump to warning" from the UI lands one
-  event late in those cases.
-- [ ] **Anchor address formatting loses precision above 2^53** —
-  `web/worker.js` `postState`: `(anchor.hi * 0x100000000) + anchor.lo` uses
-  Number arithmetic, while every other address crossing uses BigInt. Only
-  matters for >8 PiB addresses, but it's an inconsistency waiting to bite.
+- [x] **Overlap warning missed nested overlaps** — `core/src/parse.rs`: only
+  the nearest live block *by start address* was tested on each side, so an
+  allocation landing inside an earlier, larger block was not flagged when
+  another block sat between them. Now walks the whole window a live block
+  could span, bounded by `max_span` like the pick path.
+- [x] **`\u` surrogate pairs are decoded** — `core/src/json.rs` `unescape`
+  now combines a `\uD800-\uDBFF` / `\uDC00-\uDFFF` pair into one code point;
+  an unpaired half yields a single U+FFFD instead of two.
+- [x] **Anchor pin is cleared** — the transient pin exists to hold the
+  viewport's top row across a *seek*, so it is dropped when the user scrolls
+  somewhere else (`hp_clear_anchor_pin`, called from the worker's `scroll`
+  handler) rather than immediately after the seek, which would defeat it.
+  No more phantom empty row in live-rows mode.
+- [x] **Warning `seq` attribution for skipped lines** — records producing no
+  event row (malformed line, creator without `addr`, bad header version) now
+  attach to the *previous* event instead of `store.len()`, so "jump to
+  warning" no longer lands one event late.
+- [x] **Anchor address formatting above 2^53** — `web/worker.js` `postState`
+  uses BigInt like every other address crossing.
 
 ## Performance
 
-- [ ] **`render_addr` walks the entire live set every frame** —
-  `core/src/render.rs`: pass 2 iterates all live allocations regardless of
-  the viewport, skipping off-screen rows per allocation. O(live) per frame is
-  the main scaling cliff for traces with very large live sets (hundreds of
-  thousands+ live). The live set is already ordered by address; a
-  binary-search entry at the first visible row's address (bounded by
-  `max_span`, like `pick`) would make it O(visible + log live).
-- [ ] **Age mode adds a second full live-set scan per frame** —
-  `age_normalizer` (`core/src/render.rs`) finds the oldest live birth by
-  iterating everything. Could be maintained incrementally by the `View`, or
-  at least cached per playhead position.
-- [ ] **Per-frame DOM churn in `onState`** — `web/main.js`: every worker
-  state message (i.e. every rendered frame during playback/drag) rebuilds
-  `innerHTML` for the move-link SVG, both strips' bookmark flag lists,
-  address-mark lines, and crop/selection bands. Small lists today, but it's
-  layout/GC pressure ~60×/s; should diff or only rebuild on actual change.
-- [ ] **Store memory: ~120 B/event across always-allocated columns** —
-  `core/src/store.rs`: `old_addr`/`old_size` (u64×2) exist for every event
-  but are meaningful only for `R`; `usable` is u64 for a rarely-present hint;
-  `stack`/`extra` are u32 columns even when the trace has none. At 10 M+
-  events this is the difference between fitting comfortably in wasm32 memory
-  and not. Consider side-tables keyed by event index for R-only/optional
-  columns.
-- [ ] **WASM memory never shrinks across loads** — loading several large
-  traces in one session ratchets linear memory up to the high-water mark
-  (Rust frees to the allocator, not the browser). Cheap fix if it matters:
-  recreate the worker per load.
-- [ ] **`hp_pick` JSON round-trip per mousemove** — hover picking serializes
-  the full info blob (including rects) to JSON and parses it on the worker for
-  every coalesced mousemove. Fine now; would be the first thing to feel a
-  bigger info payload. (Coalescing already prevents backlog — keep that.)
-- [ ] **gen.py realloc is O(live) per event** — `_do_realloc` does
-  `list(self.live.keys())` to pick a victim; generating multi-million-event
-  traces with a high realloc rate is quadratic-ish. Tooling-only.
+- [x] **`render_addr` no longer walks the entire live set every frame** —
+  enters the address-ordered live set by binary search at the first visible
+  row (bounded by `max_span`) and stops past the last visible one:
+  O(visible + log live) instead of O(live).
+- [x] **Age mode's second full scan removed** — `View` maintains a birth-time
+  multiset incrementally, so `age_normalizer` is O(log n).
+- [x] **Per-frame DOM churn in `onState`** — the move-link SVG, both strips'
+  bookmark flags, and the address-mark lines go through `setHtml`, which
+  skips the assignment when the markup is unchanged (it usually is).
+- [x] **Store memory per event** — `usable`/`stack`/`extra` are lazy columns
+  (empty until a real value appears, read through accessors that report the
+  default), and `old_addr`/`old_size` moved to an `old_geom` side table keyed
+  by event index. A trace using none of them pays nothing for all five.
+- [x] **WASM memory shrinks across loads** — the worker keeps the compiled
+  module and re-instantiates per load, so the previous trace's linear memory
+  is collected instead of ratcheting to the session high-water mark.
+- [x] **gen.py realloc is no longer O(live) per event** — victims come from a
+  shuffled reservoir refilled in bulk, amortized O(1).
+- [ ] **`hp_pick` JSON round-trip per mousemove** — left as is, deliberately.
+  Hover picking serializes the full info blob per coalesced mousemove; it is
+  not measurable today, and the coalescing (which is what actually prevents a
+  backlog) is the part worth keeping. Revisit only if the info payload grows.
 
 ## Redundant code
 
-- [ ] **Dead `sel_rect` in `render_addr`** — `core/src/render.rs:482,628` —
-  assigned when the selected allocation is drawn, never read. Delete.
-- [ ] **`showTooltip` called with 4 args** — `web/main.js:2358`
-  (`onTlHoverResult`): passes `q.xClient ?? 0, q.clientY` to a 2-parameter
-  function, and `q.xClient` doesn't even exist. Positioning actually comes
-  from `positionTooltipNearMouse()`. Drop the extra args.
-- [ ] **Session applied twice on load** — `onLoaded` runs `restoreSession()`
-  and then `restoreMarksAutosave()`, whose marks blob embeds its own session
-  snapshot, so `applySession` runs twice back-to-back (double seeks, double
-  filter/layout messages, pinned windows torn down and rebuilt). Either strip
-  `session` from the marks *autosave* (keep it in the exported file) or skip
-  the first restore when a marks autosave exists.
-- [ ] **Duplicated constants/helpers across layers** — `CAT`/`RAMP` palettes
-  exist in both `core/src/render.rs` and `web/main.js`; `fmtBytes`/
-  `fmtAllocSize` exist in both `worker.js` and `main.js`; `clampView` is
-  intentionally mirrored (worker + main) but undocumented at the main-thread
-  copy. All must be kept in sync by hand — at minimum point each copy at its
-  twin; better, have the engine export the palette once.
-- [ ] **Test dead code** — `core/src/lib.rs` `snapshot_seek_matches_replay`:
-  the `fresh` View and the `for e in 0..target {}` loop do nothing. Delete.
-- [ ] **`lb.size === undefined` fallback in worker label drawing** —
-  `web/worker.js` `renderAddr`: `k===2` labels always carry `size`; the
-  `lb.text` fallback is unreachable.
+- [x] **Dead `sel_rect` in `render_addr`** — deleted.
+- [x] **`showTooltip` called with 4 args** — dropped the two extra args (one
+  of which never existed); positioning comes from `positionTooltipNearMouse`.
+- [x] **Session applied twice on load** — `onLoaded` prefers the marks
+  autosave (whose blob embeds its own session) and only falls back to
+  `restoreSession()` when there is none, so `applySession` runs once.
+- [x] **Duplicated constants/helpers across layers** — `CAT`/`RAMP`,
+  `fmtBytes`/`fmtAllocSize`, and `clampView` each now point at their twin in
+  a comment on both sides. Not deduplicated: the engine copy paints pixels in
+  Rust and the JS copy paints DOM chrome, so a shared source would mean
+  exporting the palette across the wasm boundary every frame for no benefit.
+- [x] **Test dead code** — the no-op `fresh` View and empty loop in
+  `snapshot_seek_matches_replay` are gone.
+- [x] **`lb.size === undefined` fallback** — unreachable; removed, along with
+  the now-unused `text` field the engine emitted for it.
 
-## Debatable design choices (revisit deliberately, don't "fix" casually)
+## Design choices, settled
 
-- [ ] **Site-less allocations pass site filters** — `Filter::pass`
-  (`core/src/render.rs`): an allocation with no `site` is unconstrained by the
-  site selection (same for `thr`). Selecting "none" therefore still shows
-  site-less allocations. Tests pin this as intended; the alternative (treat
-  missing as its own bucket with a checkbox) is arguably more predictable.
-  Documented in specs/07; decide once and keep.
-- [ ] **Giant allocations (>65536 rows) only occupy their first/last rows in
-  the layout** — `View::occ_add` / `build_all_rows` cap: the middle rows of a
-  single terabyte-scale allocation collapse as if empty (rationale: don't
-  stall layout). Correct trade-off, but the middle of such an allocation
-  renders as a gap marker, which reads as "nothing here". Worth either
-  documenting in-UI or special-casing gap markers that lie inside one
-  allocation.
-- [ ] **Unconditional 2 s localStorage autosave** — `scheduleSessionAutosave`
-  serializes and writes the session every 2 s while a trace is loaded, even
-  when idle. Harmless but wasteful; a dirty flag like the marks path already
-  has would do.
-- [ ] **Events-list position is approximate past the spacer cap** —
-  `EV_MAX_SPACER` (12 M px) index-maps scroll beyond ~700 k events; drag
-  selection in the list (`yToSeq`) is then approximate too. Accepted
-  browser-limit workaround; keep the constant next to a comment saying which
-  UX degrades past it (it does today — preserve when touching).
-- [ ] **`case 'ready'` declares `const url` in an unbraced switch case** —
-  `web/main.js` worker `onmessage`: works, but is scoped to the whole switch;
-  brace the case like the others.
-- [ ] **Numeric jump grammar doesn't accept scientific notation** —
-  `execJump`: `1e6` as a *seq* parses as `1` (`parseInt`); only `t:1e6`
-  works. Either accept `1e6` for seq or make the placeholder/`title` say
-  integers only.
+- [x] **Site-less allocations pass site filters** — kept, and now documented
+  as a decision in specs/07 rather than an open question: the site filter
+  answers "which sites do I care about", and a record that never named a site
+  is not a member of any answer. Pinned by tests.
+- [x] **Giant allocations only occupy their first/last rows** — the layout
+  cap stays (it is the right trade-off), but the gap marker inside such an
+  allocation now reads "N KiB more of this allocation" instead of "N KiB
+  skipped", which said the opposite of the truth.
+- [x] **Unconditional 2 s localStorage autosave** — now compares against the
+  last serialized snapshot and skips the write when nothing moved.
+- [x] **Events-list position past the spacer cap** — kept (it is a browser
+  limit), with `EV_MAX_SPACER` now carrying a comment naming both behaviors
+  that degrade past it, so they survive future edits.
+- [x] **`case 'ready'` unbraced switch case** — braced.
+- [x] **Numeric jump grammar** — a bare `1e6` now parses as seq 1000000
+  (`parseFloat`), matching how `t:1e6` already behaved.
+
+# Features
+
+- [x] **Match address ranges in filters** — the Filter panel takes a list of
+  hex address ranges (an allocation passes if it touches any of them), and an
+  allocation's panel has a **match range** button that seeds the list with
+  its own span. Engine-side as `Filter::addr_ranges`; persisted in the
+  session.
+- [x] **Renaming and reordering of views** — Layout had accumulated settings
+  that were not layout. Split by what a setting *does*: **Layout** = where
+  things land on the map (row bytes, collapse, all-rows, row zoom, overlap
+  display), new **Appearance** panel = how they are drawn (color mode, size
+  labels, address labels, size format), and viewport lock moved to **Play**,
+  where it belongs — it decides whether stepping scrolls.
+- [x] **Overlapping allocations display** — now a choice, since an overlap is
+  as often deliberate nesting as it is corruption: *flag orange* (default,
+  the data-integrity signal), *inner on top*, or *outer on top*. In Layout;
+  see specs/04 §4.6. The load-time overlap warning is unaffected and always
+  fires.

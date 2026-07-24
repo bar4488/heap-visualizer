@@ -6,8 +6,8 @@ everything else is a **window** the user summons, places, and dismisses.
 ## 9.1 Layout
 
 - **Toolbar** (top): open/demo, trace title, panel toggles (Play, Layout,
-  Filter, Events, Marks), horizontal-zoom pill, crop pill, marks Save/Load,
-  jump box, warnings badge.
+  Appearance, Filter, Events, Marks), horizontal-zoom pill, crop pill, marks
+  Save/Load, jump box, warnings badge.
 - **Legend strip** under the toolbar when a color mode needs one.
 - **Workspace**: optional left/right drawers flanking the three stacked views.
 - **Status bar** (bottom): playhead position (seq + t), live count/bytes,
@@ -17,8 +17,8 @@ everything else is a **window** the user summons, places, and dismisses.
 
 ## 9.2 Panels are windows
 
-Every panel (Play, Layout, Filter, Marks, Warnings, Events, Allocation, and
-pinned allocation windows) is a floating window: dragged by its header,
+Every panel (Play, Layout, Appearance, Filter, Marks, Warnings, Events,
+Allocation, and pinned allocation windows) is a floating window: dragged by its header,
 closable, and z-stacked with most-recently-touched on top. Toolbar buttons
 toggle visibility; position persists per trace via the session
 ([07-analysis §7.7](07-analysis.md)).
@@ -56,21 +56,28 @@ index.
 
 ## 9.5 Specific panels
 
-- **Play**: step/play buttons, advance mode (time / events), speed
-  ([06-playback-navigation](06-playback-navigation.md)).
-- **Layout**: row bytes, collapse threshold, all-rows, size labels + format,
-  address labels, row zoom, color mode, viewport lock
+Panels are split by *what the setting does*, not by what happens to be
+convenient: **Layout** decides where things land on the map, **Appearance**
+how they are drawn, **Play** how the playhead moves. A setting belongs to
+exactly one of those.
+
+- **Play**: step/play buttons, advance mode (time / events), speed, viewport
+  lock — lock is playback behavior (it decides whether stepping scrolls), not
+  layout ([06-playback-navigation](06-playback-navigation.md)).
+- **Layout**: row bytes, collapse threshold, all-rows, row zoom, overlap
+  display mode, freed-nested ghosts ([04-address-map](04-address-map.md)).
+- **Appearance**: color mode, size labels, address labels, size format
   ([04-address-map](04-address-map.md)).
-- **Filter**: dim/hide mode, size range, per-site and per-thread checkboxes
-  (with all/none links), tag visibility list with recolor/rename/delete
-  ([07-analysis](07-analysis.md)).
+- **Filter**: dim/hide mode, size range, address ranges, per-site and
+  per-thread checkboxes (with all/none links), tag visibility list with
+  recolor/rename/delete ([07-analysis](07-analysis.md)).
 - **Marks**: time marks, address marks, named allocations — each row
   renameable inline, with jump/center/delete actions
   ([07-analysis](07-analysis.md)).
 - **Warnings**: the flagged-input list; click jumps to the event
   ([03-core-model §3.5](03-core-model.md)).
-- **Events**: the virtualized event list
-  ([06-playback-navigation §6.5](06-playback-navigation.md)).
+- **Events**: the virtualized event list, with follow and filtered-only
+  toggles ([06-playback-navigation §6.5](06-playback-navigation.md)).
 
 ## 9.6 Status & feedback conventions
 

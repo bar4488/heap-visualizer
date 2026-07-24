@@ -22,7 +22,8 @@
   <span class="sep"></span>
 
   <button id="hz-reset" hidden title="Horizontal zoom on the address line (ctrl/alt+wheel to zoom around the cursor, shift+wheel or horizontal scroll to pan) — click to reset">×1</button>
-  <button id="btn-layout" title="Address-line layout: row bytes, collapsing, zoom, colors">Layout</button>
+  <button id="btn-layout" title="How the address map is arranged: row bytes, collapsing, row zoom, overlaps">Layout</button>
+  <button id="btn-appearance" title="How the address map is drawn: colors, labels, size format">Appearance</button>
   <button id="btn-filter">Filter</button>
   <button id="btn-events" hidden title="Sequenced list of all events">Events</button>
   <button id="btn-analysis" hidden>Marks</button>
@@ -102,6 +103,10 @@
       <option value="seq">by events</option>
     </select></label></div>
     <div class="filter-row"><label>speed <select id="play-speed" title="Playback speed"></select></label></div>
+    <div class="filter-row">
+      <button id="btn-lock" title="Lock the viewport: stepping keeps the address view where it is instead of auto-scrolling (L)">🔓</button>
+      <label>lock viewport — stepping doesn't scroll (L)</label>
+    </div>
   </div>
 </div>
 
@@ -114,15 +119,6 @@
       title="Collapse a run of empty rows only when it is at least this long: a plain number means rows (e.g. 5), a byte size means empty address space (e.g. 64k, 1m, 0x10000)"></label></div>
     <div class="filter-row"><label title="Lay out every row any allocation ever touches, so the map never reflows or scrolls away as allocations are freed">
       <input type="checkbox" id="show-all" checked> all rows</label></div>
-    <div class="filter-row"><label title="Show each allocation's name / size inside it when it fits">
-      <input type="checkbox" id="show-sizes" checked> sizes</label></div>
-    <div class="filter-row"><label>size format <select id="alloc-size-format"
-      title="How allocation sizes are shown in labels, tooltips, the allocation panel, and events">
-      <option value="human">compact</option>
-      <option value="hex">hex</option>
-    </select></label></div>
-    <div class="filter-row"><label title="Show row start addresses along the left edge of the map">
-      <input type="checkbox" id="show-addrs" checked> addresses</label></div>
     <div class="filter-row"><label>row zoom <select id="row-px">
       <option value="4">xs</option>
       <option value="8">s</option>
@@ -130,6 +126,19 @@
       <option value="18">l</option>
       <option value="26">xl</option>
     </select></label></div>
+    <div class="filter-row"><label>overlaps <select id="overlap-mode"
+      title="How to draw pixels where two live allocations overlap — a real overlap is a bug in the traced program, so it is flagged by default; ignore draws the latest-created allocation on top">
+      <option value="0">flag orange</option>
+      <option value="1">ignore</option>
+    </select></label></div>
+    <div class="filter-row"><label title="Mark where an allocation nested inside a still-live one has been freed: the freed range renders recessed (darker, with divider edges) inside its parent instead of vanishing without trace">
+      <input type="checkbox" id="ghost-mode" checked> mark freed nested</label></div>
+  </div>
+</div>
+
+<div id="appearance-panel" class="panel" hidden>
+  <div class="panel-head">Appearance <button class="panel-close" data-close="appearance-panel">×</button></div>
+  <div class="panel-body">
     <div class="filter-row"><label>color <select id="color-mode">
       <option value="0">live</option>
       <option value="1">site</option>
@@ -138,10 +147,15 @@
       <option value="4">age</option>
       <option value="5">tag</option>
     </select></label></div>
-    <div class="filter-row">
-      <button id="btn-lock" title="Lock the viewport: stepping keeps the address view where it is instead of auto-scrolling (L)">🔓</button>
-      <label>lock viewport — stepping doesn't scroll (L)</label>
-    </div>
+    <div class="filter-row"><label title="Show each allocation's name / size inside it when it fits">
+      <input type="checkbox" id="show-sizes" checked> sizes</label></div>
+    <div class="filter-row"><label title="Show row start addresses along the left edge of the map">
+      <input type="checkbox" id="show-addrs" checked> addresses</label></div>
+    <div class="filter-row"><label>size format <select id="alloc-size-format"
+      title="How allocation sizes are shown in labels, tooltips, the allocation panel, and events">
+      <option value="human">compact</option>
+      <option value="hex">hex</option>
+    </select></label></div>
   </div>
 </div>
 
@@ -154,6 +168,15 @@
       <button id="filter-clear">clear</button>
     </div>
     <div class="filter-row"><label>size <input id="f-size-min" placeholder="min (e.g. 4k)" size="9">–<input id="f-size-max" placeholder="max" size="9"></label></div>
+    <div class="an-section">
+      <div class="group-title">address ranges · an allocation passes if it touches any range
+        <span class="allnone"><a id="f-addr-clear">clear</a></span></div>
+      <div class="filter-row">
+        <input id="f-addr-lo" placeholder="0x… from" size="12">–<input id="f-addr-hi" placeholder="0x… to" size="12">
+        <button id="f-addr-add" title="Add this address range to the filter">＋</button>
+      </div>
+      <div id="f-addrs" class="check-group"></div>
+    </div>
     <div id="f-sites" class="check-group"></div>
     <div id="f-thrs" class="check-group"></div>
     <div class="an-section">
@@ -218,6 +241,7 @@
 <div id="events-panel" class="panel" hidden>
   <div class="panel-head">Events
     <span class="head-actions">
+      <label title="Only list events whose allocation passes the current Filter (an F follows the allocation it frees)"><input type="checkbox" id="ev-filtered"> filtered</label>
       <label title="Keep the current event in view while stepping / playing"><input type="checkbox" id="ev-follow" checked> follow</label>
       <button class="panel-close" data-close="events-panel">×</button>
     </span>

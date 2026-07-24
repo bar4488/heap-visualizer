@@ -64,7 +64,7 @@ view around" (each was added in response to real disorientation, see
 Fixed base semantics so traces read consistently: **green** = allocation
 (live region fill, `M`/`R` timeline ticks), **red** = free, neutral =
 gaps/background. Overlapping live bytes render **orange** — a data-integrity
-signal, not a palette choice.
+signal, not a palette choice (see §4.6 for the other display modes).
 
 The fill may instead be driven by a user-selected **color mode**:
 
@@ -87,20 +87,72 @@ that never covers real allocation pixels.
 
 A legend strip below the toolbar explains the active mode's mapping.
 
-## 4.6 Labels
+## 4.6 Overlapping allocations
+
+Two live allocations sharing bytes means the traced program (or the trace
+itself) is wrong, so the default is to make it loud rather than pretty:
+shared pixels render **orange**. But an overlap is often *nesting* — a suballocator
+handing out pieces of a block it still holds live — where orange hides the
+structure instead of revealing it. So the display is a user choice:
+
+| Mode | Shared pixels show |
+|------|--------------------|
+| flag orange (default) | Orange, wherever two allocations fully cover the same pixel. |
+| ignore | The most recently created allocation — draws are creation-ordered, so the newest is always on top. |
+
+Only pixels *fully* covered by both byte ranges count, so two allocations
+merely abutting inside one pixel are never flagged. Overlap display is
+independent of the load-time overlap *warning*
+([03-core-model §3.5](03-core-model.md)), which always fires. The overlap
+display mode (and the ghost toggle below) are **global app preferences**,
+persisted across traces and runs, unlike per-trace session state
+([07-analysis §7.7](07-analysis.md)).
+
+Where several live allocations cover the same address, **picking (hover and
+click) selects the most recently created one** — the allocation on top, in
+both senses: allocations are also *drawn* in creation order, so what "ignore"
+shows and what a click selects always agree. Address-order picking would let
+an enclosing block shadow everything nested inside it, making inner
+allocations unselectable.
+
+**Freed-nested "ghosts"** (toggleable, default on): a free normally shows as
+the region emptying, but an allocation freed *inside* a still-live parent
+would vanish without a visible trace. Instead its range renders **recessed**
+— the parent's fill darkened, with darker divider edges at its boundaries —
+so an ended allocation stays readable inside its parent. Rules that make
+this honest and cheap:
+
+- Only *true nesting* ghosts: the dead allocation must have been created
+  after the enclosing live one and sit fully inside it. Earlier tenants of
+  reused address space (freed before the parent existed) are not ghosts.
+- Candidates come from the load-time overlap index (creators that overlapped
+  something live at birth), so traces without nesting pay nothing.
+- Overlapping dead generations at one address darken a slot **once** (a
+  coverage-buffer mark makes the fill idempotent), and a live nested
+  allocation's pixels are never darkened.
+- The per-frame candidate scan is budget-capped like labels, so pathological
+  churn cannot stall a frame.
+
+## 4.7 Labels
 
 Drawn by the JS layer on top of the raster (the engine emits label geometry;
 JS knows fonts, user names, and the chosen size format):
 
 - **Row addresses** along the left edge (toggleable), thinned to every Nth row
   when rows are short.
-- **Gap markers**: centered "N KiB skipped".
+- **Gap markers**: centered "N KiB skipped" — or "N KiB more of this
+  allocation" when the collapsed rows are the middle of a single allocation
+  too large to lay out row by row (§4.3), where "skipped" would read as
+  "nothing here" and mean the opposite of the truth.
 - **In-allocation labels** for allocations wide enough: `name · size` if it
   fits, else the name, else the size (compact or hex format, user choice).
   Multi-row allocations put the label on the middle visible row. Emission is
-  capped per frame (400) so dense maps don't drown in text.
+  capped per frame (400) so dense maps don't drown in text. Overlapping
+  allocations would land their labels on the same rows, so labels are
+  collision-culled at draw time: the nested (narrower) allocation's label
+  wins and colliding text is skipped.
 
-## 4.7 Hit-testing and queries
+## 4.8 Hit-testing and queries
 
 All picking is engine-side (the DOM has no idea what's where):
 
@@ -115,5 +167,6 @@ All picking is engine-side (the DOM has no idea what's where):
   outlines the fresh allocation — so stepping always shows *where* something
   happened.
 
-Hit-testing scans the address-ordered live set backwards from the cursor
-address, bounded by the largest span in the trace — no per-pixel index needed.
+Hit-testing scans the address-ordered live set around the cursor address,
+bounded by the largest span in the trace — no per-pixel index needed. Among
+overlapping covers the newest creator event wins (§4.6).

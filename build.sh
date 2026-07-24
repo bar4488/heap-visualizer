@@ -7,4 +7,4 @@ cargo build --release --target wasm32-unknown-unknown --manifest-path core/Cargo
 cp core/target/wasm32-unknown-unknown/release/heap_visualizer_core.wasm web/heap_visualizer_core.wasm
 ls -la web/heap_visualizer_core.wasm
 
-echo "serve with: python3 -m http.server -d web 8630"
+echo "serve with: ./serve.py   (http.server sends no Cache-Control, so browsers cache stale js)"

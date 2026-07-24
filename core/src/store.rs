@@ -51,20 +51,23 @@ pub struct Store {
     pub id: Vec<u64>,
     pub addr: Vec<u64>,
     pub size: Vec<u64>,
-    /// usable size hint (0 = absent). Rendered as a slack band.
+    /// usable size hint (0 = absent). Rendered as a slack band. Lazy column:
+    /// stays empty until the first event with a hint (empty = all zero), so
+    /// traces without the hint pay nothing. Read via `usable_at`.
     pub usable: Vec<u64>,
     pub thr_idx: Vec<u16>,
     pub site: Vec<u32>,
+    /// Lazy column like `usable` (empty = all NONE_U32). Read via `stack_at`.
     pub stack: Vec<u32>,
     /// Index into `extras` of this event's caller-defined JSON fields
     /// (unrecognized top-level keys), interned as a raw JSON object body
-    /// fragment; NONE_U32 = none.
+    /// fragment; NONE_U32 = none. Lazy column; read via `extra_at`.
     pub extra: Vec<u32>,
     /// For F/R events: index of the creating event (M/R) being killed.
     pub target: Vec<u32>,
-    /// For R events: old geometry (resolved from target, else record copy).
-    pub old_addr: Vec<u64>,
-    pub old_size: Vec<u64>,
+    /// For R events only: old geometry (resolved from target, else record
+    /// copy), keyed by event index. Side table so non-R events cost nothing.
+    pub old_geom: std::collections::HashMap<u32, (u64, u64)>,
     /// For creator events (M/R): the event index that kills this allocation.
     pub death: Vec<u32>,
     /// User-assigned tag per creator event (0 = untagged). Session state,
@@ -109,6 +112,12 @@ pub struct Store {
     pub warnings: Vec<Warning>,
     pub warn_counts: [u32; NWARN],
 
+    /// Creator events flagged W_OVERLAP at load, sorted by (addr, event) —
+    /// the candidate set for ghost rendering (freed-inside-live markers).
+    /// Unlike `warnings` this is never capped, but it only holds overlapping
+    /// creators, so a trace without nesting pays nothing.
+    pub overlap_index: Vec<(u64, u32)>,
+
     /// Snapshots: (events_applied, live creator-event indices, sorted by index).
     pub snaps: Vec<(u32, Vec<u32>)>,
 }
@@ -125,11 +134,49 @@ impl Store {
         }
     }
 
+    /// Usable-size hint for event `e` (0 = absent). Lazy column: empty means
+    /// no event in the trace carried the hint.
+    #[inline]
+    pub fn usable_at(&self, e: u32) -> u64 {
+        if self.usable.is_empty() {
+            0
+        } else {
+            self.usable[e as usize]
+        }
+    }
+
+    /// Stack intern index for event `e` (NONE_U32 = absent). Lazy column.
+    #[inline]
+    pub fn stack_at(&self, e: u32) -> u32 {
+        if self.stack.is_empty() {
+            NONE_U32
+        } else {
+            self.stack[e as usize]
+        }
+    }
+
+    /// Extra-fields intern index for event `e` (NONE_U32 = absent). Lazy column.
+    #[inline]
+    pub fn extra_at(&self, e: u32) -> u32 {
+        if self.extra.is_empty() {
+            NONE_U32
+        } else {
+            self.extra[e as usize]
+        }
+    }
+
+    /// Old (addr, size) geometry of the allocation an R event replaced;
+    /// (0, 0) for anything else.
+    #[inline]
+    pub fn old_geom_at(&self, e: u32) -> (u64, u64) {
+        self.old_geom.get(&e).copied().unwrap_or((0, 0))
+    }
+
     /// Rendered byte span of a creator event (requested size or usable, whichever
     /// is larger; always at least 1 so zero-size flagged records still show).
+    #[inline]
     pub fn span(&self, e: u32) -> u64 {
-        let e = e as usize;
-        self.size[e].max(self.usable[e]).max(1)
+        self.size[e as usize].max(self.usable_at(e)).max(1)
     }
 
     /// Timestamp of the playhead "after `applied` events".

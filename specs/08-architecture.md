@@ -31,13 +31,36 @@ main thread (main.js, DOM)  ←messages→  worker (worker.js)  ←C ABI→  WAS
   unknown fields, raw-span capture of extras, and no dependency weight in the
   wasm binary.
 
+### Scaling rules
+
+The target is traces of millions of events, which makes two costs the ones
+worth defending. Both have been the actual bottleneck at some point:
+
+- **Nothing per frame may be O(live set).** Rendering enters the
+  address-ordered live set by binary search at the first visible row (bounded
+  below by the trace's largest span, exactly like hit-testing) and stops past
+  the last visible one, so a frame costs O(visible + log live) no matter how
+  large the live set grows. Values that would otherwise need a full scan are
+  maintained incrementally instead — the age color mode's oldest-live-birth
+  comes from a birth-time multiset in `View`, updated on insert/remove.
+- **Nothing per event may be paid by every trace.** Columns that most traces
+  never populate (`usable`, `stack`, `extra`) are *lazy*: the column stays
+  empty until the first real value appears and is read through an accessor
+  that reports the default, so a trace without them allocates nothing.
+  `R`-only geometry (`old_addr`/`old_size`) lives in a side table keyed by
+  event index rather than two u64 columns spanning every event.
+
 ## 8.2 The worker
 
 Owns the WASM instance and the three `OffscreenCanvas`es (transferred from
 the main thread at init). Responsibilities:
 
 - **Loading**: streams the file into the engine in 8 MiB chunks, posting
-  progress; on completion posts trace metadata + warnings.
+  progress; on completion posts trace metadata + warnings. Each load starts
+  from a **fresh WASM instance** (the compiled module is kept and
+  re-instantiated): Rust frees into its own allocator and never returns pages
+  to the browser, so reusing one instance would ratchet linear memory up to
+  the high-water mark of every trace opened in the session.
 - **Frame loop**: a rAF loop driven by per-canvas **dirty flags** — nothing
   renders unless something changed. Timeline bitmaps are cached and re-binned
   only when view/size/tag state changes; the address map re-rasters when

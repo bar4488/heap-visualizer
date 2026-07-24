@@ -163,6 +163,8 @@ class Generator:
         self.rng = random.Random(args.seed)
         self.alloc = Allocator(args.arena_base)
         self.live: dict[int, Live] = {}
+        # shuffled reservoir of live ids for realloc victim selection
+        self._live_pool: list[int] = []
         # min-heap of (free_t, id) for allocations with a scheduled death
         self.pending: list[tuple[int, int]] = []
         self.next_id = 1
@@ -203,6 +205,22 @@ class Generator:
 
     def _pick_site(self) -> Site:
         return self.rng.choices(SITES, weights=self._site_weights, k=1)[0]
+
+    def _pick_live_id(self) -> int:
+        """A random live id, without materializing the whole live dict.
+
+        `rng.choice(list(self.live))` is O(live) per realloc, which makes
+        generating multi-million-event traces with a high realloc rate
+        quadratic. Sampling from a reservoir of ids that is refilled in bulk
+        keeps it amortized O(1); ids that died in the meantime are skipped.
+        """
+        while True:
+            while self._live_pool:
+                aid = self._live_pool.pop()
+                if aid in self.live:
+                    return aid
+            self._live_pool = list(self.live)
+            self.rng.shuffle(self._live_pool)
 
     # -- emission -----------------------------------------------------------
 
@@ -264,7 +282,7 @@ class Generator:
         if not self.live:
             self._do_malloc(out)
             return
-        old_id = self.rng.choice(list(self.live.keys()))
+        old_id = self._pick_live_id()
         old = self.live.pop(old_id)
         # free the old region, then allocate the new one
         self.alloc.free(old.addr, old.size)

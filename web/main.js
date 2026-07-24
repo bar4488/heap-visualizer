@@ -3,6 +3,9 @@
 
 const $ = (id) => document.getElementById(id);
 
+// Mirrored from core/src/render.rs (CAT / RAMP): the engine paints
+// allocations, this file paints the matching legend chips and filter
+// swatches. Keep the two in sync by hand.
 const CAT = ['#58a6ff', '#3fb950', '#f2cc60', '#ff7b72', '#bc8cff', '#39c5cf',
   '#f778ba', '#d29922', '#7ee787', '#ffa657', '#79c0ff', '#d2a8ff'];
 const RAMP = ['#0e4429', '#006d32', '#26a641', '#39d353'];
@@ -33,6 +36,7 @@ const UI = {
   selMirror: null,  // UI.sel converted to the other domain: {kind, lo, hi}
   marksDirty: false, // tags/bookmarks/addr marks/names/colors changed since last save/load
   crop: null,       // {lo, hi} in seq domain, or null; see setCrop/clearCrop
+  addrRanges: [],   // [{lo, hi}] hex-string address ranges the filter matches
   setView: {},      // per-strip view setters, filled by setupTimeline
   locked: false,    // locked viewport: stepping never auto-scrolls
   xview: { zoom: 1, pan: 0 }, // horizontal zoom/pan on the address line
@@ -47,6 +51,8 @@ UI.seek = (seq) => worker.postMessage({ type: 'seek', seq });
 // formatting
 // ---------------------------------------------------------------------------
 
+// Mirrored in worker.js (`fmtBytes`/`fmtAllocSize`), which formats the labels
+// drawn inside allocations — the two must agree; change both together.
 function fmtBytes(b) {
   if (b < 1024) return `${Math.round(b)} B`;
   const u = ['KiB', 'MiB', 'GiB', 'TiB', 'PiB'];
@@ -206,12 +212,13 @@ const pending = { pick: null, tl: null };
 worker.onmessage = (ev) => {
   const m = ev.data;
   switch (m.type) {
-    case 'ready':
+    case 'ready': {
       sendResizes();
       worker.postMessage({ type: 'set', key: 'rowPx', value: +$('row-px').value });
       const url = new URLSearchParams(location.search).get('trace');
       if (url) loadURL(url);
       break;
+    }
     case 'progress':
       $('progress-pct').textContent = `${m.pct}%`;
       break;
@@ -262,6 +269,9 @@ worker.onmessage = (ev) => {
       break;
     case 'events':
       onEventsSlice(m);
+      break;
+    case 'ev-pos':
+      onEvPos(m);
       break;
     case 'flash-rects':
       flashRects(m.rects);
@@ -325,6 +335,8 @@ function onLoaded(m) {
   UI.addrMarks = [];
   UI.marksDirty = false;
   UI.crop = null;
+  UI.addrRanges = [];
+  lastSessionJson = null; // new trace: the previous snapshot says nothing
   updateCropIndicator();
   sendAddrMarks();
   sendNames();
@@ -332,6 +344,8 @@ function onLoaded(m) {
   worker.postMessage({ type: 'set', key: 'showAll', value: $('show-all').checked });
   worker.postMessage({ type: 'set', key: 'sizeLabels', value: $('show-sizes').checked });
   worker.postMessage({ type: 'set', key: 'allocSizeFormat', value: allocSizeFormat() });
+  worker.postMessage({ type: 'set', key: 'overlapMode', value: +$('overlap-mode').value });
+  worker.postMessage({ type: 'set', key: 'ghostMode', value: $('ghost-mode').checked });
   clearSelection();
   syncTagDatalist();
   buildMarksPanel();
@@ -368,8 +382,11 @@ function onLoaded(m) {
   document.querySelectorAll('.pinned-detail').forEach((w) => w.remove());
   refreshDrawerDividers('left');
   refreshDrawerDividers('right');
-  restoreSession();
-  restoreMarksAutosave();
+  // the marks autosave embeds its own session snapshot, so applying both
+  // would run applySession twice back-to-back (double seeks, double
+  // filter/layout messages, pinned windows torn down and rebuilt) — prefer
+  // the marks blob when there is one, and fall back to the session alone
+  if (!restoreMarksAutosave()) restoreSession();
 }
 
 function onState(m) {
@@ -408,6 +425,18 @@ function onState(m) {
 
 let hoverRects = [];
 
+// Every worker state message (i.e. every rendered frame during playback or a
+// drag) used to rebuild innerHTML for the overlay, both strips' bookmark
+// flags, the address-mark lines and the crop/selection bands. The content is
+// usually identical frame to frame, so each of those rebuilds now goes
+// through this: assign only when the markup actually changed.
+function setHtml(el, html) {
+  if (el._lastHtml === html) return false;
+  el._lastHtml = html;
+  el.innerHTML = html;
+  return true;
+}
+
 function drawMoveLink(ml) {
   const svg = overlay;
   let content = '';
@@ -435,7 +464,7 @@ function drawMoveLink(ml) {
       content += `<rect class="ml-new" x="${r.x / dpr}" y="${r.y / dpr}" width="${Math.max(1, r.w / dpr)}" height="${Math.max(1, r.h / dpr)}"/>`;
     }
   }
-  svg.innerHTML = content;
+  setHtml(svg, content);
 }
 
 // ---------------------------------------------------------------------------
@@ -524,7 +553,9 @@ function execJump(v) {
   } else if (v.startsWith('t:')) {
     worker.postMessage({ type: 'jump', t: parseFloat(v.slice(2)) });
   } else if (/^\d/.test(v)) {
-    worker.postMessage({ type: 'jump', seq: parseInt(v, 10) });
+    // parseFloat, not parseInt, so scientific notation works for a bare seq
+    // the same way it already does after `t:` (1e6 → 1000000, not 1)
+    worker.postMessage({ type: 'jump', seq: Math.round(parseFloat(v)) });
   }
 }
 
@@ -688,7 +719,42 @@ $('show-all').onchange = () =>
   worker.postMessage({ type: 'set', key: 'showAll', value: $('show-all').checked });
 $('show-sizes').onchange = () =>
   worker.postMessage({ type: 'set', key: 'sizeLabels', value: $('show-sizes').checked });
+$('overlap-mode').onchange = () => {
+  worker.postMessage({ type: 'set', key: 'overlapMode', value: +$('overlap-mode').value });
+  savePrefs();
+};
+$('ghost-mode').onchange = () => {
+  worker.postMessage({ type: 'set', key: 'ghostMode', value: $('ghost-mode').checked });
+  savePrefs();
+};
 $('alloc-size-format').onchange = () => sendAllocSizeFormat();
+
+// ---------------------------------------------------------------------------
+// app-level display preferences. Unlike the per-trace session (below), the
+// overlap display and freed-nested ghosts are how the user wants *every*
+// trace drawn, so they persist globally and are restored at startup; the
+// engine picks them up from the DOM on each trace load (onLoaded).
+// ---------------------------------------------------------------------------
+
+const PREFS_KEY = 'heapviz:prefs';
+
+function savePrefs() {
+  try {
+    localStorage.setItem(PREFS_KEY, JSON.stringify({
+      overlapMode: $('overlap-mode').value,
+      ghosts: $('ghost-mode').checked,
+    }));
+  } catch { /* storage full/unavailable: silently skip */ }
+}
+
+(function restorePrefs() {
+  try {
+    const p = JSON.parse(localStorage.getItem(PREFS_KEY) || '{}');
+    // legacy "outer on top" (2) folds into "ignore" (1)
+    if (p.overlapMode !== undefined) $('overlap-mode').value = String(Math.min(+p.overlapMode || 0, 1));
+    if (p.ghosts !== undefined) $('ghost-mode').checked = !!p.ghosts;
+  } catch { /* corrupt/unavailable: defaults stand */ }
+})();
 $('show-addrs').onchange = () =>
   worker.postMessage({ type: 'set', key: 'addrLabels', value: $('show-addrs').checked });
 
@@ -786,8 +852,70 @@ function buildFilterPanel() {
   }
   $('f-size-min').oninput = sendFilter;
   $('f-size-max').oninput = sendFilter;
+  buildAddrRangesSection();
   buildTagsSection();
 }
+
+// ---------------------------------------------------------------------------
+// address-range filter: an allocation passes if its span touches any range.
+// Ranges are added by hand here or by "match range" in an allocation panel.
+// ---------------------------------------------------------------------------
+
+function normAddr(v) {
+  v = (v || '').trim().toLowerCase();
+  if (!v) return null;
+  if (!v.startsWith('0x')) v = `0x${v}`;
+  if (!/^0x[0-9a-f]+$/.test(v)) return null;
+  try { return `0x${BigInt(v).toString(16)}`; } catch { return null; }
+}
+
+function addAddrRange(loHex, hiHex) {
+  const lo = normAddr(loHex);
+  const hi = normAddr(hiHex);
+  if (!lo || !hi || BigInt(hi) <= BigInt(lo)) return false;
+  if (UI.addrRanges.some((r) => r.lo === lo && r.hi === hi)) return true; // already there
+  UI.addrRanges.push({ lo, hi });
+  buildAddrRangesSection();
+  sendFilter();
+  return true;
+}
+
+function buildAddrRangesSection() {
+  const list = $('f-addrs');
+  if (!UI.addrRanges.length) {
+    list.innerHTML = '<div class="empty">none — all addresses pass</div>';
+    return;
+  }
+  list.innerHTML = UI.addrRanges.map((r, i) => `<div class="an-row">
+      <span class="grow">${esc(r.lo)} – ${esc(r.hi)}</span>
+      <span class="count">${fmtBytes(Number(BigInt(r.hi) - BigInt(r.lo)))}</span>
+      <button class="x" data-ardel="${i}" title="remove this range">×</button>
+    </div>`).join('');
+  list.querySelectorAll('[data-ardel]').forEach((el) => {
+    el.onclick = () => {
+      UI.addrRanges.splice(+el.dataset.ardel, 1);
+      buildAddrRangesSection();
+      sendFilter();
+    };
+  });
+}
+
+$('f-addr-add').onclick = () => {
+  if (addAddrRange($('f-addr-lo').value, $('f-addr-hi').value)) {
+    $('f-addr-lo').value = '';
+    $('f-addr-hi').value = '';
+  } else {
+    $('st-info').textContent = 'address range needs two hex addresses, from < to';
+  }
+};
+for (const id of ['f-addr-lo', 'f-addr-hi']) {
+  $(id).addEventListener('keydown', (e) => { if (e.key === 'Enter') $('f-addr-add').click(); });
+}
+$('f-addr-clear').onclick = () => {
+  UI.addrRanges = [];
+  buildAddrRangesSection();
+  sendFilter();
+};
 
 function sendFilter() {
   const panel = $('filter-panel');
@@ -804,7 +932,8 @@ function sendFilter() {
   if (UI.untaggedVisible) tagBits.push(0);
   UI.tags.forEach((t, i) => { if (t.visible) tagBits.push(i + 1); });
   const allTags = tagBits.length === UI.tags.length + 1;
-  const active = !allSites || !allThrs || !allTags || sizeMin > 0 || sizeMax > 0;
+  const active = !allSites || !allThrs || !allTags || sizeMin > 0 || sizeMax > 0
+    || UI.addrRanges.length > 0;
   const mode = active ? +panel.querySelector('input[name=fmode]:checked').value : 0;
   worker.postMessage({
     type: 'set', key: 'filter',
@@ -814,15 +943,22 @@ function sendFilter() {
       thrs: allThrs ? null : thrs,
       tags: allTags ? null : tagBits,
       sizeMin, sizeMax,
+      addrRanges: UI.addrRanges.map((r) => [r.lo, r.hi]),
     },
   });
   $('btn-filter').classList.toggle('active', active);
+  // the filtered event list follows the filter
+  evState.total = -1;
+  evState.lastSeq = -1;
+  refreshEventsPanel();
 }
 
 $('filter-clear').onclick = () => {
   $('filter-panel').querySelectorAll('input[type=checkbox]').forEach((b) => { b.checked = true; });
   $('f-size-min').value = '';
   $('f-size-max').value = '';
+  UI.addrRanges = [];
+  buildAddrRangesSection();
   UI.untaggedVisible = true;
   UI.tags.forEach((t) => { t.visible = true; });
   buildTagsSection();
@@ -837,7 +973,7 @@ $('filter-clear').onclick = () => {
 // dockable/floating panels tracked by session (drawers, window positions) —
 // detail-panel and its pinned clones are excluded: they're per-allocation
 // and not meaningful to restore across a session
-const PANEL_IDS = ['play-panel', 'layout-panel', 'filter-panel', 'analysis-panel', 'warnings-panel', 'events-panel'];
+const PANEL_IDS = ['play-panel', 'layout-panel', 'appearance-panel', 'filter-panel', 'analysis-panel', 'warnings-panel', 'events-panel'];
 
 let panelZ = 40;
 
@@ -1159,6 +1295,7 @@ function applyDrawersState(d) {
 for (const [btn, panel] of [
   ['btn-playcfg', 'play-panel'],
   ['btn-layout', 'layout-panel'],
+  ['btn-appearance', 'appearance-panel'],
   ['btn-filter', 'filter-panel'],
   ['btn-analysis', 'analysis-panel'],
   ['btn-warnings', 'warnings-panel'],
@@ -1202,11 +1339,23 @@ function buildWarningsPanel() {
 // ---------------------------------------------------------------------------
 
 const EV_ROW = 18;            // px per row
-const EV_MAX_SPACER = 12e6;   // cap the scroll height; index-mapped beyond it
-const evState = { from: 0, count: 0, reqId: 0, lastSeq: -1 };
+// Browsers cap how tall an element may be, so beyond this the spacer stops
+// being 1:1 with the event count (~700 k events at EV_ROW) and scroll
+// position is index-mapped instead. Two things degrade past that point and
+// must keep working when this is touched: the scroll position is approximate
+// (a given scrollTop maps to a proportional event index, not an exact row),
+// and drag-selection in the list (`yToSeq`) inherits the same approximation.
+const EV_MAX_SPACER = 12e6;
+// total = row count in filtered mode (engine-reported, -1 until known);
+// seqs = the seq of each currently loaded row, needed because filtered rows
+// are no longer 1:1 with event indices
+const evState = { from: 0, count: 0, reqId: 0, lastSeq: -1, total: -1, seqs: [], posReqId: 0 };
+
+const evFiltered = () => $('ev-filtered').checked;
 
 function evLayout() {
-  const n = UI.meta ? UI.meta.n : 0;
+  const all = UI.meta ? UI.meta.n : 0;
+  const n = evFiltered() && evState.total >= 0 ? evState.total : all;
   const viewH = $('events-scroll').clientHeight;
   const spacerH = Math.min(n * EV_ROW, EV_MAX_SPACER);
   const visN = Math.max(1, Math.ceil(viewH / EV_ROW) + 1);
@@ -1225,12 +1374,19 @@ function refreshEventsPanel() {
   evState.from = from;
   evState.count = L.visN;
   evState.reqId = UI.reqId++;
-  worker.postMessage({ type: 'events', from, count: L.visN, reqId: evState.reqId });
+  worker.postMessage({ type: 'events', from, count: L.visN, reqId: evState.reqId, filtered: evFiltered() });
   updateEventsSelBand();
 }
 
 function onEventsSlice(m) {
   if (m.reqId !== evState.reqId) return;
+  if (evFiltered() && m.total !== undefined && m.total !== evState.total) {
+    // filtered count (re)learned: re-lay out the virtual list once — the
+    // follow-up reply carries the same total, so this converges immediately
+    evState.total = m.total;
+    refreshEventsPanel();
+  }
+  evState.seqs = m.events.map((ev) => ev.seq);
   const curSeq = UI.state ? UI.state.seq - 1 : -1;
   $('events-rows').innerHTML = m.events.map((ev) => `
     <div class="ev-row${ev.seq === curSeq ? ' cur' : ''}" data-seq="${ev.seq}" title="click: seek here and select the allocation">
@@ -1285,7 +1441,12 @@ function updateEventsPanel() {
   const cur = UI.state.seq - 1;
   if (cur === evState.lastSeq) return;
   evState.lastSeq = cur;
-  if ($('ev-follow').checked && (cur < evState.from || cur >= evState.from + evState.count - 1)) {
+  // filtered rows are not 1:1 with seq, so visibility is judged from the
+  // loaded rows' actual seq span instead of index arithmetic
+  const visible = evFiltered()
+    ? evState.seqs.length > 0 && cur >= evState.seqs[0] && cur <= evState.seqs[evState.seqs.length - 1]
+    : cur >= evState.from && cur < evState.from + evState.count - 1;
+  if ($('ev-follow').checked && !visible) {
     evScrollToSeq(cur);
     return;
   }
@@ -1295,8 +1456,24 @@ function updateEventsPanel() {
 }
 
 function evScrollToSeq(seq) {
+  if (evFiltered()) {
+    // seq -> row index in the filtered list is an engine query
+    evState.posReqId = UI.reqId++;
+    worker.postMessage({ type: 'ev-pos', seq, reqId: evState.posReqId });
+    return;
+  }
+  evScrollToIndex(seq);
+}
+
+function onEvPos(m) {
+  if (m.reqId !== evState.posReqId) return;
+  evState.total = m.total;
+  evScrollToIndex(m.pos);
+}
+
+function evScrollToIndex(idx) {
   const L = evLayout();
-  const target = Math.max(0, Math.min(L.maxFrom, seq - Math.floor(L.visN / 2)));
+  const target = Math.max(0, Math.min(L.maxFrom, idx - Math.floor(L.visN / 2)));
   const y = (target / Math.max(1, L.maxFrom)) * Math.max(0, L.spacerH - L.viewH);
   $('events-scroll').scrollTop = y;
   refreshEventsPanel();
@@ -1305,16 +1482,39 @@ function evScrollToSeq(seq) {
 function stepEventsSelection(delta) {
   if (!UI.loaded || !UI.state || !UI.state.n) return;
   const cur = UI.state.seq - 1;
-  const target = Math.max(0, Math.min(UI.state.n - 1, cur + delta));
+  let target = cur + delta;
+  if (evFiltered() && evState.seqs.length) {
+    // step along the filtered rows, not raw seq
+    const i = evState.seqs.indexOf(cur);
+    if (i >= 0) {
+      const j = i + delta;
+      if (j < 0 || j >= evState.seqs.length) return; // edge of the loaded slice
+      target = evState.seqs[j];
+    } else {
+      const next = delta > 0
+        ? evState.seqs.find((s) => s > cur)
+        : [...evState.seqs].reverse().find((s) => s < cur);
+      if (next === undefined) return;
+      target = next;
+    }
+  }
+  target = Math.max(0, Math.min(UI.state.n - 1, target));
   worker.postMessage({ type: 'jump', seq: target + 1, select: true });
 }
 
 function resetEventsPanel() {
   evState.lastSeq = -1;
+  evState.total = -1;
+  evState.seqs = [];
   $('events-scroll').scrollTop = 0;
   $('events-rows').innerHTML = '';
   if (!$('events-panel').hidden) refreshEventsPanel();
 }
+
+$('ev-filtered').onchange = () => {
+  resetEventsPanel();
+  updateEventsPanel();
+};
 
 {
   const scEl = $('events-scroll');
@@ -1336,7 +1536,16 @@ new ResizeObserver(() => refreshEventsPanel()).observe($('events-scroll'));
   let dragFromY = null;
   let dragFromSeq = 0;
   let dragCaptured = false;
-  const yToSeq = (y) => evState.from + (y - scEl.getBoundingClientRect().top) / EV_ROW;
+  const yToSeq = (y) => {
+    const row = (y - scEl.getBoundingClientRect().top) / EV_ROW;
+    if (evFiltered()) {
+      // filtered rows carry arbitrary seqs: read the nearest loaded row
+      const seqs = evState.seqs;
+      if (!seqs.length) return 0;
+      return seqs[Math.max(0, Math.min(seqs.length - 1, Math.floor(row)))];
+    }
+    return evState.from + row;
+  };
   scEl.addEventListener('pointerdown', (e) => {
     if (e.button !== 0 || !UI.loaded) return;
     dragFromY = e.clientY;
@@ -1653,11 +1862,12 @@ function buildAddrMarksSection() {
 let lastAddrMarkYs = [];
 function renderAddrMarkLines() {
   const box = $('addr-mark-lines');
-  box.innerHTML = UI.addrMarks.map((m, i) => {
+  const html = UI.addrMarks.map((m, i) => {
     const y = lastAddrMarkYs[i];
     if (y === null || y === undefined) return '';
     return `<div class="amark" style="top:${y}px" data-am="${i}" data-label="⚑ ${esc(m.name)} ${esc(m.addr)}"></div>`;
   }).join('');
+  if (!setHtml(box, html)) return;
   box.querySelectorAll('.amark').forEach((el) => {
     el.onclick = () => gotoAddr(UI.addrMarks[+el.dataset.am].addr);
   });
@@ -1685,12 +1895,13 @@ function updateMarkers() {
     const marks = strip.querySelector('.tl-marks');
     const v = kind === 0 ? UI.tlT : UI.tlS;
     const w = strip.clientWidth;
-    marks.innerHTML = UI.bookmarks.map((b, i) => {
+    const html = UI.bookmarks.map((b, i) => {
       const val = kind === 0 ? b.t : b.seq;
       const x = ((val - v.lo) / (v.hi - v.lo)) * w;
       if (x < 0 || x > w) return '';
       return `<div class="mark" style="left:${x}px" data-bm="${i}" data-label="⚑ ${esc(b.name)}" title="${esc(b.name)} — click: jump in time · shift+click: also center the place"></div>`;
     }).join('');
+    if (!setHtml(marks, html)) continue;
     marks.querySelectorAll('.mark').forEach((el) => {
       // plain click: time only (stay at the same address); shift+click: also
       // center where the event happened
@@ -1891,6 +2102,7 @@ function buildSession() {
     colorMode: $('color-mode').value,
     allocSizeFormat: allocSizeFormat(),
     showAll: $('show-all').checked,
+    evFiltered: $('ev-filtered').checked,
     sizeLabels: $('show-sizes').checked,
     addrLabels: $('show-addrs').checked,
     xview: UI.xview,
@@ -1903,6 +2115,7 @@ function buildSession() {
       // site/thread list, which is exactly what the file-name-scoped key gives us
       sites: [...document.querySelectorAll('#filter-panel input[data-site]')].map((b) => b.checked),
       thrs: [...document.querySelectorAll('#filter-panel input[data-thr]')].map((b) => b.checked),
+      addrRanges: UI.addrRanges,
     },
     playhead: UI.state ? UI.state.seq : 0,
     windows,
@@ -1939,6 +2152,12 @@ function applySession(obj) {
     $('alloc-size-format').value = obj.allocSizeFormat === 'hex' ? 'hex' : 'human';
     sendAllocSizeFormat();
   }
+  // (a legacy per-trace overlapMode is deliberately ignored here — overlap
+  // display is a global preference now, see savePrefs/restorePrefs)
+  if (obj.evFiltered !== undefined) {
+    $('ev-filtered').checked = !!obj.evFiltered;
+    resetEventsPanel();
+  }
   if (obj.showAll !== undefined) {
     $('show-all').checked = obj.showAll;
     worker.postMessage({ type: 'set', key: 'showAll', value: obj.showAll });
@@ -1962,6 +2181,8 @@ function applySession(obj) {
     (f.sites || []).forEach((checked, i) => { if (siteBoxes[i]) siteBoxes[i].checked = checked; });
     const thrBoxes = [...document.querySelectorAll('#filter-panel input[data-thr]')];
     (f.thrs || []).forEach((checked, i) => { if (thrBoxes[i]) thrBoxes[i].checked = checked; });
+    UI.addrRanges = (f.addrRanges || []).filter((r) => normAddr(r.lo) && normAddr(r.hi));
+    buildAddrRangesSection();
     sendFilter();
   }
   if (obj.windows) {
@@ -1994,10 +2215,19 @@ async function restorePinnedWindows(pinned) {
   }
 }
 
+let lastSessionJson = null;
+
 function saveSessionNow() {
   const key = sessionKey();
   if (!key || !UI.loaded) return;
-  try { localStorage.setItem(key, JSON.stringify(buildSession())); } catch { /* storage full/unavailable: silently skip */ }
+  try {
+    const json = JSON.stringify(buildSession());
+    // the periodic autosave fires while idle too; skip the write (and the
+    // storage churn) when nothing in the snapshot actually moved
+    if (json === lastSessionJson) return;
+    lastSessionJson = json;
+    localStorage.setItem(key, json);
+  } catch { /* storage full/unavailable: silently skip */ }
 }
 
 function marksKey() {
@@ -2016,13 +2246,21 @@ async function saveMarksAutosave() {
   } catch { /* storage full/unavailable: silently skip */ }
 }
 
+// returns true when a marks blob was applied (it carries its own session
+// snapshot, so the caller must not also run restoreSession — see onLoaded)
 function restoreMarksAutosave() {
   const key = marksKey();
-  if (!key) return;
+  if (!key) return false;
   try {
     const raw = localStorage.getItem(key);
-    if (raw) applyMarks(JSON.parse(raw), true);
+    if (!raw) return false;
+    const obj = JSON.parse(raw);
+    if (!obj || obj.heapVisualizerAnalysis !== 1) return false;
+    applyMarks(obj, true);
+    // a pre-session marks blob still needs the standalone session restored
+    return !!obj.session;
   } catch { /* corrupt/unavailable: ignore, nothing to restore */ }
+  return false;
 }
 
 // cheap periodic autosave rather than hooking every single input's change
@@ -2110,8 +2348,17 @@ function updateEventsSelBand() {
   // sibling of the scroll content (unlike #events-rows, which self-cancels
   // scrollTop via its own `top` style), so re-add scrollTop to place it in
   // the scroll container's coordinate space
-  const y0 = (seqRange.lo - evState.from) * EV_ROW;
-  const y1 = (seqRange.hi - evState.from) * EV_ROW;
+  let y0, y1;
+  if (evFiltered()) {
+    // filtered rows: the band covers the loaded rows whose seq is in range
+    // (rows filtered out in between simply collapse)
+    const seqs = evState.seqs;
+    y0 = seqs.filter((s) => s < seqRange.lo).length * EV_ROW;
+    y1 = seqs.filter((s) => s < seqRange.hi).length * EV_ROW;
+  } else {
+    y0 = (seqRange.lo - evState.from) * EV_ROW;
+    y1 = (seqRange.hi - evState.from) * EV_ROW;
+  }
   band.hidden = y1 <= 0 || y0 >= L.viewH;
   if (!band.hidden) {
     const top = Math.max(0, Math.min(L.viewH, y0));
@@ -2221,7 +2468,8 @@ document.addEventListener('keydown', (e) => {
 // timeline interaction
 // ---------------------------------------------------------------------------
 
-// mirror of the worker's clamping so optimistic local updates agree with it
+// Mirror of the worker's clamping (worker.js `clampView`) so optimistic local
+// updates agree with it — the two must stay identical; change both together.
 function clampView(v, min, max, minSpan) {
   let { lo, hi } = v;
   if (hi - lo < minSpan) hi = lo + minSpan;
@@ -2344,20 +2592,19 @@ function flushTlHover() {
   tlHoverReq = null;
   pending.tl = UI.reqId++;
   worker.postMessage({ type: 'tlhover', kind: q.kind, x: q.x, reqId: pending.tl });
-  pending.tlPos = q;
 }
 function onTlHoverResult(m) {
   if (m.reqId !== pending.tl) return;
   pending.tl = null;
-  const q = pending.tlPos;
   if (m.info) {
     const i = m.info;
     const range = m.kind === 0
       ? `t ${fmtTime(i.from)} – ${fmtTime(i.to)}`
       : `seq ${fmtNum(Math.floor(i.from))} – ${fmtNum(Math.floor(i.to))}`;
+    // positioning comes from positionTooltipNearMouse (which tracks the real
+    // mouse), so showTooltip takes no coordinates
     showTooltip('tl',
-      `<span class="g">▲ ${fmtNum(i.g)} alloc</span>  <span class="r">▼ ${fmtNum(i.r)} free</span>\n<span class="dim">${range} · events ${fmtNum(i.seqFrom)}–${fmtNum(i.seqTo)}</span>`,
-      q.xClient ?? 0, q.clientY);
+      `<span class="g">▲ ${fmtNum(i.g)} alloc</span>  <span class="r">▼ ${fmtNum(i.r)} free</span>\n<span class="dim">${range} · events ${fmtNum(i.seqFrom)}–${fmtNum(i.seqTo)}</span>`);
     positionTooltipNearMouse();
   }
   if (tlHoverReq) flushTlHover();
@@ -2582,6 +2829,7 @@ function buildDetailBody(root, info) {
     <button class="d-focus" title="Scroll/pan to this allocation and flash exactly where it is">⌖ focus</button>
     <button class="d-birth">go to birth</button>
     ${info.deathSeq !== null ? '<button class="d-death">go to death</button>' : ''}
+    <button class="d-range" title="Add this allocation's address range to the Filter panel's address ranges">match range</button>
   </div>`;
   root.innerHTML = html;
   const q = (sel) => root.querySelector(sel);
@@ -2590,6 +2838,12 @@ function buildDetailBody(root, info) {
   q('.d-birth').onclick = () => worker.postMessage({ type: 'jump', seq: info.seq + 1 });
   const dd = q('.d-death');
   if (dd) dd.onclick = () => worker.postMessage({ type: 'jump', seq: info.deathSeq + 1 });
+  q('.d-range').onclick = () => {
+    if (addAddrRange(info.addr, info.end)) {
+      showPanel('filter-panel');
+      $('st-info').textContent = `filtering on ${info.addr} – ${info.end}`;
+    }
+  };
   q('.d-name').onchange = () => {
     const v = q('.d-name').value.trim();
     if (v) UI.names.set(info.e, { name: v, id: info.id, addr: info.addr });
