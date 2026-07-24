@@ -593,7 +593,7 @@ pub extern "C" fn hp_tag_seq_range(lo: u32, hi: u32, tag: u32, by_free: u32) -> 
 
 fn tag_seq_range(a: &mut App, lo: u32, hi: u32, tag: u32, by_free: u32) -> u32 {
     let tag = tag.min(255) as u8;
-    let mut to_tag: Vec<u32> = {
+    let to_tag: Vec<u32> = {
         let s = &a.store;
         let f = &a.cfg.filter;
         let filtered = f.mode != render::FILTER_OFF;
@@ -615,7 +615,10 @@ fn tag_seq_range(a: &mut App, lo: u32, hi: u32, tag: u32, by_free: u32) -> u32 {
             .filter(|&c| !filtered || f.pass(s, c))
             .collect()
     };
-    to_tag.dedup();
+    // No dedup needed: with by_free == 0 the range yields strictly
+    // increasing creator indices, and with by_free != 0 each target appears
+    // at most once — a creator's `death` is written exactly once and a
+    // second free of the same id resolves to NONE_U32 (W_DOUBLE_FREE).
     let n = to_tag.len() as u32;
     for e in to_tag {
         a.store.set_tag(e, tag);
