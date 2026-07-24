@@ -60,7 +60,12 @@ the main thread at init). Responsibilities:
   from a **fresh WASM instance** (the compiled module is kept and
   re-instantiated): Rust frees into its own allocator and never returns pages
   to the browser, so reusing one instance would ratchet linear memory up to
-  the high-water mark of every trace opened in the session.
+  the high-water mark of every trace opened in the session. Re-instantiation
+  is *purely* that memory measure — it is not the reset mechanism.
+  `hp_parse_begin` performs a complete state reset (store, view, and the
+  whole `Cfg`: selection, filter, zoom/pan, crop, overrides, tag colors,
+  modes), so an engine instance is also correct on its own when reused, as
+  the native tests do.
 - **Frame loop**: a rAF loop driven by per-canvas **dirty flags** — nothing
   renders unless something changed. Timeline bitmaps are cached and re-binned
   only when view/size/tag state changes; the address map re-rasters when

@@ -118,10 +118,13 @@ pub extern "C" fn hp_parse_begin() {
     a.parser = Some(Parser::new());
     a.store = Store::default();
     a.view = View::new();
-    a.cfg.selected = NONE_U32;
-    a.cfg.filter = Filter::default();
-    a.cfg.x_zoom = 1.0;
-    a.cfg.x_pan = 0.0;
+    // Complete reset: a new trace must not inherit crop, per-allocation
+    // color overrides (keyed by event index, which now means a different
+    // allocation), tag colors or view modes. The engine is correct on its
+    // own here — the worker's per-load re-instantiation is purely a memory
+    // measure (see specs/08-architecture §8.2), and native users (tests)
+    // get the same clean slate.
+    a.cfg = Cfg::new();
 }
 
 #[no_mangle]
