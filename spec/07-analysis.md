@@ -48,6 +48,13 @@ filter active. Applying an empty source turns filtering off. Dim/hide changes
 immediately when a non-empty filter is active because it does not change the
 match set.
 
+Site, thread, and tag legend chips are expression-writing actions, not another
+filter state. Clicking one toggles its visible predicate as a top-level
+conjunct and immediately applies the result; Shift-click uses a disjunction.
+Active styling is derived from the successfully applied source. String values
+are escaped as DSL literals, and adding a conjunct parenthesizes an existing
+top-level disjunction so its meaning is preserved.
+
 The focused editor offers contextual completion from the same core catalog
 that checks the expression: executable fields, type-valid operators and
 members, and observed site/thread/tag values. The attached list opens while

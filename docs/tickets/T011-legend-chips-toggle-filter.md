@@ -1,7 +1,7 @@
 ---
 id: T011
 title: Legend chips toggle a filter conjunct
-status: todo
+status: done
 updated: 2026-07-25
 ---
 
@@ -43,3 +43,11 @@ predicates are `site == "…"`, `thread == <n>`, `tag == "…"` and
 - Chips for the size and age ramps.
 - Any filter state that is not the expression.
 - Editing a predicate nested inside parentheses or a call.
+
+## Result
+
+Implemented in `src/web/filter-actions.ts` and wired to the site, thread, tag,
+and untagged legend chips. The pure rewrite tests cover add/remove, precedence,
+quoted operators, nested expressions, connector removal, and string escaping.
+`node --test src/web/test/filter-actions.test.ts` and
+`npx tsc -p tsconfig.test.json` pass.

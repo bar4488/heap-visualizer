@@ -32,6 +32,9 @@ import {
   applyFilterCompletion, utf8Offset,
 } from './filter-completion.ts';
 import {
+  hasTopLevelPredicate, quoteFilterString, toggleFilterPredicate,
+} from './filter-actions.ts';
+import {
   drawersState, dock, initDrawers, drawerEl, refreshDrawerDividers,
 } from './shell/drawers.ts';
 import type {
@@ -848,26 +851,48 @@ function buildLegend() {
   let html = '';
   if (mode === 1) {
     UI.meta.sites.forEach((s, i) => {
-      html += `<span class="chip"><span class="swatch" style="background:${CAT[i % 12]}"></span>${esc(s.name)}</span>`;
+      const predicate = `site == ${quoteFilterString(s.name)}`;
+      html += `<button class="chip filter-chip${hasTopLevelPredicate(UI.filterApplied, predicate) ? ' active' : ''}"
+        data-filter-predicate="${esc(predicate)}"><span class="swatch" style="background:${CAT[i % 12]}"></span>${esc(s.name)}</button>`;
     });
   } else if (mode === 2) {
     UI.meta.thrs.forEach((t, i) => {
-      html += `<span class="chip"><span class="swatch" style="background:${CAT[(i + 5) % 12]}"></span>thr ${t.thr}</span>`;
+      const predicate = `thread == ${t.thr}`;
+      html += `<button class="chip filter-chip${hasTopLevelPredicate(UI.filterApplied, predicate) ? ' active' : ''}"
+        data-filter-predicate="${predicate}"><span class="swatch" style="background:${CAT[(i + 5) % 12]}"></span>thr ${t.thr}</button>`;
     });
   } else if (mode === 3) {
     html = `<span class="chip">16 B <span class="ramp" style="background:linear-gradient(90deg,${RAMP.join(',')})"></span> 16 MiB (log size)</span>`;
   } else if (mode === 4) {
     html = `<span class="chip">young <span class="ramp" style="background:linear-gradient(90deg,#7ee787,#39c5cf,#1f4fa8)"></span> old (log age vs oldest live)</span>`;
   } else if (mode === 5) {
-    html = UI.tags.map((t, i) =>
-      `<span class="chip"><span class="swatch" style="background:${t.color}"></span>${esc(t.name)} · ${fmtNum(UI.tagCounts[i + 1] || 0)}</span>`).join('') +
-      `<span class="chip"><span class="swatch" style="background:#39414a"></span>untagged · ${fmtNum(UI.tagCounts[0] || 0)}</span>`;
-    if (!UI.tags.length) html = '<span class="chip">no tags yet — shift-drag a timeline range or use the allocation panel</span>';
+    html = UI.tags.map((t, i) => {
+      const predicate = `tag == ${quoteFilterString(t.name)}`;
+      return `<button class="chip filter-chip${hasTopLevelPredicate(UI.filterApplied, predicate) ? ' active' : ''}"
+        data-filter-predicate="${esc(predicate)}"><span class="swatch" style="background:${t.color}"></span>${esc(t.name)} · ${fmtNum(UI.tagCounts[i + 1] || 0)}</button>`;
+    }).join('');
+    const missing = 'tag is missing';
+    html += `<button class="chip filter-chip${hasTopLevelPredicate(UI.filterApplied, missing) ? ' active' : ''}"
+      data-filter-predicate="${missing}"><span class="swatch" style="background:#39414a"></span>untagged · ${fmtNum(UI.tagCounts[0] || 0)}</button>`;
+    if (!UI.tags.length) {
+      html = '<span class="chip">no tags yet</span>' + html;
+    }
   }
   el.innerHTML = html;
   el.hidden = html === '';
   sendResizes();
 }
+
+$('legend').onclick = (event) => {
+  const chip = event.target.closest('[data-filter-predicate]');
+  if (!chip) return;
+  const source = toggleFilterPredicate(
+    UI.filterDraft,
+    chip.dataset.filterPredicate,
+    event.shiftKey ? '||' : '&&',
+  );
+  void applyFilterSource(source);
+};
 
 // ---------------------------------------------------------------------------
 // filter expression editor
@@ -1029,6 +1054,7 @@ async function applyFilterSource(source = $('filter-source').value) {
       setFilterStatus('Edited; applied filter is still active');
     }
     worker.postMessage({ type: 'filter-mode', mode: UI.filterApplied ? UI.filterMode : 0 });
+    buildLegend();
     evState.total = -1;
     evState.lastSeq = -1;
     refreshEventsPanel();

@@ -80,6 +80,14 @@ input { font-family: ui-monospace, monospace; }
   user-select: none;
 }
 #legend .chip { display: inline-flex; align-items: center; gap: 5px; }
+#legend button.chip {
+  padding: 1px 4px; border: 1px solid transparent; border-radius: 3px;
+  background: transparent; color: inherit; font: inherit; cursor: pointer;
+}
+#legend button.chip:hover { color: var(--fg); border-color: var(--border); }
+#legend button.chip.active {
+  color: var(--fg); border-color: var(--accent); background: rgba(88,166,255,0.13);
+}
 #legend .swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
 #legend .ramp { width: 90px; height: 10px; border-radius: 2px; display: inline-block; }
 
