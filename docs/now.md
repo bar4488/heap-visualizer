@@ -44,8 +44,16 @@ browser. `tsc` covers what neither reaches: the worker protocol
 panel records — a message name one side does not know fails the build. How
 strict that check is is a named list of flags rather than `strict: true`, ten
 on and two off, per [D005](decisions/D005-strictness-is-per-flag.md).
-Rendering and pointer interaction are hand-verified, per
-[D001](decisions/D001-web-changes-are-hand-smoke-tested.md).
+
+Rendering, pointer interaction and the real worker round trip are covered by
+nothing, and no harness is coming
+([D001](decisions/D001-web-changes-are-hand-smoke-tested.md),
+[E009](explorations/E009-the-hand-verification-bottleneck.md)). **D001 was
+amended on 2026-07-25**: an agent runs every check that is cheap — including
+diffing the emitted `dist/` across a change meant to preserve behavior, which
+is the strongest of them — and a person's pass is no longer a gate on closing a
+ticket. What an agent must still not do is drive a browser or build something
+to drive one. Recipes are in [context](context.md).
 
 **Docs — just restructured.** This repository adopted the protocol on
 2026-07-25. The reviews under the old `docs/findings/` are now
@@ -64,18 +72,19 @@ survivable, a stale `dist/` is the new way to be confused.
 
 ## Next
 
-**[T008](tickets/T008-convert-web-to-typescript.md) is waiting on a person, and
-on nothing else.** Both slices are written, committed and passing — the
-conversion (`b32e5d1`) and the strictness flags (`c892602`) — and the last
-done-when is the hand-verification in
-[D001](decisions/D001-web-changes-are-hand-smoke-tested.md). The ticket's
-handoff has the smoke list, ordered by where the risk actually sits. Check it
-against `dist/` after `./build.sh web`. It braced for several sessions and took
-one: `main.js` was already type-checked in place, so the rename produced 20
-errors and no findings.
+**Nothing is in flight.** [T008](tickets/T008-convert-web-to-typescript.md)
+closed on 2026-07-25 in one session, having braced for several: `main.js` was
+already type-checked in place, so the rename produced 20 errors and no
+findings, and the three coordinated views needed nothing. The web layer is
+TypeScript end to end.
 
-Then [T009](tickets/T009-type-the-deps-contracts.md), which is the only thing
-queued and is not urgent. It types the `init*(deps)` contracts in
+It also cost D001 an amendment — see Verification above. The ticket's Result
+has the evidence that closed it, which is the shape worth copying: a `dist/`
+built from the commit before the change, diffed against a `dist/` built after,
+with the entire remaining difference enumerated.
+
+**[T009](tickets/T009-type-the-deps-contracts.md) is next, and is not urgent.**
+It types the `init*(deps)` contracts in
 `analysis.ts`, `session.ts` and `events-panel.ts` — today a comment above each
 `init*` and a `let d = null` under it. That one pattern is ~200 of the errors
 under each of the two type-checking flags that are still off; what is left
@@ -92,9 +101,10 @@ must stay blocked — see [D002](decisions/D002-shell-split-before-host.md).
 
 **Nothing else is queued, and that is the correct state.**
 [E009](explorations/E009-the-hand-verification-bottleneck.md) asked whether the
-hand-verification pass should be partly mechanized, and settled at no: the
-changes it was written against worked first try, so the risk never showed up.
-D001 stands unamended and no tooling came out of it.
+verification pass should be partly mechanized, and settled at no: the changes
+it was written against worked first try, so the risk never showed up. No
+tooling came out of it, and the later D001 amendment did not change that — it
+moved who runs the checks that already exist, not whether new ones get built.
 
 ## Not being done, deliberately
 
@@ -108,9 +118,12 @@ D001 stands unamended and no tooling came out of it.
   [D001](decisions/D001-web-changes-are-hand-smoke-tested.md), and
   [E009](explorations/E009-the-hand-verification-bottleneck.md) for why the
   cheap end of it was declined too. The bar is a failure that actually
-  happened, not one that could.
+  happened, not one that could — and "it is only forty lines" is not evidence
+  that it is needed. D001's amendment is about running what exists, not about
+  writing this.
 
 <!-- generated:begin -->
 ## Doing
-- [T008](tickets/T008-convert-web-to-typescript.md) — convert the rest of the web layer to TypeScript
+
+Nothing in flight.
 <!-- generated:end -->

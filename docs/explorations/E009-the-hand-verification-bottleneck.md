@@ -191,6 +191,23 @@ This does not retire the underlying observation. If a mechanical change does
 break the boot path and a person catches it, that is instance one, and this
 document is where the case restarts — as evidence next time, not inference.
 
+## Correction — 2026-07-25
+
+Appended after settling; the text above is left as written.
+
+The Outcome says "[D001] stands exactly as written, unamended". That stopped
+being true the same day. Bar amended D001 later on 2026-07-25, during
+[T008](../tickets/T008-convert-web-to-typescript.md), on the objection this
+document did not raise: it treated a person's check and a browser harness as
+one question, when the actual gap was that *cheap* checks were being handed to
+a person along with expensive ones. Amended D001 says an agent runs everything
+cheap itself and a person's look is not a gate on every ticket.
+
+**What that does not change is this document's own conclusion.** No harness, no
+module-graph check, no boot smoke test — E009's outcome on building new tooling
+stands, and the amended decision says so explicitly. The correction is to the
+sentence about D001 being unamended, not to the answer.
+
 ## Related
 
 - [D001](../decisions/D001-web-changes-are-hand-smoke-tested.md) — the standing

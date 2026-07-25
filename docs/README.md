@@ -26,10 +26,13 @@ is not. [TOOL-003](../spec/10-tooling.md#tool-003-tests) is an example of a stan
 reversed in place, and [T003](tickets/T003-typescript-at-the-contracts.md) will
 do it again to [TOOL-002](../spec/10-tooling.md#tool-002-build).
 
-**A web change is not verified by an agent.** How to run what an agent can
-check, and what a person needs to check by hand instead, is in
-[context.md](context.md#verify-a-web-change) — see
-[D001](decisions/D001-web-changes-are-hand-smoke-tested.md) for why.
+**Run every check that is cheap; build nothing that drives a browser.** An
+agent establishes what it can — the suites, the type-checker, the build, and a
+diff of the emitted `dist/` when a change is meant to preserve behavior — and
+then says plainly what that did *not* cover. It does not hand a cheap check
+back to a person, and a person's pass is not a gate on closing a ticket. The
+recipes are in [context.md](context.md#verify-a-web-change); the reasoning is
+[D001](decisions/D001-web-changes-are-hand-smoke-tested.md).
 
 **One finding or one refactor slice per commit** — see
 [D003](decisions/D003-one-slice-per-commit.md). With no automated coverage of

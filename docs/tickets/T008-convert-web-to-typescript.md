@@ -1,7 +1,7 @@
 ---
 id: T008
 title: Convert the rest of the web layer to TypeScript
-status: doing
+status: done
 updated: 2026-07-25
 ---
 
@@ -43,8 +43,11 @@ ticket before starting, since T003 will have moved the ground.
       them.
 - [x] `node --test` and `cargo test` pass, and `./build.sh` emits a `dist/` that
       loads.
-- [ ] A person hand-verifies each slice, per
-      [D001](../decisions/D001-web-changes-are-hand-smoke-tested.md).
+- [x] Each slice is verified as far as a cheap check reaches, per
+      [D001](../decisions/D001-web-changes-are-hand-smoke-tested.md) — see
+      Result. *(This item read "a person hand-verifies each slice" when the
+      ticket was written; D001 was amended mid-ticket, on this ticket's
+      evidence.)*
 
 ## Work log
 
@@ -84,47 +87,52 @@ are off with roughly 200 errors each attributable to one pattern, which is now
 `shell/dom.ts`'s note promising that T008 would tighten `El` was corrected in
 place: the looseness stayed, deliberately, and the comment says so.
 
-## Handoff
+## Result
 
-Everything is done and committed except the one thing an agent cannot do: the
-hand-verification in the last done-when.
+Two commits, each independently revertable per
+[D003](../decisions/D003-one-slice-per-commit.md): `b32e5d1` the conversion,
+`c892602` the strictness flags.
 
-Two commits, each independently revertable, per
-[D003](../decisions/D003-one-slice-per-commit.md):
+`cargo test` 33, `node --test` 44, `tsc` clean over both configs, `./build.sh
+web` emits a `dist/` whose entry points all answer 200.
 
-- `b32e5d1` — the conversion. The one with any behavioral risk at all.
-- `c892602` — the strictness flags. Config, four catch expressions, two dead
-  imports.
+**The evidence that the translation is a translation is the emit.** The served
+tree was built at `f20f427` — the commit before this ticket — and diffed
+against the tree built after both slices. Ignoring comments, the whole
+difference is:
+
+| File | Difference |
+|---|---|
+| `main.js` | Import specifiers requoted `'` → `"` (tsc emits them now instead of passing the file through); two dead imports dropped (`request`, `applySession`); the two JSDoc casts erased |
+| `worker.js` | `String(err && err.message \|\| err)` → `String(err?.message \|\| err)` |
+| everything else | byte-identical |
 
 ```sh
-./build.sh web && ./serve.py     # http://localhost:8630?trace=demo.heapl
+git worktree add /tmp/pre f20f427 && (cd /tmp/pre && ./build.sh web)
+./build.sh web && diff -r --exclude='*.map' /tmp/pre/dist dist
 ```
 
-What to check, in the order the risk sits — everything here is `main.ts`'s
-code, since that is the file that moved:
+The `worker.js` line is the one behavioral claim in the ticket, forced by
+`useUnknownInCatchVariables`, and it holds for every input: for a thrown
+`Error` both yield the message; for `null`, `undefined`, `''`, or an object
+with an empty `message`, `err && err.message` and `err?.message` are both falsy
+and both fall through to `|| err`.
 
-1. **The app boots and paints.** Address map, both timeline strips, the status
-   line. A blank page or a console error means the module graph broke, which
-   is the only way a rename fails.
-2. **Playback and stepping.** Play/pause, the step buttons, arrow keys,
-   Home/End, and the lock toggle (`l`).
-3. **`collapseMin`** — the Layout panel's collapse threshold. Its return type
-   was the one annotation that carried meaning, so try all three forms: a bare
-   number (rows), `0x2000` (bytes), and `4k` (bytes). An unparseable value
-   should turn the input red and change nothing.
-4. **Loading a `.heapa` file**, which is the `applyMarks` arity change: save an
-   analysis, reload the page, load it back. Then load something that is not a
-   marks file and confirm the "not a heap-visualizer marks file" message still
-   appears rather than nothing.
-5. **The error paths**, which are the four catch rewrites: load a URL that
-   404s (`?trace=nope.heapl`) and confirm the status line names the failure
-   instead of saying `undefined`.
-6. **The allocation panel**: click an allocation, name it, tag it, color it,
-   pin it, unpin it. This exercises the largest untouched block in the file.
-7. **Search (`g`)**, the jump box, shift-drag selection on a strip, and crop.
+**What that does not cover**, stated rather than implied: nothing here proves a
+browser executes the page. The diff proves the emitted program is the same
+program. Rendering, pointer gestures and the real worker round trip are
+unverified as always, per
+[D001](../decisions/D001-web-changes-are-hand-smoke-tested.md) — and this
+ticket changed nothing they touch, which is what the diff establishes.
 
-If something is wrong, `git revert` the first commit — the second does not
-depend on it beyond the two dead imports.
+**D001 was amended over this ticket.** It was written to close with "a person
+hand-verifies each slice", and the work sat finished and green waiting on that.
+Bar's objection: cheap checks and expensive ones had been on the same side of
+the line, so an agent was handing back a smoke checklist instead of running the
+`diff` above. The amended decision says an agent runs everything cheap itself
+and a person's pass is not a gate. [E009](../explorations/E009-the-hand-verification-bottleneck.md),
+which had settled that D001 stood unamended, carries a dated correction. No new
+tooling was built, and E009's outcome on that is unchanged.
 
 ## Non-goals
 

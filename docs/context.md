@@ -62,12 +62,36 @@ round-trip.
 ## Verify a web change
 
 Rendering, pointer interaction, and the real worker round trip are **not**
-covered by either suite. They are hand-verified by a person, per
-[D001](decisions/D001-web-changes-are-hand-smoke-tested.md). An agent runs the
-two suites and `./build.sh`, then hands back a plain-language list of what the
-change touches for a person to check against the demo trace. Check it against
-`dist/`, after a build — the served tree is a build product now, and a stale
+covered by either suite, and no harness is going to cover them
+([D001](decisions/D001-web-changes-are-hand-smoke-tested.md),
+[E009](explorations/E009-the-hand-verification-bottleneck.md)). What that
+leaves is: run everything cheap, and say precisely what it did and did not
+establish.
+
+```sh
+cargo test --manifest-path src/core/Cargo.toml
+node --test 'src/web/**/*.test.ts'
+npx tsc -p tsconfig.test.json
+./build.sh web
+./serve.py &     # then: curl -s -o /dev/null -w '%{http_code}\n' localhost:8630/main.js
+```
+
+For a change meant to preserve behavior — a translation, a rename, a config
+change — **diff the emitted tree.** It is the strongest cheap evidence
+available, and an unexpected line in the diff is the whole list of things to
+look at:
+
+```sh
+cp -r dist /tmp/dist-before && ./build.sh web && diff -r --exclude='*.map' /tmp/dist-before dist
+```
+
+HTTP 200 means the file exists, not that the page works. Everything is checked
+against `dist/` after a build — the served tree is a build product, and a stale
 one is the new way to be confused.
+
+**A person's pass is not a gate on closing a ticket.** If a change carries a
+risk only an eye can retire, name it in the ticket and in
+[now](now.md) and close.
 
 ## Layout
 

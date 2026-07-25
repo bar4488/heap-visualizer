@@ -82,8 +82,13 @@ cargo test --manifest-path src/core/Cargo.toml   # engine, native, no wasm
 node --test 'src/web/**/*.test.ts'               # web layer, no npm, no browser
 ```
 
-Rendering and pointer interaction are hand-verified against the demo trace;
-see [docs/decisions/D001](docs/decisions/D001-web-changes-are-hand-smoke-tested.md).
+```sh
+npx tsc -p tsconfig.test.json                    # type-check everything, emit nothing
+```
+
+Rendering and pointer interaction have no automated coverage and are not going
+to get any; what is checked instead, and how, is
+[docs/decisions/D001](docs/decisions/D001-web-changes-are-hand-smoke-tested.md).
 
 ## Layout
 
