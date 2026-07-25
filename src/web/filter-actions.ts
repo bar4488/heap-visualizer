@@ -5,7 +5,7 @@ type TopLevelSource = {
   operators: FilterJoin[];
 };
 
-function splitTopLevel(source: string): TopLevelSource {
+function splitTopLevel(source: string, splitOn?: FilterJoin): TopLevelSource {
   const operands: string[] = [];
   const operators: FilterJoin[] = [];
   let start = 0;
@@ -29,7 +29,7 @@ function splitTopLevel(source: string): TopLevelSource {
     else if (ch === ')' || ch === ']' || ch === '}') depth = Math.max(0, depth - 1);
     else if (depth === 0) {
       const op = source.slice(i, i + 2);
-      if (op === '&&' || op === '||') {
+      if ((op === '&&' || op === '||') && (!splitOn || op === splitOn)) {
         operands.push(source.slice(start, i).trim());
         operators.push(op);
         start = i + 2;
@@ -41,12 +41,17 @@ function splitTopLevel(source: string): TopLevelSource {
   return { operands, operators };
 }
 
+function splitLogicalRoot(source: string): TopLevelSource {
+  const operators = splitTopLevel(source).operators;
+  return splitTopLevel(source, operators.includes('||') ? '||' : '&&');
+}
+
 export function quoteFilterString(value: string): string {
   return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 }
 
 export function hasTopLevelPredicate(source: string, predicate: string): boolean {
-  return splitTopLevel(source).operands.includes(predicate.trim());
+  return splitLogicalRoot(source).operands.includes(predicate.trim());
 }
 
 export function toggleFilterPredicate(
@@ -58,7 +63,7 @@ export function toggleFilterPredicate(
   const target = predicate.trim();
   if (!trimmed) return target;
 
-  const split = splitTopLevel(trimmed);
+  const split = splitLogicalRoot(trimmed);
   const index = split.operands.indexOf(target);
   if (index >= 0) {
     if (split.operands.length === 1) return '';
@@ -76,7 +81,7 @@ export function toggleFilterPredicate(
     return result;
   }
 
-  const base = join === '&&' && split.operators.includes('||')
+  const base = join === '&&' && split.operators[0] === '||'
     ? `(${trimmed})`
     : trimmed;
   return `${base} ${join} ${target}`;

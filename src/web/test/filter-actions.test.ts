@@ -42,12 +42,21 @@ test('operators inside strings and nesting are not top-level splits', () => {
 
 test('removes the connector beside the first or middle operand', () => {
   assert.equal(
-    toggleFilterPredicate('site == "a" || thread == 2 && tag is missing', 'site == "a"'),
-    'thread == 2 && tag is missing',
+    toggleFilterPredicate('site == "a" || thread == 2 || tag is missing', 'site == "a"'),
+    'thread == 2 || tag is missing',
   );
   assert.equal(
-    toggleFilterPredicate('site == "a" && thread == 2 || tag is missing', 'thread == 2'),
-    'site == "a" || tag is missing',
+    toggleFilterPredicate('site == "a" && thread == 2 && tag is missing', 'thread == 2'),
+    'site == "a" && tag is missing',
+  );
+});
+
+test('does not treat a predicate inside a tighter-precedence branch as a root operand', () => {
+  const source = 'site == "a" || thread == 2 && tag is missing';
+  assert.equal(hasTopLevelPredicate(source, 'thread == 2'), false);
+  assert.equal(
+    toggleFilterPredicate(source, 'thread == 2'),
+    '(site == "a" || thread == 2 && tag is missing) && thread == 2',
   );
 });
 
