@@ -1,6 +1,6 @@
 # The Workflow Protocol
 
-Version: 3
+Version: 4
 
 A text interface that lets humans and agents work on a repository across many
 sessions without depending on conversation history.
@@ -33,6 +33,7 @@ docs/
   now.md              where the project stands — the one entry point
   context.md          how to run and test the thing (add when there is something to run)
   tickets/T001-*.md   units of work
+  milestones/M001-*.md tickets bound into one assignment (add when work runs in parallel)
   explorations/E001-* ideas, research, reviews, proposals — binding on nothing
   decisions/D001-*.md rationale that would otherwise get quietly undone
 spec/                 what your product must do — requirements with permanent IDs
@@ -186,6 +187,60 @@ A ticket that fails any of these is not ready to start. Re-ground one that has
 been sitting: `updated` says when it was last true, and the repository has moved
 since.
 
+## Milestones
+
+A milestone binds tickets into one **assignment**: work a single agent can carry
+to completion, and the set of paths it owns while doing so.
+
+Optional. Add them when the grouping stops being obvious — in practice, when
+work runs in parallel. One worker and six open tickets does not need them.
+
+```markdown
+---
+id: M002
+title: Storage layer depends only on the interface
+tickets: [T014, T017, T018]
+write_scope:
+  - src/storage/**
+  - tests/storage/**
+depends_on: [M001]
+updated: 2026-07-25
+---
+
+# M002: Storage Layer Depends Only on the Interface
+
+## Outcome
+
+No module under `src/storage/` imports a concrete driver.
+
+## Done when
+
+- [ ] `rg 'import .*driver' src/storage` returns nothing.
+```
+
+**A milestone has no status field.** Its state is derived from its tickets:
+`done` when all are `done`, `doing` when any is, `todo` otherwise. It is *ready*
+when every milestone it depends on is done. A hand-written status would give one
+fact two owners, and it is the step by which a milestone becomes a second
+tracker.
+
+**Concurrently running milestones must have disjoint write scopes.** That is the
+property that makes parallel work safe, and it is checkable before any work
+starts. Overlap is not a merge to resolve later: either the two are one
+milestone, or one depends on the other.
+
+**Shared files are in no milestone's write scope** — `docs/now.md`, the spec,
+the indexes. They are written after merge, not mid-flight.
+
+A milestone owns membership, ordering, and scope. It does not own status,
+rationale, or narrative. Tickets carry no dependency field: ordering lives at
+the milestone level, where the graph is small enough to read.
+
+Reading the graph never requires traversing it. **A dependency on a milestone
+that is not open is already satisfied** — a done milestone is a resolved edge
+carrying no information — so only open milestones are ever examined, and there
+are few of those by construction.
+
 ## The spec
 
 The declarative desired state: externally visible behavior, important internal
@@ -282,7 +337,7 @@ choices.
 
 ## Identifiers
 
-One number space per artifact type — `T001`, `E001`, `D001` — global and
+One number space per artifact type — `T001`, `E001`, `D001`, `M001` — global and
 permanent across the life of the repository. In the filename. Never reused, never
 renumbered, never scoped to a date, a review, or a directory. An identifier that
 encodes *when* something was found cannot survive the thing being moved.
@@ -333,6 +388,7 @@ in the order they usually earn their place: `write-ticket`, `start-session`,
 rg '^status: todo$' docs/tickets       # what can be started
 rg '^status: doing$' docs/tickets      # what is in flight — the queue source
 rg '^status: open$' docs/explorations  # what is unresolved
+rg -A3 '^tickets:' docs/milestones     # membership, scope, and ordering
 rg 'STORE-004' .                       # everything touching a requirement
 ```
 
@@ -362,6 +418,8 @@ field, a new skill, and a new validator: name the two times its absence hurt.
 - Durable state outside the repository — including uncommitted files.
 - A constraint cited but defined nowhere.
 - Two owners for one mutable fact, or a derivable fact maintained by hand.
+- A milestone carrying its own status, or two running milestones whose write
+  scopes overlap.
 - An identifier reused, or scoped to a date or directory.
 - A requirement cited by section number.
 - A skill holding project state.
