@@ -12,6 +12,7 @@ of an immutable trace. Nothing here ever modifies the trace or its file.
 | **Highlight color** | Per-allocation color override, visible in every color mode. | creator event |
 | **Time mark (bookmark)** | Named playhead position; ⚑ flags on both timelines. | seq (+ t for display) |
 | **Address mark** | Named horizontal flag line on the map; its row is pinned into the layout forever ([MAP-003](04-address-map.md#map-003-layout-stability)). | address |
+| **Saved filter** | Named version-1 filter source that can be set and applied again. | trace analysis |
 
 Everything is anchored to creator event indices or seq — never to ids or
 addresses (except address marks, whose point *is* the address) — so analysis
@@ -54,6 +55,11 @@ conjunct and immediately applies the result; Shift-click uses a disjunction.
 Active styling is derived from the successfully applied source. String values
 are escaped as DSL literals, and adding a conjunct parenthesizes an existing
 top-level disjunction so its meaning is preserved.
+
+The current expression can be saved under a trace-local name. The Filter panel
+lists saved filters and can set and apply one again, rename it, or delete it.
+Saving an existing name overwrites its source. A saved filter is source text,
+not a compiled plan or a live match set.
 
 The focused editor offers contextual completion from the same core catalog
 that checks the expression: executable fields, type-valid operators and
@@ -106,8 +112,8 @@ number of allocations can be pinned side by side for comparison
 Two deliberately different persistence channels:
 
 - **Marks** — the shareable deliverable: tags (+ per-event assignments),
-  names, colors, bookmarks, address marks, plus trace fingerprint, playhead,
-  and key view settings. Manually exported/imported as **`.heapa.json`** (a
+  names, colors, bookmarks, address marks, saved filters, plus trace
+  fingerprint, playhead, and key view settings. Manually exported/imported as **`.heapa.json`** (a
   single JSON object marked `heapVisualizerAnalysis: 1`). Dropping one onto
   the page restores it; a trace-size mismatch warns but applies anyway.
   Anchoring by event index is what makes the file portable — it is only

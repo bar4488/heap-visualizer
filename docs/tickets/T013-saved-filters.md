@@ -1,7 +1,7 @@
 ---
 id: T013
 title: Named filters saved in the marks file
-status: todo
+status: done
 updated: 2026-07-25
 ---
 
@@ -44,3 +44,13 @@ session blob.
 - Saved filters that follow the user across traces.
 - Sharing a filter without the rest of the analysis.
 - Any evaluation at save time — a saved filter is source text.
+
+## Result
+
+The Filter panel now saves or overwrites the current draft under a name, lists
+saved filters, sets and applies one, and supports rename and delete. These
+mutations enter the existing marks-autosave dirty path. `.heapa` marks carry a
+validated `savedFilters` array; older files load with an empty list and
+malformed entries are dropped. The analysis round-trip includes saved filters.
+`node --test src/web/test/analysis.test.ts` and
+`npx tsc -p tsconfig.test.json` pass.

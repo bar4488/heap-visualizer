@@ -353,6 +353,24 @@ button.d-pin.pinned {
 .filter-status.invalid { color: var(--red); }
 .filter-status.applied { color: var(--green); }
 .filter-editor.applying { opacity: 0.72; }
+.saved-filter-head, .saved-filter-row {
+  display: flex; align-items: center; gap: 6px;
+}
+.saved-filter-head {
+  margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border);
+  color: var(--fg-dim); font-size: 11px;
+}
+.saved-filter-head .grow, .saved-filter-row .grow { flex: 1; min-width: 0; }
+.saved-filter-head input { width: 110px; }
+.saved-filter-list { margin-top: 5px; }
+.saved-filter-row { margin-top: 4px; }
+.saved-filter-row input {
+  border: 1px solid transparent; background: transparent; color: var(--fg);
+}
+.saved-filter-row input:hover, .saved-filter-row input:focus {
+  border-color: var(--border); background: var(--bg3);
+}
+.saved-filter-list .empty { color: var(--fg-dim); font-size: 11px; }
 .check-group { border-top: 1px solid var(--border); padding-top: 6px; margin-top: 6px; }
 .check-group .group-title { color: var(--fg-dim); font-size: 11px; margin-bottom: 3px; }
 .check-group label { display: flex; gap: 6px; padding: 1px 0; cursor: pointer; color: var(--fg); }

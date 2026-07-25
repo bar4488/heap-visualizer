@@ -79,6 +79,7 @@ const ui = {
   allocColors: new Map(),
   bookmarks: [],
   addrMarks: [],
+  savedFilters: [],
   drawers: null,
 };
 
@@ -111,6 +112,7 @@ analysis.initAnalysis({
   DEFAULT_ROW_BYTES: 0x1000,
   fmtTime: (t) => `${t} ns`,
   buildLegend: noop,
+  buildFilterPanel: noop,
   sendNames: noop,
   rowBytesValue: () => 0x1000,
   setRowBytesInput: noop,
@@ -134,6 +136,9 @@ function seedAnalysisState() {
   ui.addrMarks = [
     { name: 'arena base', addr: '0x7f0000' },
     { name: 'guard page', addr: '0x7fffff' },
+  ];
+  ui.savedFilters = [
+    { name: 'large parser allocations', source: 'size >= 4096 && site == "parser"' },
   ];
 }
 
@@ -159,6 +164,9 @@ test('buildMarks captures the analysis layer and folds in a session', async () =
   assert.deepEqual(m.allocColors, [[10, '#bc8cff']]);
   assert.equal(m.bookmarks.length, 2);
   assert.equal(m.addrMarks.length, 2);
+  assert.deepEqual(m.savedFilters, [
+    { name: 'large parser allocations', source: 'size >= 4096 && site == "parser"' },
+  ]);
   // the exported file is a complete snapshot, not just the marks
   assert.equal(m.session.heapVisualizerSession, 1);
   assert.ok(typeof m.saved === 'string' && m.saved.endsWith('Z'));
@@ -202,6 +210,7 @@ test('buildMarks -> applyMarks -> buildMarks is a fixed point', async () => {
   ui.allocColors = new Map();
   ui.bookmarks = [];
   ui.addrMarks = [];
+  ui.savedFilters = [];
   analysis.applyMarks(before, true);
 
   const after = await analysis.buildMarks();
@@ -260,6 +269,26 @@ test('applyMarks drops per-allocation colors that are not #rrggbb', () => {
     allocColors: [[1, '#aabbcc'], [2, 'red'], [3, '#fff']],
   }, true);
   assert.deepEqual([...ui.allocColors.entries()], [[1, '#aabbcc']]);
+});
+
+test('applyMarks accepts valid saved filters, drops malformed entries, and deduplicates names', () => {
+  analysis.applyMarks({
+    heapVisualizerAnalysis: 1,
+    savedFilters: [
+      { name: ' useful ', source: 'size > 1' },
+      { name: '', source: 'thread == 1' },
+      { name: 'bad source' },
+      null,
+      { name: 'useful', source: 'size > 2' },
+    ],
+  }, true);
+  assert.deepEqual(ui.savedFilters, [{ name: 'useful', source: 'size > 2' }]);
+});
+
+test('applyMarks loads an older marks file without saved filters', () => {
+  ui.savedFilters = [{ name: 'old', source: 'size > 0' }];
+  analysis.applyMarks({ heapVisualizerAnalysis: 1 }, true);
+  assert.deepEqual(ui.savedFilters, []);
 });
 
 test('applyMarks coerces bookmark fields to their declared types', () => {

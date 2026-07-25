@@ -43,6 +43,7 @@ import type {
 
 /** A user-authored tag. Its id is its index here + 1; id 0 means untagged. */
 type Tag = { name: string; color: string };
+type SavedFilter = { name: string; source: string };
 
 /** A range selection or its mirror, in whichever domain `kind` names. */
 type Selection = { kind: Domain; lo: number; hi: number };
@@ -79,6 +80,8 @@ type UIState = {
   bookmarks: { name: string; seq: number; t: number }[];
   /** Address marks; `addr` is a `0x…` string. */
   addrMarks: { name: string; addr: string }[];
+  /** Named filter source saved with the authored analysis. */
+  savedFilters: SavedFilter[];
   /** The active range selection, and the same range in the other domain. */
   sel: Selection | null;
   selMirror: Selection | null;
@@ -133,6 +136,7 @@ const UI: UIState = {
   allocColors: new Map(),
   bookmarks: [],
   addrMarks: [],
+  savedFilters: [],
   sel: null,
   selMirror: null,
   marksDirty: false,
@@ -390,6 +394,7 @@ function onLoaded(m) {
   UI.allocColors.clear();
   UI.bookmarks = [];
   UI.addrMarks = [];
+  UI.savedFilters = [];
   UI.marksDirty = false;
   UI.crop = null;
   UI.filterDraft = '';
@@ -1071,7 +1076,37 @@ function buildFilterPanel() {
   $('filter-source').value = UI.filterDraft;
   const mode = $1(`input[name=fmode][value="${UI.filterMode}"]`);
   if (mode) mode.checked = true;
+  buildSavedFilters();
   filterEdited();
+}
+
+function buildSavedFilters() {
+  const list = $('saved-filter-list');
+  if (!UI.savedFilters.length) {
+    list.innerHTML = '<div class="empty">no saved filters</div>';
+    return;
+  }
+  list.innerHTML = UI.savedFilters.map((filter, index) => `<div class="saved-filter-row">
+    <input type="text" class="grow" data-saved-filter-name="${index}" value="${esc(filter.name)}">
+    <button type="button" data-saved-filter-set="${index}">set</button>
+    <button type="button" class="x" data-saved-filter-delete="${index}" title="delete saved filter">×</button>
+  </div>`).join('');
+}
+
+function saveCurrentFilter() {
+  const input = $('saved-filter-name');
+  const name = input.value.trim();
+  if (!name) {
+    input.focus();
+    return;
+  }
+  const existing = UI.savedFilters.find((filter) => filter.name === name);
+  if (existing) existing.source = UI.filterDraft;
+  else UI.savedFilters.push({ name, source: UI.filterDraft });
+  input.value = '';
+  buildSavedFilters();
+  markDirty();
+  setFilterStatus(`Saved “${name}”`);
 }
 
 $('filter-source').oninput = filterEdited;
@@ -1112,6 +1147,45 @@ $('filter-completions').onpointermove = (e) => {
   if (option) setActiveFilterCompletion(+option.dataset.completion);
 };
 $('filter-apply').onclick = () => { void applyFilterSource(); };
+$('saved-filter-save').onclick = saveCurrentFilter;
+$('saved-filter-name').onkeydown = (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    saveCurrentFilter();
+  }
+};
+$('saved-filter-list').onchange = (event) => {
+  const input = event.target.closest('[data-saved-filter-name]');
+  if (!input) return;
+  let index = +input.dataset.savedFilterName;
+  const name = input.value.trim();
+  if (!name) {
+    buildSavedFilters();
+    return;
+  }
+  const duplicate = UI.savedFilters.findIndex((filter, i) => i !== index && filter.name === name);
+  if (duplicate >= 0) {
+    UI.savedFilters.splice(duplicate, 1);
+    if (duplicate < index) index--;
+  }
+  UI.savedFilters[index].name = name;
+  buildSavedFilters();
+  markDirty();
+};
+$('saved-filter-list').onclick = (event) => {
+  const set = event.target.closest('[data-saved-filter-set]');
+  if (set) {
+    const filter = UI.savedFilters[+set.dataset.savedFilterSet];
+    if (filter) void applyFilterSource(filter.source);
+    return;
+  }
+  const del = event.target.closest('[data-saved-filter-delete]');
+  if (del) {
+    UI.savedFilters.splice(+del.dataset.savedFilterDelete, 1);
+    buildSavedFilters();
+    markDirty();
+  }
+};
 $('filter-clear').onclick = () => {
   $('filter-source').value = '';
   hideFilterCompletions();
@@ -1218,6 +1292,7 @@ initAnalysis({
   DEFAULT_ROW_BYTES,
   fmtTime,
   buildLegend,
+  buildFilterPanel,
   sendNames,
   rowBytesValue,
   setRowBytesInput,

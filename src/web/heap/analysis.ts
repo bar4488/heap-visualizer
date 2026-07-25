@@ -1,5 +1,5 @@
 // Heap domain: the user-authored analysis layer — tags, allocation names and
-// colors, time marks (bookmarks) and address marks — plus the `.heapa` file
+// colors, time marks (bookmarks), address marks and saved filters — plus the `.heapa` file
 // these are saved to and loaded from.
 //
 // This is durable, user-authored data, distinct from the transient view state
@@ -19,7 +19,7 @@ import { buildSession, applySession } from '../session.ts';
 
 let d = null;
 
-// deps: { ui, post, CAT, DEFAULT_ROW_BYTES, fmtTime, buildLegend,
+// deps: { ui, post, CAT, DEFAULT_ROW_BYTES, fmtTime, buildLegend, buildFilterPanel,
 //         sendNames, rowBytesValue, setRowBytesInput, sendCollapseMin }
 export function initAnalysis(deps) {
   d = deps;
@@ -31,6 +31,17 @@ export function initAnalysis(deps) {
 // session/layout state) now auto-persist to localStorage, so there's nothing
 // a plain refresh can actually lose
 export function markDirty() { d.ui.marksDirty = true; }
+
+export function normalizeSavedFilters(value) {
+  if (!Array.isArray(value)) return [];
+  const byName = new Map();
+  for (const entry of value) {
+    if (!entry || typeof entry.name !== 'string' || typeof entry.source !== 'string') continue;
+    const name = entry.name.trim();
+    if (name) byName.set(name, { name, source: entry.source });
+  }
+  return [...byName.values()];
+}
 
 // ---------------------------------------------------------------------------
 // tags
@@ -270,6 +281,7 @@ export async function buildMarks() {
     allocColors: [...d.ui.allocColors.entries()],
     bookmarks: d.ui.bookmarks,
     addrMarks: d.ui.addrMarks,
+    savedFilters: d.ui.savedFilters,
     // layout/filters/crop/drawers/window positions — folded in so the one
     // manually-exported file is a complete snapshot, not just the "marks"
     session: buildSession(),
@@ -329,6 +341,7 @@ export function applyMarks(obj, quiet?) {
   d.ui.bookmarks = (obj.bookmarks || []).map((b) => ({ name: String(b.name), seq: b.seq | 0, t: +b.t }));
   d.ui.addrMarks = (obj.addrMarks || []).filter((m) => /^0x[0-9a-f]+$/i.test(m.addr))
     .map((m) => ({ name: String(m.name), addr: m.addr.toLowerCase() }));
+  d.ui.savedFilters = normalizeSavedFilters(obj.savedFilters);
   sendAddrMarks();
   if (obj.rowBytes) {
     d.setRowBytesInput(obj.rowBytes);
@@ -347,6 +360,7 @@ export function applyMarks(obj, quiet?) {
   }
   syncTagDatalist();
   buildMarksPanel();
+  d.buildFilterPanel();
   d.buildLegend();
   updateMarkers();
   // layout/filters/crop/drawers/window positions, if this file has them
