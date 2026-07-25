@@ -171,7 +171,10 @@
     </div>
     <textarea id="filter-source" rows="6" spellcheck="false"
       placeholder='size >= 4KiB && site.starts_with("parser_")'
-      aria-describedby="filter-status"></textarea>
+      aria-describedby="filter-status" aria-autocomplete="list"
+      aria-controls="filter-completions" aria-expanded="false"></textarea>
+    <div id="filter-completions" class="filter-completions"
+      role="listbox" aria-label="Filter completions" hidden></div>
     <div id="filter-status" class="filter-status" role="status">Empty</div>
   </div>
 </div>

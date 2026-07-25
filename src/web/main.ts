@@ -29,10 +29,13 @@ import {
   restoreMarksAutosave, resetSessionSnapshot,
 } from './session.ts';
 import {
+  applyFilterCompletion, utf8Offset,
+} from './filter-completion.ts';
+import {
   drawersState, dock, initDrawers, drawerEl, refreshDrawerDividers,
 } from './shell/drawers.ts';
 import type {
-  AllocInfo, Domain, FromWorker, Range, TraceMeta,
+  AllocInfo, Domain, FilterCompletions, FromWorker, Range, TraceMeta,
 } from './protocol.ts';
 
 /** A user-authored tag. Its id is its index here + 1; id 0 means untagged. */
@@ -873,6 +876,8 @@ function buildLegend() {
 let filterCheckTimer = 0;
 let filterCheckGeneration = 0;
 let filterApplyGeneration = 0;
+let filterCompletions: FilterCompletions | null = null;
+let filterCompletionIndex = 0;
 
 function setFilterStatus(text, kind = '') {
   const status = $('filter-status');
@@ -880,12 +885,104 @@ function setFilterStatus(text, kind = '') {
   status.className = `filter-status${kind ? ` ${kind}` : ''}`;
 }
 
-function utf8Offset(source, utf16Offset) {
-  return new TextEncoder().encode(source.slice(0, utf16Offset)).length;
-}
-
 function showFilterDiagnostic(diagnostic) {
   setFilterStatus(`Invalid: ${diagnostic.message} at byte ${diagnostic.start}`, 'invalid');
+}
+
+function hideFilterCompletions() {
+  const input = $('filter-source');
+  const list = $('filter-completions');
+  filterCompletions = null;
+  filterCompletionIndex = 0;
+  list.hidden = true;
+  list.innerHTML = '';
+  input.setAttribute('aria-expanded', 'false');
+  input.removeAttribute('aria-activedescendant');
+}
+
+function setActiveFilterCompletion(index) {
+  if (!filterCompletions?.items.length) return;
+  filterCompletionIndex = (index + filterCompletions.items.length)
+    % filterCompletions.items.length;
+  $$('[role=option]', $('filter-completions')).forEach((option, i) => {
+    const active = i === filterCompletionIndex;
+    option.classList.toggle('active', active);
+    option.setAttribute('aria-selected', String(active));
+    if (active) option.scrollIntoView({ block: 'nearest' });
+  });
+  $('filter-source').setAttribute(
+    'aria-activedescendant',
+    `filter-completion-${filterCompletionIndex}`,
+  );
+}
+
+function showFilterCompletions(completions) {
+  const input = $('filter-source');
+  const list = $('filter-completions');
+  filterCompletions = completions;
+  filterCompletionIndex = 0;
+  list.innerHTML = completions.items.map((candidate, index) =>
+    `<div id="filter-completion-${index}" class="filter-completion" role="option"
+      aria-selected="${index === 0}" data-completion="${index}">
+      <span class="filter-completion-label">${esc(candidate.label)}</span>
+      <span class="filter-completion-kind">${esc(candidate.kind)}</span>
+      ${candidate.detail ? `<span class="filter-completion-detail">${esc(candidate.detail)}</span>` : ''}
+    </div>`).join('') +
+    (completions.hasMore
+      ? '<div class="filter-completion-more">more — type to narrow</div>'
+      : '');
+  list.hidden = false;
+  input.setAttribute('aria-expanded', 'true');
+  setActiveFilterCompletion(0);
+}
+
+function acceptFilterCompletion(index = filterCompletionIndex) {
+  if (!filterCompletions) return;
+  const candidate = filterCompletions.items[index];
+  if (!candidate) return;
+  const input = $('filter-source');
+  const edit = applyFilterCompletion(input.value, filterCompletions, candidate);
+  input.value = edit.source;
+  input.setSelectionRange(edit.cursor, edit.cursor);
+  hideFilterCompletions();
+  input.focus();
+  filterEdited();
+}
+
+function scheduleFilterCheck(explicit = false) {
+  const input = $('filter-source');
+  clearTimeout(filterCheckTimer);
+  const generation = ++filterCheckGeneration;
+  filterCheckTimer = window.setTimeout(async () => {
+    const source = input.value;
+    const cursorUtf16 = input.selectionStart;
+    const cursor = utf8Offset(source, cursorUtf16);
+    const result = await requestLatest('filter-check', 'filter-check', { source, cursor });
+    if (
+      generation !== filterCheckGeneration
+      || source !== input.value
+      || cursorUtf16 !== input.selectionStart
+      || input.selectionStart !== input.selectionEnd
+    ) return;
+    if (source.trim() && source !== UI.filterApplied) {
+      if (result.available === false) {
+        setFilterStatus('Checker unavailable; keep editing or Apply to retry');
+      } else if (result.valid) {
+        setFilterStatus('Valid');
+      } else if (result.diagnostic) {
+        showFilterDiagnostic(result.diagnostic);
+      }
+    }
+    if (
+      document.activeElement === input
+      && result.completions
+      && (explicit || !!source.trim())
+    ) {
+      showFilterCompletions(result.completions);
+    } else {
+      hideFilterCompletions();
+    }
+  }, explicit ? 0 : 180);
 }
 
 function filterEdited() {
@@ -898,18 +995,7 @@ function filterEdited() {
   } else {
     setFilterStatus(UI.filterApplied ? 'Edited; applied filter is still active' : 'Checking…');
   }
-  clearTimeout(filterCheckTimer);
-  const generation = ++filterCheckGeneration;
-  if (!UI.filterDraft.trim() || UI.filterDraft === UI.filterApplied) return;
-  filterCheckTimer = window.setTimeout(async () => {
-    const source = UI.filterDraft;
-    const cursor = utf8Offset(source, input.selectionStart);
-    const result = await requestLatest('filter-check', 'filter-check', { source, cursor });
-    if (generation !== filterCheckGeneration || source !== UI.filterDraft) return;
-    if (result.available === false) setFilterStatus('Checker unavailable; keep editing or Apply to retry');
-    else if (result.valid) setFilterStatus('Valid');
-    else if (result.diagnostic) showFilterDiagnostic(result.diagnostic);
-  }, 180);
+  scheduleFilterCheck();
 }
 
 async function applyFilterSource(source = $('filter-source').value) {
@@ -918,6 +1004,10 @@ async function applyFilterSource(source = $('filter-source').value) {
   const generation = ++filterApplyGeneration;
   UI.filterDraft = source;
   $('filter-source').value = source;
+  clearTimeout(filterCheckTimer);
+  ++filterCheckGeneration;
+  cancelLatest('filter-check');
+  hideFilterCompletions();
   panel.classList.add('applying');
   button.disabled = true;
   setFilterStatus('Applying…');
@@ -974,12 +1064,43 @@ $('filter-source').oninput = filterEdited;
 $('filter-source').onkeydown = (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
     e.preventDefault();
+    hideFilterCompletions();
     void applyFilterSource();
+  } else if ((e.ctrlKey || e.metaKey) && e.code === 'Space') {
+    e.preventDefault();
+    scheduleFilterCheck(true);
+  } else if (filterCompletions && e.key === 'ArrowDown') {
+    e.preventDefault();
+    setActiveFilterCompletion(filterCompletionIndex + 1);
+  } else if (filterCompletions && e.key === 'ArrowUp') {
+    e.preventDefault();
+    setActiveFilterCompletion(filterCompletionIndex - 1);
+  } else if (filterCompletions && (e.key === 'Enter' || e.key === 'Tab')) {
+    e.preventDefault();
+    acceptFilterCompletion();
+  } else if (e.key === 'Escape') {
+    hideFilterCompletions();
   }
+};
+$('filter-source').onkeyup = (e) => {
+  if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) scheduleFilterCheck();
+};
+$('filter-source').onclick = () => { scheduleFilterCheck(); };
+$('filter-source').onblur = () => { hideFilterCompletions(); };
+$('filter-completions').onpointerdown = (e) => {
+  const option = e.target.closest('[data-completion]');
+  if (!option) return;
+  e.preventDefault();
+  acceptFilterCompletion(+option.dataset.completion);
+};
+$('filter-completions').onpointermove = (e) => {
+  const option = e.target.closest('[data-completion]');
+  if (option) setActiveFilterCompletion(+option.dataset.completion);
 };
 $('filter-apply').onclick = () => { void applyFilterSource(); };
 $('filter-clear').onclick = () => {
   $('filter-source').value = '';
+  hideFilterCompletions();
   filterEdited();
   $('filter-source').focus();
 };

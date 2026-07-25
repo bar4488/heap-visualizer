@@ -317,6 +317,26 @@ button.d-pin.pinned {
   font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 .filter-editor textarea:focus { border-color: var(--accent); outline: none; }
+.filter-completions {
+  max-height: 176px; overflow-y: auto; margin-top: 3px;
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 4px;
+  font: 11px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.filter-completion {
+  display: grid; grid-template-columns: minmax(7em, 1fr) auto minmax(0, 1fr);
+  gap: 8px; align-items: baseline; padding: 4px 7px; cursor: default;
+}
+.filter-completion.active { background: var(--accent); color: #fff; }
+.filter-completion-kind { color: var(--fg-dim); font-size: 10px; }
+.filter-completion.active .filter-completion-kind,
+.filter-completion.active .filter-completion-detail { color: inherit; opacity: 0.8; }
+.filter-completion-detail {
+  overflow: hidden; color: var(--fg-dim); text-align: right;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.filter-completion-more {
+  padding: 4px 7px; border-top: 1px solid var(--border); color: var(--fg-dim);
+}
 .filter-status {
   min-height: 1.4em; margin-top: 5px; color: var(--fg-dim);
   font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
