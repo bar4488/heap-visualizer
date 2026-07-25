@@ -26,23 +26,24 @@ native tests asserting real invariants: snapshot seek ≡ forward replay, pick
 prefers the newest overlap, anchor stability across reflow. Every performance
 and soundness finding from the 2026-07-24 review is fixed.
 
-**Web layer (`src/web/`, ~3.2k lines) — TypeScript, split on the shell/domain
-seam, no other internal structure yet.** `main.js` is down from 2,979 lines in one flat
-scope to ~1,700 lines of trace/worker/toolbar wiring plus the three coordinated
-views.
+**Web layer (`src/web/`, ~3.2k lines) — all TypeScript now, split on the
+shell/domain seam, no other internal structure yet.** `main.ts` is down from
+2,979 lines in one flat scope to ~1,750 lines of trace/worker/toolbar wiring
+plus the three coordinated views, and it owns `UIState`, the shared state every
+other module takes as `deps.ui`.
 `src/web/shell/` (433 lines) is domain-independent and stays that way by
 check: `grep -ric heap src/web/shell/` reports 0 for every file.
 `src/web/heap/` — analysis, the panel table, the events panel — and the
-`src/web/session.ts` boundary module hold the rest. `main.js` is the last
-JavaScript file left; it is type-checked in place until
-[T008](tickets/T008-convert-web-to-typescript.md) converts it.
+`src/web/session.ts` boundary module hold the rest.
 
 **Verification — two suites, a type-checker, and a person.** `cargo test` (33)
 covers the engine; `node --test 'src/web/**/*.test.ts'` (44) covers the pure
 functions, the panel table, and both persisted round-trips, with no npm and no
 browser. `tsc` covers what neither reaches: the worker protocol
 (`src/web/protocol.ts`, imported by both sides), the persisted shapes, and the
-panel records — a message name one side does not know fails the build.
+panel records — a message name one side does not know fails the build. How
+strict that check is is a named list of flags rather than `strict: true`, ten
+on and two off, per [D005](decisions/D005-strictness-is-per-flag.md).
 Rendering and pointer interaction are hand-verified, per
 [D001](decisions/D001-web-changes-are-hand-smoke-tested.md).
 
@@ -63,17 +64,23 @@ survivable, a stale `dist/` is the new way to be confused.
 
 ## Next
 
-**Nothing is in flight.** The 2026-07-25 run closed T001, T002, T005, T007 and
-T003 — the session namespacing, the panel table, spec requirement ids, the
-`src/`-to-`dist/` split, and TypeScript at the contracts. All four web changes
-were hand-verified against `dist/`.
+**[T008](tickets/T008-convert-web-to-typescript.md) is waiting on a person, and
+on nothing else.** Both slices are written, committed and passing — the
+conversion (`b32e5d1`) and the strictness flags (`c892602`) — and the last
+done-when is the hand-verification in
+[D001](decisions/D001-web-changes-are-hand-smoke-tested.md). The ticket's
+handoff has the smoke list, ordered by where the risk actually sits. Check it
+against `dist/` after `./build.sh web`. It braced for several sessions and took
+one: `main.js` was already type-checked in place, so the rename produced 20
+errors and no findings.
 
-The one thing left of the TypeScript move is
-[T008](tickets/T008-convert-web-to-typescript.md) — `main.js`, the last
-JavaScript file, and raising strictness. **Deferred on purpose**: it is the
-largest body of hand-verified JS change left, and it should be picked up when
-there is appetite for repeated smoke-testing, not because it is next in a list.
-Re-ground it before starting; T003 moved the ground under it.
+Then [T009](tickets/T009-type-the-deps-contracts.md), which is the only thing
+queued and is not urgent. It types the `init*(deps)` contracts in
+`analysis.ts`, `session.ts` and `events-panel.ts` — today a comment above each
+`init*` and a `let d = null` under it. That one pattern is ~200 of the errors
+under each of the two type-checking flags that are still off; what is left
+underneath is deliberately not planned yet, per
+[D005](decisions/D005-strictness-is-per-flag.md).
 
 Why the language changed at all is
 [D004](decisions/D004-typescript-is-the-language-for-web.md); the argument that
@@ -85,9 +92,9 @@ must stay blocked — see [D002](decisions/D002-shell-split-before-host.md).
 
 **Nothing else is queued, and that is the correct state.**
 [E009](explorations/E009-the-hand-verification-bottleneck.md) asked whether the
-hand-verification pass those four tickets waited on should be partly mechanized,
-and settled at no: the four changes worked first try, so the risk it was written
-against never showed up. D001 stands unamended and no tooling came out of it.
+hand-verification pass should be partly mechanized, and settled at no: the
+changes it was written against worked first try, so the risk never showed up.
+D001 stands unamended and no tooling came out of it.
 
 ## Not being done, deliberately
 
@@ -105,6 +112,5 @@ against never showed up. D001 stands unamended and no tooling came out of it.
 
 <!-- generated:begin -->
 ## Doing
-
-Nothing in flight.
+- [T008](tickets/T008-convert-web-to-typescript.md) — convert the rest of the web layer to TypeScript
 <!-- generated:end -->
