@@ -742,7 +742,7 @@ onmessage = async (ev: MessageEvent<ToWorker>) => {
         break;
       }
       const len = writeBuf(te.encode(m.source));
-      E.hp_filter_check(len);
+      E.hp_filter_check(len, m.cursor);
       postMessage({ type: 'filter-check-result', reqId: m.reqId, ...retJson() });
       break;
     }

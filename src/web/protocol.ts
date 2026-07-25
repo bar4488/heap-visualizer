@@ -39,6 +39,21 @@ export type FilterDiagnostic = {
   end: number;
 };
 
+export type FilterCompletion = {
+  label: string;
+  insertText: string;
+  kind: 'field' | 'function' | 'member' | 'operator' | 'value';
+  detail?: string;
+};
+
+export type FilterCompletions = {
+  /** UTF-8 byte offsets into the submitted source. */
+  start: number;
+  end: number;
+  items: FilterCompletion[];
+  hasMore?: boolean;
+};
+
 // --- settings ---------------------------------------------------------------
 // One `set` message per setting, keyed by name. The value type per key is the
 // contract; the worker's SETTINGS table is the applier for the same key, and
@@ -136,7 +151,7 @@ export type ReplyTo = {
     /** False when this worker's core has no checker implementation. */
     available?: boolean;
     diagnostic?: FilterDiagnostic;
-    completions?: string[];
+    completions?: FilterCompletions;
   };
   'filter-apply': {
     type: 'filter-apply-result';
