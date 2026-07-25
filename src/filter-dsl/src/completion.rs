@@ -118,6 +118,7 @@ fn string_at_cursor(source: &str, cursor: usize) -> Option<(Span, String)> {
         let start = i;
         i += 1;
         let mut escaped = false;
+        let mut closed = false;
         while i < bytes.len() {
             let byte = bytes[i];
             if escaped {
@@ -128,6 +129,7 @@ fn string_at_cursor(source: &str, cursor: usize) -> Option<(Span, String)> {
                 i += 1;
             } else if byte == b'"' {
                 i += 1;
+                closed = true;
                 break;
             } else {
                 i += source[i..].chars().next()?.len_utf8();
@@ -135,8 +137,7 @@ fn string_at_cursor(source: &str, cursor: usize) -> Option<(Span, String)> {
         }
         let end = i;
         if cursor > start && cursor <= end {
-            let prefix_end =
-                cursor.min(end.saturating_sub((end > start && bytes[end - 1] == b'"') as usize));
+            let prefix_end = cursor.min(end.saturating_sub(closed as usize));
             return Some((
                 Span::new(start, end),
                 source[start + 1..prefix_end].to_owned(),

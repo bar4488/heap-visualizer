@@ -74,6 +74,10 @@ fn string_values_replace_the_literal_and_preserve_utf8_spans() {
     let got = context("tag in {\"sus", 12);
     assert_eq!(got.replacement, Span::new(8, 12));
     assert_eq!(got.prefix, "sus");
+
+    let got = context("site == \"", 9);
+    assert_eq!(got.replacement, Span::new(8, 9));
+    assert_eq!(got.prefix, "");
 }
 
 #[test]
