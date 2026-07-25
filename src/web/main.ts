@@ -6,7 +6,7 @@ import {
   esc, clampView,
 } from './fmt.ts';
 import {
-  initRpc, request, requestLatest, cancelLatest, handleReply,
+  initRpc, requestLatest, cancelLatest, handleReply,
 } from './rpc.ts';
 import {
   $, $$, $1, dpr, setHtml, delegate, toCss, toCssLen,
@@ -26,7 +26,7 @@ import {
   updateEventsPanel, onEvPos, resetEventsPanel, updateEventsSelBand,
 } from './heap/events-panel.ts';
 import {
-  initSession, applySession, restoreSession,
+  initSession, restoreSession,
   restoreMarksAutosave, resetSessionSnapshot,
 } from './session.ts';
 import {
@@ -227,7 +227,7 @@ async function loadURL(url) {
     if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
     loadBuffer(await resp.arrayBuffer(), url.split('/').pop());
   } catch (e) {
-    $('st-trace').textContent = `failed to load ${url}: ${e.message}`;
+    $('st-trace').textContent = `failed to load ${url}: ${(e as Error).message}`;
   }
 }
 
@@ -239,7 +239,7 @@ async function handleFile(f) {
     try {
       applyMarks(JSON.parse(await f.text()));
     } catch (e) {
-      $('st-trace').textContent = `analysis load failed: ${e.message}`;
+      $('st-trace').textContent = `analysis load failed: ${(e as Error).message}`;
     }
   } else {
     loadBuffer(await f.arrayBuffer(), f.name);

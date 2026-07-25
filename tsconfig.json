@@ -23,10 +23,32 @@
     // The whole layer is TypeScript: no allowJs, so a stray .js file under
     // src/web/ is not compiled and not served rather than silently unchecked.
 
-    // Strictness is deliberately low; the DOM surface is typed loosely on
-    // purpose (see shell/dom.ts). Raising it is the second half of T008.
+    // Strictness, per D005: every check the layer passes today is on and
+    // stays on; the two it does not pass are off and named, so a new file
+    // cannot quietly add a third.
+    //
+    // `strict` itself is off because it is a moving alias — a TypeScript
+    // upgrade that adds a check to it would turn on something nobody chose.
     "strict": false,
+    "strictFunctionTypes": true,
+    "strictBindCallApply": true,
+    "noImplicitThis": true,
+    "alwaysStrict": true,
+    "useUnknownInCatchVariables": true,
+    "noImplicitOverride": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+
+    // The two that are off: 341 errors and 555 respectively, ~200 of each
+    // being the one `let d = null` deps pattern in analysis/session/
+    // events-panel that T009 retires. Counts and the rest of the breakdown
+    // are in D005; re-measure rather than trusting these numbers.
     "noImplicitAny": false,
+    "strictNullChecks": false,
+
+    // The DOM surface is typed loosely on purpose — see shell/dom.ts.
     "skipLibCheck": true
   },
   "include": ["src/web/**/*"],

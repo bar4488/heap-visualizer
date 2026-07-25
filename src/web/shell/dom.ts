@@ -5,9 +5,10 @@
 // The element types here are deliberately loose. `$('row-bytes').value` is how
 // the whole layer reads inputs, and typing `$` as `HTMLElement` would turn
 // every one of those into an error to be silenced with a cast — noise that
-// would bury the contract types this pass is actually here to add. Tightening
-// this (a generic `$<T extends HTMLElement>`, or ids mapped to element types)
-// belongs with the conversion of main.ts, in T008.
+// would bury the contract types the protocol and the persisted shapes carry.
+// T008 converted the last of the layer to TypeScript and left this as it is,
+// on purpose: a generic `$<T extends HTMLElement>` or an id-to-element map is
+// worth doing when something asks for it, and nothing has.
 
 /** An element read loosely: see the note above. */
 export type El = any;

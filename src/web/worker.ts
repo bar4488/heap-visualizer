@@ -547,7 +547,7 @@ onmessage = async (ev: MessageEvent<ToWorker>) => {
       try {
         await loadTrace(m.buffer);
       } catch (err) {
-        postMessage({ type: 'error', message: String(err && err.message || err) });
+        postMessage({ type: 'error', message: String((err as Error)?.message || err) });
       }
       break;
     case 'resize': {

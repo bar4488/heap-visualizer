@@ -500,7 +500,7 @@ function wireAnalysisPanel() {
       try {
         applyMarks(JSON.parse(await f.text()), false);
       } catch (e) {
-        $('st-trace').textContent = `marks load failed: ${e.message}`;
+        $('st-trace').textContent = `marks load failed: ${(e as Error).message}`;
       }
     }
     ev.target.value = '';
