@@ -1,7 +1,7 @@
 ---
 id: E009
 title: "The hand-verification bottleneck: what the person actually checked, and what a machine could have"
-status: open
+status: settled
 updated: 2026-07-25
 ---
 
@@ -162,6 +162,34 @@ either way yet — one occurrence.
 - Would any of this have changed the *outcome* for these four tickets, or only
   the latency? Everything came back clean. One clean sample says nothing about
   how often the answer would have been different.
+
+## Outcome
+
+_Settled 2026-07-25 by Bar._
+
+**Nothing here becomes work. No harness, no module-graph check, no ticket.**
+[D001](../decisions/D001-web-changes-are-hand-smoke-tested.md) stands exactly as
+written, unamended, and no companion decision sits beside it.
+
+The reason is the evidence this document was missing when it was written: the
+four changes it worried about all worked first try. The verification pass came
+back clean, and it came back clean because the risk was smaller than the
+document estimated. Everything above under "what would have prevented the block"
+was reasoning from a fear, not from a failure — the section itself marks its
+central claim as *inference, not evidence*, and that inference is what did not
+hold up. The four open questions are answered the same way: none of them is
+worth resolving until something actually breaks.
+
+The general form, which is the part worth keeping: **do not build machinery
+against a problem that has not happened.** A cheap check is still cost — to
+write, to run, to keep working, and to read past forever after. "It is only
+forty lines" is not evidence that it is needed. The protocol already says a
+process rule needs two recorded instances of the failure it prevents; this is
+the same test applied to tooling, and here there is not even one.
+
+This does not retire the underlying observation. If a mechanical change does
+break the boot path and a person catches it, that is instance one, and this
+document is where the case restarts — as evidence next time, not inference.
 
 ## Related
 

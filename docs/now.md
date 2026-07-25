@@ -83,14 +83,11 @@ got there, including the position that lost, is
 [T004](tickets/T004-shell-host.md) is blocked on a second domain existing and
 must stay blocked — see [D002](decisions/D002-shell-split-before-host.md).
 
-**One open question came out of the run itself.** All four web tickets finished
-agent-side and then waited on a person, and
-[E009](explorations/E009-the-hand-verification-bottleneck.md) separates what
-that check was actually for: boot and wiring, behavior through the real worker,
-and judgment about how it looks. Only the third is inherently a person's, and
-the cost side of [D001](decisions/D001-web-changes-are-hand-smoke-tested.md) was
-priced when this repository had no toolchain at all. D001 stands; the question
-is open.
+**Nothing else is queued, and that is the correct state.**
+[E009](explorations/E009-the-hand-verification-bottleneck.md) asked whether the
+hand-verification pass those four tickets waited on should be partly mechanized,
+and settled at no: the four changes worked first try, so the risk it was written
+against never showed up. D001 stands unamended and no tooling came out of it.
 
 ## Not being done, deliberately
 
@@ -100,7 +97,11 @@ is open.
   with user value, not side effects of a refactor. Neither has a ticket; each
   needs its own exploration first. The second is also a prerequisite question
   for T004. See [E007 §6](explorations/E007-web-architecture-direction.md).
-- **Browser automation.** D001.
+- **Browser automation, a boot harness, and a module-graph check.**
+  [D001](decisions/D001-web-changes-are-hand-smoke-tested.md), and
+  [E009](explorations/E009-the-hand-verification-bottleneck.md) for why the
+  cheap end of it was declined too. The bar is a failure that actually
+  happened, not one that could.
 
 <!-- generated:begin -->
 ## Doing
