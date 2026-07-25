@@ -128,6 +128,12 @@ selected by tag `a` into tag `b` preserves both groups. Counts, filters,
 `.heapa` persistence, the allocation panel, and segmented map stripes all use
 the complete membership set.
 
+[E014](explorations/E014-overlapping-tags-cost-model.md) records the resulting
+cost model and semantics. The current tag-indexed bitsets are compact for a few
+tags, but inverse event-to-tags scans reach count refresh, filter evaluation,
+timeline index rebuilds, export, and rendering. The exploration proposes
+measurement and separable optimizations; none is queued.
+
 **[T009](tickets/T009-type-the-deps-contracts.md) is next, and is not urgent.**
 It types the `init*(deps)` contracts in
 `analysis.ts`, `session.ts` and `events-panel.ts` — today a comment above each
