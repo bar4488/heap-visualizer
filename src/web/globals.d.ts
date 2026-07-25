@@ -9,7 +9,7 @@ interface Window {
 interface Element {
   /** setHtml's memo of the last markup it assigned (src/web/shell/dom.ts). */
   _lastHtml?: string;
-  /** The allocation a pinned detail window is showing (src/web/main.js). */
+  /** The allocation a pinned detail window is showing (src/web/main.ts). */
   _allocInfo?: any;
 }
 

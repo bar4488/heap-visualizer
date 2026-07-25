@@ -1,13 +1,13 @@
 // Shell: DOM helpers with no domain knowledge. Nothing here knows what an
 // allocation is — these are the primitives every panel and overlay is built
-// from, lifted out of main.js unchanged.
+// from, lifted out of main.ts unchanged.
 //
 // The element types here are deliberately loose. `$('row-bytes').value` is how
 // the whole layer reads inputs, and typing `$` as `HTMLElement` would turn
 // every one of those into an error to be silenced with a cast — noise that
 // would bury the contract types this pass is actually here to add. Tightening
 // this (a generic `$<T extends HTMLElement>`, or ids mapped to element types)
-// belongs with the conversion of main.js, in T008.
+// belongs with the conversion of main.ts, in T008.
 
 /** An element read loosely: see the note above. */
 export type El = any;

@@ -20,14 +20,11 @@
     // half-emitted tree that still loads is the worst possible failure here.
     "noEmitOnError": true,
 
-    // main.js is still JavaScript (T008 converts it) but is type-checked, so
-    // a message that does not match the protocol fails from either side.
-    "allowJs": true,
-    "checkJs": true,
+    // The whole layer is TypeScript: no allowJs, so a stray .js file under
+    // src/web/ is not compiled and not served rather than silently unchecked.
 
-    // Strictness is deliberately low while half the layer is still JS, and
-    // the DOM surface is typed loosely on purpose (see shell/dom.ts).
-    // Raising it is T008's, along with the last conversions.
+    // Strictness is deliberately low; the DOM surface is typed loosely on
+    // purpose (see shell/dom.ts). Raising it is the second half of T008.
     "strict": false,
     "noImplicitAny": false,
     "skipLibCheck": true

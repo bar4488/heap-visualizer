@@ -23,7 +23,7 @@ const ctxs = { addr: null, tlt: null, tls: null };
 let dpr = 1;
 
 // Pointer/scroll geometry arrives from the main thread in CSS px; engine
-// geometry is device px. Convert once, on the way in (main.js's toCss /
+// geometry is device px. Convert once, on the way in (main.ts's toCss /
 // toCssLen are the opposite direction of the same boundary).
 const toDevice = (v) => v * dpr;
 
@@ -95,7 +95,7 @@ async function loadTrace(buffer) {
   // back to the browser, so reusing one instance ratchets linear memory up to
   // the high-water mark of every trace opened this session. A new instance
   // starts from zero and lets the old memory be collected. (Every setting the
-  // engine holds is re-sent right after 'loaded' — see main.js onLoaded — and
+  // engine holds is re-sent right after 'loaded' — see main.ts onLoaded — and
   // hp_parse_begin resets the rest, so nothing carries over that shouldn't.)
   // stop the frame loop from rendering against a half-swapped engine
   S.loaded = false;
@@ -413,7 +413,7 @@ function frame(now) {
 // Settables, one table entry per key: `preLoad` marks the ones that work
 // before a trace is loaded, right next to how the key applies — no separate
 // allowlist to keep in sync with the handlers. The preLoad appliers guard on
-// `E` (no instance exists before the first load); main.js re-sends every
+// `E` (no instance exists before the first load); main.ts re-sends every
 // setting after 'loaded', so nothing is lost.
 const SETTINGS: Record<SettingKey, { preLoad?: boolean; apply(m: any): void }> = {
   rowBytes: {
@@ -642,7 +642,7 @@ onmessage = async (ev: MessageEvent<ToWorker>) => {
       S.scroll = Math.max(0, toDevice(m.y));
       // the anchor pin only exists to hold the viewport's top row in place
       // across a seek; once the user scrolls somewhere else it would linger
-      // as an empty phantom row, so drop it here (main.js swallows echoes of
+      // as an empty phantom row, so drop it here (main.ts swallows echoes of
       // our own programmatic scrolls, so this only fires on real user scrolls)
       if (S.loaded) E.hp_clear_anchor_pin();
       S.dirty.addr = true;

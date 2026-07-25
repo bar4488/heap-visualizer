@@ -78,7 +78,7 @@ one is the new way to be confused.
 | `src/web/shell/` | Domain-independent: panel windows, drawers, tooltip, DOM helpers. Names no heap concept. |
 | `src/web/heap/` | Heap-specific: analysis data, the panel table, events panel, address helpers. |
 | `src/web/session.ts` | The boundary: serializes shell state *and* heap state into one per-trace blob. |
-| `src/web/main.js` | Trace/worker/toolbar wiring plus the three coordinated views. The last `.js` file — T008 converts it. |
+| `src/web/main.ts` | Trace/worker/toolbar wiring plus the three coordinated views. Owns `UIState`, the shared state every other module takes as `deps.ui`. |
 | `src/web/worker.ts` | Worker side of the protocol; owns the WASM instance and OffscreenCanvas. |
 | `dist/` | The served tree. Generated; not in git. |
 | `gen.py` | Synthetic `.heapl` trace generator. |

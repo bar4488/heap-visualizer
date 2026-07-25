@@ -1,4 +1,4 @@
-// Shared helpers for BOTH JS layers: main.js (panels, tooltips, chrome) and
+// Shared helpers for BOTH JS layers: main.ts (panels, tooltips, chrome) and
 // worker.ts (in-allocation labels, view clamping). One definition replaces
 // the old mirrored copies and their change-both-together comments.
 //
@@ -19,7 +19,7 @@ export function fmtHexSize(b) {
 }
 
 // `mode` is 'hex' | 'human', passed in because the two sides source it
-// differently (main.js reads the DOM select, the worker its settings state).
+// differently (main.ts reads the DOM select, the worker its settings state).
 export function fmtAllocSize(b, mode) {
   return mode === 'hex' ? fmtHexSize(b) : fmtBytes(b);
 }

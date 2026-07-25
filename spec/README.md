@@ -42,11 +42,11 @@ Finding everything that touches one: `rg 'MAP-003' .`
 | [02-trace-format](02-trace-format.md) | `TRACE-` | The `.heapl` JSONL wire format: records, ordering, validity | `src/core/src/parse.rs`, `src/core/src/json.rs` |
 | [03-core-model](03-core-model.md) | `MODEL-` | Columnar event store, live set, time travel, warnings | `src/core/src/store.rs`, `src/core/src/parse.rs`, `src/core/src/state.rs` |
 | [04-address-map](04-address-map.md) | `MAP-` | The address-line: row layout, collapsing, coloring, picking | `src/core/src/state.rs`, `src/core/src/render.rs` |
-| [05-timelines](05-timelines.md) | `TL-` | The temporal and sequential strips: binning, zoom, tag lanes | `src/core/src/timeline.rs`, `src/web/main.js` |
-| [06-playback-navigation](06-playback-navigation.md) | `NAV-` | Playhead, seeking, playback, stepping, jump/search, scroll anchoring | `src/web/worker.js`, `src/web/main.js` |
-| [07-analysis](07-analysis.md) | `ANL-` | Tags, names, marks, filter, crop, selection, `.heapa` files, persistence | `src/web/main.js`, `src/core/src/lib.rs` |
-| [08-architecture](08-architecture.md) | `ARCH-` | The three-layer runtime: WASM core, worker, DOM; ABI and protocol | `src/core/src/lib.rs`, `src/web/worker.js` |
-| [09-ui-shell](09-ui-shell.md) | `SHELL-` | Toolbar, floating/dockable panels, events panel, allocation windows, shortcuts | `src/web/main.js`, `src/web/index.html` |
+| [05-timelines](05-timelines.md) | `TL-` | The temporal and sequential strips: binning, zoom, tag lanes | `src/core/src/timeline.rs`, `src/web/main.ts` |
+| [06-playback-navigation](06-playback-navigation.md) | `NAV-` | Playhead, seeking, playback, stepping, jump/search, scroll anchoring | `src/web/worker.ts`, `src/web/main.ts` |
+| [07-analysis](07-analysis.md) | `ANL-` | Tags, names, marks, filter, crop, selection, `.heapa` files, persistence | `src/web/main.ts`, `src/core/src/lib.rs` |
+| [08-architecture](08-architecture.md) | `ARCH-` | The three-layer runtime: WASM core, worker, DOM; ABI and protocol | `src/core/src/lib.rs`, `src/web/worker.ts` |
+| [09-ui-shell](09-ui-shell.md) | `SHELL-` | Toolbar, floating/dockable panels, events panel, allocation windows, shortcuts | `src/web/main.ts`, `src/web/index.html` |
 | [10-tooling](10-tooling.md) | `TOOL-` | Trace generator, build pipeline, tests | `gen.py`, `build*.sh`, `src/core` tests |
 
 Reading order for newcomers: 01 → 02 → 03 → 04 → 05, then the rest as needed.

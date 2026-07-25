@@ -3,7 +3,7 @@
 // per-trace session blob, and reads it back.
 //
 // Everything it needs from the heap layer arrives through initSession(deps)
-// rather than by import — main.js still owns those functions, and injecting
+// rather than by import — main.ts still owns those functions, and injecting
 // them keeps the dependency visible instead of hidden in a shared scope. It
 // is also what makes the round-trip testable without a browser: a test
 // supplies a fake `deps` and a stub DOM.

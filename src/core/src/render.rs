@@ -7,7 +7,7 @@ use crate::json::push_json_str;
 use crate::state::View;
 use crate::store::*;
 
-// NOTE: BG/CAT/RAMP are mirrored in web/main.js (CAT/RAMP consts) for legend
+// NOTE: BG/CAT/RAMP are mirrored in src/web/main.ts (CAT/RAMP consts) for legend
 // chips and filter swatches — keep the two in sync by hand.
 pub const BG: [u8; 3] = [0x0d, 0x11, 0x17];
 pub const ROW_BG: [u8; 3] = [0x16, 0x1b, 0x22];

@@ -1,7 +1,7 @@
 ---
 id: T008
 title: Convert the rest of the web layer to TypeScript
-status: todo
+status: doing
 updated: 2026-07-25
 ---
 

@@ -7,7 +7,7 @@
 // a session snapshot in, so the one manually-exported file is a complete
 // picture rather than just the marks.
 //
-// What it needs from main.js arrives through initAnalysis(deps): the worker
+// What it needs from main.ts arrives through initAnalysis(deps): the worker
 // send, the shared UI state, and the handful of render/refresh functions that
 // still live there.
 
@@ -301,7 +301,9 @@ export async function saveMarks() {
   d.ui.marksDirty = false;
 }
 
-export function applyMarks(obj, quiet) {
+// `quiet` suppresses the "not a marks file" message: the autosave restore
+// path calls this with whatever localStorage holds and expects a silent no.
+export function applyMarks(obj, quiet?) {
   if (!obj || obj.heapVisualizerAnalysis !== 1) {
     if (!quiet) $('st-trace').textContent = 'not a heap-visualizer marks file';
     return;

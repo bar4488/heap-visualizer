@@ -7,7 +7,7 @@
 // scroll position becomes index-mapped and approximate. Both the scroll math
 // and `yToSeq` inherit that approximation.
 //
-// What it needs from main.js arrives through initEventsPanel(deps).
+// What it needs from main.ts arrives through initEventsPanel(deps).
 
 import { $, $$, toCss } from '../shell/dom.ts';
 import { raisePanel } from '../shell/panels.ts';

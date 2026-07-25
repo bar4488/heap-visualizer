@@ -5,8 +5,8 @@ is the app's central performance decision: the DOM never touches trace data,
 and the main thread never blocks on trace-sized work.
 
 ```
-main thread (DOM)           ←messages→  worker (worker.js)  ←C ABI→  WASM core (Rust)
-  main.js + shell/ + heap/               canvases, frame loop,        trace, playhead,
+main thread (DOM)           ←messages→  worker (worker.ts)  ←C ABI→  WASM core (Rust)
+  main.ts + shell/ + heap/               canvases, frame loop,        trace, playhead,
   chrome, input, overlays, persistence   playback clock               layout, pixels
 ```
 
@@ -98,7 +98,7 @@ answers.
 | `src/web/shell/` | `dom.ts` (`$`, `$$`, `setHtml`, `delegate`, device↔CSS px), `panels.ts` (draggable windows, z-stack), `drawers.ts` (dockable left/right drawers), `tooltip.ts`. **No domain identifiers.** |
 | `src/web/heap/` | `analysis.ts` (tags, names, colors, marks, `.heapa`), `panels.ts` (the panel table), `events-panel.ts`, `addr.ts` |
 | `src/web/session.ts` | The boundary: serializes shell state (window/drawer geometry) *and* heap state (view, crop, filters, playhead) into the one per-trace session blob |
-| `src/web/main.js` | Trace/worker/toolbar wiring and the three coordinated views. The last JavaScript file; converted by [T008](../docs/tickets/T008-convert-web-to-typescript.md) |
+| `src/web/main.ts` | Trace/worker/toolbar wiring and the three coordinated views. Owns `UIState`, the shared main-thread state every other module receives as `deps.ui` |
 | `src/web/fmt.ts`, `src/web/rpc.ts` | Shared with the worker; the request/response layer |
 | `src/web/protocol.ts` | The message protocol, types only. Both sides import it, so a message one side does not know about is a build error |
 

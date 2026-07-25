@@ -4,34 +4,101 @@
 import {
   fmtBytes, fmtHexSize, fmtAllocSize as fmtAllocSizeMode, fmtNum, parseSize,
   esc, clampView,
-} from './fmt.js';
+} from './fmt.ts';
 import {
   initRpc, request, requestLatest, cancelLatest, handleReply,
-} from './rpc.js';
+} from './rpc.ts';
 import {
   $, $$, $1, dpr, setHtml, delegate, toCss, toCssLen,
-} from './shell/dom.js';
-import { raisePanel, showPanel, makePanelWindow } from './shell/panels.js';
-import { showTooltip, hideTooltip, positionTooltipNearMouse } from './shell/tooltip.js';
-import { normAddr } from './heap/addr.js';
-import { heapPanels } from './heap/panels.js';
+} from './shell/dom.ts';
+import { raisePanel, showPanel, makePanelWindow } from './shell/panels.ts';
+import { showTooltip, hideTooltip, positionTooltipNearMouse } from './shell/tooltip.ts';
+import { normAddr } from './heap/addr.ts';
+import { heapPanels } from './heap/panels.ts';
 import {
   initAnalysis, markDirty, tagIdFor, syncTagDatalist, buildMarksPanel,
   buildTagsSection, buildNamesSection, sendAddrMarks, gotoAddr, addAddrMark,
   renderAddrMarkLines, setAddrMarkYs, addBookmark, updateMarkers,
   requestAllocInfo, buildMarks, applyMarks,
-} from './heap/analysis.js';
+} from './heap/analysis.ts';
 import {
   initEventsPanel, evState, refreshEventsPanel, onEventsSlice, flashRects,
   updateEventsPanel, onEvPos, resetEventsPanel, updateEventsSelBand,
-} from './heap/events-panel.js';
+} from './heap/events-panel.ts';
 import {
   initSession, applySession, restoreSession,
   restoreMarksAutosave, resetSessionSnapshot,
-} from './session.js';
+} from './session.ts';
 import {
   drawersState, dock, initDrawers, drawerEl, refreshDrawerDividers,
-} from './shell/drawers.js';
+} from './shell/drawers.ts';
+import type {
+  AllocInfo, Domain, FromWorker, Range, TraceMeta,
+} from './protocol.ts';
+
+/** A user-authored tag. Its id is its index here + 1; id 0 means untagged. */
+type Tag = { name: string; color: string; visible: boolean };
+
+/** A range selection or its mirror, in whichever domain `kind` names. */
+type Selection = { kind: Domain; lo: number; hi: number };
+
+/**
+ * The shared main-thread state. Every other module receives it as `deps.ui`
+ * (see initAnalysis / initSession / initEventsPanel) instead of importing it,
+ * so this file stays its one owner.
+ *
+ * The optional fields are the ones filled in after the literal below — either
+ * at startup (`worker`, `seek`, `drawers`) or when a trace loads and the user
+ * starts working (`fileName`, `detailInfo`, `tlLocalAt`, `detailWasPinned`).
+ */
+type UIState = {
+  meta: TraceMeta | null;
+  warnings: any[];
+  /** The last `state` message from the worker. */
+  state: Extract<FromWorker, { type: 'state' }> | null;
+  playing: boolean;
+  /** The two strips' current views: time and sequence. */
+  tlT: Range;
+  tlS: Range;
+  selected: number | null;
+  reqId: number;
+  loaded: boolean;
+  tags: Tag[];
+  /** Tag id -> tagged creator-event count; 0 counts the untagged. */
+  tagCounts: Record<number, number>;
+  untaggedVisible: boolean;
+  /** Creator event -> the name the user gave that allocation. */
+  names: Map<number, { name: string; id: number; addr: string }>;
+  /** Creator event -> a `#rrggbb` override for every color mode. */
+  allocColors: Map<number, string>;
+  /** Time marks. */
+  bookmarks: { name: string; seq: number; t: number }[];
+  /** Address marks; `addr` is a `0x…` string. */
+  addrMarks: { name: string; addr: string }[];
+  /** The active range selection, and the same range in the other domain. */
+  sel: Selection | null;
+  selMirror: Selection | null;
+  /** Tags/bookmarks/addr marks/names/colors changed since the last save or load. */
+  marksDirty: boolean;
+  /** The crop window in the seq domain, or null; see setCrop/clearCrop. */
+  crop: Range | null;
+  /** Hex-string address ranges the filter matches. */
+  addrRanges: { lo: string; hi: string }[];
+  /** Per-strip view setters, keyed by domain; filled by setupTimeline. */
+  setView: Record<number, (v: Range, mirror?: boolean) => void>;
+  /** Locked viewport: stepping never auto-scrolls. */
+  locked: boolean;
+  /** Horizontal zoom/pan on the address line. */
+  xview: { zoom: number; pan: number };
+  worker?: TypedWorker;
+  seek?: (seq: number) => void;
+  fileName?: string;
+  detailInfo?: AllocInfo | null;
+  /** When the user last zoomed a strip locally; see onState. */
+  tlLocalAt?: number;
+  drawers?: typeof drawersState;
+  detailWasPinned?: boolean;
+};
 
 // Mirrored from src/core/src/render.rs (CAT / RAMP): the engine paints
 // allocations, this file paints the matching legend chips and filter
@@ -41,34 +108,34 @@ const CAT = ['#58a6ff', '#3fb950', '#f2cc60', '#ff7b72', '#bc8cff', '#39c5cf',
 const RAMP = ['#0e4429', '#006d32', '#26a641', '#39d353'];
 const OPS = ['malloc', 'free', 'realloc'];
 
-const worker = /** @type {TypedWorker} */ (new Worker('worker.js', { type: 'module' }));
+const worker = new Worker('worker.js', { type: 'module' }) as TypedWorker;
 initRpc(worker);
 
-const UI = {
+const UI: UIState = {
   meta: null,
   warnings: [],
-  state: null,      // last state message from the worker
+  state: null,
   playing: false,
   tlT: { lo: 0, hi: 1 },
   tlS: { lo: 0, hi: 1 },
   selected: null,
   reqId: 1,
   loaded: false,
-  tags: [],         // tag id = index + 1; {name, color: '#rrggbb', visible}
-  tagCounts: {},    // tag id -> tagged creator-event count (0 = untagged)
+  tags: [],
+  tagCounts: {},
   untaggedVisible: true,
-  names: new Map(),       // creator event -> {name, id, addr}
-  allocColors: new Map(), // creator event -> '#rrggbb' override
-  bookmarks: [],          // {name, seq, t} time marks
-  addrMarks: [],          // {name, addr: '0x…'} address marks
-  sel: null,        // active range selection {kind, lo, hi}
-  selMirror: null,  // UI.sel converted to the other domain: {kind, lo, hi}
-  marksDirty: false, // tags/bookmarks/addr marks/names/colors changed since last save/load
-  crop: null,       // {lo, hi} in seq domain, or null; see setCrop/clearCrop
-  addrRanges: [],   // [{lo, hi}] hex-string address ranges the filter matches
-  setView: {},      // per-strip view setters, filled by setupTimeline
-  locked: false,    // locked viewport: stepping never auto-scrolls
-  xview: { zoom: 1, pan: 0 }, // horizontal zoom/pan on the address line
+  names: new Map(),
+  allocColors: new Map(),
+  bookmarks: [],
+  addrMarks: [],
+  sel: null,
+  selMirror: null,
+  marksDirty: false,
+  crop: null,
+  addrRanges: [],
+  setView: {},
+  locked: false,
+  xview: { zoom: 1, pan: 0 },
 };
 
 // expose for tests / console poking
@@ -631,7 +698,7 @@ $('search-overlay').addEventListener('pointerdown', (e) => {
 });
 
 document.addEventListener('keydown', (e) => {
-  const target = /** @type {any} */ (e.target);
+  const target = e.target as any;
   if (target.tagName === 'INPUT' || target.tagName === 'SELECT') return;
   if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
   else if (e.key === 'ArrowRight') { e.preventDefault(); worker.postMessage({ type: 'step', delta: e.shiftKey ? 100 : 1 }); }
@@ -671,8 +738,7 @@ $('row-bytes').onchange = () => {
 $('row-px').onchange = () =>
   worker.postMessage({ type: 'set', key: 'rowPx', value: +$('row-px').value });
 // collapse threshold: plain number = rows, byte suffix / 0x… = bytes
-/** @returns {{ mode: 'rows' | 'bytes', value: number } | null} */
-function parseCollapseMin(v) {
+function parseCollapseMin(v: string): { mode: 'rows' | 'bytes'; value: number } | null {
   v = (v || '').trim().toLowerCase();
   if (!v) return null;
   if (/^\d+$/.test(v)) return { mode: 'rows', value: Math.max(1, parseInt(v, 10)) };

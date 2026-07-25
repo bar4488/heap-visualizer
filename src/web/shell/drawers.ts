@@ -12,7 +12,7 @@ import { raisePanel } from './panels.ts';
 // no manual show/hide control: a drawer is visible exactly when it has a
 // docked window in it, empty otherwise — see refreshDrawerDividers
 //
-// Mutated in place, never replaced, so a holder of the reference (main.js
+// Mutated in place, never replaced, so a holder of the reference (main.ts
 // keeps it as UI.drawers for the session snapshot) always sees current state.
 export const drawersState = { left: [], right: [], widthLeft: 300, widthRight: 300 };
 
@@ -122,7 +122,7 @@ dndIndicator.id = 'dnd-indicator';
 dndIndicator.hidden = true;
 
 // appends the drag indicator and wires both drawers' width handles; called
-// from main.js at the point in startup where this used to run inline
+// from main.ts at the point in startup where this used to run inline
 export function initDrawers() {
   document.body.appendChild(dndIndicator);
   wireDrawerWidthResize('left');

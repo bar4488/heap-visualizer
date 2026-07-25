@@ -89,7 +89,7 @@ and aimed at what a refactor breaks silently:
   address-mark and per-allocation-color rejection, trace-count mismatch).
 
 This replaces an earlier stance that the JS layers would carry no automated
-tests at all. That held while `main.js` was one flat scope with nothing
+tests at all. That held while `main.ts` was one flat scope with nothing
 importable; it stopped holding once the shell/domain split made the persisted
 shapes testable in isolation, and the split itself needed something to lean on.
 
