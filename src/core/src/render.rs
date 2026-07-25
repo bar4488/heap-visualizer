@@ -115,8 +115,16 @@ impl Filter {
                 return false;
             }
         }
-        if self.tags_set && !Self::bit(&self.tags, s.tag[ei] as u32) {
-            return false;
+        if self.tags_set {
+            let passes = if s.has_tags(e) {
+                s.tag_ids(e)
+                    .any(|tag| Self::bit(&self.tags, tag as u32))
+            } else {
+                Self::bit(&self.tags, 0)
+            };
+            if !passes {
+                return false;
+            }
         }
         let sz = s.size[ei];
         if sz < self.size_min {
@@ -472,7 +480,7 @@ pub fn alloc_color(s: &Store, cfg: &Cfg, e: u32, cur_t: u64, age_norm: f64) -> [
             lerp3(&AGE_RAMP, f)
         }
         MODE_TAG => {
-            let tag = s.tag[ei];
+            let tag = s.first_tag(e);
             if tag == 0 {
                 [0x39, 0x41, 0x4a] // untagged: recede
             } else {
@@ -723,12 +731,16 @@ pub fn render_addr(
             color = dim(color);
         }
         let slack_color = lerp(ROW_BG, color, 0.35);
-        // tag stripe: keep tags visible in every color mode
-        let tag = s.tag[e as usize];
-        let stripe = if tag != 0 && cfg.color_mode != MODE_TAG && pass {
-            Some(cfg.tag_color(tag))
+        // Keep every membership visible: one tag uses the traditional solid
+        // stripe; overlapping tags split it into adjacent color segments.
+        let tags: Vec<u8> = s.tag_ids(e).collect();
+        let stripes = if !tags.is_empty()
+            && (cfg.color_mode != MODE_TAG || tags.len() > 1)
+            && pass
+        {
+            tags
         } else {
-            None
+            Vec::new()
         };
 
         // label the middle visible line of the allocation (rounded to the top)
@@ -795,9 +807,14 @@ pub fn render_addr(
             if x1 > xm {
                 frame.fill_slack(xm, x1, y, y1, slack_color);
             }
-            if let Some(sc) = stripe {
+            if !stripes.is_empty() {
                 let sh = (row_px as i64 / 4).clamp(1, 3);
-                frame.fill(x0, x1, y1 - sh, y1, sc);
+                let width = x1 - x0;
+                for (i, &tag) in stripes.iter().enumerate() {
+                    let sx0 = x0 + width * i as i64 / stripes.len() as i64;
+                    let sx1 = x0 + width * (i as i64 + 1) / stripes.len() as i64;
+                    frame.fill(sx0, sx1.max(sx0 + 1), y1 - sh, y1, cfg.tag_color(tag));
+                }
             }
             // in-allocation label on the middle visible segment; the JS layer
             // picks "name · size" / name / size by what actually fits (it
@@ -1036,13 +1053,19 @@ pub fn alloc_info(
     let birth_t = s.t[ei];
     let cur_t = s.t_at(v.cur);
     out.push_str(&format!(
-        ",\"seq\":{},\"t\":{},\"age\":{},\"op\":{},\"tag\":{}",
+        ",\"seq\":{},\"t\":{},\"age\":{},\"op\":{},\"tags\":[",
         e,
         birth_t as f64,
         cur_t.saturating_sub(birth_t) as f64,
-        s.op[ei],
-        s.tag[ei]
+        s.op[ei]
     ));
+    for (i, tag) in s.tag_ids(e).enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let _ = write!(out, "{tag}");
+    }
+    out.push(']');
     let death = s.death[ei];
     if death != NONE_U32 {
         out.push_str(&format!(

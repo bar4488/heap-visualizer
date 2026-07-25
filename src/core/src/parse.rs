@@ -363,8 +363,6 @@ impl Parser {
             s.old_geom.insert(e, (o_addr, o_size));
         }
         s.death.push(NONE_U32);
-        s.tag.push(0);
-
         let gp = *s.green_pre.last().unwrap_or(&0);
         let rp = *s.red_pre.last().unwrap_or(&0);
         if s.green_pre.is_empty() {
@@ -478,7 +476,7 @@ impl Default for Store {
             target: Vec::new(),
             old_geom: std::collections::HashMap::new(),
             death: Vec::new(),
-            tag: Vec::new(),
+            tag_members: Vec::new(),
             tagged: 0,
             tag_alloc_idx: Vec::new(),
             tag_free_idx: Vec::new(),

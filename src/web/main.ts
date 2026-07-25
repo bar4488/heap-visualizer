@@ -1754,9 +1754,12 @@ function onPickResult(m) {
     hoverRects = info.rects || [];
     drawMoveLink(UI.state && UI.state.moveLink);
     const name = UI.names.get(info.e)?.name;
-    const tag = info.tag > 0 ? UI.tags[info.tag - 1] : null;
+    const tags = (info.tags || []).map((id) => UI.tags[id - 1]).filter(Boolean);
+    const tagText = tags
+      .map((tag) => `<span style="color:${tag.color}">⬤ ${esc(tag.name)}</span>`)
+      .join(' ');
     const lines = [
-      `<b>${name ? `“${esc(name)}”  ` : ''}id ${info.id}</b>${info.site ? `  <span style="color:${CAT[(info.siteIdx ?? 0) % 12]}">${esc(info.site)}</span>` : ''}${tag ? `  <span style="color:${tag.color}">⬤ ${esc(tag.name)}</span>` : ''}`,
+      `<b>${name ? `“${esc(name)}”  ` : ''}id ${info.id}</b>${info.site ? `  <span style="color:${CAT[(info.siteIdx ?? 0) % 12]}">${esc(info.site)}</span>` : ''}${tagText ? `  ${tagText}` : ''}`,
       `${info.addr} – ${info.end}  <span class="g">${fmtAllocSize(info.size)}</span>${info.usable ? ` <span class="dim">(usable ${fmtAllocSize(info.usable)})</span>` : ''}`,
       `<span class="dim">born</span> seq ${fmtNum(info.seq)} · t ${fmtTime(info.t)}   <span class="dim">age</span> ${fmtTime(info.age)}`,
       `${info.thr !== null ? `<span class="dim">thr</span> ${info.thr}   ` : ''}` +
@@ -1794,11 +1797,14 @@ function buildDetailBody(root, info) {
       html += `<div class="row"><span class="k">${esc(k)}</span><span>${esc(typeof v === 'string' ? v : JSON.stringify(v))}</span></div>`;
     }
   }
-  const curTag = info.tag > 0 ? UI.tags[info.tag - 1]?.name || '' : '';
+  const curTags = (info.tags || [])
+    .map((id) => UI.tags[id - 1]?.name)
+    .filter(Boolean)
+    .join(', ');
   html += `<div class="row"><span class="k">name</span>
     <input class="d-name" placeholder="name this allocation" value="${esc(UI.names.get(info.e)?.name || '')}" size="18"></div>`;
-  html += `<div class="row"><span class="k">tag</span>
-    <input class="d-tag" placeholder="tag (empty = none)" value="${esc(curTag)}" size="12" list="tag-names">
+  html += `<div class="row"><span class="k">tags</span>
+    <input class="d-tag" placeholder="tags, comma separated" value="${esc(curTags)}" size="18" list="tag-names">
     <button class="d-tag-apply">set</button></div>`;
   html += `<div class="row"><span class="k">color</span>
     <input type="color" class="d-color" value="#3fb950" title="highlight this allocation in every color mode">
@@ -1835,9 +1841,16 @@ function buildDetailBody(root, info) {
     markDirty();
   };
   q('.d-tag-apply').onclick = () => {
-    const id = tagIdFor(q('.d-tag').value);
-    worker.postMessage({ type: 'tag-event', e: info.e, tag: id });
-    info.tag = id;
+    const names = [...new Set(
+      q('.d-tag').value.split(',').map((name) => name.trim()).filter(Boolean),
+    )];
+    if (UI.tags.length + names.filter((name) => !UI.tags.some((tag) => tag.name === name)).length > 255) {
+      $('st-info').textContent = 'cannot create these tags: the 255-tag limit would be exceeded';
+      return;
+    }
+    const tags = names.map(tagIdFor);
+    worker.postMessage({ type: 'tag-event', e: info.e, tags });
+    info.tags = tags;
     buildLegend();
     markDirty();
   };

@@ -793,7 +793,8 @@ onmessage = async (ev: MessageEvent<ToWorker>) => {
     }
     case 'tag-event':
       if (!S.loaded) break;
-      E.hp_tag_event(m.e, m.tag);
+      writeBuf(new Uint8Array(m.tags));
+      E.hp_set_event_tags(m.e, m.tags.length);
       tagsChanged();
       break;
     case 'tag-range': {

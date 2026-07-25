@@ -23,7 +23,7 @@ client-side.
 
 **Rust core (`src/core/`, ~5.3k lines) — healthy; filter syntax is a separate
 crate and evaluation is integrated.** The engine has clean module boundaries
-and 40 native tests asserting
+and 41 native tests asserting
 real invariants: snapshot seek ≡ forward replay, pick prefers the newest
 overlap, anchor stability across reflow. Every performance and soundness
 finding from the 2026-07-24 review is fixed. `src/filter-dsl/` is
@@ -50,7 +50,9 @@ position: exact fields advance to operators, right-hand expressions are
 filtered to the required type, calls/sets/ranges progress through their
 delimiters, and live site/thread/tag values come from that same core catalog.
 Tag candidates update on create, rename, delete, and restore, including escaped
-labels. `named()` and custom `field.*` columns still report direct diagnostics
+labels. Allocations can carry overlapping tags; tag predicates match any
+membership, and filter-to-tag adds its snapshot without removing the tags that
+selected it. `named()` and custom `field.*` columns still report direct diagnostics
 and are not offered as completions.
 
 The expression is also the single state behind the filter actions. Site,
@@ -119,6 +121,12 @@ surfaces; neither has a ticket yet.
 toggles, replace-and-apply match range, saved filters in marks, and a snapshot
 of current matches into a tag. All cheap checks pass; as before, real pointer
 interaction and the worker/browser round trip are not automated.
+
+[T015](tickets/T015-overlapping-tags.md) fixed the first filter-to-tag defect:
+allocations now carry real overlapping memberships, so snapshotting matches
+selected by tag `a` into tag `b` preserves both groups. Counts, filters,
+`.heapa` persistence, the allocation panel, and segmented map stripes all use
+the complete membership set.
 
 **[T009](tickets/T009-type-the-deps-contracts.md) is next, and is not urgent.**
 It types the `init*(deps)` contracts in

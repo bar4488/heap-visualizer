@@ -61,7 +61,7 @@ Drop any `.heapl` file onto the page to load it.
 - In site, thread, and tag color modes, click a legend chip to toggle its
   visible filter predicate (Shift-click uses OR). The Filter panel can save
   named expressions with the analysis and snapshot all current matches into a
-  tag.
+  tag without removing their existing tags.
 - **＋ mark** (or `m`) bookmarks the current playhead position; time marks show
   as flags on both timelines. Clicking one jumps in time while the address
   view stays put; the ⌖ button (or shift+click on the flag) also centers
@@ -70,6 +70,8 @@ Drop any `.heapl` file onto the page to load it.
   horizontal flag line; click it (or its Analysis-panel entry) to center that
   address at any playhead. `g` focuses the jump box, which accepts a seq,
   `t:` time, or `0x…` address.
+- Allocations can belong to several tags; their allocation panel edits the
+  comma-separated membership set.
 - The **Analysis** panel lists bookmarks, tags (recolor, rename, delete) and
   named allocations, and **saves/loads** the whole thing
   as a `.heapa.json` file — dropping one onto the page restores the analysis.
@@ -78,7 +80,8 @@ Drop any `.heapl` file onto the page to load it.
   address space — byte thresholds adapt when the row width changes.
 - Color modes: live, site, thread, size (log ramp), age (log-normalized vs
   the oldest live allocation), tag. Tagged allocations keep a colored stripe
-  in every mode, and both timelines carry a tag lane along the bottom.
+  in every mode; overlapping tags split it into color segments, and both
+  timelines carry a tag lane along the bottom.
 
 ## Tests
 

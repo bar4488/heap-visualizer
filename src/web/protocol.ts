@@ -103,7 +103,7 @@ export type Command =
   | { type: 'addr-marks'; marks: Range[] }
   | { type: 'goto-addr'; lo: number; hi: number }
   | { type: 'tlview'; kind: Domain; lo: number; hi: number }
-  | { type: 'tag-event'; e: number; tag: number }
+  | { type: 'tag-event'; e: number; tags: number[] }
   | { type: 'tag-range'; kind: Domain; lo: number; hi: number; tag: number; byFree?: boolean }
   | { type: 'tag-filter'; tag: number }
   | { type: 'tag-events'; events: number[] | Uint32Array; tag: number }

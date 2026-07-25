@@ -717,10 +717,18 @@ pub extern "C" fn hp_set_crop(lo: i32, hi: i32) {
 // ---------------------------------------------------------------------------
 
 #[no_mangle]
-pub extern "C" fn hp_tag_event(e: u32, tag: u32) {
+pub extern "C" fn hp_set_event_tags(e: u32, count: u32) {
     let a = unsafe { &mut *app() };
-    if (e as usize) < a.store.tag.len() {
-        a.store.set_tag(e, tag.min(255) as u8);
+    if e < a.store.len() {
+        let tags: Vec<u8> = a.buf[..count as usize]
+            .iter()
+            .copied()
+            .filter(|&tag| tag != 0)
+            .collect();
+        a.store.clear_event_tags(e);
+        for tag in tags {
+            a.store.add_tag(e, tag);
+        }
         a.ev_dirty = true; // tags participate in the filter
     }
 }
@@ -746,7 +754,7 @@ fn tag_filter_matches(a: &mut App, tag: u32) -> u32 {
         .collect();
     let tag = tag.min(255) as u8;
     for &e in &to_tag {
-        a.store.set_tag(e, tag);
+        a.store.add_tag(e, tag);
     }
     a.ev_dirty = true;
     to_tag.len() as u32
@@ -793,7 +801,7 @@ fn tag_seq_range(a: &mut App, lo: u32, hi: u32, tag: u32, by_free: u32) -> u32 {
     // second free of the same id resolves to NONE_U32 (W_DOUBLE_FREE).
     let n = to_tag.len() as u32;
     for e in to_tag {
-        a.store.set_tag(e, tag);
+        a.store.add_tag(e, tag);
     }
     a.ev_dirty = true;
     n
@@ -859,7 +867,7 @@ pub extern "C" fn hp_tag_events(count: u32, tag: u32) -> u32 {
         if e < n {
             let op = s.op[e as usize];
             if op == OP_M || op == OP_R {
-                s.set_tag(e, tag);
+                s.add_tag(e, tag);
                 applied += 1;
             }
         }
@@ -883,30 +891,34 @@ pub extern "C" fn hp_tags_clear() {
 pub extern "C" fn hp_retag(from: u32, to: u32) -> u32 {
     let a = unsafe { &mut *app() };
     let (from, to) = (from.min(255) as u8, to.min(255) as u8);
-    let mut n = 0;
-    for e in 0..a.store.len() {
-        if a.store.tag[e as usize] == from {
-            a.store.set_tag(e, to);
-            n += 1;
+    let events: Vec<u32> = (0..a.store.len())
+        .filter(|&e| a.store.has_tag(e, from))
+        .collect();
+    for &e in &events {
+        a.store.remove_tag(e, from);
+        if to != 0 {
+            a.store.add_tag(e, to);
         }
     }
     a.ev_dirty = true;
-    n
+    events.len() as u32
 }
 
 /// All tag assignments, for analysis export: {"1":[e,e,...],"2":[...]}.
 #[no_mangle]
 pub extern "C" fn hp_tags_dump_json() {
     let a = unsafe { &mut *app() };
-    let s = &a.store;
+    tags_dump_json(&a.store, &mut a.out);
+    ret_str(&a.out);
+}
+
+fn tags_dump_json(s: &Store, o: &mut String) {
     let mut lists: Vec<Vec<u32>> = vec![Vec::new(); 256];
     for e in 0..s.len() {
-        let t = s.tag[e as usize];
-        if t != 0 {
+        for t in s.tag_ids(e) {
             lists[t as usize].push(e);
         }
     }
-    let o = &mut a.out;
     o.clear();
     o.push('{');
     let mut first = true;
@@ -928,7 +940,6 @@ pub extern "C" fn hp_tags_dump_json() {
         o.push(']');
     }
     o.push('}');
-    ret_str(o);
 }
 
 /// Count of tagged creator events per tag id: [{"tag":1,"count":42},...]
@@ -936,14 +947,23 @@ pub extern "C" fn hp_tags_dump_json() {
 #[no_mangle]
 pub extern "C" fn hp_tag_counts_json() {
     let a = unsafe { &mut *app() };
-    let s = &a.store;
+    tag_counts_json(&a.store, &mut a.out);
+    ret_str(&a.out);
+}
+
+fn tag_counts_json(s: &Store, o: &mut String) {
     let mut counts = [0u32; 256];
-    for e in 0..s.len() as usize {
-        if s.op[e] == OP_M || s.op[e] == OP_R {
-            counts[s.tag[e] as usize] += 1;
+    for e in 0..s.len() {
+        if s.op[e as usize] == OP_M || s.op[e as usize] == OP_R {
+            if !s.has_tags(e) {
+                counts[0] += 1;
+            } else {
+                for tag in s.tag_ids(e) {
+                    counts[tag as usize] += 1;
+                }
+            }
         }
     }
-    let o = &mut a.out;
     o.clear();
     o.push('[');
     let mut first = true;
@@ -958,7 +978,6 @@ pub extern "C" fn hp_tag_counts_json() {
         o.push_str(&format!("{{\"tag\":{},\"count\":{}}}", i, c));
     }
     o.push(']');
-    ret_str(o);
 }
 
 // ---------------------------------------------------------------------------
@@ -1309,6 +1328,12 @@ mod tests {
         a.store = p.store;
         a.view.reset(&a.store);
         a
+    }
+
+    fn tags(store: &Store) -> Vec<Vec<u8>> {
+        (0..store.len())
+            .map(|e| store.tag_ids(e).collect())
+            .collect()
     }
 
     const SAMPLE: &str = r#"{"op":"H","v":1,"unit":"ns","row_bytes":4096,"title":"test"}
@@ -1694,14 +1719,14 @@ not json at all
             for e in 0..s.len() {
                 let op = s.op[e as usize];
                 if (op == OP_M || op == OP_R) && e < 4 {
-                    s.set_tag(e, 2);
+                    s.add_tag(e, 2);
                     n += 1;
                 }
             }
             n
         };
         assert_eq!(n, 3);
-        assert_eq!(a.store.tag, vec![2, 2, 0, 2, 0]);
+        assert_eq!(tags(&a.store), vec![vec![2], vec![2], vec![], vec![2], vec![]]);
         // tag color mode renders tagged colors
         a.view.seek(&a.store, 4);
         a.cfg.color_mode = render::MODE_TAG;
@@ -1814,12 +1839,12 @@ not json at all
                 .collect()
         };
         for &e in &to_tag {
-            a.store.set_tag(e, 1);
+            a.store.add_tag(e, 1);
         }
         // creators: 0 (site a → filtered out), 1 (site b → tagged),
         // 3 (realloc without a site field → unconstrained, passes)
         assert_eq!(to_tag, vec![1, 3]);
-        assert_eq!(a.store.tag, vec![0, 1, 0, 1, 0]);
+        assert_eq!(tags(&a.store), vec![vec![], vec![1], vec![], vec![1], vec![]]);
     }
 
     #[test]
@@ -1837,11 +1862,41 @@ not json at all
         a.cfg.filter.matches = Some(bits);
 
         assert_eq!(tag_filter_matches(&mut a, 2), 2);
-        assert_eq!(a.store.tag, vec![0, 2, 0, 2, 0]);
+        assert_eq!(tags(&a.store), vec![vec![], vec![2], vec![], vec![2], vec![]]);
 
         let mut no_filter = load(SAMPLE);
         assert_eq!(tag_filter_matches(&mut no_filter, 1), 0);
-        assert!(no_filter.store.tag.iter().all(|&tag| tag == 0));
+        assert!(tags(&no_filter.store).iter().all(Vec::is_empty));
+    }
+
+    #[test]
+    fn tag_filter_matches_preserves_source_tag_membership() {
+        let mut a = load(SAMPLE);
+        a.store.add_tag(1, 1);
+        let labels = vec!["a".to_string(), "b".to_string()];
+        let expr = heap_visualizer_filter_dsl::parse(r#"tag in {"a"}"#).unwrap();
+        let mut bits = vec![0u64; (a.store.len() as usize).div_ceil(64)];
+        for e in 0..a.store.len() {
+            if matches!(a.store.op[e as usize], OP_M | OP_R)
+                && filter_eval::evaluate(&expr, &a.store, e, &labels).unwrap()
+            {
+                bits[e as usize / 64] |= 1 << (e % 64);
+            }
+        }
+        a.cfg.filter.matches = Some(bits);
+
+        assert_eq!(tag_filter_matches(&mut a, 2), 1);
+        assert_eq!(tags(&a.store)[1], vec![1, 2]);
+        assert!(filter_eval::evaluate(&expr, &a.store, 1, &labels).unwrap());
+        let b = heap_visualizer_filter_dsl::parse(r#"tag in {"b"}"#).unwrap();
+        assert!(filter_eval::evaluate(&b, &a.store, 1, &labels).unwrap());
+
+        let mut dump = String::new();
+        tags_dump_json(&a.store, &mut dump);
+        assert_eq!(dump, r#"{"1":[1],"2":[1]}"#);
+        tag_counts_json(&a.store, &mut dump);
+        assert!(dump.contains(r#"{"tag":1,"count":1}"#), "{dump}");
+        assert!(dump.contains(r#"{"tag":2,"count":1}"#), "{dump}");
     }
 
     #[test]
@@ -1851,15 +1906,18 @@ not json at all
         // frees in [2, 4): F#2 kills creator 0, R#3 kills creator 1
         let n = tag_seq_range(&mut a, 2, 4, 1, 1);
         assert_eq!(n, 2);
-        assert_eq!(a.store.tag, vec![1, 1, 0, 0, 0]);
+        assert_eq!(tags(&a.store), vec![vec![1], vec![1], vec![], vec![], vec![]]);
         // freed in [4, 5): F#4 kills the realloc creator (event 3)
         let n = tag_seq_range(&mut a, 4, 5, 2, 1);
         assert_eq!(n, 1);
-        assert_eq!(a.store.tag, vec![1, 1, 0, 2, 0]);
+        assert_eq!(tags(&a.store), vec![vec![1], vec![1], vec![], vec![2], vec![]]);
         // by_free = 0 keeps the old "creators in range" behavior
         let n = tag_seq_range(&mut a, 0, 5, 3, 0);
         assert_eq!(n, 3);
-        assert_eq!(a.store.tag, vec![3, 3, 0, 3, 0]);
+        assert_eq!(
+            tags(&a.store),
+            vec![vec![1, 3], vec![1, 3], vec![], vec![2, 3], vec![]]
+        );
     }
 
     #[test]
@@ -1970,7 +2028,7 @@ not json at all
     #[test]
     fn timeline_tag_lanes() {
         let mut a = load(SAMPLE);
-        a.store.set_tag(0, 1); // tag the first malloc (freed by event 2)
+        a.store.add_tag(0, 1); // tag the first malloc (freed by event 2)
         let mut px = Vec::new();
         timeline::render(&mut a.store, &a.cfg, 1, 100, 40, 0.0, 5.0, &mut px);
         let at = |px: &[u8], x: usize, y: usize| {

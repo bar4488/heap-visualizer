@@ -128,12 +128,12 @@ pub fn render(
         let alloc_c = alloc_idx
             .get(i)
             .filter(|&&e| e < b)
-            .map(|&e| cfg.tag_color(s.tag[e as usize]));
+            .map(|&e| cfg.tag_color(s.first_tag(e)));
         let i = free_idx.partition_point(|&e| e < a);
         let free_c = free_idx
             .get(i)
             .filter(|&&e| e < b)
-            .map(|&e| cfg.tag_color(s.tag[s.target[e as usize] as usize]));
+            .map(|&e| cfg.tag_color(s.first_tag(s.target[e as usize])));
         if let Some(c) = alloc_c {
             for y in 0..lane {
                 put(x as i64, y, c);

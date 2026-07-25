@@ -7,7 +7,7 @@ of an immutable trace. Nothing here ever modifies the trace or its file.
 
 | Object | What it is | Anchored to |
 |--------|-----------|-------------|
-| **Tag** | Named, colored group of allocations. At most 255 per trace; each allocation carries at most one tag. | creator events |
+| **Tag** | Named, colored group of allocations. At most 255 named tags per trace; an allocation may belong to any number of them. | creator events |
 | **Name** | Free-text label on a single allocation; shows in its in-map label, tooltip, panel, and search. | creator event |
 | **Highlight color** | Per-allocation color override, visible in every color mode. | creator event |
 | **Time mark (bookmark)** | Named playhead position; ⚑ flags on both timelines. | seq (+ t for display) |
@@ -25,16 +25,20 @@ render.
   Events panel), then *Tag allocs* (created in range) or *Tag freed* (freed in
   range — the creator each `F`/`R` kills). Tagging by frees exists because
   "what died during this dip?" is as common a question as "what was born?".
-- **Single tagging** from the allocation panel.
+- **Direct tagging** from the allocation panel, which edits its comma-separated
+  set of memberships.
 - **Filter-to-tag**: the Filter panel snapshots every creator allocation in
   the currently applied match set into a named tag. An existing tag name is
-  reused; later filter edits do not change the snapshot.
+  reused; later filter edits do not change the snapshot. Adding the snapshot
+  tag preserves every existing membership on those allocations.
 - **Filter-scoped**: when a filter is active, range tagging applies only to
   allocations the filter matches — the filter defines the working set, so
   filter+drag composes into "tag all `json_node` allocations born here".
 
-Tags can be renamed, recolored, and deleted (delete untags and compacts higher
-tag ids down). Filtering by tag is expressed in the Filter panel below.
+Tags can overlap, be renamed, recolored, and deleted (delete removes only that
+membership and compacts higher tag ids down). Filtering by tag is
+membership-aware: `tag == "a"` and `tag in {"a", "b"}` match when any
+membership satisfies the predicate.
 
 ## ANL-003: Filter
 
@@ -104,7 +108,7 @@ allocs / Tag freed**. Escape clears.
 
 Clicking an allocation (or stepping onto an event) opens the allocation
 panel: full info (id, range, size/usable, site, thread, birth/death, stack,
-extra wire-format fields) plus the editing surface — name, tag, highlight
+  extra wire-format fields) plus the editing surface — name, tags, highlight
 color, focus/birth/death navigation. **Pinning** (📌) freezes the current
 panel as an independent window and lets the next selection open fresh; any
 number of allocations can be pinned side by side for comparison
@@ -114,7 +118,7 @@ number of allocations can be pinned side by side for comparison
 
 Two deliberately different persistence channels:
 
-- **Marks** — the shareable deliverable: tags (+ per-event assignments),
+- **Marks** — the shareable deliverable: tags (+ overlapping per-event memberships),
   names, colors, bookmarks, address marks, saved filters, plus trace
   fingerprint, playhead, and key view settings. Manually exported/imported as **`.heapa.json`** (a
   single JSON object marked `heapVisualizerAnalysis: 1`). Dropping one onto

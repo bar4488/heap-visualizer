@@ -74,11 +74,12 @@ The fill may instead be driven by a user-selected **color mode**:
 | thread | Categorical palette by thread. |
 | size | Sequential green ramp over **log₂ size** (≈16 B → 16 MiB). Log because sizes span orders of magnitude. |
 | age | Ramp (young green → cyan → old blue) over **log age normalized to the oldest live allocation** at the playhead — a relative scale that stays useful whether ages span nanoseconds or minutes. |
-| tag | Tag colors; untagged recedes to gray. |
+| tag | First tag color, with a segmented stripe exposing every membership; untagged recedes to gray. |
 
 Two overrides apply in every mode: a per-allocation **highlight color**
-(user-set), and a **tag stripe** along the bottom edge of tagged allocations,
-so tags stay visible outside tag mode. Filtered-out / cropped-out allocations
+(user-set), and a **tag stripe** along the bottom edge of tagged allocations.
+Overlapping memberships split that stripe into adjacent tag-color segments,
+so every tag stays visible in every mode. Filtered-out / cropped-out allocations
 render dimmed (blended toward the row background) or hidden per the filter
 mode ([07-analysis](07-analysis.md)). The selected allocation gets a white
 outline. `usable` slack beyond the requested size renders as a faint band

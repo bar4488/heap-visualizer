@@ -70,10 +70,10 @@ pub struct Store {
     pub old_geom: std::collections::HashMap<u32, (u64, u64)>,
     /// For creator events (M/R): the event index that kills this allocation.
     pub death: Vec<u32>,
-    /// User-assigned tag per creator event (0 = untagged). Session state,
-    /// mutated by the viewer, not part of the wire format. Written through
-    /// `set_tag`/`clear_tags` so the count and index below stay correct.
-    pub tag: Vec<u8>,
+    /// Sparse bitset per tag id, indexed by creator event. Inner vectors are
+    /// allocated only for tags that are actually used, so overlapping tags
+    /// cost one bit per event per used tag rather than 255 bits per event.
+    pub tag_members: Vec<Vec<u64>>,
     /// Number of creator events currently tagged — lets per-frame consumers
     /// (the timeline tag lanes) skip tag work for untagged traces.
     pub tagged: u32,
@@ -189,25 +189,85 @@ impl Store {
         self.size[e as usize].max(self.usable_at(e)).max(1)
     }
 
-    /// Write a tag assignment. Not `self.tag[..] = ..` directly: this keeps
-    /// `tagged` and the timeline's tagged-event index in sync.
-    pub fn set_tag(&mut self, e: u32, tag: u8) {
-        let old = std::mem::replace(&mut self.tag[e as usize], tag);
-        if old != tag {
-            self.tag_idx_dirty = true;
-            if old == 0 {
-                self.tagged += 1;
-            } else if tag == 0 {
-                self.tagged -= 1;
+    #[inline]
+    pub fn has_tag(&self, e: u32, tag: u8) -> bool {
+        if tag == 0 {
+            return !self.has_tags(e);
+        }
+        let word = e as usize / 64;
+        self.tag_members
+            .get(tag as usize)
+            .and_then(|bits| bits.get(word))
+            .is_some_and(|bits| bits & (1 << (e % 64)) != 0)
+    }
+
+    #[inline]
+    pub fn has_tags(&self, e: u32) -> bool {
+        self.tag_ids(e).next().is_some()
+    }
+
+    pub fn tag_ids(&self, e: u32) -> impl Iterator<Item = u8> + '_ {
+        (1..self.tag_members.len())
+            .filter(move |&tag| self.has_tag(e, tag as u8))
+            .map(|tag| tag as u8)
+    }
+
+    #[inline]
+    pub fn first_tag(&self, e: u32) -> u8 {
+        self.tag_ids(e).next().unwrap_or(0)
+    }
+
+    /// Add one membership without disturbing the allocation's other tags.
+    pub fn add_tag(&mut self, e: u32, tag: u8) {
+        if tag == 0 {
+            self.clear_event_tags(e);
+            return;
+        }
+        if self.has_tag(e, tag) {
+            return;
+        }
+        if !self.has_tags(e) {
+            self.tagged += 1;
+        }
+        if self.tag_members.len() <= tag as usize {
+            self.tag_members.resize_with(tag as usize + 1, Vec::new);
+        }
+        let words = (self.len() as usize).div_ceil(64);
+        let bits = &mut self.tag_members[tag as usize];
+        bits.resize(words, 0);
+        bits[e as usize / 64] |= 1 << (e % 64);
+        self.tag_idx_dirty = true;
+    }
+
+    pub fn remove_tag(&mut self, e: u32, tag: u8) {
+        if !self.has_tag(e, tag) || tag == 0 {
+            return;
+        }
+        let bits = &mut self.tag_members[tag as usize];
+        bits[e as usize / 64] &= !(1 << (e % 64));
+        if !self.has_tags(e) {
+            self.tagged -= 1;
+        }
+        self.tag_idx_dirty = true;
+    }
+
+    pub fn clear_event_tags(&mut self, e: u32) {
+        if !self.has_tags(e) {
+            return;
+        }
+        for bits in self.tag_members.iter_mut().skip(1) {
+            let word = e as usize / 64;
+            if word < bits.len() {
+                bits[word] &= !(1 << (e % 64));
             }
         }
+        self.tagged -= 1;
+        self.tag_idx_dirty = true;
     }
 
     /// Remove every tag assignment.
     pub fn clear_tags(&mut self) {
-        for t in self.tag.iter_mut() {
-            *t = 0;
-        }
+        self.tag_members.clear();
         self.tagged = 0;
         self.tag_idx_dirty = true;
     }
@@ -224,12 +284,12 @@ impl Store {
         for e in 0..self.len() {
             let ei = e as usize;
             let op = self.op[ei];
-            if (op == OP_M || op == OP_R) && self.tag[ei] != 0 {
+            if (op == OP_M || op == OP_R) && self.has_tags(e) {
                 self.tag_alloc_idx.push(e);
             }
             if op == OP_F || op == OP_R {
                 let tgt = self.target[ei];
-                if tgt != NONE_U32 && self.tag[tgt as usize] != 0 {
+                if tgt != NONE_U32 && self.has_tags(tgt) {
                     self.tag_free_idx.push(e);
                 }
             }

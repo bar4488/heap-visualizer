@@ -110,8 +110,9 @@ UI never triggers a full-trace scan after load:
 
 ## MODEL-007: Session state in the store
 
-One store column is **not** derived from the trace: `tag[e]`, the
-user-assigned tag id per creator event (0 = untagged, at most 255 tags). Tags
-live in the store because the engine renders and filters by them, but they are
-session state owned by the analysis layer ([07-analysis](07-analysis.md)) and
-are never read from or written to the wire format.
+One store index is **not** derived from the trace: sparse membership bitsets
+from user-assigned tag ids to creator events (at most 255 named tags).
+Allocations may occur in several bitsets. Tags live in the store because the
+engine renders and filters by them, but they are session state owned by the
+analysis layer ([07-analysis](07-analysis.md)) and are never read from or
+written to the wire format.

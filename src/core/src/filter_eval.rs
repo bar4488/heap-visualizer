@@ -54,6 +54,7 @@ enum Value {
     Bool(bool),
     Int(i128),
     String(String),
+    Strings(Vec<String>),
     Range(i128, i128),
     Set(Vec<Value>),
     Missing,
@@ -691,11 +692,14 @@ fn field(
             }
         }
         "tag" => {
-            let id = s.tag[i] as usize;
-            if id == 0 || id > labels.len() {
+            let values: Vec<String> = s
+                .tag_ids(e)
+                .filter_map(|id| labels.get(id as usize - 1).cloned())
+                .collect();
+            if values.is_empty() {
                 Value::Missing
             } else {
-                Value::String(labels[id - 1].clone())
+                Value::Strings(values)
             }
         }
         "freed" => Value::Bool(s.death[i] != NONE_U32),
@@ -717,7 +721,24 @@ fn equal(a: &Value, b: &Value) -> Result<bool, String> {
         (Value::Bool(a), Value::Bool(b)) => Ok(a == b),
         (Value::Int(a), Value::Int(b)) => Ok(a == b),
         (Value::String(a), Value::String(b)) => Ok(a == b),
+        (Value::Strings(a), Value::String(b)) | (Value::String(b), Value::Strings(a)) => {
+            Ok(a.iter().any(|value| value == b))
+        }
+        (Value::Strings(a), Value::Strings(b)) => {
+            Ok(a.iter().any(|value| b.contains(value)))
+        }
         _ => Err("equality operands have incompatible types".into()),
+    }
+}
+
+fn string_order(a: &str, b: &str, op: BinaryOp) -> bool {
+    let ord = a.cmp(b);
+    match op {
+        BinaryOp::Less => ord.is_lt(),
+        BinaryOp::LessEqual => ord.is_le(),
+        BinaryOp::Greater => ord.is_gt(),
+        BinaryOp::GreaterEqual => ord.is_ge(),
+        _ => false,
     }
 }
 
@@ -726,6 +747,12 @@ fn order(a: &Value, b: &Value, op: BinaryOp) -> Result<bool, String> {
         (Value::Missing, _) | (_, Value::Missing) => return Ok(false),
         (Value::Int(a), Value::Int(b)) => a.cmp(b),
         (Value::String(a), Value::String(b)) => a.cmp(b),
+        (Value::Strings(a), Value::String(b)) => {
+            return Ok(a.iter().any(|a| string_order(a, b, op)));
+        }
+        (Value::String(a), Value::Strings(b)) => {
+            return Ok(b.iter().any(|b| string_order(a, b, op)));
+        }
         _ => return Err("ordering operands have incompatible types".into()),
     };
     Ok(match op {
@@ -829,6 +856,14 @@ fn eval(expr: &Expr, s: &Store, e: u32, labels: &[String]) -> Result<Value, Eval
                                 ))
                             }
                         }),
+                        (Value::Strings(values), Value::String(b)) => Value::Bool(
+                            values.iter().any(|a| match name.as_str() {
+                                "contains" => a.contains(b),
+                                "starts_with" => a.starts_with(b),
+                                "ends_with" => a.ends_with(b),
+                                _ => false,
+                            }),
+                        ),
                         _ => {
                             return Err(EvalError::at(
                                 expr,
