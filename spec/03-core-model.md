@@ -3,7 +3,7 @@
 How the engine represents a loaded trace and answers the question every view
 asks: *what is live at the playhead?*
 
-## 3.1 The columnar store
+## MODEL-001: The columnar store
 
 The parsed trace lives in a **struct-of-arrays store** (`core/src/store.rs`):
 one flat `Vec` per field (`op`, `t`, `id`, `addr`, `size`, …), indexed by
@@ -18,7 +18,7 @@ extra-field blobs each get a small table plus a per-event index column. Hex
 address strings are parsed to `u64` at load and never exist as strings again
 internally.
 
-## 3.2 Identity: ids resolve to event indices at load
+## MODEL-002: Identity — ids resolve to event indices at load
 
 The wire format names allocations by `id`; the engine does not. During the
 single parse pass every `F`/`R` is resolved against an id→creator map into two
@@ -33,7 +33,7 @@ for display. This makes every downstream operation (liveness, tagging,
 selection, links) integer array indexing with no hash lookups, and gives every
 allocation a stable identity even in malformed traces where ids are reused.
 
-## 3.3 The live set
+## MODEL-003: The live set
 
 Applying events left-to-right:
 
@@ -51,7 +51,7 @@ rendering and hit-testing walk — plus running `live_count` / `live_bytes`
 tallies and a per-row occupancy count that feeds the address-map layout
 ([04-address-map](04-address-map.md)).
 
-## 3.4 Time travel: seeks and snapshots
+## MODEL-004: Time travel — seeks and snapshots
 
 Seeking to seq *n* means reconstructing the live set after *n* events.
 
@@ -72,7 +72,7 @@ Seeking to seq *n* means reconstructing the live set after *n* events.
   `t' <= t` (binary search over the monotonic `t` column), then seeks by seq.
   `seq` is the canonical coordinate; `t` is a lookup into it.
 
-## 3.5 Warnings
+## MODEL-005: Warnings
 
 The parser validates while it loads and records per-event warnings instead of
 rejecting input (goal: *faithful*). Warning codes:
@@ -95,7 +95,7 @@ badge with the total and a panel listing each warning; clicking one jumps to
 the offending event. Overlap is *also* flagged spatially: pixels covered by
 two live allocations render orange ([04-address-map](04-address-map.md)).
 
-## 3.6 Derived load-time indexes
+## MODEL-006: Derived load-time indexes
 
 Everything expensive is computed once, in the same single parse pass, so the
 UI never triggers a full-trace scan after load:
@@ -108,7 +108,7 @@ UI never triggers a full-trace scan after load:
   counts, per-site and per-thread counts, and the largest single span (used
   to bound hit-test scans).
 
-## 3.7 Session state in the store
+## MODEL-007: Session state in the store
 
 One store column is **not** derived from the trace: `tag[e]`, the
 user-assigned tag id per creator event (0 = untagged, at most 255 tags). Tags

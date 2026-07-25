@@ -23,7 +23,7 @@ Adoption order, by where an untyped contract actually costs: the worker
 protocol first (a typo there is a silent no-op today), then the persisted
 shapes, then the panel records from T002.
 
-**This reverses a documented decision.** `spec/10-tooling.md` §10.2 records the
+**This reverses a documented decision.** [TOOL-002](../../spec/10-tooling.md#tool-002-build) records the
 zero-JS-build stance — *"no bundler, no npm"* — as intentional. That spec text
 must change in the same commit, saying what the stance was traded for. Leaving
 the spec contradicted by the tree is not an option.
@@ -38,7 +38,7 @@ the spec contradicted by the tree is not an option.
 - [ ] A single documented command builds `web/` from source to the served
       output, and `README.md` and `docs/context.md` give it.
 - [ ] `node --test 'web/**/*.test.js'` and `cargo test` pass.
-- [ ] `spec/10-tooling.md` §10.2 states the build step and why the
+- [ ] [TOOL-002](../../spec/10-tooling.md#tool-002-build) states the build step and why the
       zero-toolchain stance was traded away.
 - [ ] The full smoke checklist passes against the built output, not the source.
 

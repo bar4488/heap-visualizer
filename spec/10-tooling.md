@@ -1,6 +1,6 @@
 # 10 — Tooling: Generator, Build, Tests
 
-## 10.1 `gen.py` — synthetic trace generator
+## TOOL-001: `gen.py` — synthetic trace generator
 
 A stdlib-only Python script that emits a spec-conformant `.heapl` stream, used
 for the bundled demo and for exercising the viewer at any scale.
@@ -28,7 +28,7 @@ Knobs: `--seed --ops --threads --mean-gap --burst-prob --leak-rate
 --realloc-rate --arena-base --row-bytes --unit --out`. A summary (event
 counts, leaks, peak live, address span) prints to stderr.
 
-## 10.2 Build
+## TOOL-002: Build
 
 - `build.sh` — the whole build: `cargo build --release --target
   wasm32-unknown-unknown` and copy the `.wasm` into `web/`. There is no JS
@@ -42,7 +42,7 @@ counts, leaks, peak live, address span) prints to stderr.
 - Serve: `python3 -m http.server -d web` (any static server works;
   `?trace=demo.heapl` autoloads).
 
-## 10.3 Tests
+## TOOL-003: Tests
 
 `cargo test` in `core/` runs the engine test suite **natively** (no wasm, no
 browser) — the reason the crate is also an `rlib` and the C-ABI layer stays

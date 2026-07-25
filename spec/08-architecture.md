@@ -10,7 +10,7 @@ main thread (DOM)           ←messages→  worker (worker.js)  ←C ABI→  WAS
   chrome, input, overlays, persistence   playback clock               layout, pixels
 ```
 
-## 8.1 The WASM core
+## ARCH-001: The WASM core
 
 - Rust compiled to `wasm32-unknown-unknown`, **plain C ABI, no wasm-bindgen**
   — an opinionated choice: zero glue-code dependency, a fully explicit
@@ -31,7 +31,7 @@ main thread (DOM)           ←messages→  worker (worker.js)  ←C ABI→  WAS
   unknown fields, raw-span capture of extras, and no dependency weight in the
   wasm binary.
 
-### Scaling rules
+### ARCH-002: Scaling rules
 
 The target is traces of millions of events, which makes two costs the ones
 worth defending. Both have been the actual bottleneck at some point:
@@ -50,7 +50,7 @@ worth defending. Both have been the actual bottleneck at some point:
   `R`-only geometry (`old_addr`/`old_size`) lives in a side table keyed by
   event index rather than two u64 columns spanning every event.
 
-## 8.2 The worker
+## ARCH-003: The worker
 
 Owns the WASM instance and the three `OffscreenCanvas`es (transferred from
 the main thread at init). Responsibilities:
@@ -72,13 +72,13 @@ the main thread at init). Responsibilities:
   dirty. After any render it posts a consolidated `state` message
   (playhead, live stats, virtual height, overlay geometry) that the main
   thread uses to update all chrome at once.
-- **Playback clock** ([06-playback-navigation §6.2](06-playback-navigation.md)).
+- **Playback clock** ([NAV-002](06-playback-navigation.md#nav-002-playback)).
 - **Scroll authority** and scroll anchoring around layout changes
-  ([06 §6.6](06-playback-navigation.md)).
+  ([NAV-006](06-playback-navigation.md#nav-006-scroll-ownership)).
 - Text drawing on top of engine rasters (labels), since the engine has no
   font machinery and JS `measureText` decides what fits.
 
-## 8.3 The main thread
+## ARCH-004: The main thread
 
 DOM chrome and input only: toolbar, panels/windows, overlays (SVG move-links,
 selection bands, marks, tooltips), keyboard, drag-and-drop, and persistence
@@ -86,7 +86,7 @@ selection bands, marks, tooltips), keyboard, drag-and-drop, and persistence
 tags list, names, marks) but never trace data; anything requiring the trace
 is a message round-trip.
 
-### Module layout
+### ARCH-005: Module layout
 
 It is split on one seam: code whose meaning depends on heap traces, and code
 whose meaning does not. **The directory a file sits in states who owns it**,
@@ -111,7 +111,7 @@ The destination this serves is a domain-independent shell hosting several
 analysis domains, heap being the first; see
 [docs/explorations/E007-web-architecture-direction](../docs/explorations/E007-web-architecture-direction.md).
 
-## 8.4 Protocol conventions
+## ARCH-006: Protocol conventions
 
 - Fire-and-forget commands (seek, set-config, tag) carry no reply; the next
   `state` message reflects them.
@@ -123,7 +123,7 @@ analysis domains, heap being the first; see
 - Round-trip-dependent UI (selection mirroring, optimistic timeline zoom) is
   designed to tolerate one frame of lag rather than block.
 
-## 8.5 File-type routing
+## ARCH-007: File-type routing
 
 One drop target for everything: a dropped/opened file whose head contains the
 `"heapVisualizerAnalysis"` marker is applied as a marks file; anything else is

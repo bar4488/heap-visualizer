@@ -3,7 +3,7 @@
 The chrome around the three views. Guiding stance: the views own the screen;
 everything else is a **window** the user summons, places, and dismisses.
 
-## 9.1 Layout
+## SHELL-001: Layout
 
 - **Toolbar** (top): open/demo, trace title, panel toggles (Play, Layout,
   Appearance, Filter, Events, Marks), horizontal-zoom pill, crop pill, marks
@@ -15,13 +15,15 @@ everything else is a **window** the user summons, places, and dismisses.
 - Overlays above everything as needed: tooltip, selection popover, search
   overlay, drop overlay, load progress.
 
-## 9.2 Panels are windows
+## SHELL-002: Panels are windows
 
 Every panel (Play, Layout, Appearance, Filter, Marks, Warnings, Events,
 Allocation, and pinned allocation windows) is a floating window: dragged by its header,
 closable, and z-stacked with most-recently-touched on top. Toolbar buttons
 toggle visibility; position persists per trace via the session
-([07-analysis §7.7](07-analysis.md)).
+([ANL-007](07-analysis.md#anl-007-persistence--heapa-files-and-autosave)).
+
+## SHELL-003: Panels are declared as data
 
 The set of session-restored panels must be declared as data — one record per
 panel carrying at least its element id, its title, and how it refills itself
@@ -34,7 +36,7 @@ that is not in the table is an error, not a step that silently never runs.
 The declaration belongs to the domain, not to the shell: the shell places and
 persists whatever windows it is handed, and must not name a panel.
 
-## 9.3 Docking drawers
+## SHELL-004: Docking drawers
 
 Any window can be **docked** by dragging it to a screen edge (or an already
 open drawer): an insertion indicator previews the drop position; drop docks
@@ -54,7 +56,7 @@ it into a vertical stack. Behaviors that define the feel:
 - Dock layout, drawer widths, and floating positions restore with the
   session.
 
-## 9.4 The allocation window lifecycle
+## SHELL-005: The allocation window lifecycle
 
 One **live** Allocation panel follows selection (click, step, search-jump).
 **Pinning** (📌) detaches the current window in place — identical chrome, the
@@ -65,7 +67,7 @@ Unpinning returns the window's content to the live panel. Pinned windows dock
 like any other window and are restored from the session by creator event
 index.
 
-## 9.5 Specific panels
+## SHELL-006: Specific panels
 
 Panels are split by *what the setting does*, not by what happens to be
 convenient: **Layout** decides where things land on the map, **Appearance**
@@ -86,11 +88,11 @@ exactly one of those.
   renameable inline, with jump/center/delete actions
   ([07-analysis](07-analysis.md)).
 - **Warnings**: the flagged-input list; click jumps to the event
-  ([03-core-model §3.5](03-core-model.md)).
+  ([MODEL-005](03-core-model.md#model-005-warnings)).
 - **Events**: the virtualized event list, with follow and filtered-only
-  toggles ([06-playback-navigation §6.5](06-playback-navigation.md)).
+  toggles ([NAV-005](06-playback-navigation.md#nav-005-the-events-panel)).
 
-## 9.6 Status & feedback conventions
+## SHELL-007: Status and feedback conventions
 
 Every non-obvious action acknowledges itself in the status info line
 ("tagged 1,204 allocations …", "marked 0x… — rename it in the Marks panel").

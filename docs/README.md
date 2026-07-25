@@ -22,9 +22,9 @@ not edit it locally. This file is the project-specific part.
 **The spec is authoritative.** When behavior and `spec/` disagree, one of them
 is wrong and the same change fixes both. This holds when the change reverses a
 documented decision — reversing one is legitimate, leaving the old one standing
-is not. `spec/10-tooling.md` §10.3 is an example of a stance being reversed in
-place, and [T003](tickets/T003-typescript-at-the-contracts.md) will do it again
-to §10.2.
+is not. [TOOL-003](../spec/10-tooling.md#tool-003-tests) is an example of a stance being
+reversed in place, and [T003](tickets/T003-typescript-at-the-contracts.md) will
+do it again to [TOOL-002](../spec/10-tooling.md#tool-002-build).
 
 **A web change is not verified by an agent.** How to run what an agent can
 check, and what a person needs to check by hand instead, is in
@@ -42,6 +42,7 @@ rg '^status: todo$' docs/tickets        # what can be started
 rg '^status: doing$' docs/tickets       # the queue source for now.md
 rg '^status: open$' docs/explorations   # what is unresolved
 rg 'F10' docs/explorations              # a review finding by its id
+rg 'MAP-003' .                          # a requirement and everything citing it
 ```
 
 Review findings carry `F<n>` ids inside the 2026-07-24 review only. They are not
@@ -51,10 +52,15 @@ owns whether it is fixed.
 ## A note on the identifier spaces
 
 `T`/`E`/`D` numbers are global and permanent. `F<n>` predates the protocol and
-is local to [E002](explorations/E002-review-2026-07-24.md). Spec requirements do
-not yet have permanent ids — that is
-[T005](tickets/T005-spec-requirement-ids.md); until it lands, spec citations use
-section numbers, which is a known defect and not a pattern to copy.
+is local to [E002](explorations/E002-review-2026-07-24.md). Spec requirements
+carry per-file prefixes (`TRACE-`, `MAP-`, `ANL-`, …) listed in
+[spec/README](../spec/README.md#requirement-identifiers); cite one by its
+identifier, never by a section number.
+
+Citations written before [T005](tickets/T005-spec-requirement-ids.md) landed on
+2026-07-25 name spec sections (`§7.7`, `§10.2`). Those survive only in closed
+explorations and closed tickets, which are dated records and are not migrated;
+translate one by opening the file and finding the identifier on that heading.
 
 Explorations and closed tickets are dated records. They are not updated when a
 convention changes, and a wrong claim in one gets a dated correction appended

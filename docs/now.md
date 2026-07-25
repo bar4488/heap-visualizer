@@ -41,9 +41,10 @@ interaction are hand-verified, per
 **Docs — just restructured.** This repository adopted the protocol on
 2026-07-25. The reviews under the old `docs/findings/` are now
 `docs/explorations/E001`–`E006`, moved unedited except for link repair, and
-`specs/` is now `spec/`. The spec's requirements do not yet carry permanent ids
-([T005](tickets/T005-spec-requirement-ids.md)), so citations to it still use
-section numbers.
+`specs/` is now `spec/`. The spec's 61 requirements carry permanent ids
+([T005](tickets/T005-spec-requirement-ids.md)) — `MAP-003`, `ANL-008` — and
+every live citation names one. Section numbers survive only in the
+explorations and in closed tickets, which are dated records.
 
 ## Next
 

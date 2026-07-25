@@ -11,7 +11,7 @@ traces matters; it would be a pure encoding change with identical semantics,
 which is why everything below is defined in terms of records and fields, not
 bytes.
 
-## 2.1 General rules
+## TRACE-001: General rules
 
 - Each line is a complete, self-contained JSON object.
 - **Field order is not significant.** Parsers must not depend on it.
@@ -27,7 +27,7 @@ bytes.
 - Empty lines and lines whose first non-whitespace character is `#` are
   ignored, so hand-authored files can carry comments and separators.
 
-## 2.2 Record types (`op`)
+## TRACE-002: Record types (`op`)
 
 Every record has an `op` field naming its type. Unknown `op` values are
 skipped (forward compatibility).
@@ -39,7 +39,7 @@ skipped (forward compatibility).
 | `F`  | **Free** — an existing allocation ends. |
 | `R`  | **Realloc** — one allocation ends and a new one begins, atomically. |
 
-## 2.3 Header record `H`
+## TRACE-003: Header record `H`
 
 The header **should** be the first line; at most one per stream. All fields
 except `op` and `v` are optional. If no header is present, consumers assume
@@ -58,7 +58,7 @@ except `op` and `v` are optional. If no header is present, consumers assume
 | `title` | Human label for the trace, shown in the toolbar. |
 | `meta` | Free-form producer metadata object (command line, allocator name, …). |
 
-## 2.4 Malloc record `M`
+## TRACE-004: Malloc record `M`
 
 An allocation `[addr, addr + size)` becomes live.
 
@@ -70,15 +70,15 @@ An allocation `[addr, addr + size)` becomes live.
 |-------|-----|---------|
 | `id` | ✓ | Stream-unique allocation id. Never reused, even after the allocation is freed. |
 | `addr` | ✓ | Base address (u64 hex string). |
-| `size` | ✓ | **Requested** size in bytes, must be `> 0` (see §2.8). |
+| `size` | ✓ | **Requested** size in bytes, must be `> 0` (see [TRACE-008](#trace-008-requested-size-vs-real-footprint)). |
 | `t` | rec | Timestamp. If absent, inherits the previous event's `t`. |
-| `seq` | — | Event index; assigned from stream position if absent (§2.7). |
+| `seq` | — | Event index; assigned from stream position if absent ([TRACE-007](#trace-007-ordering-seq-and-timestamps)). |
 | `thr` | — | Originating thread id. |
 | `site` | — | Allocation-site tag (function, symbol, stack-hash). Drives coloring and filtering. |
 | `stack` | — | Call stack as an array of strings, outermost-last. |
-| `usable` | — | Real usable size if the producer knows it (§2.8). |
+| `usable` | — | Real usable size if the producer knows it ([TRACE-008](#trace-008-requested-size-vs-real-footprint)). |
 
-## 2.5 Free record `F`
+## TRACE-005: Free record `F`
 
 An allocation ends, referenced **by `id`**.
 
@@ -95,7 +95,7 @@ consumers must not require them.
 producer that must record them emits `id:0` (the reserved null id), which
 consumers drop entirely.
 
-## 2.6 Realloc record `R`
+## TRACE-006: Realloc record `R`
 
 Models `realloc`: the old allocation ends and a new one begins — possibly at a
 new address, possibly the same. Emitting a single `R` rather than an `F`+`M`
@@ -117,7 +117,7 @@ not care may treat `R` as exactly that pair, applied atomically at one
 | `old_addr`, `old_size` | — | Convenience copies; the resolved creator record wins when both exist. |
 | `t`, `seq`, `thr`, `site`, `stack`, `usable` | — | As for `M`. |
 
-## 2.7 Ordering, `seq`, and timestamps
+## TRACE-007: Ordering, `seq`, and timestamps
 
 - **Stream order is authoritative.** Events are applied in the order they
   appear. `seq`, if present, must equal the 0-based index among *event*
@@ -128,7 +128,7 @@ not care may treat `R` as exactly that pair, applied atomically at one
   A decreasing `t` is clamped to the previous value and flagged.
 - Missing `t` inherits the previous event's timestamp.
 
-## 2.8 Requested size vs. real footprint
+## TRACE-008: Requested size vs. real footprint
 
 `size` is the **requested** size. Real allocators round up and add header
 overhead, so true footprints are larger and allocations are spaced apart. The
@@ -137,11 +137,11 @@ real usable size may add `usable` (int, bytes), which the viewer renders as a
 lighter "slack" band beyond the requested region. `usable <= size` is treated
 as absent.
 
-## 2.9 Validity
+## TRACE-009: Validity
 
 Invalid input is a *property of the trace worth showing*, not a load error:
 overlapping allocations, double frees, unknown ids, reused ids, zero sizes,
 and malformed lines are all rendered as best as possible and surfaced as
-warnings ([03-core-model §3.5](03-core-model.md)). The only records dropped
+warnings ([MODEL-005](03-core-model.md#model-005-warnings)). The only records dropped
 entirely are unparseable lines, records with no/unknown `op`, creator records
 with no `addr`, and `F` with the null id.

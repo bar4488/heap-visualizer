@@ -2,7 +2,7 @@
 
 Two full-width strips above the address map, sharing one playhead.
 
-## 5.1 Temporal vs. sequential
+## TL-001: Temporal vs. sequential
 
 - **Temporal strip** — x is `t`, linearly scaled over the visible time range.
   Bursts bunch up; idle gaps show as empty stretches. Answers *"when, and how
@@ -13,14 +13,13 @@ Two full-width strips above the address map, sharing one playhead.
 Same events, two projections; the divergence between them is information (see
 [01-overview](01-overview.md)).
 
-## 5.2 Density rendering
+## TL-002: Density rendering
 
 Each strip is a two-sided density histogram: per pixel column, allocation
 events (`M`/`R`) draw green bars up from a baseline, free events (`F`/`R`)
 draw red bars down. Two rendering decisions worth keeping:
 
-- **Binning uses the load-time prefix sums** ([03-core-model
-  §3.6](03-core-model.md)): a column's count is two array lookups, so a full
+- **Binning uses the load-time prefix sums** ([MODEL-006](03-core-model.md#model-006-derived-load-time-indexes)): a column's count is two array lookups, so a full
   re-bin is O(width · log n) and never scans events — million-event traces
   re-render at interaction speed.
 - **Bar height is √-scaled** relative to the visible maximum, so a
@@ -30,14 +29,14 @@ Rendered strips are cached and only re-binned when the view range, size, or
 tag state changes; the playhead (cursor line + dimmed "played" region) is
 drawn over the cached image every frame.
 
-## 5.3 Tag lanes
+## TL-003: Tag lanes
 
 Thin lanes along the strip edges mark tagged activity in the tag's color:
 top edge = columns where tagged allocations are *created*, bottom edge =
 columns where they are *freed*. This keeps an analysis visible at trace scale
 even when the tagged allocations are a tiny fraction of events.
 
-## 5.4 Interaction
+## TL-004: Interaction
 
 | Gesture | Effect |
 |---------|--------|
@@ -57,7 +56,7 @@ range onto the other (and onto the Events panel's gutter band) via a
 time↔seq conversion round-trip to the engine. Mirror updates are marked so
 they don't bounce back and forth between the strips.
 
-## 5.5 Overlays
+## TL-005: Overlays
 
 Both strips carry, in strip-local coordinates: the selection band and its
 mirrored echo, the crop band, bookmark flags (⚑, click = jump in time;

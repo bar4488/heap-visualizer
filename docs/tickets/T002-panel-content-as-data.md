@@ -39,7 +39,8 @@ era, and it is cheap to act on now.
       re-declaring it.
 - [x] `node --test 'web/**/*.test.js'` passes, and `grep -ric heap web/shell/`
       reports 0 for every file.
-- [x] `spec/09-ui-shell.md` describes panels as declared records.
+- [x] [SHELL-003](../../spec/09-ui-shell.md#shell-003-panels-are-declared-as-data) describes panels as
+      declared records.
 - [ ] A person checks that every panel opens, docks, floats, and restores, per
       [D001](../decisions/D001-web-changes-are-hand-smoke-tested.md). **This is
       the only item outstanding** — see Handoff.

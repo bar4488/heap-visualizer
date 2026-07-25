@@ -26,7 +26,7 @@ abstraction. See [D002](../decisions/D002-shell-split-before-host.md).
 Stage 4 of [E007](../explorations/E007-web-architecture-direction.md#stage-4--the-host-designed-against-the-second-domain).
 Its §5 lists the questions that must have answers before this starts; the
 largest is whether several documents are open at once, which touches the
-single-engine-instance decision in `spec/08-architecture.md` §8.1, session
+single-engine-instance decision in [ARCH-001](../../spec/08-architecture.md#arch-001-the-wasm-core), session
 persistence, and the whole toolbar. That is a user-facing feature and must be
 decided as one, not arrive as a side effect of a refactor.
 

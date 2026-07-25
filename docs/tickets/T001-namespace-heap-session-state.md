@@ -38,7 +38,8 @@ Constraint and reasoning: [E007 §3](../explorations/E007-web-architecture-direc
       shape restores identically.
 - [x] `web/shell/drawers.js` and `web/shell/panels.js` still name no heap
       concept: `grep -ric heap web/shell/` reports 0 for every file.
-- [x] `spec/07-analysis.md` §7.7 describes the persisted shape as written.
+- [x] [ANL-008](../../spec/07-analysis.md#anl-008-the-session-blobs-shape) describes the persisted
+      shape as written.
 - [ ] A person checks save-session / reload / restore by hand, per
       [D001](../decisions/D001-web-changes-are-hand-smoke-tested.md). **This is
       the only item outstanding** — see Handoff.

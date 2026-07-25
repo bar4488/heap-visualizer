@@ -3,7 +3,7 @@
 The main view: the address space drawn as a grid of rows, showing the live set
 at the playhead.
 
-## 4.1 Row layout
+## MAP-001: Row layout
 
 - The viewer picks a **base** `B` (lowest observed address, or `arena_base`
   from the header if lower, rounded down to a row boundary) and a **row
@@ -16,7 +16,7 @@ at the playhead.
   the `0x1000` default matches a typical page so page-level fragmentation
   reads naturally.
 
-## 4.2 Empty-row collapsing
+## MAP-002: Empty-row collapsing
 
 Address spaces are sparse. A run of consecutive rows containing no live
 allocation is **collapsed** into a thin gap marker (labeled with how many
@@ -30,12 +30,11 @@ and scrollable across terabyte-wide ranges.
 - Collapsing is recomputed per playhead position: a row empty now may be
   occupied later.
 
-## 4.3 Layout stability
+## MAP-003: Layout stability
 
 Per-playhead collapsing means the map can reflow as the playhead moves. Three
 mechanisms deliberately trade "show only what's live" for "don't yank the
-view around" (each was added in response to real disorientation, see
-`TASKS.md` items 8–10):
+view around" (each was added in response to real disorientation while using the app):
 
 - **All-rows mode** (default on): lay out every row *any* allocation ever
   touches, playhead-independent, so the map never reflows during
@@ -49,7 +48,7 @@ view around" (each was added in response to real disorientation, see
   and restores scroll so that address stays put — even if everything in it
   was just freed.
 
-## 4.4 Vertical and horizontal navigation
+## MAP-004: Vertical and horizontal navigation
 
 - **Vertical**: native browser scrolling over a virtual height (row height ×
   laid-out rows + gaps). Row pixel height is a user "row zoom" setting.
@@ -59,12 +58,12 @@ view around" (each was added in response to real disorientation, see
   allocations become visible and clickable. All picking, overlays, marks, and
   auto-centering honor the zoom.
 
-## 4.5 Coloring
+## MAP-005: Coloring
 
 Fixed base semantics so traces read consistently: **green** = allocation
 (live region fill, `M`/`R` timeline ticks), **red** = free, neutral =
 gaps/background. Overlapping live bytes render **orange** — a data-integrity
-signal, not a palette choice (see §4.6 for the other display modes).
+signal, not a palette choice (see [MAP-006](#map-006-overlapping-allocations) for the other display modes).
 
 The fill may instead be driven by a user-selected **color mode**:
 
@@ -87,7 +86,7 @@ that never covers real allocation pixels.
 
 A legend strip below the toolbar explains the active mode's mapping.
 
-## 4.6 Overlapping allocations
+## MAP-006: Overlapping allocations
 
 Two live allocations sharing bytes means the traced program (or the trace
 itself) is wrong, so the default is to make it loud rather than pretty:
@@ -103,10 +102,10 @@ structure instead of revealing it. So the display is a user choice:
 Only pixels *fully* covered by both byte ranges count, so two allocations
 merely abutting inside one pixel are never flagged. Overlap display is
 independent of the load-time overlap *warning*
-([03-core-model §3.5](03-core-model.md)), which always fires. The overlap
+([MODEL-005](03-core-model.md#model-005-warnings)), which always fires. The overlap
 display mode (and the ghost toggle below) are **global app preferences**,
 persisted across traces and runs, unlike per-trace session state
-([07-analysis §7.7](07-analysis.md)).
+([ANL-007](07-analysis.md#anl-007-persistence--heapa-files-and-autosave)).
 
 Where several live allocations cover the same address, **picking (hover and
 click) selects the most recently created one** — the allocation on top, in
@@ -133,7 +132,7 @@ this honest and cheap:
 - The per-frame candidate scan is budget-capped like labels, so pathological
   churn cannot stall a frame.
 
-## 4.7 Labels
+## MAP-007: Labels
 
 Drawn by the JS layer on top of the raster (the engine emits label geometry;
 JS knows fonts, user names, and the chosen size format):
@@ -142,7 +141,7 @@ JS knows fonts, user names, and the chosen size format):
   when rows are short.
 - **Gap markers**: centered "N KiB skipped" — or "N KiB more of this
   allocation" when the collapsed rows are the middle of a single allocation
-  too large to lay out row by row (§4.3), where "skipped" would read as
+  too large to lay out row by row ([MAP-003](#map-003-layout-stability)), where "skipped" would read as
   "nothing here" and mean the opposite of the truth.
 - **In-allocation labels** for allocations wide enough: `name · size` if it
   fits, else the name, else the size (compact or hex format, user choice).
@@ -152,7 +151,7 @@ JS knows fonts, user names, and the chosen size format):
   collision-culled at draw time: the nested (narrower) allocation's label
   wins and colliding text is skipped.
 
-## 4.8 Hit-testing and queries
+## MAP-008: Hit-testing and queries
 
 All picking is engine-side (the DOM has no idea what's where):
 
@@ -169,4 +168,4 @@ All picking is engine-side (the DOM has no idea what's where):
 
 Hit-testing scans the address-ordered live set around the cursor address,
 bounded by the largest span in the trace — no per-pixel index needed. Among
-overlapping covers the newest creator event wins (§4.6).
+overlapping covers the newest creator event wins ([MAP-006](#map-006-overlapping-allocations)).
