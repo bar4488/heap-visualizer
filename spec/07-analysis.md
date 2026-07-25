@@ -66,9 +66,10 @@ The core owns checking, evaluation, and one creator-allocation match bitset.
 Rendering, filter-scoped range tagging ([ANL-002](#anl-002-acquiring-tags)),
 and the Events panel's filtered index
 ([NAV-005](06-playback-navigation.md#nav-005-the-events-panel)) all consume
-those same match bits. The allocation panel's **match range** action inserts
-visible source of the form `span overlaps 0x1000..0x1800` at the editor cursor;
-it does not mutate separate filter state.
+those same match bits. The allocation panel's **match range** action replaces
+the expression with visible source of the form
+`span overlaps 0x1000..0x1800` and applies it immediately; it does not mutate
+separate filter state.
 
 Only the successfully applied source, dim/hide mode, and filter-language
 version persist in the heap session. An unapplied draft, compiled plan, and

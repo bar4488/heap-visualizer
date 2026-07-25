@@ -1,7 +1,7 @@
 ---
 id: T012
 title: Match range replaces the filter instead of inserting
-status: todo
+status: done
 updated: 2026-07-25
 ---
 
@@ -33,3 +33,10 @@ so many words, so the spec changes with the code.
 
 - Changing the predicate's syntax.
 - The address-range list that E010 removed.
+
+## Result
+
+The allocation action now replaces the draft with its single
+`span overlaps` predicate, applies it, and reports the active range. The
+cursor-insertion helper had no remaining callers and was removed.
+`npx tsc -p tsconfig.test.json` passes.

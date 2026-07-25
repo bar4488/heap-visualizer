@@ -1067,18 +1067,6 @@ async function applyFilterSource(source = $('filter-source').value) {
   }
 }
 
-function insertFilterText(text) {
-  const input = $('filter-source');
-  const before = input.value.slice(0, input.selectionStart);
-  const after = input.value.slice(input.selectionEnd);
-  const glue = before.trim() && !/\s$/.test(before) ? ' && ' : '';
-  input.value = before + glue + text + after;
-  const cursor = (before + glue + text).length;
-  input.setSelectionRange(cursor, cursor);
-  input.focus();
-  filterEdited();
-}
-
 function buildFilterPanel() {
   $('filter-source').value = UI.filterDraft;
   const mode = $1(`input[name=fmode][value="${UI.filterMode}"]`);
@@ -1715,7 +1703,7 @@ function buildDetailBody(root, info) {
     <button class="d-focus" title="Scroll/pan to this allocation and flash exactly where it is">⌖ focus</button>
     <button class="d-birth">go to birth</button>
     ${info.deathSeq !== null ? '<button class="d-death">go to death</button>' : ''}
-    <button class="d-range" title="Insert this allocation's address range into the Filter expression">match range</button>
+    <button class="d-range" title="Replace the Filter expression with this allocation's address range and apply it">match range</button>
   </div>`;
   root.innerHTML = html;
   const q = (sel) => root.querySelector(sel);
@@ -1724,10 +1712,12 @@ function buildDetailBody(root, info) {
   q('.d-birth').onclick = () => worker.postMessage({ type: 'jump', seq: info.seq + 1 });
   const dd = q('.d-death');
   if (dd) dd.onclick = () => worker.postMessage({ type: 'jump', seq: info.deathSeq + 1 });
-  q('.d-range').onclick = () => {
+  q('.d-range').onclick = async () => {
     showPanel('filter-panel');
-    insertFilterText(`span overlaps ${info.addr}..${info.end}`);
-    $('st-info').textContent = `inserted range ${info.addr} – ${info.end}; Apply to activate`;
+    const applied = await applyFilterSource(`span overlaps ${info.addr}..${info.end}`);
+    if (applied) {
+      $('st-info').textContent = `filtering range ${info.addr} – ${info.end}`;
+    }
   };
   q('.d-name').onchange = () => {
     const v = q('.d-name').value.trim();
