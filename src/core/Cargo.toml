@@ -13,3 +13,6 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
+
+[dependencies]
+heap-visualizer-filter-dsl = { path = "../filter-dsl" }

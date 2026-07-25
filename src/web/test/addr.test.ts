@@ -13,7 +13,6 @@ test('normAddr: canonicalizes to lowercase 0x form', () => {
 test('normAddr: strips leading zeros so equal addresses compare equal', () => {
   assert.equal(normAddr('0x0000ff'), '0xff');
   assert.equal(normAddr('0x00'), '0x0');
-  // this is what makes the "already there" check in addAddrRange work
   assert.equal(normAddr('0x0000ff'), normAddr('FF'));
 });
 

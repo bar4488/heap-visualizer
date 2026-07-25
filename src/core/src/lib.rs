@@ -4,6 +4,7 @@
 //! strings (ptr/len in ret[0]/ret[1]).
 
 pub mod json;
+mod filter_eval;
 pub mod parse;
 pub mod render;
 pub mod state;
@@ -40,6 +41,7 @@ struct App {
     /// no filter is active — the identity mapping is used instead.
     ev_filtered: Vec<u32>,
     ev_dirty: bool,
+    tag_labels: Vec<String>,
 }
 
 impl App {
@@ -56,6 +58,7 @@ impl App {
             scratch: RenderScratch::default(),
             ev_filtered: Vec::new(),
             ev_dirty: true,
+            tag_labels: Vec::new(),
         }
     }
 }
@@ -125,6 +128,7 @@ pub extern "C" fn hp_parse_begin() {
     // measure (see ARCH-003 in spec/08-architecture.md), and native users (tests)
     // get the same clean slate.
     a.cfg = Cfg::new();
+    a.tag_labels.clear();
 }
 
 #[no_mangle]
@@ -552,6 +556,113 @@ pub extern "C" fn hp_set_filter(len: u32) {
     let data: Vec<u8> = a.buf[..len as usize].to_vec();
     a.cfg.filter = parse_filter_json(&data);
     a.ev_dirty = true;
+}
+
+fn filter_diagnostic_json(out: &mut String, kind: &str, message: &str, start: usize, end: usize) {
+    out.clear();
+    out.push_str("{\"");
+    out.push_str(kind);
+    out.push_str("\":false,\"available\":true,\"diagnostic\":{\"message\":");
+    push_json_str(out, message);
+    out.push_str(",\"start\":");
+    out.push_str(&start.to_string());
+    out.push_str(",\"end\":");
+    out.push_str(&end.to_string());
+    out.push_str("}}");
+}
+
+#[no_mangle]
+pub extern "C" fn hp_filter_check(len: u32) {
+    let a = unsafe { &mut *app() };
+    let source = std::str::from_utf8(&a.buf[..len as usize]).unwrap_or("");
+    match heap_visualizer_filter_dsl::parse(source) {
+        Ok(_) => a.out = "{\"valid\":true,\"available\":true}".into(),
+        Err(e) => filter_diagnostic_json(&mut a.out, "valid", &e.message, e.span.start, e.span.end),
+    }
+    ret_str(&a.out);
+}
+
+#[no_mangle]
+pub extern "C" fn hp_filter_apply(len: u32) {
+    let a = unsafe { &mut *app() };
+    let source = std::str::from_utf8(&a.buf[..len as usize]).unwrap_or("").to_string();
+    if source.trim().is_empty() {
+        a.cfg.filter = Filter::default();
+        a.ev_dirty = true;
+        a.out = "{\"success\":true,\"source\":\"\",\"matches\":0,\"creators\":0}".into();
+        ret_str(&a.out);
+        return;
+    }
+    let expr = match heap_visualizer_filter_dsl::parse(&source) {
+        Ok(expr) => expr,
+        Err(e) => {
+            filter_diagnostic_json(&mut a.out, "success", &e.message, e.span.start, e.span.end);
+            ret_str(&a.out);
+            return;
+        }
+    };
+    let mut bits = vec![0u64; (a.store.len() as usize).div_ceil(64)];
+    let mut matches = 0u32;
+    let mut creators = 0u32;
+    for e in 0..a.store.len() {
+        if !matches!(a.store.op[e as usize], OP_M | OP_R) {
+            continue;
+        }
+        creators += 1;
+        match filter_eval::evaluate(&expr, &a.store, e, &a.tag_labels) {
+            Ok(true) => {
+                bits[e as usize / 64] |= 1 << (e % 64);
+                matches += 1;
+            }
+            Ok(false) => {}
+            Err(err) => {
+                filter_diagnostic_json(&mut a.out, "success", &err.message, err.span.start, err.span.end);
+                ret_str(&a.out);
+                return;
+            }
+        }
+    }
+    let mode = a.cfg.filter.mode;
+    a.cfg.filter = Filter::default();
+    a.cfg.filter.mode = mode;
+    a.cfg.filter.matches = Some(bits);
+    a.ev_dirty = true;
+    a.out.clear();
+    a.out.push_str("{\"success\":true,\"source\":");
+    push_json_str(&mut a.out, &source);
+    a.out.push_str(",\"matches\":");
+    a.out.push_str(&matches.to_string());
+    a.out.push_str(",\"creators\":");
+    a.out.push_str(&creators.to_string());
+    a.out.push('}');
+    ret_str(&a.out);
+}
+
+#[no_mangle]
+pub extern "C" fn hp_filter_set_mode(mode: u32) {
+    let a = unsafe { &mut *app() };
+    a.cfg.filter.mode = mode.min(render::FILTER_HIDE as u32) as u8;
+    a.ev_dirty = true;
+}
+
+#[no_mangle]
+pub extern "C" fn hp_set_tag_labels(len: u32) {
+    let a = unsafe { &mut *app() };
+    let data = &a.buf[..len as usize];
+    let mut sc = json::Scan::new(data);
+    let mut labels = Vec::new();
+    if sc.eat(b'[') {
+        loop {
+            if sc.eat(b']') { break; }
+            let Some((lo, hi)) = sc.string_span() else { break };
+            labels.push(String::from_utf8_lossy(&data[lo..hi]).into_owned());
+            if !sc.eat(b',') {
+                let _ = sc.eat(b']');
+                break;
+            }
+        }
+    }
+    a.tag_labels = labels;
 }
 
 /// Crop the address-line to creator events with `lo <= e < hi` — always dims
@@ -1823,5 +1934,21 @@ not json at all
         let mut px = Vec::new();
         timeline::render(&mut a.store, &a.cfg, 1, 100, 40, 0.0, 5.0, &mut px);
         assert_eq!(px.len(), 100 * 40 * 4);
+    }
+
+    #[test]
+    fn expression_filter_evaluates_creator_columns() {
+        let a = load(SAMPLE);
+        let expr = heap_visualizer_filter_dsl::parse(
+            r#"size >= 100 && site == "b" && span overlaps 0x1800..0x2800"#,
+        ).unwrap();
+        assert!(!filter_eval::evaluate(&expr, &a.store, 0, &[]).unwrap());
+        assert!(filter_eval::evaluate(&expr, &a.store, 1, &[]).unwrap());
+
+        let methods = heap_visualizer_filter_dsl::parse(
+            r#"freed && site.starts_with("a")"#,
+        ).unwrap();
+        assert!(filter_eval::evaluate(&methods, &a.store, 0, &[]).unwrap());
+        assert!(!filter_eval::evaluate(&methods, &a.store, 1, &[]).unwrap());
     }
 }

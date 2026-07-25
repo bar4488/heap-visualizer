@@ -29,33 +29,36 @@ render.
   allocations the filter matches — the filter defines the working set, so
   filter+drag composes into "tag all `json_node` allocations born here".
 
-Tags can be renamed, recolored, deleted (delete untags and compacts higher
-tag ids down), and toggled visible per-tag; tag visibility participates in
-the filter below.
+Tags can be renamed, recolored, and deleted (delete untags and compacts higher
+tag ids down). Filtering by tag is expressed in the Filter panel below.
 
 ## ANL-003: Filter
 
-The Filter panel selects by **site**, **thread**, **size range**, **address
-range**, and **tag visibility** (including "untagged"). Two application modes,
-chosen by the user: **dim others** (default — context stays visible) or **hide
-others**. Empty selections are real constraints: unchecking every site means
-"no site qualifies", not "no constraint". The filter applies everywhere
-allocations render, (deliberately) also scopes range tagging ([ANL-002](#anl-002-acquiring-tags)), and
-drives the Events panel's "filtered" toggle
-([NAV-005](06-playback-navigation.md#nav-005-the-events-panel)).
+The Filter panel is one multiline allocation-expression editor plus **dim
+others** (default) / **hide others** presentation mode. The expression surface
+and semantics are the version-1 DSL defined by
+[E010](../docs/explorations/E010-filter-expression-language.md): there are no
+checkbox predicates, quick filters, or hidden conjunctions with another
+representation.
 
-Address ranges are a list, added by hand (two hex addresses) or from an
-allocation's **match range** button, which seeds the list with that
-allocation's own span. An allocation qualifies if it touches *any* range in
-the list, so several ranges read as "or", matching how the site and thread
-checkboxes already behave.
+The visible draft and the last successfully applied source are separate.
+Typing performs a debounced check but never changes visibility; **Apply**
+compiles and scans in the worker. A diagnostic leaves the previous applied
+filter active. Applying an empty source turns filtering off. Dim/hide changes
+immediately when a non-empty filter is active because it does not change the
+match set.
 
-**Allocations without a site (or thread) are unconstrained by that
-selection** — selecting "none" still shows them. Settled deliberately: the
-site filter answers "which sites do I care about", and a record that never
-named a site is not a member of any answer to that question; the alternative
-(a "no site" pseudo-bucket with its own checkbox) buys precision that no
-observed trace needs. Pinned by tests; do not change casually.
+The core owns checking, evaluation, and one creator-allocation match bitset.
+Rendering, filter-scoped range tagging ([ANL-002](#anl-002-acquiring-tags)),
+and the Events panel's filtered index
+([NAV-005](06-playback-navigation.md#nav-005-the-events-panel)) all consume
+those same match bits. The allocation panel's **match range** action inserts
+visible source of the form `span overlaps 0x1000..0x1800` at the editor cursor;
+it does not mutate separate filter state.
+
+Only the successfully applied source, dim/hide mode, and filter-language
+version persist in the heap session. An unapplied draft, compiled plan, and
+match bits do not.
 
 ## ANL-004: Crop
 

@@ -21,14 +21,15 @@ client-side.
 
 ## State
 
-**Rust core (`src/core/`, ~4.9k lines) — healthy; filter language is a separate
-crate.** The engine has clean module boundaries and 33 native tests asserting
+**Rust core (`src/core/`, ~4.9k lines) — healthy; filter syntax is a separate
+crate and evaluation is integrated.** The engine has clean module boundaries
+and 34 native tests asserting
 real invariants: snapshot seek ≡ forward replay, pick prefers the newest
 overlap, anchor stability across reflow. Every performance and soundness
 finding from the 2026-07-24 review is fixed. `src/filter-dsl/` is
-dependency-free and not yet linked into the core; its 15 tests cover the E010
-grammar, source-spanned AST and parser limits. Type checking and evaluation do
-not exist yet.
+dependency-free; its 15 tests cover the E010 grammar, source-spanned AST and
+parser limits. The core links it to type checking and a column-backed
+evaluator for the first set of built-in fields and operations.
 
 **Web layer (`src/web/`, ~3.2k lines) — all TypeScript now, split on the
 shell/domain seam, no other internal structure yet.** `main.ts` is down from
@@ -39,9 +40,15 @@ other module takes as `deps.ui`.
 check: `grep -ric heap src/web/shell/` reports 0 for every file.
 `src/web/heap/` — analysis, the panel table, the events panel — and the
 `src/web/session.ts` boundary module hold the rest.
+The Filter panel is now the E010 draft/applied expression editor and speaks
+the typed check/apply/mode worker protocol. The core exports the first
+column-backed evaluator for built-in allocation/death fields, boolean and
+numeric/string operations, sets/ranges, overlap, missing tests, and string /
+stack methods. `named()` and custom `field.*` columns still report direct
+diagnostics rather than being silently mis-evaluated.
 
 **Verification — three suites, a type-checker, and a person.** `cargo test`
-covers the engine (33) and filter parser (15);
+covers the engine (34) and filter parser (15);
 `node --test 'src/web/**/*.test.ts'` (44) covers the pure functions, the panel
 table, and both persisted round-trips, with no npm and no browser. `tsc` covers
 what those do not reach: the worker protocol
@@ -88,10 +95,10 @@ has the evidence that closed it, which is the shape worth copying: a `dist/`
 built from the commit before the change, diffed against a `dist/` built after,
 with the entire remaining difference enumerated.
 
-[T010](tickets/T010-standalone-filter-dsl-parser.md) now establishes the first
-filter-language slice as a separate crate: parser only, with no core dependency
-or runtime behavior. The next language slice is type checking and name
-resolution, but it has no ticket yet.
+[T010](tickets/T010-standalone-filter-dsl-parser.md) established the first
+filter-language slice as a separate crate. Type checking, the first evaluator,
+and the expression editor now connect it to the core and web UI. Completion is
+the next language slice and has no ticket yet.
 
 **[T009](tickets/T009-type-the-deps-contracts.md) is next, and is not urgent.**
 It types the `init*(deps)` contracts in

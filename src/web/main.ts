@@ -6,14 +6,13 @@ import {
   esc, clampView,
 } from './fmt.ts';
 import {
-  initRpc, requestLatest, cancelLatest, handleReply,
+  initRpc, request, requestLatest, cancelLatest, handleReply,
 } from './rpc.ts';
 import {
-  $, $$, $1, dpr, setHtml, delegate, toCss, toCssLen,
+  $, $$, $1, dpr, setHtml, toCss, toCssLen,
 } from './shell/dom.ts';
 import { raisePanel, showPanel, makePanelWindow } from './shell/panels.ts';
 import { showTooltip, hideTooltip, positionTooltipNearMouse } from './shell/tooltip.ts';
-import { normAddr } from './heap/addr.ts';
 import { heapPanels } from './heap/panels.ts';
 import {
   initAnalysis, markDirty, tagIdFor, syncTagDatalist, buildMarksPanel,
@@ -37,7 +36,7 @@ import type {
 } from './protocol.ts';
 
 /** A user-authored tag. Its id is its index here + 1; id 0 means untagged. */
-type Tag = { name: string; color: string; visible: boolean };
+type Tag = { name: string; color: string };
 
 /** A range selection or its mirror, in whichever domain `kind` names. */
 type Selection = { kind: Domain; lo: number; hi: number };
@@ -66,7 +65,6 @@ type UIState = {
   tags: Tag[];
   /** Tag id -> tagged creator-event count; 0 counts the untagged. */
   tagCounts: Record<number, number>;
-  untaggedVisible: boolean;
   /** Creator event -> the name the user gave that allocation. */
   names: Map<number, { name: string; id: number; addr: string }>;
   /** Creator event -> a `#rrggbb` override for every color mode. */
@@ -82,8 +80,10 @@ type UIState = {
   marksDirty: boolean;
   /** The crop window in the seq domain, or null; see setCrop/clearCrop. */
   crop: Range | null;
-  /** Hex-string address ranges the filter matches. */
-  addrRanges: { lo: string; hi: string }[];
+  /** Filter text visible in the editor and the last source accepted by core. */
+  filterDraft: string;
+  filterApplied: string;
+  filterMode: 1 | 2;
   /** Per-strip view setters, keyed by domain; filled by setupTimeline. */
   setView: Record<number, (v: Range, mirror?: boolean) => void>;
   /** Locked viewport: stepping never auto-scrolls. */
@@ -123,7 +123,6 @@ const UI: UIState = {
   loaded: false,
   tags: [],
   tagCounts: {},
-  untaggedVisible: true,
   names: new Map(),
   allocColors: new Map(),
   bookmarks: [],
@@ -132,7 +131,9 @@ const UI: UIState = {
   selMirror: null,
   marksDirty: false,
   crop: null,
-  addrRanges: [],
+  filterDraft: '',
+  filterApplied: '',
+  filterMode: 1,
   setView: {},
   locked: false,
   xview: { zoom: 1, pan: 0 },
@@ -379,14 +380,19 @@ function onLoaded(m) {
   UI.selected = null;
   UI.tags = [];
   UI.tagCounts = {};
-  UI.untaggedVisible = true;
   UI.names.clear();
   UI.allocColors.clear();
   UI.bookmarks = [];
   UI.addrMarks = [];
   UI.marksDirty = false;
   UI.crop = null;
-  UI.addrRanges = [];
+  UI.filterDraft = '';
+  UI.filterApplied = '';
+  UI.filterMode = 1;
+  filterApplyGeneration++;
+  $('btn-filter').classList.remove('active');
+  $('filter-panel').classList.remove('applying');
+  $('filter-apply').disabled = false;
   resetSessionSnapshot(); // new trace: the previous snapshot says nothing
   updateCropIndicator();
   sendAddrMarks();
@@ -697,9 +703,14 @@ $('search-overlay').addEventListener('pointerdown', (e) => {
   if (e.target === $('search-overlay')) closeSearchOverlay();
 });
 
+function isEditableTarget(target) {
+  const tag = target?.tagName;
+  return tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA'
+    || target?.isContentEditable;
+}
+
 document.addEventListener('keydown', (e) => {
-  const target = e.target as any;
-  if (target.tagName === 'INPUT' || target.tagName === 'SELECT') return;
+  if (isEditableTarget(e.target)) return;
   if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
   else if (e.key === 'ArrowRight') { e.preventDefault(); worker.postMessage({ type: 'step', delta: e.shiftKey ? 100 : 1 }); }
   else if (e.key === 'ArrowLeft') { e.preventDefault(); worker.postMessage({ type: 'step', delta: e.shiftKey ? -100 : -1 }); }
@@ -856,153 +867,129 @@ function buildLegend() {
 }
 
 // ---------------------------------------------------------------------------
-// filter panel
+// filter expression editor
 // ---------------------------------------------------------------------------
 
-function allNoneHtml(sel) {
-  return `<span class="allnone"><a data-an="all" data-sel="${sel}">all</a> · <a data-an="none" data-sel="${sel}">none</a></span>`;
+let filterCheckTimer = 0;
+let filterCheckGeneration = 0;
+let filterApplyGeneration = 0;
+
+function setFilterStatus(text, kind = '') {
+  const status = $('filter-status');
+  status.textContent = text;
+  status.className = `filter-status${kind ? ` ${kind}` : ''}`;
+}
+
+function utf8Offset(source, utf16Offset) {
+  return new TextEncoder().encode(source.slice(0, utf16Offset)).length;
+}
+
+function showFilterDiagnostic(diagnostic) {
+  setFilterStatus(`Invalid: ${diagnostic.message} at byte ${diagnostic.start}`, 'invalid');
+}
+
+function filterEdited() {
+  const input = $('filter-source');
+  UI.filterDraft = input.value;
+  if (!UI.filterDraft.trim()) {
+    setFilterStatus(UI.filterApplied ? 'Edited; applied filter is still active' : 'Empty');
+  } else if (UI.filterDraft === UI.filterApplied) {
+    setFilterStatus('Applied', 'applied');
+  } else {
+    setFilterStatus(UI.filterApplied ? 'Edited; applied filter is still active' : 'Checking…');
+  }
+  clearTimeout(filterCheckTimer);
+  const generation = ++filterCheckGeneration;
+  if (!UI.filterDraft.trim() || UI.filterDraft === UI.filterApplied) return;
+  filterCheckTimer = window.setTimeout(async () => {
+    const source = UI.filterDraft;
+    const cursor = utf8Offset(source, input.selectionStart);
+    const result = await requestLatest('filter-check', 'filter-check', { source, cursor });
+    if (generation !== filterCheckGeneration || source !== UI.filterDraft) return;
+    if (result.available === false) setFilterStatus('Checker unavailable; keep editing or Apply to retry');
+    else if (result.valid) setFilterStatus('Valid');
+    else if (result.diagnostic) showFilterDiagnostic(result.diagnostic);
+  }, 180);
+}
+
+async function applyFilterSource(source = $('filter-source').value) {
+  const panel = $('filter-panel');
+  const button = $('filter-apply');
+  const generation = ++filterApplyGeneration;
+  UI.filterDraft = source;
+  $('filter-source').value = source;
+  panel.classList.add('applying');
+  button.disabled = true;
+  setFilterStatus('Applying…');
+  try {
+    const result = await request('filter-apply', { source });
+    if (generation !== filterApplyGeneration) return false;
+    if (!result.success) {
+      if (UI.filterDraft !== source) filterEdited();
+      else if (result.diagnostic) showFilterDiagnostic(result.diagnostic);
+      return false;
+    }
+    UI.filterApplied = result.source ?? source;
+    $('btn-filter').classList.toggle('active', !!UI.filterApplied);
+    if (UI.filterDraft === source) {
+      UI.filterDraft = UI.filterApplied;
+      $('filter-source').value = UI.filterApplied;
+      setFilterStatus(UI.filterApplied ? 'Applied' : 'Empty', UI.filterApplied ? 'applied' : '');
+    } else {
+      setFilterStatus('Edited; applied filter is still active');
+    }
+    worker.postMessage({ type: 'filter-mode', mode: UI.filterApplied ? UI.filterMode : 0 });
+    evState.total = -1;
+    evState.lastSeq = -1;
+    refreshEventsPanel();
+    return true;
+  } finally {
+    if (generation === filterApplyGeneration) {
+      panel.classList.remove('applying');
+      button.disabled = false;
+    }
+  }
+}
+
+function insertFilterText(text) {
+  const input = $('filter-source');
+  const before = input.value.slice(0, input.selectionStart);
+  const after = input.value.slice(input.selectionEnd);
+  const glue = before.trim() && !/\s$/.test(before) ? ' && ' : '';
+  input.value = before + glue + text + after;
+  const cursor = (before + glue + text).length;
+  input.setSelectionRange(cursor, cursor);
+  input.focus();
+  filterEdited();
 }
 
 function buildFilterPanel() {
-  const sites = $('f-sites');
-  sites.innerHTML = UI.meta.sites.length
-    ? `<div class="group-title">sites ${allNoneHtml('site')}</div>` + UI.meta.sites.map((s, i) =>
-      `<label><input type="checkbox" data-site="${i}" checked><span class="swatch" style="background:${CAT[i % 12]}"></span>${esc(s.name)}<span class="count">${fmtNum(s.count)}</span></label>`).join('')
-    : '';
-  const thrs = $('f-thrs');
-  thrs.innerHTML = UI.meta.thrs.length > 1
-    ? `<div class="group-title">threads ${allNoneHtml('thr')}</div>` + UI.meta.thrs.map((t, i) =>
-      `<label><input type="checkbox" data-thr="${i}" checked><span class="swatch" style="background:${CAT[(i + 5) % 12]}"></span>thr ${t.thr}<span class="count">${fmtNum(t.count)}</span></label>`).join('')
-    : '';
-  // scoped to sites/threads only — tags live in the same panel but keep
-  // their own dedicated wiring (buildTagsSection) driven by UI.tags state,
-  // not raw checkbox DOM state
-  for (const group of [sites, thrs]) {
-    $$('input', group).forEach((inp) => { inp.onchange = sendFilter; });
-    $$('.allnone a', group).forEach((a) => {
-      a.onclick = () => {
-        const on = a.dataset.an === 'all';
-        $$(`input[data-${a.dataset.sel}]`, group).forEach((b) => { b.checked = on; });
-        sendFilter();
-      };
-    });
-  }
-  $('f-size-min').oninput = sendFilter;
-  $('f-size-max').oninput = sendFilter;
-  buildAddrRangesSection();
-  buildTagsSection();
+  $('filter-source').value = UI.filterDraft;
+  const mode = $1(`input[name=fmode][value="${UI.filterMode}"]`);
+  if (mode) mode.checked = true;
+  filterEdited();
 }
 
-// ---------------------------------------------------------------------------
-// address-range filter: an allocation passes if its span touches any range.
-// Ranges are added by hand here or by "match range" in an allocation panel.
-// ---------------------------------------------------------------------------
-
-function addAddrRange(loHex, hiHex) {
-  const lo = normAddr(loHex);
-  const hi = normAddr(hiHex);
-  if (!lo || !hi || BigInt(hi) <= BigInt(lo)) return false;
-  if (UI.addrRanges.some((r) => r.lo === lo && r.hi === hi)) return true; // already there
-  UI.addrRanges.push({ lo, hi });
-  buildAddrRangesSection();
-  sendFilter();
-  return true;
-}
-
-function buildAddrRangesSection() {
-  const list = $('f-addrs');
-  if (!UI.addrRanges.length) {
-    setHtml(list, '<div class="empty">none — all addresses pass</div>');
-    return;
-  }
-  setHtml(list, UI.addrRanges.map((r, i) => `<div class="an-row">
-      <span class="grow">${esc(r.lo)} – ${esc(r.hi)}</span>
-      <span class="count">${fmtBytes(Number(BigInt(r.hi) - BigInt(r.lo)))}</span>
-      <button class="x" data-ardel="${i}" title="remove this range">×</button>
-    </div>`).join(''));
-}
-delegate($('f-addrs'), 'click', {
-  ardel: (_, i) => {
-    UI.addrRanges.splice(+i, 1);
-    buildAddrRangesSection();
-    sendFilter();
-  },
-});
-
-$('f-addr-add').onclick = () => {
-  if (addAddrRange($('f-addr-lo').value, $('f-addr-hi').value)) {
-    $('f-addr-lo').value = '';
-    $('f-addr-hi').value = '';
-  } else {
-    $('st-info').textContent = 'address range needs two hex addresses, from < to';
+$('filter-source').oninput = filterEdited;
+$('filter-source').onkeydown = (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+    e.preventDefault();
+    void applyFilterSource();
   }
 };
-for (const id of ['f-addr-lo', 'f-addr-hi']) {
-  $(id).addEventListener('keydown', (e) => { if (e.key === 'Enter') $('f-addr-add').click(); });
-}
-$('f-addr-clear').onclick = () => {
-  UI.addrRanges = [];
-  buildAddrRangesSection();
-  sendFilter();
-};
-
-// Last size constraints that parsed; an unparsable input keeps the previous
-// constraint (marked red) instead of silently matching everything.
-const lastSizeFilter = { min: 0, max: 0 };
-
-function sendFilter() {
-  const panel = $('filter-panel');
-  const siteBoxes = $$('input[data-site]', panel);
-  const thrBoxes = $$('input[data-thr]', panel);
-  const sites = siteBoxes.filter((b) => b.checked).map((b) => +b.dataset.site);
-  const thrs = thrBoxes.filter((b) => b.checked).map((b) => +b.dataset.thr);
-  const rawMin = parseSize($('f-size-min').value);
-  const rawMax = parseSize($('f-size-max').value);
-  $('f-size-min').style.borderColor = rawMin === null ? 'var(--red)' : '';
-  $('f-size-max').style.borderColor = rawMax === null ? 'var(--red)' : '';
-  const sizeMin = rawMin === null ? lastSizeFilter.min : rawMin;
-  const sizeMax = rawMax === null ? lastSizeFilter.max : rawMax;
-  lastSizeFilter.min = sizeMin;
-  lastSizeFilter.max = sizeMax;
-  const allSites = sites.length === siteBoxes.length;
-  const allThrs = thrs.length === thrBoxes.length;
-  // tag visibility (from the tags panel; bit 0 = untagged)
-  const tagBits = [];
-  if (UI.untaggedVisible) tagBits.push(0);
-  UI.tags.forEach((t, i) => { if (t.visible) tagBits.push(i + 1); });
-  const allTags = tagBits.length === UI.tags.length + 1;
-  const active = !allSites || !allThrs || !allTags || sizeMin > 0 || sizeMax > 0
-    || UI.addrRanges.length > 0;
-  const mode = active ? +panel.querySelector('input[name=fmode]:checked').value : 0;
-  worker.postMessage({
-    type: 'set', key: 'filter',
-    value: {
-      mode,
-      sites: allSites ? null : sites,
-      thrs: allThrs ? null : thrs,
-      tags: allTags ? null : tagBits,
-      sizeMin, sizeMax,
-      addrRanges: UI.addrRanges.map((r) => [r.lo, r.hi]),
-    },
-  });
-  $('btn-filter').classList.toggle('active', active);
-  // the filtered event list follows the filter
-  evState.total = -1;
-  evState.lastSeq = -1;
-  refreshEventsPanel();
-}
-
+$('filter-apply').onclick = () => { void applyFilterSource(); };
 $('filter-clear').onclick = () => {
-  $$('input[type=checkbox]', $('filter-panel')).forEach((b) => { b.checked = true; });
-  $('f-size-min').value = '';
-  $('f-size-max').value = '';
-  UI.addrRanges = [];
-  buildAddrRangesSection();
-  UI.untaggedVisible = true;
-  UI.tags.forEach((t) => { t.visible = true; });
-  buildTagsSection();
-  sendFilter();
+  $('filter-source').value = '';
+  filterEdited();
+  $('filter-source').focus();
 };
+$$('input[name=fmode]').forEach((radio) => {
+  radio.onchange = () => {
+    if (!radio.checked) return;
+    UI.filterMode = +radio.value as 1 | 2;
+    if (UI.filterApplied) worker.postMessage({ type: 'filter-mode', mode: UI.filterMode });
+  };
+});
 
 // ---------------------------------------------------------------------------
 // panel wiring. The windowing itself — dragging, the z-stack, docking into
@@ -1096,7 +1083,6 @@ initAnalysis({
   DEFAULT_ROW_BYTES,
   fmtTime,
   buildLegend,
-  sendFilter,
   sendNames,
   rowBytesValue,
   setRowBytesInput,
@@ -1121,8 +1107,7 @@ initSession({
   sendAllocSizeFormat,
   resetEventsPanel,
   sendXView,
-  buildAddrRangesSection,
-  sendFilter,
+  applyFilterSource,
   setCrop,
   requestAllocInfo,
   createPinnedWindow,
@@ -1268,6 +1253,7 @@ function applySelTag(byFree) {
 }
 
 document.addEventListener('keydown', (e) => {
+  if (isEditableTarget(e.target)) return;
   if (e.key === 'Escape') clearSelection();
 });
 
@@ -1582,7 +1568,7 @@ function buildDetailBody(root, info) {
     <button class="d-focus" title="Scroll/pan to this allocation and flash exactly where it is">⌖ focus</button>
     <button class="d-birth">go to birth</button>
     ${info.deathSeq !== null ? '<button class="d-death">go to death</button>' : ''}
-    <button class="d-range" title="Add this allocation's address range to the Filter panel's address ranges">match range</button>
+    <button class="d-range" title="Insert this allocation's address range into the Filter expression">match range</button>
   </div>`;
   root.innerHTML = html;
   const q = (sel) => root.querySelector(sel);
@@ -1592,10 +1578,9 @@ function buildDetailBody(root, info) {
   const dd = q('.d-death');
   if (dd) dd.onclick = () => worker.postMessage({ type: 'jump', seq: info.deathSeq + 1 });
   q('.d-range').onclick = () => {
-    if (addAddrRange(info.addr, info.end)) {
-      showPanel('filter-panel');
-      $('st-info').textContent = `filtering on ${info.addr} – ${info.end}`;
-    }
+    showPanel('filter-panel');
+    insertFilterText(`span overlaps ${info.addr}..${info.end}`);
+    $('st-info').textContent = `inserted range ${info.addr} – ${info.end}; Apply to activate`;
   };
   q('.d-name').onchange = () => {
     const v = q('.d-name').value.trim();

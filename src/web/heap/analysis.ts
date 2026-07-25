@@ -19,7 +19,7 @@ import { buildSession, applySession } from '../session.ts';
 
 let d = null;
 
-// deps: { ui, post, CAT, DEFAULT_ROW_BYTES, fmtTime, buildLegend, sendFilter,
+// deps: { ui, post, CAT, DEFAULT_ROW_BYTES, fmtTime, buildLegend,
 //         sendNames, rowBytesValue, setRowBytesInput, sendCollapseMin }
 export function initAnalysis(deps) {
   d = deps;
@@ -42,7 +42,7 @@ export function tagIdFor(name) {
   let i = d.ui.tags.findIndex((t) => t.name === name);
   if (i === -1) {
     i = d.ui.tags.length;
-    d.ui.tags.push({ name, color: d.CAT[i % 12], visible: true });
+    d.ui.tags.push({ name, color: d.CAT[i % 12] });
     syncTagDatalist();
     sendTagColors();
     buildTagsSection();
@@ -63,6 +63,7 @@ export function sendTagColors() {
     type: 'tag-colors',
     colors: d.ui.tags.map((t) => parseInt(t.color.slice(1), 16)),
   });
+  d.post({ type: 'tag-labels', labels: d.ui.tags.map((t) => t.name) });
 }
 
 export function buildMarksPanel() {
@@ -92,18 +93,11 @@ export function buildTagsSection() {
     return;
   }
   let html = d.ui.tags.map((t, i) => `<div class="an-row">
-      <input type="checkbox" data-tagvis="${i + 1}" ${t.visible ? 'checked' : ''} title="visible">
       <input type="color" data-tagcolor="${i + 1}" value="${t.color}">
       <input type="text" class="grow" data-tagname="${i + 1}" value="${esc(t.name)}">
       <span class="count">${fmtNum(d.ui.tagCounts[i + 1] || 0)}</span>
       <button class="x" data-tagdel="${i + 1}" title="delete tag (untags its allocations)">×</button>
     </div>`).join('');
-  html += `<div class="an-row">
-      <input type="checkbox" data-tagvis="0" ${d.ui.untaggedVisible ? 'checked' : ''} title="visible">
-      <span class="swatch" style="background:#39414a"></span>
-      <span class="grow">untagged</span>
-      <span class="count">${fmtNum(d.ui.tagCounts[0] || 0)}</span>
-    </div>`;
   setHtml(list, html);
 }
 
@@ -113,15 +107,9 @@ export function deleteTag(id) {
     d.post({ type: 'retag', from: k, to: k - 1 });
   }
   d.ui.tags.splice(id - 1, 1);
-  // with no tags left, buildTagsSection renders only the "none yet" hint —
-  // no checkbox survives to undo an "untagged" filter, which would strand
-  // the user with everything hidden and no obvious way back except the
-  // Filter panel's unrelated "clear" button; auto-restore visibility instead
-  if (d.ui.tags.length === 0) d.ui.untaggedVisible = true;
   syncTagDatalist();
   sendTagColors();
   buildTagsSection();
-  d.sendFilter();
   d.buildLegend();
   markDirty();
 }
@@ -276,7 +264,7 @@ export async function buildMarks() {
     rowBytes: d.rowBytesValue() || d.DEFAULT_ROW_BYTES,
     collapseMin: $('collapse-min').value.trim(),
     colorMode: +$('color-mode').value,
-    tags: d.ui.tags.map((t) => ({ name: t.name, color: t.color, visible: t.visible })),
+    tags: d.ui.tags.map((t) => ({ name: t.name, color: t.color })),
     taggedEvents,
     names: [...d.ui.names.entries()].map(([e, v]) => ({ e, name: v.name, id: v.id, addr: v.addr })),
     allocColors: [...d.ui.allocColors.entries()],
@@ -324,7 +312,6 @@ export function applyMarks(obj, quiet?) {
   d.ui.tags = (obj.tags || []).map((t, i) => ({
     name: t.name || `tag ${i + 1}`,
     color: /^#[0-9a-f]{6}$/i.test(t.color) ? t.color : d.CAT[i % 12],
-    visible: t.visible !== false,
   }));
   sendTagColors();
   for (const [tagStr, events] of Object.entries(obj.taggedEvents || {})) {
@@ -359,7 +346,6 @@ export function applyMarks(obj, quiet?) {
     d.post({ type: 'seek', seq: obj.playhead });
   }
   syncTagDatalist();
-  d.sendFilter();
   buildMarksPanel();
   d.buildLegend();
   updateMarkers();
@@ -402,16 +388,11 @@ function wireAnalysisPanel() {
   });
 
   delegate($('tags-list'), 'change', {
-    tagvis: (inp, id) => {
-      if (+id === 0) d.ui.untaggedVisible = inp.checked;
-      else d.ui.tags[+id - 1].visible = inp.checked;
-      d.sendFilter();
-      markDirty();
-    },
     tagname: (inp, id) => {
       const v = inp.value.trim();
       if (v) d.ui.tags[+id - 1].name = v;
       syncTagDatalist();
+      d.post({ type: 'tag-labels', labels: d.ui.tags.map((t) => t.name) });
       d.buildLegend();
       markDirty();
     },
@@ -426,18 +407,6 @@ function wireAnalysisPanel() {
   });
   delegate($('tags-list'), 'click', {
     tagdel: (_, id) => deleteTag(+id),
-  });
-
-  // all / none visibility toggles for the tags list (untagged included)
-  $$('#tags-allnone a').forEach((a) => {
-    a.onclick = () => {
-      const on = a.dataset.an === 'all';
-      d.ui.untaggedVisible = on;
-      d.ui.tags.forEach((t) => { t.visible = on; });
-      buildTagsSection();
-      d.sendFilter();
-      markDirty();
-    };
   });
 
   delegate($('an-names'), 'input', {

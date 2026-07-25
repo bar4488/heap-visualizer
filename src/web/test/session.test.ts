@@ -37,27 +37,17 @@ function buildFixture() {
   input('ev-filtered', { checked: true });
   input('show-sizes', { checked: false });
   input('show-addrs', { checked: true });
-  input('f-size-min', { value: '1k' });
-  input('f-size-max', { value: '1m' });
+  input('filter-source', { value: 'size >= 1KiB && size <= 1MiB' });
 
-  // filter panel: fmode radios plus site/thread checkboxes
+  // filter panel: presentation mode is separate from the expression
   const fp = doc.getElementById('filter-panel');
-  for (const v of ['0', '1', '2']) {
+  for (const v of ['1', '2']) {
     const r = new El('input');
     r.setAttribute('type', 'radio');
     r.setAttribute('name', 'fmode');
     r.setAttribute('value', v);
     r.checked = v === '2';
     fp.appendChild(r);
-  }
-  const boxes: [string, boolean[]][] = [['data-site', [true, false, true]], ['data-thr', [false, true]]];
-  for (const [attr, states] of boxes) {
-    states.forEach((on, i) => {
-      const b = new El('input');
-      b.setAttribute(attr, String(i));
-      b.checked = on;
-      fp.appendChild(b);
-    });
   }
 
   // panels as windows, with a couple carrying explicit float geometry
@@ -87,8 +77,12 @@ function makeDeps(ui, posted) {
     sendAllocSizeFormat: noop,
     resetEventsPanel: noop,
     sendXView: noop,
-    buildAddrRangesSection: noop,
-    sendFilter: noop,
+    applyFilterSource: (source) => {
+      ui.filterDraft = source;
+      ui.filterApplied = source;
+      doc.getElementById('filter-source').value = source;
+      return Promise.resolve(true);
+    },
     setCrop: (lo, hi) => { ui.crop = { lo, hi }; },
     requestAllocInfo: async () => null,
     createPinnedWindow: () => new El('div'),
@@ -104,7 +98,9 @@ function makeUI() {
     state: { seq: 4321, n: 100000 },
     xview: { zoom: 2.5, pan: 0.25 },
     crop: { lo: 100, hi: 900 },
-    addrRanges: [{ lo: '0x1000', hi: '0x2000' }],
+    filterDraft: 'size >= 1KiB && size <= 1MiB',
+    filterApplied: 'size >= 1KiB && size <= 1MiB',
+    filterMode: 2,
     marksDirty: false,
     drawers: drawersState,
   };
@@ -122,7 +118,7 @@ test('buildSession captures every field the format promises', () => {
   const s = buildSession();
   assert.equal(s.heapVisualizerSession, 1);
   const h = s.heap;
-  assert.equal(h.version, 1);
+  assert.equal(h.version, 2);
   assert.equal(h.rowBytes, '0x1000');
   assert.equal(h.collapseMin, '4');
   assert.equal(h.rowPx, '3');
@@ -135,12 +131,9 @@ test('buildSession captures every field the format promises', () => {
   assert.deepEqual(h.xview, { zoom: 2.5, pan: 0.25 });
   assert.deepEqual(h.crop, { lo: 100, hi: 900 });
   assert.equal(h.playhead, 4321);
-  assert.deepEqual(h.filter.sites, [true, false, true]);
-  assert.deepEqual(h.filter.thrs, [false, true]);
-  assert.equal(h.filter.fmode, '2');
-  assert.equal(h.filter.sizeMin, '1k');
-  assert.equal(h.filter.sizeMax, '1m');
-  assert.deepEqual(h.filter.addrRanges, [{ lo: '0x1000', hi: '0x2000' }]);
+  assert.equal(h.filter.languageVersion, 1);
+  assert.equal(h.filter.source, 'size >= 1KiB && size <= 1MiB');
+  assert.equal(h.filter.mode, 2);
   assert.deepEqual(Object.keys(s.windows).sort(), [...PANEL_IDS].sort());
   assert.equal(s.windows['warnings-panel'].hidden, true);
   assert.deepEqual(s.windows['play-panel'],
@@ -165,14 +158,13 @@ function scramble() {
   doc.getElementById('ev-filtered').checked = false;
   doc.getElementById('show-sizes').checked = true;
   doc.getElementById('show-addrs').checked = false;
-  doc.getElementById('f-size-min').value = '';
-  doc.getElementById('f-size-max').value = '';
-  doc.querySelectorAll('#filter-panel input[data-site]').forEach((b) => { b.checked = false; });
-  doc.querySelectorAll('#filter-panel input[data-thr]').forEach((b) => { b.checked = true; });
-  doc.querySelectorAll('#filter-panel input[name=fmode]').forEach((r) => { r.checked = r.getAttribute('value') === '0'; });
+  doc.getElementById('filter-source').value = '';
+  doc.querySelectorAll('#filter-panel input[name=fmode]').forEach((r) => { r.checked = r.getAttribute('value') === '1'; });
   ui.xview = { zoom: 1, pan: 0 };
   ui.crop = null;
-  ui.addrRanges = [];
+  ui.filterDraft = '';
+  ui.filterApplied = '';
+  ui.filterMode = 1;
   ui.state = { seq: 0, n: 100000 };
   Object.assign(doc.getElementById('play-panel').style,
     { left: '999px', top: '999px', right: '', bottom: '' });
@@ -232,15 +224,13 @@ test('applySession ignores a blob that is not a session', () => {
   assert.deepEqual(buildSession(), before);
 });
 
-test('applySession drops address ranges that are not valid addresses', () => {
+test('applySession ignores a filter with an unknown language version', () => {
   const s = buildSession();
-  s.heap.filter.addrRanges = [
-    { lo: '0x10', hi: '0x20' },
-    { lo: 'nonsense', hi: '0x20' },
-    { lo: '0x10', hi: '' },
-  ];
+  s.heap.filter.languageVersion = 99;
+  s.heap.filter.source = 'size > 0';
+  ui.filterApplied = '';
   applySession(s);
-  assert.deepEqual(ui.addrRanges, [{ lo: '0x10', hi: '0x20' }]);
+  assert.equal(ui.filterApplied, '');
 });
 
 test('applySession restores drawer docking and widths', () => {

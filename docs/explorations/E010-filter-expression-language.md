@@ -320,6 +320,42 @@ One match bit costs about 125 KiB per million creator events. The compiled plan
 and dependency list are cached with the source. A tag/name/custom-field change
 rebuilds matches only when the plan declares that dependency.
 
+### Core integration
+
+The web owns the expression-editing experience; the Rust core owns all filter
+meaning and execution. `heap-visualizer-filter-dsl` remains a syntax-only
+crate. The core depends on it and adds the heap-specific layers:
+
+- type checking and name resolution against the trace store and analysis
+  catalog;
+- lowering to the compact typed plan;
+- execution over the store's typed columns;
+- the creator-event match bitset; and
+- dependency tracking for tags, allocation names, stacks, and custom fields.
+
+The core application state holds one filter runtime containing the applied
+source, compiled plan, match bits, dependencies, and presentation mode.
+Dim/hide is deliberately separate from the plan: changing presentation mode
+does not compile or scan again. An empty applied source means the filter is
+off and does not materialize an identity bitset.
+
+The existing structured `Filter` and its JSON decoder are replaced, not kept
+as a second execution path. Rendering, the Events panel, and range tagging
+must consume the shared match bitset rather than each re-evaluating the
+expression. The filtered Events index may remain lazily materialized, but its
+membership comes only from those bits.
+
+Site and thread catalogs already live in the core. Tag assignments do too, but
+tag labels and allocation names currently live in web/worker state. The worker
+must mirror those analysis symbols into the core whenever they change so
+expressions such as `tag == "suspect"` and `named("request root")` resolve in
+the same place as every other filter operation. The web remains the authoring
+owner; the core copy is execution context, not a second persisted model.
+
+Apply is atomic. The core compiles and scans into temporary state, then swaps
+the new plan and match bits into the active runtime only after both succeed. A
+diagnostic leaves the previous successfully applied runtime untouched.
+
 ### Performance gates
 
 Benchmarks run in release WASM in a Chromium worker after one warm-up, and
@@ -368,15 +404,77 @@ Invalid edits never become “match everything.” The last successfully applied
 filter remains active until valid source is applied or the editor is cleared
 and Apply is pressed.
 
+The web therefore tracks two values:
+
+```text
+draft source     what is currently visible in the editor
+applied source   what the core most recently accepted
+```
+
+Changing the draft never changes allocation visibility. A successful Apply
+makes the two equal. Clearing the editor is also only a draft edit until Apply;
+applying the empty source turns the filter off. Changing dim/hide is immediate
+when a filter is active because it does not change the match set.
+
+The initial editor can be a native, monospace multiline input with Apply,
+Clear, the dim/hide choice, and one compact status/diagnostic line. A
+diagnostic contains a message and UTF-8 byte span; the UI may select or mark
+that range but must not reinterpret it. Apply shows a busy state while the
+worker scans large traces.
+
 Completion is contextual and comes from the compiler's field/type catalog. It
 covers built-ins, custom keys, valid members, observed site/thread/tag values,
 and allocation names. It does not include snippets, fuzzy documentation
 search, or a language server.
 
+The old size inputs, address-range list, site/thread checkboxes, and tag
+visibility checkboxes are removed in the cutover. Tag rename, recolor, and
+delete remain analysis operations and move to the Analysis panel or a
+dedicated Tags panel; they are not a second filtering surface.
+
+Existing actions that create filters insert visible DSL text. In particular,
+an allocation's **match range** action opens the Filter panel and inserts:
+
+```text
+span overlaps 0x1000..0x1800
+```
+
+A field or value picker may likewise insert text at the cursor. These helpers
+do not retain structured state or silently combine another predicate with the
+source.
+
+### Worker protocol
+
+Checking and applying require replies, so the current fire-and-forget
+`set filter` setting is replaced with explicit worker queries:
+
+```text
+filter-check { source, cursor }
+  -> validity, diagnostic, and optional contextual completions
+
+filter-apply { source }
+  -> success with match/creator counts and elapsed time,
+     or one diagnostic
+
+filter-mode { mode }
+  -> fire-and-forget presentation change; no compile or scan
+```
+
+`filter-check` tokenizes, parses, resolves, and type-checks after a short web
+debounce. It never scans allocations or mutates the active runtime.
+`filter-apply` performs the same validation and then the scan in the existing
+worker, away from the main thread. Its reply is sent only after the atomic
+runtime swap or failure. A successful Apply marks the address view and
+filtered Events index dirty.
+
 ## Persistence and compatibility
 
-The session stores the canonical source and a filter-language version in the
-heap-state envelope. Compiled plans and match bits are never persisted.
+The session stores the successfully applied canonical source, dim/hide mode,
+and filter-language version in the heap-state envelope. An unapplied draft is
+not persisted: restore must reproduce an active filter deterministically, not
+recreate an ambiguous edited state. Compiled plans and match bits are never
+persisted; restore compiles and applies the source against the loaded trace and
+current analysis catalog.
 
 The first implementation bumps the heap session version. Old structured
 checkbox filter state is ignored with the rest of an unsupported old heap
@@ -406,6 +504,23 @@ There is no recovery during Apply: one error means no new plan and no scan.
 Recovery may be used internally to offer completion after an incomplete
 expression, but recovered trees are never executable.
 
+## Semantics to pin before implementation
+
+Two interactions need an explicit decision and tests before the public
+cutover:
+
+1. An `R` event is both the creator of a new allocation and the death event of
+   the old allocation. The likely Events-panel rule is that its row qualifies
+   when either allocation matches, while each rendered allocation still reads
+   only its own creator bit. This must be reconciled with NAV-005 rather than
+   inherited accidentally from the current event mapping.
+2. A tag rename, allocation rename, or deletion can make an applied expression
+   fail resolution. The core must never continue silently with stale resolved
+   ids. The likely rule is to report dependency invalidation and disable the
+   stale match set until the source is applied successfully again, but this
+   adds an editor state beyond the five listed above and must be chosen
+   deliberately.
+
 ## Remaining work before a decision
 
 The language shape no longer needs an implementation comparison.
@@ -427,3 +542,21 @@ parser limits. The remaining useful evidence is:
 No editor or filter-panel implementation should begin until the core prototype
 meets the numeric and interned-id gates. The UI must not hide an evaluator that
 is too slow.
+
+After the prototype meets those gates, implementation should proceed as one
+public cutover built from internal slices:
+
+1. update ANL-003, which still specifies the structured checkbox filter;
+2. add core type checking and the numeric/interned-column evaluator behind
+   native tests and benchmarks;
+3. add the creator match bitset and move rendering, filtered Events, and range
+   tagging to it internally;
+4. add the analysis-symbol catalog, dependency invalidation, stack operations,
+   and lazy custom-field materialization;
+5. add the check/apply/mode worker protocol; and
+6. replace the Filter panel and bump heap-session persistence in the same
+   cutover.
+
+The incomplete internal slices do not expose or persist a partial version of
+the language. There is no period with two user-visible evaluators and no
+checkbox-to-expression compatibility adapter.

@@ -32,6 +32,13 @@ export type EventRow = { seq: number; [field: string]: any };
 /** Engine JSON: trace metadata from the load pass. */
 export type TraceMeta = { [field: string]: any };
 
+export type FilterDiagnostic = {
+  message: string;
+  /** UTF-8 byte offsets into the submitted source. */
+  start: number;
+  end: number;
+};
+
 // --- settings ---------------------------------------------------------------
 // One `set` message per setting, keyed by name. The value type per key is the
 // contract; the worker's SETTINGS table is the applier for the same key, and
@@ -51,7 +58,6 @@ export type SettingValue = {
   xview: { zoom: number; pan: number };
   colorMode: number;
   selected: number | null;
-  filter: unknown;
   crop: Range | null;
 };
 
@@ -77,6 +83,8 @@ export type Command =
   | { type: 'jump'; seq?: number; t?: number; select?: boolean }
   | { type: 'scroll'; y: number }
   | { type: 'names'; names: [number, string][] }
+  | { type: 'tag-labels'; labels: string[] }
+  | { type: 'filter-mode'; mode: 0 | 1 | 2 }
   | { type: 'addr-marks'; marks: Range[] }
   | { type: 'goto-addr'; lo: number; hi: number }
   | { type: 'tlview'; kind: Domain; lo: number; hi: number }
@@ -103,7 +111,9 @@ export type Query =
   | { type: 'alloc-info'; reqId: number; e: number }
   | { type: 'events'; reqId: number; from: number; count: number; filtered?: boolean }
   | { type: 'ev-pos'; reqId: number; seq: number }
-  | { type: 'tlhover'; reqId: number; kind: Domain; x: number };
+  | { type: 'tlhover'; reqId: number; kind: Domain; x: number }
+  | { type: 'filter-check'; reqId: number; source: string; cursor: number }
+  | { type: 'filter-apply'; reqId: number; source: string };
 
 export type ToWorker = Command | Query;
 
@@ -119,6 +129,25 @@ export type ReplyTo = {
   events: { type: 'events'; reqId: number; from: number; events: EventRow[]; total: number };
   'ev-pos': { type: 'ev-pos'; reqId: number; pos: number; total: number };
   tlhover: { type: 'tlhover-result'; reqId: number; kind: Domain; info: unknown };
+  'filter-check': {
+    type: 'filter-check-result';
+    reqId: number;
+    valid: boolean;
+    /** False when this worker's core has no checker implementation. */
+    available?: boolean;
+    diagnostic?: FilterDiagnostic;
+    completions?: string[];
+  };
+  'filter-apply': {
+    type: 'filter-apply-result';
+    reqId: number;
+    success: boolean;
+    source?: string;
+    matches?: number;
+    creators?: number;
+    elapsedMs?: number;
+    diagnostic?: FilterDiagnostic;
+  };
 };
 
 export type QueryType = keyof ReplyTo;

@@ -81,11 +81,12 @@ exactly one of those.
   display mode, freed-nested ghosts ([04-address-map](04-address-map.md)).
 - **Appearance**: color mode, size labels, address labels, size format
   ([04-address-map](04-address-map.md)).
-- **Filter**: dim/hide mode, size range, address ranges, per-site and
-  per-thread checkboxes (with all/none links), tag visibility list with
-  recolor/rename/delete ([07-analysis](07-analysis.md)).
-- **Marks**: time marks, address marks, named allocations — each row
-  renameable inline, with jump/center/delete actions
+- **Filter**: one allocation-expression editor with Apply, Clear, status /
+  diagnostics, and dim/hide presentation mode
+  ([ANL-003](07-analysis.md#anl-003-filter)).
+- **Analysis**: tag management, time marks, address marks, named allocations —
+  each row renameable inline, with the applicable recolor/jump/center/delete
+  actions
   ([07-analysis](07-analysis.md)).
 - **Warnings**: the flagged-input list; click jumps to the event
   ([MODEL-005](03-core-model.md#model-005-warnings)).

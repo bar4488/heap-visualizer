@@ -309,6 +309,21 @@ button.d-pin.pinned {
 .panel-body { overflow-y: auto; padding: 8px 10px; font-size: 12px; }
 
 .filter-row { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+.filter-row .grow { flex: 1; }
+.filter-editor textarea {
+  box-sizing: border-box; width: 100%; min-height: 8em; resize: vertical;
+  padding: 7px 8px; background: var(--bg); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 4px;
+  font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.filter-editor textarea:focus { border-color: var(--accent); outline: none; }
+.filter-status {
+  min-height: 1.4em; margin-top: 5px; color: var(--fg-dim);
+  font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.filter-status.invalid { color: var(--red); }
+.filter-status.applied { color: var(--green); }
+.filter-editor.applying { opacity: 0.72; }
 .check-group { border-top: 1px solid var(--border); padding-top: 6px; margin-top: 6px; }
 .check-group .group-title { color: var(--fg-dim); font-size: 11px; margin-bottom: 3px; }
 .check-group label { display: flex; gap: 6px; padding: 1px 0; cursor: pointer; color: var(--fg); }

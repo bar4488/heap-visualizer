@@ -41,7 +41,7 @@ initRpc({
 
 function seedDom() {
   for (const id of ['row-bytes', 'row-px', 'alloc-size-format', 'show-all', 'ev-filtered',
-    'show-sizes', 'show-addrs', 'f-size-min', 'f-size-max']) {
+    'show-sizes', 'show-addrs', 'filter-source']) {
     doc._put(id, new El('input'));
   }
   doc._put('collapse-min', new El('input')).value = '4';
@@ -69,11 +69,12 @@ const ui = {
   tlS: { lo: 0, hi: 1000 },
   xview: { zoom: 1, pan: 0 },
   crop: null,
-  addrRanges: [],
+  filterDraft: '',
+  filterApplied: '',
+  filterMode: 1,
   marksDirty: false,
   tags: [],
   tagCounts: {},
-  untaggedVisible: true,
   names: new Map(),
   allocColors: new Map(),
   bookmarks: [],
@@ -95,8 +96,7 @@ initSession({
   sendAllocSizeFormat: noop,
   resetEventsPanel: noop,
   sendXView: noop,
-  buildAddrRangesSection: noop,
-  sendFilter: noop,
+  applyFilterSource: async () => true,
   setCrop: noop,
   requestAllocInfo: analysis.requestAllocInfo,
   createPinnedWindow: () => new El('div'),
@@ -111,7 +111,6 @@ analysis.initAnalysis({
   DEFAULT_ROW_BYTES: 0x1000,
   fmtTime: (t) => `${t} ns`,
   buildLegend: noop,
-  sendFilter: noop,
   sendNames: noop,
   rowBytesValue: () => 0x1000,
   setRowBytesInput: noop,
@@ -120,8 +119,8 @@ analysis.initAnalysis({
 
 function seedAnalysisState() {
   ui.tags = [
-    { name: 'leaky', color: '#ff7b72', visible: true },
-    { name: 'pool', color: '#3fb950', visible: false },
+    { name: 'leaky', color: '#ff7b72' },
+    { name: 'pool', color: '#3fb950' },
   ];
   ui.names = new Map([
     [10, { name: 'session buffer', id: 3, addr: '0x7f0010' }],
@@ -149,8 +148,8 @@ test('buildMarks captures the analysis layer and folds in a session', async () =
   assert.equal(m.trace.n, 1000);
   assert.equal(m.playhead, 250);
   assert.deepEqual(m.tags, [
-    { name: 'leaky', color: '#ff7b72', visible: true },
-    { name: 'pool', color: '#3fb950', visible: false },
+    { name: 'leaky', color: '#ff7b72' },
+    { name: 'pool', color: '#3fb950' },
   ]);
   assert.deepEqual(m.taggedEvents, tagsDump);
   assert.deepEqual(m.names, [
@@ -204,8 +203,8 @@ test('applyMarks falls back to a palette color for a malformed tag color', () =>
   analysis.applyMarks({
     heapVisualizerAnalysis: 1,
     tags: [
-      { name: 'ok', color: '#123abc', visible: true },
-      { name: 'bad', color: 'rebeccapurple', visible: true },
+      { name: 'ok', color: '#123abc' },
+      { name: 'bad', color: 'rebeccapurple' },
       { color: '#ffffff' },
     ],
   }, true);
@@ -213,8 +212,6 @@ test('applyMarks falls back to a palette color for a malformed tag color', () =>
   assert.equal(ui.tags[1].color, CAT[1]);
   // a tag with no name gets a positional default rather than undefined
   assert.equal(ui.tags[2].name, 'tag 3');
-  // visible defaults to true when the field is absent
-  assert.equal(ui.tags[2].visible, true);
 });
 
 test('applyMarks drops address marks that are not hex addresses, and lowercases the rest', () => {
@@ -249,7 +246,7 @@ test('applyMarks warns but still applies when the trace event count differs', ()
   analysis.applyMarks({
     heapVisualizerAnalysis: 1,
     trace: { n: 999999 },
-    tags: [{ name: 'x', color: '#111111', visible: true }],
+    tags: [{ name: 'x', color: '#111111' }],
   }, true);
   assert.match(doc.getElementById('st-info').textContent, /applying anyway/);
   assert.equal(ui.tags.length, 1);
@@ -268,7 +265,7 @@ test('applyMarks only forwards tag-events for tags that exist', () => {
   posted.length = 0;
   analysis.applyMarks({
     heapVisualizerAnalysis: 1,
-    tags: [{ name: 'one', color: '#111111', visible: true }],
+    tags: [{ name: 'one', color: '#111111' }],
     taggedEvents: { 1: [5, 6], 2: [7], 0: [8], 1.5: 'nope' },
   }, true);
   const sent = posted.filter((m) => m.type === 'tag-events');

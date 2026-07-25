@@ -17,13 +17,12 @@
 
 import { $, $$, $1 } from './shell/dom.ts';
 import { applyDrawersState, dockPanelAt } from './shell/drawers.ts';
-import { normAddr } from './heap/addr.ts';
 
 let d = null;
 
 // deps: { ui, post, panels, allocSizeFormat, rowBytesValue, sendCollapseMin,
 //         buildLegend, sendAllocSizeFormat, resetEventsPanel, sendXView,
-//         buildAddrRangesSection, sendFilter, setCrop, requestAllocInfo,
+//         applyFilterSource, setCrop, requestAllocInfo,
 //         createPinnedWindow, buildMarks, applyMarks }
 export function initSession(deps) {
   d = deps;
@@ -37,7 +36,7 @@ export function sessionKey() {
 
 // the shape version of the `heap` section, bumped when its fields change
 // shape in a way a reader must know about
-export const HEAP_SESSION_VERSION = 1;
+export const HEAP_SESSION_VERSION = 2;
 
 export function buildSession() {
   const windows = {};
@@ -54,7 +53,6 @@ export function buildSession() {
 }
 
 function buildHeapSession() {
-  const fmode = $1('input[name=fmode]:checked');
   return {
     version: HEAP_SESSION_VERSION,
     rowBytes: $('row-bytes').value,
@@ -69,14 +67,9 @@ function buildHeapSession() {
     xview: d.ui.xview,
     crop: d.ui.crop,
     filter: {
-      fmode: fmode ? fmode.value : '1',
-      sizeMin: $('f-size-min').value,
-      sizeMax: $('f-size-max').value,
-      // checkbox states by index — meaningful only against the same trace's
-      // site/thread list, which is exactly what the file-name-scoped key gives us
-      sites: $$('#filter-panel input[data-site]').map((b) => b.checked),
-      thrs: $$('#filter-panel input[data-thr]').map((b) => b.checked),
-      addrRanges: d.ui.addrRanges,
+      languageVersion: 1,
+      source: d.ui.filterApplied,
+      mode: d.ui.filterMode,
     },
     playhead: d.ui.state ? d.ui.state.seq : 0,
     // pinned allocation windows: re-fetched by creator event index on
@@ -168,17 +161,13 @@ function applyHeapSettings(obj) {
   if (obj.xview) { d.ui.xview = obj.xview; d.sendXView(); }
   if (obj.filter) {
     const f = obj.filter;
-    const fr = $1(`input[name=fmode][value="${f.fmode}"]`);
+    if (f.languageVersion !== 1 || typeof f.source !== 'string') return;
+    d.ui.filterMode = f.mode === 2 ? 2 : 1;
+    const fr = $1(`input[name=fmode][value="${d.ui.filterMode}"]`);
     if (fr) fr.checked = true;
-    if (f.sizeMin !== undefined) $('f-size-min').value = f.sizeMin;
-    if (f.sizeMax !== undefined) $('f-size-max').value = f.sizeMax;
-    const siteBoxes = $$('#filter-panel input[data-site]');
-    (f.sites || []).forEach((checked, i) => { if (siteBoxes[i]) siteBoxes[i].checked = checked; });
-    const thrBoxes = $$('#filter-panel input[data-thr]');
-    (f.thrs || []).forEach((checked, i) => { if (thrBoxes[i]) thrBoxes[i].checked = checked; });
-    d.ui.addrRanges = (f.addrRanges || []).filter((r) => normAddr(r.lo) && normAddr(r.hi));
-    d.buildAddrRangesSection();
-    d.sendFilter();
+    d.ui.filterDraft = f.source;
+    $('filter-source').value = f.source;
+    void d.applyFilterSource(f.source);
   }
 }
 

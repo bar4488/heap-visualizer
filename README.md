@@ -65,8 +65,8 @@ Drop any `.heapl` file onto the page to load it.
   horizontal flag line; click it (or its Analysis-panel entry) to center that
   address at any playhead. `g` focuses the jump box, which accepts a seq,
   `t:` time, or `0x…` address.
-- The **Analysis** panel lists bookmarks, tags (visibility filter, recolor,
-  rename, delete) and named allocations, and **saves/loads** the whole thing
+- The **Analysis** panel lists bookmarks, tags (recolor, rename, delete) and
+  named allocations, and **saves/loads** the whole thing
   as a `.heapa.json` file — dropping one onto the page restores the analysis.
 - The **collapse ≥** box controls empty-row collapsing: a plain number is a
   run length in rows (e.g. `5`), a byte size (`64k`, `0x10000`) is empty

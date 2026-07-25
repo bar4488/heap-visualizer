@@ -5,3 +5,10 @@ version = 4
 [[package]]
 name = "heap-visualizer-core"
 version = "0.1.0"
+dependencies = [
+ "heap-visualizer-filter-dsl",
+]
+
+[[package]]
+name = "heap-visualizer-filter-dsl"
+version = "0.1.0"

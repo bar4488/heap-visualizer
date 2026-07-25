@@ -68,6 +68,9 @@ const GHOST_MARK: u8 = 0x80;
 #[derive(Default)]
 pub struct Filter {
     pub mode: u8,
+    /// Match bits for the applied E010 expression, indexed by creator event.
+    /// `None` means the expression is empty/off.
+    pub matches: Option<Vec<u64>>,
     /// bitmask over site indices; meaningful only when `sites_set` (an empty
     /// *set* bitmask, as opposed to an absent one, means "no site selected"
     /// — i.e. hide everything with a site).
@@ -95,6 +98,9 @@ impl Filter {
     pub fn pass(&self, s: &Store, e: u32) -> bool {
         if self.mode == FILTER_OFF {
             return true;
+        }
+        if let Some(bits) = &self.matches {
+            return Self::bit(bits, e);
         }
         let ei = e as usize;
         if self.sites_set {

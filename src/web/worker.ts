@@ -509,13 +509,6 @@ const SETTINGS: Record<SettingKey, { preLoad?: boolean; apply(m: any): void }> =
       S.dirty.addr = true;
     },
   },
-  filter: {
-    apply(m) {
-      const len = writeBuf(te.encode(JSON.stringify(m.value)));
-      E.hp_set_filter(len);
-      S.dirty.addr = true;
-    },
-  },
   crop: {
     apply(m) {
       E.hp_set_crop(m.value ? Math.round(m.value.lo) : -1, m.value ? Math.round(m.value.hi) : -1);
@@ -657,6 +650,21 @@ onmessage = async (ev: MessageEvent<ToWorker>) => {
     }
     case 'names':
       S.names = new Map(m.names);
+      if (S.loaded && typeof E.hp_set_names === 'function') {
+        const len = writeBuf(te.encode(JSON.stringify(m.names)));
+        E.hp_set_names(len);
+      }
+      S.dirty.addr = true;
+      break;
+    case 'tag-labels':
+      if (S.loaded && typeof E.hp_set_tag_labels === 'function') {
+        const len = writeBuf(te.encode(JSON.stringify(m.labels)));
+        E.hp_set_tag_labels(len);
+      }
+      break;
+    case 'filter-mode':
+      if (!S.loaded) break;
+      if (typeof E.hp_filter_set_mode === 'function') E.hp_filter_set_mode(m.mode);
       S.dirty.addr = true;
       break;
     case 'addr-marks': {
@@ -713,6 +721,58 @@ onmessage = async (ev: MessageEvent<ToWorker>) => {
       const s = SETTINGS[m.key];
       if (!s || (!S.loaded && !s.preLoad)) break;
       s.apply(m);
+      break;
+    }
+    case 'filter-check': {
+      if (!S.loaded) {
+        postMessage({
+          type: 'filter-check-result', reqId: m.reqId, valid: false,
+          diagnostic: { message: 'load a trace before checking a filter', start: 0, end: 0 },
+        });
+        break;
+      }
+      if (typeof E.hp_filter_check !== 'function') {
+        postMessage({
+          type: 'filter-check-result', reqId: m.reqId, valid: false, available: false,
+          diagnostic: {
+            message: 'this core build does not include the E010 filter evaluator',
+            start: 0, end: new TextEncoder().encode(m.source).length,
+          },
+        });
+        break;
+      }
+      const len = writeBuf(te.encode(m.source));
+      E.hp_filter_check(len);
+      postMessage({ type: 'filter-check-result', reqId: m.reqId, ...retJson() });
+      break;
+    }
+    case 'filter-apply': {
+      if (!S.loaded) {
+        postMessage({
+          type: 'filter-apply-result', reqId: m.reqId, success: false,
+          diagnostic: { message: 'load a trace before applying a filter', start: 0, end: 0 },
+        });
+        break;
+      }
+      if (typeof E.hp_filter_apply !== 'function') {
+        postMessage({
+          type: 'filter-apply-result', reqId: m.reqId, success: false,
+          diagnostic: {
+            message: 'this core build does not include the E010 filter evaluator',
+            start: 0, end: new TextEncoder().encode(m.source).length,
+          },
+        });
+        break;
+      }
+      const len = writeBuf(te.encode(m.source));
+      const started = performance.now();
+      E.hp_filter_apply(len);
+      const result = retJson();
+      if (result.success) {
+        allDirty();
+        result.elapsedMs ??= performance.now() - started;
+      }
+      postMessage({ type: 'filter-apply-result', reqId: m.reqId, ...result });
       break;
     }
     // domain conversion: given a [lo,hi] range in the `kind` domain (0 = time,

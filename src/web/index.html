@@ -161,29 +161,18 @@
 
 <div id="filter-panel" class="panel" hidden>
   <div class="panel-head"><span class="ph-t"></span> <button class="panel-close" data-close="filter-panel">×</button></div>
-  <div class="panel-body">
+  <div class="panel-body filter-editor">
     <div class="filter-row">
       <label><input type="radio" name="fmode" value="1" checked> dim others</label>
       <label><input type="radio" name="fmode" value="2"> hide others</label>
-      <button id="filter-clear">clear</button>
+      <span class="grow"></span>
+      <button id="filter-clear" type="button">Clear</button>
+      <button id="filter-apply" type="button">Apply</button>
     </div>
-    <div class="filter-row"><label>size <input id="f-size-min" placeholder="min (e.g. 4k)" size="9">–<input id="f-size-max" placeholder="max" size="9"></label></div>
-    <div class="an-section">
-      <div class="group-title">address ranges · an allocation passes if it touches any range
-        <span class="allnone"><a id="f-addr-clear">clear</a></span></div>
-      <div class="filter-row">
-        <input id="f-addr-lo" placeholder="0x… from" size="12">–<input id="f-addr-hi" placeholder="0x… to" size="12">
-        <button id="f-addr-add" title="Add this address range to the filter">＋</button>
-      </div>
-      <div id="f-addrs" class="check-group"></div>
-    </div>
-    <div id="f-sites" class="check-group"></div>
-    <div id="f-thrs" class="check-group"></div>
-    <div class="an-section">
-      <div class="group-title">tags · check = visible (uses the dim/hide mode above) · recolor, rename, delete
-        <span class="allnone" id="tags-allnone"><a data-an="all">all</a> · <a data-an="none">none</a></span></div>
-      <div id="tags-list" class="check-group"></div>
-    </div>
+    <textarea id="filter-source" rows="6" spellcheck="false"
+      placeholder='size >= 4KiB && site.starts_with("parser_")'
+      aria-describedby="filter-status"></textarea>
+    <div id="filter-status" class="filter-status" role="status">Empty</div>
   </div>
 </div>
 
@@ -195,6 +184,10 @@
     </span>
   </div>
   <div class="panel-body">
+    <div class="an-section">
+      <div class="group-title">tags · recolor, rename, delete</div>
+      <div id="tags-list" class="check-group"></div>
+    </div>
     <div class="an-section">
       <div class="group-title">time marks · click = jump in time (address view stays) · ⌖ = also center the place</div>
       <div id="an-bookmarks" class="check-group"></div>
