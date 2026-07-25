@@ -99,16 +99,17 @@ survivable, a stale `dist/` is the new way to be confused.
 
 ## Next
 
-**Nothing is in flight.** [T008](tickets/T008-convert-web-to-typescript.md)
-closed on 2026-07-25 in one session, having braced for several: `main.js` was
-already type-checked in place, so the rename produced 20 errors and no
-findings, and the three coordinated views needed nothing. The web layer is
-TypeScript end to end.
+**Nothing is in flight.** [T010](tickets/T010-default-docked-layout.md) closed
+on 2026-07-25. A trace with no saved session now starts with Events open in the
+left drawer and Layout, Appearance, Filter and Marks open in the right; Play,
+Warnings and Allocation remain floating and closed. Each populated drawer can
+collapse to a narrow rail without closing or undocking its windows, and that
+state persists with the rest of the per-trace layout. A saved layout replaces
+the default wholly.
 
-It also cost D001 an amendment — see Verification above. The ticket's Result
-has the evidence that closed it, which is the shape worth copying: a `dist/`
-built from the commit before the change, diffed against a `dist/` built after,
-with the entire remaining difference enumerated.
+The data shape, persistence, override, build and served output are verified.
+Per D001, the rendered rail geometry and pointer interaction were not driven
+in a browser; those remain the part a person's ordinary use can inspect.
 
 [T010](tickets/T010-standalone-filter-dsl-parser.md) established the first
 filter-language slice as a separate crate. Type checking, the first evaluator,

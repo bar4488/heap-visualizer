@@ -11,7 +11,9 @@ import { installDom, El } from './dom-stub.ts';
 const doc = installDom();
 
 const { initSession, buildSession, applySession } = await import('../session.ts');
-const { drawersState } = await import('../shell/drawers.ts');
+const {
+  drawersState, dockPanel, dockPanelAt, refreshDrawerDividers, setDrawerCollapsed,
+} = await import('../shell/drawers.ts');
 const { heapPanels } = await import('../heap/panels.ts');
 
 // the panel list comes from the domain's table, not a copy of it
@@ -235,7 +237,11 @@ test('applySession ignores a filter with an unknown language version', () => {
 
 test('applySession restores drawer docking and widths', () => {
   const s = buildSession();
-  s.drawers = { left: ['filter-panel'], right: ['events-panel'], widthLeft: 420, widthRight: 260 };
+  s.drawers = {
+    left: ['filter-panel'], right: ['events-panel'],
+    widthLeft: 420, widthRight: 260,
+    collapsedLeft: true, collapsedRight: false,
+  };
   applySession(s);
 
   assert.equal(doc.getElementById('drawer-left').style.width, '420px');
@@ -244,12 +250,54 @@ test('applySession restores drawer docking and widths', () => {
   assert.deepEqual(drawersState.right, ['events-panel']);
   assert.equal(doc.getElementById('filter-panel').dataset.dockSide, 'left');
   assert.equal(doc.getElementById('events-panel').dataset.dockSide, 'right');
+  assert.equal(drawersState.collapsedLeft, true);
+  assert.equal(drawersState.collapsedRight, false);
+  assert.equal(doc.getElementById('drawer-left').classList.contains('collapsed'), true);
 
   // and the docking survives a build/apply cycle
   const again = buildSession();
   assert.deepEqual(again.drawers.left, ['filter-panel']);
   assert.deepEqual(again.drawers.right, ['events-panel']);
   assert.equal(again.drawers.widthLeft, 420);
+  assert.equal(again.drawers.collapsedLeft, true);
+});
+
+test('a saved drawer layout wholly overrides panels docked by default', () => {
+  for (const p of PANELS.filter((p) => p.dock)) {
+    dockPanel(doc.getElementById(p.id), p.dock);
+  }
+  assert.equal(doc.getElementById('layout-panel').dataset.dockSide, 'right');
+
+  const s = buildSession();
+  s.drawers = {
+    left: ['events-panel'], right: [],
+    widthLeft: 300, widthRight: 300,
+    collapsedLeft: false, collapsedRight: false,
+  };
+  applySession(s);
+
+  assert.equal(doc.getElementById('layout-panel').dataset.dockSide, undefined);
+  assert.equal(doc.getElementById('appearance-panel').dataset.dockSide, undefined);
+  assert.equal(doc.getElementById('filter-panel').dataset.dockSide, undefined);
+  assert.equal(doc.getElementById('analysis-panel').dataset.dockSide, undefined);
+  assert.deepEqual(drawersState.left, ['events-panel']);
+  assert.deepEqual(drawersState.right, []);
+});
+
+test('session docking preserves a collapsed drawer, while a user drop expands it', () => {
+  const win = new El('div');
+  win.classList.add('panel');
+  doc.body.appendChild(win);
+
+  setDrawerCollapsed('left', true);
+  dockPanelAt(win, 'left', null, false);
+  assert.equal(drawersState.collapsedLeft, true);
+
+  dockPanelAt(win, 'left', null);
+  assert.equal(drawersState.collapsedLeft, false);
+
+  win.remove();
+  refreshDrawerDividers('left');
 });
 
 test('applySession seeks to the saved playhead', () => {

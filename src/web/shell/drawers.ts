@@ -1,7 +1,7 @@
-// Shell: dockable left/right drawers. Panels float by default (panels.ts);
-// this adds an alternate home where any panel can stack, get hidden as a
-// group, and be resized — without changing anything about how floating
-// panels behave.
+// Shell: dockable left/right drawers. Panels enter this layer as ordinary
+// floating elements; the domain may dock any of them here, where they can
+// stack, get hidden as a group, and be resized — without changing anything
+// about how floating panels behave.
 //
 // No domain knowledge: a drawer holds panel elements by id and never asks
 // what is inside one.
@@ -9,12 +9,17 @@
 import { $, $$ } from './dom.ts';
 import { raisePanel } from './panels.ts';
 
-// no manual show/hide control: a drawer is visible exactly when it has a
-// docked window in it, empty otherwise — see refreshDrawerDividers
+// A drawer exists exactly when it has a docked window in it, empty otherwise
+// (see refreshDrawerDividers). Separately from that, one that does have content
+// can be *collapsed* to a rail from its bar — which hides its windows without
+// closing or undocking them, so the way to get the screen back is not to
+// dismantle the layout.
 //
 // Mutated in place, never replaced, so a holder of the reference (main.ts
 // keeps it as UI.drawers for the session snapshot) always sees current state.
-export const drawersState = { left: [], right: [], widthLeft: 300, widthRight: 300 };
+export const drawersState = {
+  left: [], right: [], widthLeft: 300, widthRight: 300, collapsedLeft: false, collapsedRight: false,
+};
 
 const panelFloatRect = new Map(); // panel element -> its floating {left,top,right,bottom}, for undock
 
@@ -121,12 +126,53 @@ const dndIndicator = document.createElement('div');
 dndIndicator.id = 'dnd-indicator';
 dndIndicator.hidden = true;
 
-// appends the drag indicator and wires both drawers' width handles; called
-// from main.ts at the point in startup where this used to run inline
+// appends the drag indicator, gives each drawer its bar, and wires both
+// drawers' width handles; called from main.ts at the point in startup where
+// this used to run inline
 export function initDrawers() {
   document.body.appendChild(dndIndicator);
+  addDrawerBar('left');
+  addDrawerBar('right');
   wireDrawerWidthResize('left');
   wireDrawerWidthResize('right');
+}
+
+const collapseButtons = new Map(); // side -> its collapse toggle
+
+// The bar sits above the docked windows and holds the collapse toggle. It is
+// created here rather than written into index.html so the whole drawer
+// mechanism stays in one file, the same way the width handle is.
+function addDrawerBar(side) {
+  const dr = drawerEl(side);
+  const bar = document.createElement('div');
+  bar.className = 'drawer-bar';
+  const btn = document.createElement('button');
+  btn.className = 'drawer-collapse';
+  btn.onclick = () => setDrawerCollapsed(side, !isDrawerCollapsed(side));
+  bar.appendChild(btn);
+  // first child: refreshDrawerDividers only ever inserts dividers before
+  // panels, and panels are appended after, so it stays at the top
+  dr.insertBefore(bar, dr.children[0] || null);
+  collapseButtons.set(side, btn);
+  setDrawerCollapsed(side, isDrawerCollapsed(side));
+}
+
+const collapsedField = (side) => (side === 'left' ? 'collapsedLeft' : 'collapsedRight');
+
+export function isDrawerCollapsed(side) { return !!drawersState[collapsedField(side)]; }
+
+// Collapsing is a pure display change: nothing is closed, undocked or
+// reordered, and the drawer keeps its width so expanding puts it back exactly
+// as it was. The chevron always points the way the drawer will move.
+export function setDrawerCollapsed(side, on) {
+  drawersState[collapsedField(side)] = !!on;
+  drawerEl(side).classList.toggle('collapsed', !!on);
+  const btn = collapseButtons.get(side);
+  if (!btn) return;
+  const away = side === 'left' ? '›' : '‹';
+  const toward = side === 'left' ? '‹' : '›';
+  btn.textContent = on ? away : toward;
+  btn.title = on ? 'Show this drawer' : 'Collapse this drawer, keeping its windows docked';
 }
 
 // shows an insertion-line preview at the position `p` would land in `side`'s
@@ -167,15 +213,22 @@ export function clearDropPreview() {
   $$('.drawer.drop-target').forEach((d) => d.classList.remove('drop-target'));
 }
 
-export function dockPanelAt(p, side, beforeEl) {
+export function dockPanelAt(p, side, beforeEl, expand = true) {
   const oldSide = p.dataset.dockSide;
   if (!oldSide) {
     panelFloatRect.set(p, { left: p.style.left, top: p.style.top, right: p.style.right, bottom: p.style.bottom });
   }
   p.classList.add('docked');
   p.dataset.dockSide = side;
-  p.hidden = false;
+  // open/closed is the window's own state and docking does not change it: a
+  // closed docked window keeps its slot (it is how the toolbar returns it to
+  // its place), and the default layout docks windows it means to leave closed
   drawerEl(side).insertBefore(p, beforeEl || null);
+  // A user drop into a collapsed drawer means "put it there", which is only
+  // observable if the drawer opens up again. Session restoration passes
+  // expand=false: recreating a saved pinned window must not undo the saved
+  // collapsed state.
+  if (expand && !p.hidden) setDrawerCollapsed(side, false);
   // id-keyed bookkeeping is only for session persistence of the panels that
   // have a stable id — windows created dynamically at runtime have none, and
   // dock/reorder/undock fine without being tracked here
@@ -223,6 +276,16 @@ export function undockPanel(p) {
 // re-dock panels and restore drawer width/visibility from a saved session
 export function applyDrawersState(d) {
   if (!d) return;
+  // A saved layout replaces the current one rather than adding to it: a panel
+  // docked right now and absent from the save — which is what a session
+  // written before the default layout docked anything looks like — has to end
+  // up floating, or the default would show through a restore.
+  const wanted = new Set([...(d.left || []), ...(d.right || [])]);
+  for (const side of ['left', 'right']) {
+    for (const p of [...drawerEl(side).children]) {
+      if (p.classList.contains('panel') && p.id && !wanted.has(p.id)) undockPanel(p);
+    }
+  }
   // in-place reset: same fields the old `UI.drawers = {…}` assigned, but the
   // object identity is stable (see drawersState)
   drawersState.left = [];
@@ -235,6 +298,9 @@ export function applyDrawersState(d) {
   // (via refreshDrawerDividers) as soon as it has content
   (d.left || []).forEach((id) => { if ($(id)) dockPanel($(id), 'left'); });
   (d.right || []).forEach((id) => { if ($(id)) dockPanel($(id), 'right'); });
+  // after the docking, which expands a drawer it drops a visible window into
+  setDrawerCollapsed('left', d.collapsedLeft);
+  setDrawerCollapsed('right', d.collapsedRight);
 }
 
 // the shell's own panel-window factory, bound to this drawer implementation

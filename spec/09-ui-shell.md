@@ -18,10 +18,13 @@ everything else is a **window** the user summons, places, and dismisses.
 ## SHELL-002: Panels are windows
 
 Every panel (Play, Layout, Appearance, Filter, Marks, Warnings, Events,
-Allocation, and pinned allocation windows) is a floating window: dragged by its header,
-closable, and z-stacked with most-recently-touched on top. Toolbar buttons
-toggle visibility; position persists per trace via the session
-([ANL-007](07-analysis.md#anl-007-persistence--heapa-files-and-autosave)).
+Allocation, and pinned allocation windows) is a window: it is either floating —
+dragged by its header, z-stacked with most-recently-touched on top — or docked
+in a drawer ([SHELL-004](#shell-004-docking-drawers)). Every window is closable.
+Toolbar buttons toggle visibility; which home a window has, and where it sits in
+it, persists per trace via the session
+([ANL-007](07-analysis.md#anl-007-persistence--heapa-files-and-autosave)), and
+starts from the default layout ([SHELL-008](#shell-008-the-default-layout)).
 
 ## SHELL-003: Panels are declared as data
 
@@ -33,6 +36,10 @@ including the code that titles panels, the code that toggles them, and the
 code that persists their geometry. A build function declared against an id
 that is not in the table is an error, not a step that silently never runs.
 
+Each record must also carry that panel's place in the default layout — which
+drawer it docks in, or that it floats, and whether it starts open
+([SHELL-008](#shell-008-the-default-layout)).
+
 The declaration belongs to the domain, not to the shell: the shell places and
 persists whatever windows it is handed, and must not name a panel.
 
@@ -42,8 +49,14 @@ Any window can be **docked** by dragging it to a screen edge (or an already
 open drawer): an insertion indicator previews the drop position; drop docks
 it into a vertical stack. Behaviors that define the feel:
 
-- A drawer exists only while it has visible docked windows — there is no
-  manual drawer toggle; empty drawers vanish.
+- A drawer exists only while it has visible docked windows; empty drawers
+  vanish.
+- A drawer that has content carries a bar at its top with a **collapse**
+  control. Collapsing must reduce the drawer to a narrow rail carrying only
+  that control, and must not close, undock, or reorder the windows in it;
+  expanding must restore them at the drawer's previous width. Collapsed state
+  persists with the session, and dropping a window on a collapsed drawer
+  expands it.
 - Docked windows share the drawer's height; dividers between them resize
   neighboring pairs only, and the drawer's width is draggable at its inner
   edge.
@@ -51,7 +64,7 @@ it into a vertical stack. Behaviors that define the feel:
   actually dropped on a drawer), so a window in motion is always visibly "in
   hand".
 - Closing a docked window keeps its dock slot in the DOM so reopening from
-  the toolbar returns it to its place; the drawer collapses if that leaves it
+  the toolbar returns it to its place; the drawer vanishes if that leaves it
   empty.
 - Dock layout, drawer widths, and floating positions restore with the
   session.
@@ -100,3 +113,19 @@ Every non-obvious action acknowledges itself in the status info line
 Transient visual feedback (address flash, rect flash + ping ring, move links)
 is used wherever the answer to "where did that happen?" is a place on the
 map. Controls carry `title` tooltips explaining gesture modifiers.
+
+## SHELL-008: The default layout
+
+Where a window sits before anyone has moved it is a decision, not an accident
+of CSS. With no session to restore, the workspace must open with the panels
+that are consulted continuously already docked and open:
+
+- **Right drawer**, top to bottom: Layout, Appearance, Filter, Marks.
+- **Left drawer**: Events.
+- **Floating and closed**: Play, Warnings, Allocation and its pinned clones.
+  Play is a window a user opens for a moment and dismisses; Warnings only
+  exists when the trace has any; Allocation follows selection and is placed
+  relative to it ([SHELL-005](#shell-005-the-allocation-window-lifecycle)).
+
+A restored session overrides this **wholly**, not as a patch on top of it: a
+window the default docks and the session does not must end up floating.

@@ -187,7 +187,7 @@ async function restorePinnedWindows(pinned) {
     if (!info) continue; // stale/unknown event (e.g. mismatched trace): skip
     const win = d.createPinnedWindow(info, null);
     win.style.left = pw.left; win.style.top = pw.top; win.style.right = pw.right; win.style.bottom = pw.bottom;
-    if (pw.dockSide) dockPanelAt(win, pw.dockSide, null);
+    if (pw.dockSide) dockPanelAt(win, pw.dockSide, null, false);
   }
 }
 
