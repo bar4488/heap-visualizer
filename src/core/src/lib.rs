@@ -572,13 +572,34 @@ fn filter_diagnostic_json(out: &mut String, kind: &str, message: &str, start: us
 }
 
 #[no_mangle]
-pub extern "C" fn hp_filter_check(len: u32) {
+pub extern "C" fn hp_filter_check(len: u32, cursor: u32) {
     let a = unsafe { &mut *app() };
     let source = std::str::from_utf8(&a.buf[..len as usize]).unwrap_or("");
-    match heap_visualizer_filter_dsl::parse(source) {
-        Ok(_) => a.out = "{\"valid\":true,\"available\":true}".into(),
-        Err(e) => filter_diagnostic_json(&mut a.out, "valid", &e.message, e.span.start, e.span.end),
+    let result = heap_visualizer_filter_dsl::parse(source)
+        .map_err(|error| (error.message, error.span))
+        .and_then(|expr| {
+            filter_eval::check(&expr, &a.store).map_err(|error| (error.message, error.span))
+        });
+    match result {
+        Ok(()) => a.out = "{\"valid\":true,\"available\":true".into(),
+        Err((message, span)) => {
+            a.out = "{\"valid\":false,\"available\":true,\"diagnostic\":{\"message\":".into();
+            push_json_str(&mut a.out, &message);
+            a.out.push_str(",\"start\":");
+            a.out.push_str(&span.start.to_string());
+            a.out.push_str(",\"end\":");
+            a.out.push_str(&span.end.to_string());
+            a.out.push('}');
+        }
     }
+    filter_eval::push_completions_json(
+        &mut a.out,
+        source,
+        cursor as usize,
+        &a.store,
+        &a.tag_labels,
+    );
+    a.out.push('}');
     ret_str(&a.out);
 }
 
@@ -601,6 +622,11 @@ pub extern "C" fn hp_filter_apply(len: u32) {
             return;
         }
     };
+    if let Err(err) = filter_eval::check(&expr, &a.store) {
+        filter_diagnostic_json(&mut a.out, "success", &err.message, err.span.start, err.span.end);
+        ret_str(&a.out);
+        return;
+    }
     let mut bits = vec![0u64; (a.store.len() as usize).div_ceil(64)];
     let mut matches = 0u32;
     let mut creators = 0u32;
@@ -1950,5 +1976,80 @@ not json at all
         ).unwrap();
         assert!(filter_eval::evaluate(&methods, &a.store, 0, &[]).unwrap());
         assert!(!filter_eval::evaluate(&methods, &a.store, 1, &[]).unwrap());
+    }
+
+    #[test]
+    fn filter_check_rejects_semantic_errors_before_scanning() {
+        let valid = heap_visualizer_filter_dsl::parse(
+            r#"size >= 100 && site.starts_with("a")"#,
+        ).unwrap();
+        let store = Store { unit: "ns".into(), ..Store::default() };
+        assert!(filter_eval::check(&valid, &store).is_ok());
+
+        let wrong_method = heap_visualizer_filter_dsl::parse(
+            r#"size.starts_with("1")"#,
+        ).unwrap();
+        assert_eq!(
+            filter_eval::check(&wrong_method, &store).unwrap_err().message,
+            "`starts_with` requires one string argument"
+        );
+
+        let not_boolean = heap_visualizer_filter_dsl::parse("size + 1").unwrap();
+        assert_eq!(
+            filter_eval::check(&not_boolean, &store).unwrap_err().message,
+            "filter expression must produce bool"
+        );
+
+        let empty_set = heap_visualizer_filter_dsl::parse("site in {}").unwrap();
+        assert!(filter_eval::check(&empty_set, &store).is_ok());
+
+        let tick_store = Store { unit: "tick".into(), ..Store::default() };
+        let time_unit = heap_visualizer_filter_dsl::parse("time > 1ms").unwrap();
+        assert_eq!(
+            filter_eval::check(&time_unit, &tick_store).unwrap_err().message,
+            "time literals are unavailable for a tick trace"
+        );
+    }
+
+    #[test]
+    fn filter_completions_use_types_and_live_catalogs() {
+        let mut a = load(SAMPLE);
+        a.tag_labels = vec!["suspect".into(), "quoted \"tag\"".into()];
+
+        let mut out = String::new();
+        filter_eval::push_completions_json(&mut out, "span ", 5, &a.store, &a.tag_labels);
+        assert!(out.contains("\"label\":\"overlaps\""));
+        assert!(!out.contains("\"label\":\"contains\""));
+
+        out.clear();
+        filter_eval::push_completions_json(&mut out, "site == \"", 9, &a.store, &a.tag_labels);
+        assert!(out.contains("\"label\":\"a\""));
+        assert!(out.contains("\"insertText\":\"\\\"a\\\"\""));
+
+        out.clear();
+        let source = "tag == \"q";
+        filter_eval::push_completions_json(
+            &mut out, source, source.len(), &a.store, &a.tag_labels,
+        );
+        assert!(out.contains("\"label\":\"quoted \\\"tag\\\"\""));
+        assert!(out.contains("\"insertText\":\"\\\"quoted \\\\\\\"tag\\\\\\\"\\\"\""));
+
+        out.clear();
+        filter_eval::push_completions_json(&mut out, "", 0, &a.store, &a.tag_labels);
+        assert!(out.contains("\"label\":\"size\""));
+        assert!(!out.contains("\"label\":\"named\""));
+        assert!(!out.contains("\"label\":\"field\""));
+    }
+
+    #[test]
+    fn filter_completion_results_are_bounded() {
+        let mut store = Store::default();
+        store.sites = (0..60).map(|index| format!("site-{index:02}")).collect();
+        let mut out = String::new();
+        filter_eval::push_completions_json(&mut out, "site == \"", 9, &store, &[]);
+        assert_eq!(out.matches("\"kind\":\"value\"").count(), 50);
+        assert!(out.contains("\"hasMore\":true"));
+        assert!(out.contains("\"label\":\"site-00\""));
+        assert!(!out.contains("\"label\":\"site-50\""));
     }
 }

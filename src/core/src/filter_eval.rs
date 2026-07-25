@@ -1,6 +1,53 @@
-use heap_visualizer_filter_dsl::{BinaryOp, Expr, ExprKind, Span, UnaryOp, Unit};
+use heap_visualizer_filter_dsl::{
+    completion_context, BinaryOp, CompletionSite, Expr, ExprKind, Span, UnaryOp, Unit,
+};
 
+use crate::json::push_json_str;
 use crate::store::{Store, NONE_U16, NONE_U32};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Type {
+    Bool,
+    Int,
+    String,
+    Range,
+    Set(ValueKind),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ValueKind {
+    Bool,
+    Int,
+    String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CheckedType {
+    ty: Type,
+    optional: bool,
+}
+
+impl CheckedType {
+    const fn required(ty: Type) -> Self {
+        Self {
+            ty,
+            optional: false,
+        }
+    }
+
+    const fn optional(ty: Type) -> Self {
+        Self { ty, optional: true }
+    }
+
+    fn value_kind(self) -> Option<ValueKind> {
+        match self.ty {
+            Type::Bool => Some(ValueKind::Bool),
+            Type::Int => Some(ValueKind::Int),
+            Type::String => Some(ValueKind::String),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 enum Value {
@@ -25,6 +72,387 @@ impl EvalError {
             span: expr.span,
         }
     }
+}
+
+fn field_type(name: &str, expr: &Expr) -> Result<CheckedType, EvalError> {
+    Ok(match name {
+        "id" | "address" | "end" | "size" | "seq" | "time" => CheckedType::required(Type::Int),
+        "usable" | "thread" | "lifetime" => CheckedType::optional(Type::Int),
+        "span" => CheckedType::required(Type::Range),
+        "site" | "tag" => CheckedType::optional(Type::String),
+        "stack" => CheckedType::required(Type::String),
+        "freed" => CheckedType::required(Type::Bool),
+        _ => return Err(EvalError::at(expr, format!("unknown field `{name}`"))),
+    })
+}
+
+fn same_values(left: CheckedType, right: CheckedType) -> bool {
+    left.value_kind().is_some() && left.value_kind() == right.value_kind()
+}
+
+fn check_type(expr: &Expr, store: &Store) -> Result<CheckedType, EvalError> {
+    let required = |ty| Ok(CheckedType::required(ty));
+    match &expr.kind {
+        ExprKind::Bool(_) => required(Type::Bool),
+        ExprKind::Integer(value) => {
+            integer(value.value, value.unit, &store.unit)
+                .map_err(|message| EvalError::at(expr, message))?;
+            required(Type::Int)
+        }
+        ExprKind::String(_) => required(Type::String),
+        ExprKind::Identifier(name) => field_type(name, expr),
+        ExprKind::Unary {
+            op: UnaryOp::Not,
+            expr: inner,
+        } => {
+            let ty = check_type(inner, store)?;
+            if ty.ty == Type::Bool {
+                required(Type::Bool)
+            } else {
+                Err(EvalError::at(expr, "`!` requires bool"))
+            }
+        }
+        ExprKind::IsMissing { expr: inner, .. } => {
+            check_type(inner, store)?;
+            required(Type::Bool)
+        }
+        ExprKind::Set(items) => {
+            let Some(first) = items.first() else {
+                return Err(EvalError::at(expr, "cannot infer the type of an empty set"));
+            };
+            let first = check_type(first, store)?;
+            let Some(kind) = first.value_kind() else {
+                return Err(EvalError::at(expr, "set members must be scalar values"));
+            };
+            for item in &items[1..] {
+                if check_type(item, store)?.value_kind() != Some(kind) {
+                    return Err(EvalError::at(expr, "set members must have one type"));
+                }
+            }
+            required(Type::Set(kind))
+        }
+        ExprKind::Range { start, end } => {
+            if check_type(start, store)?.ty == Type::Int && check_type(end, store)?.ty == Type::Int
+            {
+                required(Type::Range)
+            } else {
+                Err(EvalError::at(expr, "range bounds must be numeric"))
+            }
+        }
+        ExprKind::Field { base, name } => {
+            if matches!(&base.kind, ExprKind::Identifier(root) if root == "death") {
+                match name.as_str() {
+                    "seq" | "time" => Ok(CheckedType::optional(Type::Int)),
+                    _ => Err(EvalError::at(expr, format!("unknown death field `{name}`"))),
+                }
+            } else {
+                Err(EvalError::at(expr, "field access is not valid here"))
+            }
+        }
+        ExprKind::Call { callee, arguments } => match &callee.kind {
+            ExprKind::Identifier(name) if name == "abs" => {
+                if arguments.len() == 1 && check_type(&arguments[0], store)?.ty == Type::Int {
+                    required(Type::Int)
+                } else {
+                    Err(EvalError::at(expr, "abs requires one number"))
+                }
+            }
+            ExprKind::Field { base, name } => {
+                if arguments.len() != 1
+                    || check_type(base, store)?.ty != Type::String
+                    || check_type(&arguments[0], store)?.ty != Type::String
+                {
+                    return Err(EvalError::at(
+                        expr,
+                        format!("`{name}` requires one string argument"),
+                    ));
+                }
+                match name.as_str() {
+                    "contains" | "starts_with" | "ends_with" => required(Type::Bool),
+                    _ => Err(EvalError::at(
+                        expr,
+                        format!("unknown string method `{name}`"),
+                    )),
+                }
+            }
+            _ => Err(EvalError::at(expr, "unknown function")),
+        },
+        ExprKind::Index { .. } => Err(EvalError::at(expr, "custom fields are not available yet")),
+        ExprKind::Binary { op, left, right } => {
+            let left_ty = check_type(left, store)?;
+            let right_ty = if *op == BinaryOp::In
+                && matches!(&right.kind, ExprKind::Set(items) if items.is_empty())
+            {
+                CheckedType::required(Type::Set(left_ty.value_kind().unwrap_or(ValueKind::Bool)))
+            } else {
+                check_type(right, store)?
+            };
+            match op {
+                BinaryOp::And | BinaryOp::Or => {
+                    if left_ty.ty == Type::Bool && right_ty.ty == Type::Bool {
+                        required(Type::Bool)
+                    } else {
+                        Err(EvalError::at(expr, "boolean operators require bool"))
+                    }
+                }
+                BinaryOp::Equal | BinaryOp::NotEqual => {
+                    if same_values(left_ty, right_ty) {
+                        required(Type::Bool)
+                    } else {
+                        Err(EvalError::at(
+                            expr,
+                            "equality operands have incompatible types",
+                        ))
+                    }
+                }
+                BinaryOp::Less
+                | BinaryOp::LessEqual
+                | BinaryOp::Greater
+                | BinaryOp::GreaterEqual => {
+                    if same_values(left_ty, right_ty)
+                        && matches!(left_ty.ty, Type::Int | Type::String)
+                    {
+                        required(Type::Bool)
+                    } else {
+                        Err(EvalError::at(
+                            expr,
+                            "ordering operands have incompatible types",
+                        ))
+                    }
+                }
+                BinaryOp::Add | BinaryOp::Subtract => {
+                    if left_ty.ty == Type::Int && right_ty.ty == Type::Int {
+                        required(Type::Int)
+                    } else {
+                        Err(EvalError::at(expr, "arithmetic requires numbers"))
+                    }
+                }
+                BinaryOp::In => {
+                    let compatible = match right_ty.ty {
+                        Type::Range => left_ty.ty == Type::Int,
+                        Type::Set(kind) => left_ty.value_kind() == Some(kind),
+                        _ => false,
+                    };
+                    if compatible {
+                        required(Type::Bool)
+                    } else {
+                        Err(EvalError::at(
+                            expr,
+                            "`in` requires a compatible set or range",
+                        ))
+                    }
+                }
+                BinaryOp::Overlaps => {
+                    if left_ty.ty == Type::Range && right_ty.ty == Type::Range {
+                        required(Type::Bool)
+                    } else {
+                        Err(EvalError::at(expr, "`overlaps` requires two ranges"))
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub fn check(expr: &Expr, store: &Store) -> Result<(), EvalError> {
+    let ty = check_type(expr, store)?;
+    if ty.ty == Type::Bool {
+        Ok(())
+    } else {
+        Err(EvalError::at(expr, "filter expression must produce bool"))
+    }
+}
+
+struct CompletionItem {
+    label: String,
+    insert: String,
+    kind: &'static str,
+    detail: Option<&'static str>,
+}
+
+fn item(label: &str, kind: &'static str, detail: Option<&'static str>) -> CompletionItem {
+    CompletionItem {
+        label: label.into(),
+        insert: label.into(),
+        kind,
+        detail,
+    }
+}
+
+fn string_item(label: &str, detail: &'static str) -> CompletionItem {
+    let mut insert = String::new();
+    push_json_str(&mut insert, label);
+    CompletionItem {
+        label: label.into(),
+        insert,
+        kind: "value",
+        detail: Some(detail),
+    }
+}
+
+fn expression_items() -> Vec<CompletionItem> {
+    [
+        ("abs", "function", Some("number -> number")),
+        ("address", "field", Some("address")),
+        ("death", "field", Some("event namespace")),
+        ("end", "field", Some("address")),
+        ("false", "value", Some("bool")),
+        ("freed", "field", Some("bool")),
+        ("id", "field", Some("integer")),
+        ("lifetime", "field", Some("time, optional")),
+        ("seq", "field", Some("integer")),
+        ("site", "field", Some("string, optional")),
+        ("size", "field", Some("bytes")),
+        ("span", "field", Some("address range")),
+        ("stack", "field", Some("string")),
+        ("tag", "field", Some("string, optional")),
+        ("thread", "field", Some("integer, optional")),
+        ("time", "field", Some("time")),
+        ("true", "value", Some("bool")),
+        ("usable", "field", Some("bytes, optional")),
+    ]
+    .into_iter()
+    .map(|(label, kind, detail)| item(label, kind, detail))
+    .collect()
+}
+
+fn operator_items(ty: CheckedType) -> Vec<CompletionItem> {
+    let mut labels: Vec<(&str, Option<&str>)> = match ty.ty {
+        Type::Bool => vec![("&&", None), ("||", None), ("==", None), ("!=", None)],
+        Type::Int => vec![
+            ("+", None),
+            ("-", None),
+            ("==", None),
+            ("!=", None),
+            ("<", None),
+            ("<=", None),
+            (">", None),
+            (">=", None),
+            ("in", Some("set or half-open range")),
+        ],
+        Type::String => vec![
+            ("==", None),
+            ("!=", None),
+            ("<", None),
+            ("<=", None),
+            (">", None),
+            (">=", None),
+            ("in", Some("set")),
+        ],
+        Type::Range => vec![("overlaps", Some("half-open range"))],
+        Type::Set(_) => Vec::new(),
+    };
+    if ty.optional {
+        labels.push(("is", Some("missing test")));
+    }
+    labels
+        .into_iter()
+        .map(|(label, detail)| item(label, "operator", detail))
+        .collect()
+}
+
+fn member_items(receiver: &Expr, store: &Store) -> Vec<CompletionItem> {
+    if matches!(&receiver.kind, ExprKind::Identifier(name) if name == "death") {
+        return vec![
+            item("seq", "member", Some("integer, optional")),
+            item("time", "member", Some("time, optional")),
+        ];
+    }
+    if check_type(receiver, store).is_ok_and(|ty| ty.ty == Type::String) {
+        return vec![
+            item("contains", "member", Some("string -> bool")),
+            item("ends_with", "member", Some("string -> bool")),
+            item("starts_with", "member", Some("string -> bool")),
+        ];
+    }
+    Vec::new()
+}
+
+fn value_items(subject: &Expr, store: &Store, labels: &[String]) -> Vec<CompletionItem> {
+    let ExprKind::Identifier(name) = &subject.kind else {
+        return expression_items();
+    };
+    match name.as_str() {
+        "site" => store
+            .sites
+            .iter()
+            .map(|value| string_item(value, "observed site"))
+            .collect(),
+        "thread" => store
+            .thrs
+            .iter()
+            .map(|value| item(&value.to_string(), "value", Some("observed thread")))
+            .collect(),
+        "tag" => labels
+            .iter()
+            .map(|value| string_item(value, "current tag"))
+            .collect(),
+        _ => expression_items(),
+    }
+}
+
+pub fn push_completions_json(
+    out: &mut String,
+    source: &str,
+    cursor: usize,
+    store: &Store,
+    labels: &[String],
+) {
+    let Some(context) = completion_context(source, cursor) else {
+        return;
+    };
+    let mut items = match &context.site {
+        CompletionSite::Expression => expression_items(),
+        CompletionSite::Operator { expression } => {
+            check_type(expression, store).map_or_else(|_| Vec::new(), operator_items)
+        }
+        CompletionSite::Member { receiver } => member_items(receiver, store),
+        CompletionSite::Value { subject } => value_items(subject, store, labels),
+        CompletionSite::AfterIs { negated } => {
+            if *negated {
+                vec![item("missing", "operator", None)]
+            } else {
+                vec![
+                    item("missing", "operator", None),
+                    item("not", "operator", Some("follow with missing")),
+                ]
+            }
+        }
+    };
+    items.retain(|candidate| candidate.label.starts_with(&context.prefix));
+    items.sort_by(|left, right| left.label.cmp(&right.label));
+    let has_more = items.len() > 50;
+    items.truncate(50);
+    if items.is_empty() {
+        return;
+    }
+
+    out.push_str(",\"completions\":{\"start\":");
+    out.push_str(&context.replacement.start.to_string());
+    out.push_str(",\"end\":");
+    out.push_str(&context.replacement.end.to_string());
+    out.push_str(",\"items\":[");
+    for (index, candidate) in items.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"label\":");
+        push_json_str(out, &candidate.label);
+        out.push_str(",\"insertText\":");
+        push_json_str(out, &candidate.insert);
+        out.push_str(",\"kind\":");
+        push_json_str(out, candidate.kind);
+        if let Some(detail) = candidate.detail {
+            out.push_str(",\"detail\":");
+            push_json_str(out, detail);
+        }
+        out.push('}');
+    }
+    out.push(']');
+    if has_more {
+        out.push_str(",\"hasMore\":true");
+    }
+    out.push('}');
 }
 
 fn integer(value: u128, unit: Option<Unit>, time_unit: &str) -> Result<i128, String> {
