@@ -23,7 +23,7 @@ client-side.
 
 **Rust core (`src/core/`, ~5.3k lines) — healthy; filter syntax is a separate
 crate and evaluation is integrated.** The engine has clean module boundaries
-and 39 native tests asserting
+and 40 native tests asserting
 real invariants: snapshot seek ≡ forward replay, pick prefers the newest
 overlap, anchor stability across reflow. Every performance and soundness
 finding from the 2026-07-24 review is fixed. `src/filter-dsl/` is
@@ -53,9 +53,16 @@ Tag candidates update on create, rename, delete, and restore, including escaped
 labels. `named()` and custom `field.*` columns still report direct diagnostics
 and are not offered as completions.
 
+The expression is also the single state behind the filter actions. Site,
+thread, tag, and untagged legend chips toggle visible predicates and apply
+them; **match range** replaces and applies the expression; named expressions
+ride in `.heapa` marks; and **Tag matches** snapshots the applied creator set
+into an ordinary tag. Pure source rewrites and marks parsing are covered by
+the web suite, while the core match snapshot has a native invariant test.
+
 **Verification — three suites, a type-checker, and a person.** `cargo test`
-covers the engine (39) and filter parser/completion contexts (23);
-`node --test 'src/web/**/*.test.ts'` (44) covers the pure functions, the panel
+covers the engine (40) and filter parser/completion contexts (23);
+`node --test 'src/web/**/*.test.ts'` (56) covers the pure functions, the panel
 table, and both persisted round-trips, with no npm and no browser. `tsc` covers
 what those do not reach: the worker protocol
 (`src/web/protocol.ts`, imported by both sides), the persisted shapes, and the
@@ -106,6 +113,12 @@ filter-language slice as a separate crate. Type checking, the first evaluator,
 the expression editor, and contextual completion now connect it to the core
 and web UI. `named()` and custom scalar fields are the next unfinished E010
 surfaces; neither has a ticket yet.
+
+[T011](tickets/T011-legend-chips-toggle-filter.md) through
+[T014](tickets/T014-filter-to-tag.md) closed the filter-action batch: legend
+toggles, replace-and-apply match range, saved filters in marks, and a snapshot
+of current matches into a tag. All cheap checks pass; as before, real pointer
+interaction and the worker/browser round trip are not automated.
 
 **[T009](tickets/T009-type-the-deps-contracts.md) is next, and is not urgent.**
 It types the `init*(deps)` contracts in

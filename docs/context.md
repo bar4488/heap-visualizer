@@ -40,9 +40,9 @@ python3 gen.py --seed 2 --ops 200000 --threads 8 --out dist/big.heapl
 ## Test
 
 ```sh
-cargo test --manifest-path src/core/Cargo.toml   # 37 engine/filter tests, native, no wasm
-cargo test --manifest-path src/filter-dsl/Cargo.toml # 22 DSL parser/completion tests, native
-node --test 'src/web/**/*.test.ts'               # 44 web tests, no npm, no browser
+cargo test --manifest-path src/core/Cargo.toml   # 40 engine/filter tests, native, no wasm
+cargo test --manifest-path src/filter-dsl/Cargo.toml # 23 DSL parser/completion tests, native
+node --test 'src/web/**/*.test.ts'               # 56 web tests, no npm, no browser
 npx tsc -p tsconfig.test.json                    # type-check everything, emit nothing
 ```
 

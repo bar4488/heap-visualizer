@@ -56,7 +56,12 @@ Drop any `.heapl` file onto the page to load it.
   allocations the filter matches get tagged — the filter defines the working
   set.
 - Click an allocation to open its panel: give it a **name**, a **tag**, or a
-  **highlight color** (shown in every color mode).
+  **highlight color** (shown in every color mode), or replace the active filter
+  with that allocation's address range.
+- In site, thread, and tag color modes, click a legend chip to toggle its
+  visible filter predicate (Shift-click uses OR). The Filter panel can save
+  named expressions with the analysis and snapshot all current matches into a
+  tag.
 - **＋ mark** (or `m`) bookmarks the current playhead position; time marks show
   as flags on both timelines. Clicking one jumps in time while the address
   view stays put; the ⌖ button (or shift+click on the flag) also centers
