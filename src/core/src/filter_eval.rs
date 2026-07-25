@@ -1,5 +1,5 @@
 use heap_visualizer_filter_dsl::{
-    completion_context, BinaryOp, CompletionSite, Expr, ExprKind, Span, UnaryOp, Unit,
+    completion_context, BinaryOp, CompletionSite, Expr, ExprKind, OperandKind, Span, UnaryOp, Unit,
 };
 
 use crate::json::push_json_str;
@@ -268,55 +268,100 @@ struct CompletionItem {
     insert: String,
     kind: &'static str,
     detail: Option<&'static str>,
+    rank: u8,
 }
 
-fn item(label: &str, kind: &'static str, detail: Option<&'static str>) -> CompletionItem {
+fn item(
+    label: &str,
+    insert: impl Into<String>,
+    kind: &'static str,
+    detail: Option<&'static str>,
+    rank: u8,
+) -> CompletionItem {
     CompletionItem {
         label: label.into(),
-        insert: label.into(),
+        insert: insert.into(),
         kind,
         detail,
+        rank,
     }
 }
 
-fn string_item(label: &str, detail: &'static str) -> CompletionItem {
+fn string_item(label: &str, detail: &'static str, in_set: bool) -> CompletionItem {
     let mut insert = String::new();
     push_json_str(&mut insert, label);
+    if !in_set {
+        insert.push(' ');
+    }
     CompletionItem {
         label: label.into(),
         insert,
         kind: "value",
         detail: Some(detail),
+        rank: 0,
     }
 }
 
-fn expression_items() -> Vec<CompletionItem> {
-    [
-        ("abs", "function", Some("number -> number")),
-        ("address", "field", Some("address")),
-        ("death", "field", Some("event namespace")),
-        ("end", "field", Some("address")),
-        ("false", "value", Some("bool")),
-        ("freed", "field", Some("bool")),
-        ("id", "field", Some("integer")),
-        ("lifetime", "field", Some("time, optional")),
-        ("seq", "field", Some("integer")),
-        ("site", "field", Some("string, optional")),
-        ("size", "field", Some("bytes")),
-        ("span", "field", Some("address range")),
-        ("stack", "field", Some("string")),
-        ("tag", "field", Some("string, optional")),
-        ("thread", "field", Some("integer, optional")),
-        ("time", "field", Some("time")),
-        ("true", "value", Some("bool")),
-        ("usable", "field", Some("bytes, optional")),
-    ]
-    .into_iter()
-    .map(|(label, kind, detail)| item(label, kind, detail))
-    .collect()
+fn expression_items(expected: Option<Type>) -> Vec<CompletionItem> {
+    let descriptors = [
+        ("abs", "function", "number -> number", Type::Int, "abs(", 2),
+        ("address", "field", "address", Type::Int, "address ", 2),
+        ("end", "field", "address", Type::Int, "end ", 2),
+        ("false", "value", "bool", Type::Bool, "false ", 1),
+        ("freed", "field", "bool", Type::Bool, "freed ", 2),
+        ("id", "field", "integer", Type::Int, "id ", 2),
+        (
+            "lifetime",
+            "field",
+            "time, optional",
+            Type::Int,
+            "lifetime ",
+            2,
+        ),
+        ("seq", "field", "integer", Type::Int, "seq ", 2),
+        (
+            "site",
+            "field",
+            "string, optional",
+            Type::String,
+            "site ",
+            2,
+        ),
+        ("size", "field", "bytes", Type::Int, "size ", 2),
+        ("span", "field", "address range", Type::Range, "span ", 2),
+        ("stack", "field", "string", Type::String, "stack ", 2),
+        ("tag", "field", "string, optional", Type::String, "tag ", 2),
+        (
+            "thread",
+            "field",
+            "integer, optional",
+            Type::Int,
+            "thread ",
+            2,
+        ),
+        ("time", "field", "time", Type::Int, "time ", 2),
+        ("true", "value", "bool", Type::Bool, "true ", 1),
+        (
+            "usable",
+            "field",
+            "bytes, optional",
+            Type::Int,
+            "usable ",
+            2,
+        ),
+    ];
+    let mut items: Vec<_> = descriptors
+        .into_iter()
+        .filter(|(_, _, _, ty, _, _)| expected.is_none_or(|expected| expected == *ty))
+        .map(|(label, kind, detail, _, insert, rank)| item(label, insert, kind, Some(detail), rank))
+        .collect();
+    if expected.is_none() {
+        items.push(item("death", "death.", "field", Some("event namespace"), 2));
+    }
+    items
 }
 
-fn operator_items(ty: CheckedType) -> Vec<CompletionItem> {
+fn operator_items(ty: CheckedType, leading_space: bool) -> Vec<CompletionItem> {
     let mut labels: Vec<(&str, Option<&str>)> = match ty.ty {
         Type::Bool => vec![("&&", None), ("||", None), ("==", None), ("!=", None)],
         Type::Int => vec![
@@ -347,47 +392,132 @@ fn operator_items(ty: CheckedType) -> Vec<CompletionItem> {
     }
     labels
         .into_iter()
-        .map(|(label, detail)| item(label, "operator", detail))
+        .map(|(label, detail)| {
+            let separator = if leading_space { " " } else { "" };
+            item(label, format!("{separator}{label} "), "operator", detail, 0)
+        })
         .collect()
 }
 
 fn member_items(receiver: &Expr, store: &Store) -> Vec<CompletionItem> {
     if matches!(&receiver.kind, ExprKind::Identifier(name) if name == "death") {
         return vec![
-            item("seq", "member", Some("integer, optional")),
-            item("time", "member", Some("time, optional")),
+            item("seq", "seq ", "member", Some("integer, optional"), 0),
+            item("time", "time ", "member", Some("time, optional"), 0),
         ];
     }
     if check_type(receiver, store).is_ok_and(|ty| ty.ty == Type::String) {
         return vec![
-            item("contains", "member", Some("string -> bool")),
-            item("ends_with", "member", Some("string -> bool")),
-            item("starts_with", "member", Some("string -> bool")),
+            item("contains", "contains(", "member", Some("string -> bool"), 0),
+            item(
+                "ends_with",
+                "ends_with(",
+                "member",
+                Some("string -> bool"),
+                0,
+            ),
+            item(
+                "starts_with",
+                "starts_with(",
+                "member",
+                Some("string -> bool"),
+                0,
+            ),
         ];
     }
     Vec::new()
 }
 
-fn value_items(subject: &Expr, store: &Store, labels: &[String]) -> Vec<CompletionItem> {
+fn observed_items(
+    subject: &Expr,
+    store: &Store,
+    labels: &[String],
+    in_set: bool,
+) -> Vec<CompletionItem> {
     let ExprKind::Identifier(name) = &subject.kind else {
-        return expression_items();
+        return Vec::new();
     };
     match name.as_str() {
         "site" => store
             .sites
             .iter()
-            .map(|value| string_item(value, "observed site"))
+            .map(|value| string_item(value, "observed site", in_set))
             .collect(),
         "thread" => store
             .thrs
             .iter()
-            .map(|value| item(&value.to_string(), "value", Some("observed thread")))
+            .map(|value| {
+                let label = value.to_string();
+                let insert = if in_set {
+                    label.clone()
+                } else {
+                    format!("{label} ")
+                };
+                item(&label, insert, "value", Some("observed thread"), 0)
+            })
             .collect(),
         "tag" => labels
             .iter()
-            .map(|value| string_item(value, "current tag"))
+            .map(|value| string_item(value, "current tag", in_set))
             .collect(),
-        _ => expression_items(),
+        _ => Vec::new(),
+    }
+}
+
+fn operand_items(
+    left: &Expr,
+    kind: OperandKind,
+    store: &Store,
+    labels: &[String],
+) -> Vec<CompletionItem> {
+    let left_ty = check_type(left, store).ok();
+    match kind {
+        OperandKind::SetMember => {
+            let mut items = observed_items(left, store, labels, true);
+            if left_ty.is_some_and(|ty| ty.ty == Type::Bool) {
+                items.push(item("false", "false", "value", Some("bool"), 1));
+                items.push(item("true", "true", "value", Some("bool"), 1));
+            }
+            items
+        }
+        OperandKind::RangeEnd => expression_items(Some(Type::Int)),
+        OperandKind::Binary(BinaryOp::In) => {
+            let mut items = vec![item("{", "{", "operator", Some("constant set"), 0)];
+            if left_ty.is_some_and(|ty| ty.ty == Type::Int) {
+                items.extend(expression_items(Some(Type::Int)));
+            }
+            items
+        }
+        OperandKind::Binary(operator) => {
+            let expected = match operator {
+                BinaryOp::Equal
+                | BinaryOp::NotEqual
+                | BinaryOp::Less
+                | BinaryOp::LessEqual
+                | BinaryOp::Greater
+                | BinaryOp::GreaterEqual => left_ty.map(|ty| ty.ty),
+                BinaryOp::Add | BinaryOp::Subtract => Some(Type::Int),
+                BinaryOp::Overlaps => Some(Type::Range),
+                BinaryOp::And | BinaryOp::Or => Some(Type::Bool),
+                BinaryOp::In => unreachable!(),
+            };
+            let mut items = observed_items(left, store, labels, false);
+            items.extend(expression_items(expected));
+            items
+        }
+    }
+}
+
+fn call_argument_items(callee: &Expr, store: &Store) -> Vec<CompletionItem> {
+    match &callee.kind {
+        ExprKind::Identifier(name) if name == "abs" => expression_items(Some(Type::Int)),
+        ExprKind::Field { base, name }
+            if matches!(name.as_str(), "contains" | "starts_with" | "ends_with")
+                && check_type(base, store).is_ok_and(|ty| ty.ty == Type::String) =>
+        {
+            expression_items(Some(Type::String))
+        }
+        _ => Vec::new(),
     }
 }
 
@@ -401,26 +531,55 @@ pub fn push_completions_json(
     let Some(context) = completion_context(source, cursor) else {
         return;
     };
+    let mut replacement = context.replacement;
+    let mut prefix = context.prefix.clone();
     let mut items = match &context.site {
-        CompletionSite::Expression => expression_items(),
-        CompletionSite::Operator { expression } => {
-            check_type(expression, store).map_or_else(|_| Vec::new(), operator_items)
+        CompletionSite::Expression => expression_items(None),
+        CompletionSite::Exact { expression } => {
+            if matches!(&expression.kind, ExprKind::Identifier(name) if name == "death") {
+                replacement = Span::new(context.replacement.end, context.replacement.end);
+                prefix.clear();
+                vec![item(".", ".", "operator", Some("death members"), 0)]
+            } else if let Ok(ty) = check_type(expression, store) {
+                replacement = Span::new(context.replacement.end, context.replacement.end);
+                prefix.clear();
+                operator_items(ty, true)
+            } else {
+                expression_items(None)
+            }
         }
+        CompletionSite::Operator { expression } => check_type(expression, store)
+            .map_or_else(|_| Vec::new(), |ty| operator_items(ty, false)),
         CompletionSite::Member { receiver } => member_items(receiver, store),
-        CompletionSite::Value { subject } => value_items(subject, store, labels),
+        CompletionSite::Operand { left, kind } => operand_items(left, *kind, store, labels),
+        CompletionSite::CallArgument { callee, index } => {
+            if *index == 0 {
+                call_argument_items(callee, store)
+            } else {
+                Vec::new()
+            }
+        }
+        CompletionSite::SetDelimiter => vec![
+            item(",", ", ", "operator", Some("another set member"), 0),
+            item("}", "}", "operator", Some("close set"), 0),
+        ],
         CompletionSite::AfterIs { negated } => {
             if *negated {
-                vec![item("missing", "operator", None)]
+                vec![item("missing", "missing ", "operator", None, 0)]
             } else {
                 vec![
-                    item("missing", "operator", None),
-                    item("not", "operator", Some("follow with missing")),
+                    item("missing", "missing ", "operator", None, 0),
+                    item("not", "not ", "operator", Some("follow with missing"), 0),
                 ]
             }
         }
     };
-    items.retain(|candidate| candidate.label.starts_with(&context.prefix));
-    items.sort_by(|left, right| left.label.cmp(&right.label));
+    items.retain(|candidate| candidate.label.starts_with(&prefix));
+    items.sort_by(|left, right| {
+        left.rank
+            .cmp(&right.rank)
+            .then_with(|| left.label.cmp(&right.label))
+    });
     let has_more = items.len() > 50;
     items.truncate(50);
     if items.is_empty() {
@@ -428,9 +587,9 @@ pub fn push_completions_json(
     }
 
     out.push_str(",\"completions\":{\"start\":");
-    out.push_str(&context.replacement.start.to_string());
+    out.push_str(&replacement.start.to_string());
     out.push_str(",\"end\":");
-    out.push_str(&context.replacement.end.to_string());
+    out.push_str(&replacement.end.to_string());
     out.push_str(",\"items\":[");
     for (index, candidate) in items.iter().enumerate() {
         if index > 0 {

@@ -675,20 +675,28 @@ pub extern "C" fn hp_filter_set_mode(mode: u32) {
 pub extern "C" fn hp_set_tag_labels(len: u32) {
     let a = unsafe { &mut *app() };
     let data = &a.buf[..len as usize];
+    a.tag_labels = parse_tag_labels(data);
+}
+
+fn parse_tag_labels(data: &[u8]) -> Vec<String> {
     let mut sc = json::Scan::new(data);
     let mut labels = Vec::new();
     if sc.eat(b'[') {
         loop {
-            if sc.eat(b']') { break; }
-            let Some((lo, hi)) = sc.string_span() else { break };
-            labels.push(String::from_utf8_lossy(&data[lo..hi]).into_owned());
+            if sc.eat(b']') {
+                break;
+            }
+            let Some((lo, hi)) = sc.string_span() else {
+                break;
+            };
+            labels.push(json::unescape(&data[lo..hi]));
             if !sc.eat(b',') {
                 let _ = sc.eat(b']');
                 break;
             }
         }
     }
-    a.tag_labels = labels;
+    labels
 }
 
 /// Crop the address-line to creator events with `lo <= e < hi` — always dims
@@ -2024,7 +2032,7 @@ not json at all
         out.clear();
         filter_eval::push_completions_json(&mut out, "site == \"", 9, &a.store, &a.tag_labels);
         assert!(out.contains("\"label\":\"a\""));
-        assert!(out.contains("\"insertText\":\"\\\"a\\\"\""));
+        assert!(out.contains("\"insertText\":\"\\\"a\\\" \""));
 
         out.clear();
         let source = "tag == \"q";
@@ -2032,13 +2040,79 @@ not json at all
             &mut out, source, source.len(), &a.store, &a.tag_labels,
         );
         assert!(out.contains("\"label\":\"quoted \\\"tag\\\"\""));
-        assert!(out.contains("\"insertText\":\"\\\"quoted \\\\\\\"tag\\\\\\\"\\\"\""));
+        assert!(out.contains("\"insertText\":\"\\\"quoted \\\\\\\"tag\\\\\\\"\\\" \""));
 
         out.clear();
         filter_eval::push_completions_json(&mut out, "", 0, &a.store, &a.tag_labels);
         assert!(out.contains("\"label\":\"size\""));
         assert!(!out.contains("\"label\":\"named\""));
         assert!(!out.contains("\"label\":\"field\""));
+    }
+
+    #[test]
+    fn filter_completions_follow_the_typed_grammar_matrix() {
+        let mut a = load(SAMPLE);
+        a.tag_labels = vec!["suspect".into(), "parser".into()];
+        let complete = |source: &str| {
+            let mut out = String::new();
+            filter_eval::push_completions_json(
+                &mut out, source, source.len(), &a.store, &a.tag_labels,
+            );
+            out
+        };
+
+        let out = complete("span");
+        assert!(out.contains("\"start\":4,\"end\":4"));
+        assert!(out.contains("\"label\":\"overlaps\""));
+        assert!(out.contains("\"insertText\":\" overlaps \""));
+        assert!(!out.contains("\"label\":\"span\""));
+
+        let out = complete("size == ");
+        for numeric in ["abs", "address", "id", "size", "thread"] {
+            assert!(out.contains(&format!("\"label\":\"{numeric}\"")), "{out}");
+        }
+        for incompatible in ["false", "freed", "site", "span", "tag", "true"] {
+            assert!(!out.contains(&format!("\"label\":\"{incompatible}\"")), "{out}");
+        }
+
+        let out = complete("tag");
+        assert!(out.contains("\"label\":\"==\""));
+        assert!(out.contains("\"insertText\":\" == \""));
+        assert!(!out.contains("\"label\":\"tag\""));
+
+        let out = complete("tag == ");
+        for string in ["parser", "suspect", "site", "stack", "tag"] {
+            assert!(out.contains(&format!("\"label\":\"{string}\"")), "{out}");
+        }
+        for incompatible in ["false", "freed", "size", "span", "true"] {
+            assert!(!out.contains(&format!("\"label\":\"{incompatible}\"")), "{out}");
+        }
+        assert!(out.contains("\"insertText\":\"\\\"suspect\\\" \""));
+
+        let out = complete("tag in {");
+        assert!(out.contains("\"label\":\"suspect\""));
+        assert!(out.contains("\"insertText\":\"\\\"suspect\\\"\""));
+        assert!(!out.contains("\"label\":\"site\""));
+
+        let out = complete("abs(");
+        assert!(out.contains("\"label\":\"size\""));
+        assert!(!out.contains("\"label\":\"site\""));
+
+        let out = complete("span overlaps ");
+        assert!(out.contains("\"label\":\"span\""));
+        assert!(!out.contains("\"label\":\"size\""));
+
+        let out = complete("tag in {\"suspect\"");
+        assert!(out.contains("\"label\":\",\""));
+        assert!(out.contains("\"label\":\"}\""));
+    }
+
+    #[test]
+    fn tag_label_catalog_decodes_json_strings() {
+        assert_eq!(
+            parse_tag_labels(br#"["plain","quoted \"tag\"","slash\\tag","\u05d0"]"#),
+            vec!["plain", "quoted \"tag\"", "slash\\tag", "א"],
+        );
     }
 
     #[test]

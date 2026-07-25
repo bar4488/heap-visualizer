@@ -164,6 +164,34 @@ test('buildMarks captures the analysis layer and folds in a session', async () =
   assert.ok(typeof m.saved === 'string' && m.saved.endsWith('Z'));
 });
 
+test('tag mutations mirror the live completion catalog', () => {
+  ui.tags = [];
+  posted.length = 0;
+
+  assert.equal(analysis.tagIdFor('quoted "tag"'), 1);
+  assert.deepEqual(
+    posted.filter((message) => message.type === 'tag-labels').at(-1),
+    { type: 'tag-labels', labels: ['quoted "tag"'] },
+  );
+
+  analysis.tagIdFor('second');
+  analysis.deleteTag(1);
+  assert.deepEqual(
+    posted.filter((message) => message.type === 'tag-labels').at(-1),
+    { type: 'tag-labels', labels: ['second'] },
+  );
+
+  posted.length = 0;
+  analysis.applyMarks({
+    heapVisualizerAnalysis: 1,
+    tags: [{ name: 'restored', color: '#123456' }],
+  }, true);
+  assert.deepEqual(
+    posted.filter((message) => message.type === 'tag-labels').at(-1),
+    { type: 'tag-labels', labels: ['restored'] },
+  );
+});
+
 test('buildMarks -> applyMarks -> buildMarks is a fixed point', async () => {
   seedAnalysisState();
   const before = await analysis.buildMarks();

@@ -35,3 +35,18 @@ test('filter completion replaces one byte-spanned token', () => {
     cursor: 'site == "parser \\"fast\\""'.length,
   });
 });
+
+test('an exact field completion advances to its operator with spacing', () => {
+  const source = 'span';
+  const completions = { start: 4, end: 4, items: [] };
+  const item = {
+    label: 'overlaps',
+    insertText: ' overlaps ',
+    kind: 'operator' as const,
+  };
+
+  assert.deepEqual(applyFilterCompletion(source, completions, item), {
+    source: 'span overlaps ',
+    cursor: 'span overlaps '.length,
+  });
+});

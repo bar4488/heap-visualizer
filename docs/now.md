@@ -23,11 +23,11 @@ client-side.
 
 **Rust core (`src/core/`, ~5.3k lines) — healthy; filter syntax is a separate
 crate and evaluation is integrated.** The engine has clean module boundaries
-and 37 native tests asserting
+and 39 native tests asserting
 real invariants: snapshot seek ≡ forward replay, pick prefers the newest
 overlap, anchor stability across reflow. Every performance and soundness
 finding from the 2026-07-24 review is fixed. `src/filter-dsl/` is
-dependency-free; its 22 tests cover the E010 grammar, source-spanned AST,
+dependency-free; its 23 tests cover the E010 grammar, source-spanned AST,
 parser limits, and incomplete cursor contexts. The core links it to semantic
 checking, contextual completion, and a column-backed evaluator for the first
 set of built-in fields and operations.
@@ -45,13 +45,16 @@ The Filter panel is now the E010 draft/applied expression editor and speaks
 the typed check/apply/mode worker protocol. The core exports the first
 column-backed evaluator for built-in allocation/death fields, boolean and
 numeric/string operations, sets/ranges, overlap, missing tests, and string /
-stack methods. Its attached completion list offers executable fields,
-type-valid operators/members, and live site/thread/tag values from that same
-core catalog. `named()` and custom `field.*` columns still report direct
-diagnostics and are not offered as completions.
+stack methods. Its attached completion list follows the complete grammar
+position: exact fields advance to operators, right-hand expressions are
+filtered to the required type, calls/sets/ranges progress through their
+delimiters, and live site/thread/tag values come from that same core catalog.
+Tag candidates update on create, rename, delete, and restore, including escaped
+labels. `named()` and custom `field.*` columns still report direct diagnostics
+and are not offered as completions.
 
 **Verification — three suites, a type-checker, and a person.** `cargo test`
-covers the engine (37) and filter parser/completion contexts (22);
+covers the engine (39) and filter parser/completion contexts (23);
 `node --test 'src/web/**/*.test.ts'` (44) covers the pure functions, the panel
 table, and both persisted round-trips, with no npm and no browser. `tsc` covers
 what those do not reach: the worker protocol

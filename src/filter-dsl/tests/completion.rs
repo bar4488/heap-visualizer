@@ -1,7 +1,10 @@
-use heap_visualizer_filter_dsl::{completion_context, CompletionSite, ExprKind, Span};
+use heap_visualizer_filter_dsl::{
+    completion_context, BinaryOp, CompletionSite, ExprKind, OperandKind, Span,
+};
 
 fn context(source: &str, cursor: usize) -> heap_visualizer_filter_dsl::CompletionContext {
-    completion_context(source, cursor).expect("completion context")
+    completion_context(source, cursor)
+        .unwrap_or_else(|| panic!("completion context for {source:?} at {cursor}"))
 }
 
 #[test]
@@ -20,6 +23,9 @@ fn expression_and_operator_slots_are_distinct() {
     assert_eq!(got.prefix, "ove");
     assert_eq!(got.replacement, Span::new(5, 8));
     assert!(matches!(got.site, CompletionSite::Operator { .. }));
+
+    let got = context("span", 4);
+    assert!(matches!(got.site, CompletionSite::Exact { .. }));
 }
 
 #[test]
@@ -48,17 +54,30 @@ fn member_context_carries_the_receiver() {
 }
 
 #[test]
-fn comparison_values_carry_the_subject() {
-    for (source, cursor, expected) in [
-        ("site == ", 8, "site"),
-        ("size > 0 && tag in {", 20, "tag"),
-        ("thread == 2", 10, "thread"),
+fn operands_carry_the_left_expression_and_operator() {
+    for (source, cursor, expected, operator) in [
+        ("site == ", 8, "site", OperandKind::Binary(BinaryOp::Equal)),
+        ("size > 0 && tag in {", 20, "tag", OperandKind::SetMember),
+        (
+            "span overlaps ",
+            14,
+            "span",
+            OperandKind::Binary(BinaryOp::Overlaps),
+        ),
+        ("size + ", 7, "size", OperandKind::Binary(BinaryOp::Add)),
+        (
+            "size == si",
+            10,
+            "size",
+            OperandKind::Binary(BinaryOp::Equal),
+        ),
     ] {
         let got = context(source, cursor);
-        let CompletionSite::Value { subject } = got.site else {
-            panic!("value context for {source:?}");
+        let CompletionSite::Operand { left, kind } = got.site else {
+            panic!("operand context for {source:?}");
         };
-        assert!(matches!(subject.kind, ExprKind::Identifier(ref name) if name == expected));
+        assert_eq!(kind, operator);
+        assert!(matches!(left.kind, ExprKind::Identifier(ref name) if name == expected));
     }
 }
 
@@ -69,11 +88,18 @@ fn string_values_replace_the_literal_and_preserve_utf8_spans() {
     let got = context(source, cursor);
     assert_eq!(got.replacement, Span::new(8, source.len()));
     assert_eq!(got.prefix, "hé");
-    assert!(matches!(got.site, CompletionSite::Value { .. }));
+    assert!(matches!(got.site, CompletionSite::Operand { .. }));
 
     let got = context("tag in {\"sus", 12);
     assert_eq!(got.replacement, Span::new(8, 12));
     assert_eq!(got.prefix, "sus");
+    assert!(matches!(
+        got.site,
+        CompletionSite::Operand {
+            kind: OperandKind::SetMember,
+            ..
+        }
+    ));
 
     let got = context("site == \"", 9);
     assert_eq!(got.replacement, Span::new(8, 9));
@@ -83,6 +109,48 @@ fn string_values_replace_the_literal_and_preserve_utf8_spans() {
     assert!(matches!(
         context(source, source.len()).site,
         CompletionSite::Operator { .. }
+    ));
+}
+
+#[test]
+fn call_arguments_and_set_delimiters_are_distinct() {
+    let got = context("abs(", 4);
+    assert!(matches!(
+        got.site,
+        CompletionSite::CallArgument {
+            callee: heap_visualizer_filter_dsl::Expr {
+                kind: ExprKind::Identifier(ref name),
+                ..
+            },
+            index: 0,
+        } if name == "abs"
+    ));
+
+    let source = "site.contains(\"";
+    let got = context(source, source.len());
+    assert!(matches!(
+        got.site,
+        CompletionSite::CallArgument { index: 0, .. }
+    ));
+
+    assert!(matches!(
+        context("tag in {\"suspect\"", 17).site,
+        CompletionSite::SetDelimiter
+    ));
+    assert!(matches!(
+        context("tag in {\"a\", ", 13).site,
+        CompletionSite::Operand {
+            kind: OperandKind::SetMember,
+            ..
+        }
+    ));
+    let source = "span overlaps 0x1000..";
+    assert!(matches!(
+        context(source, source.len()).site,
+        CompletionSite::Operand {
+            kind: OperandKind::RangeEnd,
+            ..
+        }
     ));
 }
 

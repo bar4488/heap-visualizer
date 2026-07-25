@@ -1,7 +1,7 @@
 ---
 id: E012
 title: "A complete interaction matrix for filter DSL completion"
-status: open
+status: complete
 updated: 2026-07-25
 ---
 

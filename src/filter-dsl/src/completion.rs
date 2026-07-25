@@ -1,12 +1,22 @@
 use crate::lexer::{lex, Token, TokenKind};
-use crate::{parse, Expr, Span, MAX_SOURCE_BYTES};
+use crate::{parse, BinaryOp, Expr, Span, MAX_SOURCE_BYTES};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OperandKind {
+    Binary(BinaryOp),
+    SetMember,
+    RangeEnd,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CompletionSite {
     Expression,
+    Exact { expression: Expr },
     Operator { expression: Expr },
     Member { receiver: Expr },
-    Value { subject: Expr },
+    Operand { left: Expr, kind: OperandKind },
+    CallArgument { callee: Expr, index: usize },
+    SetDelimiter,
     AfterIs { negated: bool },
 }
 
@@ -29,10 +39,12 @@ pub fn completion_context(source: &str, cursor: usize) -> Option<CompletionConte
     }
 
     if let Some((replacement, prefix)) = string_at_cursor(source, cursor) {
-        return comparison_subject(source, replacement.start).map(|subject| CompletionContext {
+        let site = operand_context(source, replacement.start)
+            .or_else(|| call_argument_context(source, replacement.start));
+        return site.map(|site| CompletionContext {
             replacement,
             prefix,
-            site: CompletionSite::Value { subject },
+            site,
         });
     }
 
@@ -41,7 +53,7 @@ pub fn completion_context(source: &str, cursor: usize) -> Option<CompletionConte
     let before = &source[..replacement.start];
     let trimmed = before.trim_end();
 
-    if trimmed.ends_with('.') {
+    if trimmed.ends_with('.') && !trimmed.ends_with("..") {
         return receiver_before_dot(source, trimmed.len() - 1).map(|receiver| CompletionContext {
             replacement,
             prefix,
@@ -57,12 +69,34 @@ pub fn completion_context(source: &str, cursor: usize) -> Option<CompletionConte
         });
     }
 
-    if let Some(subject) = comparison_subject(source, replacement.start) {
+    if replacement.start == replacement.end {
+        if let Some(site) = set_delimiter_context(source, replacement.start) {
+            return Some(CompletionContext {
+                replacement,
+                prefix,
+                site,
+            });
+        }
+    }
+
+    if let Some(site) = operand_context(source, replacement.start)
+        .or_else(|| call_argument_context(source, replacement.start))
+    {
         return Some(CompletionContext {
             replacement,
             prefix,
-            site: CompletionSite::Value { subject },
+            site,
         });
+    }
+
+    if replacement.end == cursor && !prefix.is_empty() {
+        if let Ok(expression) = parse(source[..cursor].trim_end()) {
+            return Some(CompletionContext {
+                replacement,
+                prefix,
+                site: CompletionSite::Exact { expression },
+            });
+        }
     }
 
     if !trimmed.is_empty() {
@@ -175,7 +209,7 @@ fn receiver_before_dot(source: &str, dot: usize) -> Option<Expr> {
     parse(&source[token.span.start..token.span.end]).ok()
 }
 
-fn comparison_subject(source: &str, value_start: usize) -> Option<Expr> {
+fn operand_context(source: &str, value_start: usize) -> Option<CompletionSite> {
     let tokens = lex(&source[..value_start]).ok()?;
     let meaningful = &tokens[..tokens.len().saturating_sub(1)];
     let op = meaningful.iter().rposition(|token| {
@@ -188,12 +222,44 @@ fn comparison_subject(source: &str, value_start: usize) -> Option<Expr> {
                 | TokenKind::Greater
                 | TokenKind::GreaterEqual
                 | TokenKind::In
+                | TokenKind::Overlaps
+                | TokenKind::Plus
+                | TokenKind::Minus
+                | TokenKind::DotDot
         )
     })?;
-    if meaningful[op + 1..]
-        .iter()
-        .any(|token| !matches!(token.kind, TokenKind::LeftBrace | TokenKind::Comma))
-    {
+    let after = &meaningful[op + 1..];
+    let kind = match meaningful[op].kind {
+        TokenKind::EqualEqual => OperandKind::Binary(BinaryOp::Equal),
+        TokenKind::BangEqual => OperandKind::Binary(BinaryOp::NotEqual),
+        TokenKind::Less => OperandKind::Binary(BinaryOp::Less),
+        TokenKind::LessEqual => OperandKind::Binary(BinaryOp::LessEqual),
+        TokenKind::Greater => OperandKind::Binary(BinaryOp::Greater),
+        TokenKind::GreaterEqual => OperandKind::Binary(BinaryOp::GreaterEqual),
+        TokenKind::Overlaps => OperandKind::Binary(BinaryOp::Overlaps),
+        TokenKind::Plus => OperandKind::Binary(BinaryOp::Add),
+        TokenKind::Minus => OperandKind::Binary(BinaryOp::Subtract),
+        TokenKind::DotDot => OperandKind::RangeEnd,
+        TokenKind::In => {
+            if after
+                .first()
+                .is_some_and(|token| matches!(token.kind, TokenKind::LeftBrace))
+            {
+                if !after.last().is_some_and(|token| {
+                    matches!(token.kind, TokenKind::LeftBrace | TokenKind::Comma)
+                }) {
+                    return None;
+                }
+                OperandKind::SetMember
+            } else if after.is_empty() {
+                OperandKind::Binary(BinaryOp::In)
+            } else {
+                return None;
+            }
+        }
+        _ => return None,
+    };
+    if !matches!(meaningful[op].kind, TokenKind::In) && !after.is_empty() {
         return None;
     }
     let start = meaningful[..op]
@@ -201,10 +267,99 @@ fn comparison_subject(source: &str, value_start: usize) -> Option<Expr> {
         .rposition(|token| {
             matches!(
                 token.kind,
-                TokenKind::AndAnd | TokenKind::OrOr | TokenKind::LeftParen | TokenKind::Comma
+                TokenKind::AndAnd
+                    | TokenKind::OrOr
+                    | TokenKind::EqualEqual
+                    | TokenKind::BangEqual
+                    | TokenKind::Less
+                    | TokenKind::LessEqual
+                    | TokenKind::Greater
+                    | TokenKind::GreaterEqual
+                    | TokenKind::In
+                    | TokenKind::Overlaps
+                    | TokenKind::Plus
+                    | TokenKind::Minus
+                    | TokenKind::DotDot
+                    | TokenKind::LeftParen
+                    | TokenKind::LeftBrace
+                    | TokenKind::Comma
             )
         })
         .map_or(0, |index| meaningful[index].span.end);
     let end = meaningful[op].span.start;
-    parse(source[start..end].trim()).ok()
+    let left_source = source[start..end].trim();
+    let left = parse(left_source).ok()?;
+    Some(CompletionSite::Operand { left, kind })
+}
+
+fn call_argument_context(source: &str, value_start: usize) -> Option<CompletionSite> {
+    let tokens = lex(&source[..value_start]).ok()?;
+    let meaningful = &tokens[..tokens.len().saturating_sub(1)];
+    let mut depth = 0usize;
+    let mut open = None;
+    for (index, token) in meaningful.iter().enumerate().rev() {
+        match token.kind {
+            TokenKind::RightParen => depth += 1,
+            TokenKind::LeftParen if depth > 0 => depth -= 1,
+            TokenKind::LeftParen => {
+                open = Some(index);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let open = open?;
+    if open == 0 {
+        return None;
+    }
+    let callee_end = meaningful[open].span.start;
+    let callee_start = meaningful[..open]
+        .iter()
+        .rposition(|token| {
+            matches!(
+                token.kind,
+                TokenKind::AndAnd
+                    | TokenKind::OrOr
+                    | TokenKind::EqualEqual
+                    | TokenKind::BangEqual
+                    | TokenKind::Less
+                    | TokenKind::LessEqual
+                    | TokenKind::Greater
+                    | TokenKind::GreaterEqual
+                    | TokenKind::Plus
+                    | TokenKind::Minus
+                    | TokenKind::Comma
+                    | TokenKind::LeftParen
+            )
+        })
+        .map_or(0, |index| meaningful[index].span.end);
+    let callee = parse(source[callee_start..callee_end].trim()).ok()?;
+    let index = meaningful[open + 1..]
+        .iter()
+        .filter(|token| matches!(token.kind, TokenKind::Comma))
+        .count();
+    Some(CompletionSite::CallArgument { callee, index })
+}
+
+fn set_delimiter_context(source: &str, cursor: usize) -> Option<CompletionSite> {
+    let tokens = lex(&source[..cursor]).ok()?;
+    let meaningful = &tokens[..tokens.len().saturating_sub(1)];
+    let open = meaningful
+        .iter()
+        .rposition(|token| matches!(token.kind, TokenKind::LeftBrace))?;
+    if meaningful[open + 1..]
+        .iter()
+        .any(|token| matches!(token.kind, TokenKind::RightBrace))
+    {
+        return None;
+    }
+    let last = meaningful.last()?;
+    if matches!(
+        last.kind,
+        TokenKind::String(_) | TokenKind::Integer(_) | TokenKind::True | TokenKind::False
+    ) {
+        Some(CompletionSite::SetDelimiter)
+    } else {
+        None
+    }
 }
