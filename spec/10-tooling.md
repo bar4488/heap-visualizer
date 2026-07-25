@@ -30,10 +30,17 @@ counts, leaks, peak live, address span) prints to stderr.
 
 ## TOOL-002: Build
 
-- `build.sh` — the whole build: `cargo build --release --target
-  wasm32-unknown-unknown` and copy the `.wasm` into `web/`. There is no JS
-  build step at all — `web/` is served as-is (an intentional
-  zero-toolchain stance: no bundler, no npm).
+- `build.sh` — the whole build. It produces `dist/`, the served tree: the wasm
+  from `cargo build --release --target wasm32-unknown-unknown`, the web layer,
+  `index.html`/`style.css`, and a generated demo trace. `./build.sh web` skips
+  the cargo build.
+- **Hand-written files live under `src/`, generated files under `dist/`, and
+  nothing crosses.** `dist/` is not in version control; a clean checkout is not
+  servable until `build.sh` has run.
+- The web layer currently has no compile step — `build.sh` copies it — and the
+  zero-toolchain stance (no bundler, no npm) still holds. Both change in
+  [T003](../docs/tickets/T003-typescript-at-the-contracts.md); see
+  [D004](../docs/decisions/D004-typescript-is-the-language-for-web.md).
 - The release profile is tuned for the shipped artifact: fat LTO, one
   codegen unit, `panic = "abort"`, stripped.
 - `build-docker.sh` / `build-wasm-docker.sh` — build (and export) a Rust
@@ -44,7 +51,7 @@ counts, leaks, peak live, address span) prints to stderr.
 
 ## TOOL-003: Tests
 
-`cargo test` in `core/` runs the engine test suite **natively** (no wasm, no
+`cargo test` in `src/core/` runs the engine test suite **natively** (no wasm, no
 browser) — the reason the crate is also an `rlib` and the C-ABI layer stays
 thin. Coverage tracks the specs: parsing and chunk-boundary carry, warning
 flagging, live-set seeks (including snapshot seeks verified against fresh
@@ -54,15 +61,16 @@ show-all layout, tagging (range, by-free, filter-scoped), filter semantics
 label placement, move links, timeline tag lanes, and render smoke tests over
 the raw pixel buffer.
 
-`node --test 'web/**/*.test.js'` runs the JS suite. It needs no npm packages
-and no browser: `web/test/dom-stub.js` is a ~200-line stand-in implementing
-only the DOM surface `web/` actually touches. Coverage is deliberately narrow
+`node --test 'src/web/**/*.test.js'` runs the JS suite, against the sources
+rather than `dist/`. It needs no npm packages and no browser:
+`src/web/test/dom-stub.js` is a ~200-line stand-in implementing only the DOM
+surface the web layer actually touches. Coverage is deliberately narrow
 and aimed at what a refactor breaks silently:
 
-- `web/fmt.js` in full, `clampView` included — it is the one function both
+- `fmt.js` in full, `clampView` included — it is the one function both
   threads run on the same input, so the main thread's optimistic local zoom
   agreeing with the worker's authoritative clamp rests on it;
-- `normAddr` (`web/heap/addr.js`);
+- `normAddr` (`heap/addr.js`), and the panel table (`heap/panels.js`);
 - the **session round-trip** — `buildSession → applySession → buildSession`
   must be a fixed point, plus drawer docking, address-range validation and
   playhead restore;

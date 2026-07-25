@@ -1,5 +1,4 @@
-core/target/
-web/heap_visualizer_core.wasm
+dist/
+src/core/target/
 images/*.tar
-web/demo.heapl
 *.heapl

@@ -14,7 +14,7 @@ updated in the same change.
   style — and is called out as such.
 - Wire-format and semantic rules use RFC-style language (**must**, **should**,
   **may**). Everything else is descriptive.
-- File/symbol references (e.g. `core/src/state.rs`, `hp_seek_seq`) are
+- File/symbol references (e.g. `src/core/src/state.rs`, `hp_seek_seq`) are
   navigation aids, not part of the contract.
 
 ## Requirement identifiers
@@ -39,14 +39,14 @@ Finding everything that touches one: `rg 'MAP-003' .`
 | Spec | Prefix | Covers | Primary code |
 |------|--------|--------|--------------|
 | [01-overview](01-overview.md) | — | Goals, the three coordinated views, terminology, repo layout | — |
-| [02-trace-format](02-trace-format.md) | `TRACE-` | The `.heapl` JSONL wire format: records, ordering, validity | `core/src/parse.rs`, `core/src/json.rs` |
-| [03-core-model](03-core-model.md) | `MODEL-` | Columnar event store, live set, time travel, warnings | `core/src/store.rs`, `core/src/parse.rs`, `core/src/state.rs` |
-| [04-address-map](04-address-map.md) | `MAP-` | The address-line: row layout, collapsing, coloring, picking | `core/src/state.rs`, `core/src/render.rs` |
-| [05-timelines](05-timelines.md) | `TL-` | The temporal and sequential strips: binning, zoom, tag lanes | `core/src/timeline.rs`, `web/main.js` |
-| [06-playback-navigation](06-playback-navigation.md) | `NAV-` | Playhead, seeking, playback, stepping, jump/search, scroll anchoring | `web/worker.js`, `web/main.js` |
-| [07-analysis](07-analysis.md) | `ANL-` | Tags, names, marks, filter, crop, selection, `.heapa` files, persistence | `web/main.js`, `core/src/lib.rs` |
-| [08-architecture](08-architecture.md) | `ARCH-` | The three-layer runtime: WASM core, worker, DOM; ABI and protocol | `core/src/lib.rs`, `web/worker.js` |
-| [09-ui-shell](09-ui-shell.md) | `SHELL-` | Toolbar, floating/dockable panels, events panel, allocation windows, shortcuts | `web/main.js`, `web/index.html` |
-| [10-tooling](10-tooling.md) | `TOOL-` | Trace generator, build pipeline, tests | `gen.py`, `build*.sh`, `core` tests |
+| [02-trace-format](02-trace-format.md) | `TRACE-` | The `.heapl` JSONL wire format: records, ordering, validity | `src/core/src/parse.rs`, `src/core/src/json.rs` |
+| [03-core-model](03-core-model.md) | `MODEL-` | Columnar event store, live set, time travel, warnings | `src/core/src/store.rs`, `src/core/src/parse.rs`, `src/core/src/state.rs` |
+| [04-address-map](04-address-map.md) | `MAP-` | The address-line: row layout, collapsing, coloring, picking | `src/core/src/state.rs`, `src/core/src/render.rs` |
+| [05-timelines](05-timelines.md) | `TL-` | The temporal and sequential strips: binning, zoom, tag lanes | `src/core/src/timeline.rs`, `src/web/main.js` |
+| [06-playback-navigation](06-playback-navigation.md) | `NAV-` | Playhead, seeking, playback, stepping, jump/search, scroll anchoring | `src/web/worker.js`, `src/web/main.js` |
+| [07-analysis](07-analysis.md) | `ANL-` | Tags, names, marks, filter, crop, selection, `.heapa` files, persistence | `src/web/main.js`, `src/core/src/lib.rs` |
+| [08-architecture](08-architecture.md) | `ARCH-` | The three-layer runtime: WASM core, worker, DOM; ABI and protocol | `src/core/src/lib.rs`, `src/web/worker.js` |
+| [09-ui-shell](09-ui-shell.md) | `SHELL-` | Toolbar, floating/dockable panels, events panel, allocation windows, shortcuts | `src/web/main.js`, `src/web/index.html` |
+| [10-tooling](10-tooling.md) | `TOOL-` | Trace generator, build pipeline, tests | `gen.py`, `build*.sh`, `src/core` tests |
 
 Reading order for newcomers: 01 → 02 → 03 → 04 → 05, then the rest as needed.

@@ -91,6 +91,12 @@ still restores, and the top level holds exactly the four expected keys.
 
 ## Handoff
 
+**Paths in this ticket predate [T007](T007-src-dist-layout.md)**, which moved
+the web layer to `src/web/` and the served tree to `dist/`. Read `web/x.js` as
+`src/web/x.js`, and the test command as
+`node --test 'src/web/**/*.test.js'`. The work itself is unaffected.
+
+
 The code is done and both suites pass. The ticket stays `doing` because D001
 says an agent does not report a web change as verified on unit tests alone, and
 the one remaining done-when item is a person's.

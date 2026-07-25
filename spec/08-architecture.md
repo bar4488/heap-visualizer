@@ -90,16 +90,16 @@ is a message round-trip.
 
 It is split on one seam: code whose meaning depends on heap traces, and code
 whose meaning does not. **The directory a file sits in states who owns it**,
-and "does the shell know about heaps" is a question `grep -r heap web/shell/`
+and "does the shell know about heaps" is a question `grep -r heap src/web/shell/`
 answers.
 
 | | |
 |---|---|
-| `web/shell/` | `dom.js` (`$`, `setHtml`, `delegate`, device↔CSS px), `panels.js` (draggable windows, z-stack), `drawers.js` (dockable left/right drawers), `tooltip.js`. **No domain identifiers.** |
-| `web/heap/` | `analysis.js` (tags, names, colors, marks, `.heapa`), `events-panel.js`, `addr.js` |
-| `web/session.js` | The boundary: serializes shell state (window/drawer geometry) *and* heap state (view, crop, filters, playhead) into the one per-trace session blob |
-| `web/main.js` | Trace/worker/toolbar wiring and the three coordinated views |
-| `web/fmt.js`, `web/rpc.js` | Shared with the worker; the request/response layer |
+| `src/web/shell/` | `dom.js` (`$`, `setHtml`, `delegate`, device↔CSS px), `panels.js` (draggable windows, z-stack), `drawers.js` (dockable left/right drawers), `tooltip.js`. **No domain identifiers.** |
+| `src/web/heap/` | `analysis.js` (tags, names, colors, marks, `.heapa`), `panels.js` (the panel table), `events-panel.js`, `addr.js` |
+| `src/web/session.js` | The boundary: serializes shell state (window/drawer geometry) *and* heap state (view, crop, filters, playhead) into the one per-trace session blob |
+| `src/web/main.js` | Trace/worker/toolbar wiring and the three coordinated views |
+| `src/web/fmt.js`, `src/web/rpc.js` | Shared with the worker; the request/response layer |
 
 Two rules keep the seam from eroding. **No module imports the shared `UI`
 object** — each receives what it needs through an `init*(deps)` call, so the

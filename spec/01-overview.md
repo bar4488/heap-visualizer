@@ -66,12 +66,12 @@ either strip seeks all three views. See [05-timelines](05-timelines.md).
 Three layers, one direction of authority (details in
 [08-architecture](08-architecture.md)):
 
-- **`core/` — Rust WASM engine.** Owns the parsed trace, the playhead, layout,
+- **`src/core/` — Rust WASM engine.** Owns the parsed trace, the playhead, layout,
   and all pixel generation. Plain C ABI, no wasm-bindgen, no JS framework.
-- **`web/worker.js` — Web Worker.** Owns the WASM instance and the three
+- **`src/web/worker.js` — Web Worker.** Owns the WASM instance and the three
   `OffscreenCanvas`es; runs the frame loop and playback clock. The single
   writer of canvas pixels.
-- **`web/main.js` + `index.html` — main thread.** DOM chrome, input, overlays,
+- **`src/web/main.js` + `index.html` — main thread.** DOM chrome, input, overlays,
   panels, persistence. Talks to the worker only via messages.
 
 Supporting tools: `gen.py` (deterministic synthetic trace generator) and the

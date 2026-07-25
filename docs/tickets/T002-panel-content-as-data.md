@@ -91,6 +91,12 @@ for every file.
 
 ## Handoff
 
+**Paths in this ticket predate [T007](T007-src-dist-layout.md)**, which moved
+the web layer to `src/web/` and the served tree to `dist/`. Read `web/x.js` as
+`src/web/x.js`, and the test command as
+`node --test 'src/web/**/*.test.js'`. The work itself is unaffected.
+
+
 The code is done and both suites pass; the remaining done-when item is a
 person's, per D001.
 

@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Dev server: http.server with caching disabled, so edited files are always refetched."""
+"""Dev server over dist/: http.server with caching disabled, so a rebuilt file is always refetched.
+
+dist/ is a build product — run ./build.sh (or ./build.sh web) before serving.
+"""
 import functools
 import http.server
 import os
 import sys
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8630
-WEB = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'web')
+DIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dist')
 
 
 class NoCacheHandler(http.server.SimpleHTTPRequestHandler):
@@ -17,6 +20,6 @@ class NoCacheHandler(http.server.SimpleHTTPRequestHandler):
 
 if __name__ == '__main__':
     http.server.test(
-        HandlerClass=functools.partial(NoCacheHandler, directory=WEB),
+        HandlerClass=functools.partial(NoCacheHandler, directory=DIST),
         port=PORT,
     )

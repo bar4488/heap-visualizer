@@ -10,9 +10,10 @@ docker run --rm \
   --volume "$PWD:/work" \
   "$image" \
   cargo build --release --target wasm32-unknown-unknown \
-    --manifest-path core/Cargo.toml
+    --manifest-path src/core/Cargo.toml
 
-cp core/target/wasm32-unknown-unknown/release/heap_visualizer_core.wasm \
-  web/heap_visualizer_core.wasm
+mkdir -p dist
+cp src/core/target/wasm32-unknown-unknown/release/heap_visualizer_core.wasm \
+  dist/heap_visualizer_core.wasm
 
-ls -lh web/heap_visualizer_core.wasm
+ls -lh dist/heap_visualizer_core.wasm

@@ -21,22 +21,24 @@ client-side.
 
 ## State
 
-**Rust core (`core/`, ~4.9k lines) — healthy.** Clean module boundaries, 33
+**Rust core (`src/core/`, ~4.9k lines) — healthy.** Clean module boundaries, 33
 native tests asserting real invariants: snapshot seek ≡ forward replay, pick
 prefers the newest overlap, anchor stability across reflow. Every performance
 and soundness finding from the 2026-07-24 review is fixed.
 
-**Web layer (`web/`, ~3.2k lines) — split on the shell/domain seam, no other
-internal structure yet.** `main.js` is down from 2,979 lines in one flat scope
-to 1,707 lines of trace/worker/toolbar wiring plus the three coordinated views.
-`web/shell/` (433 lines) is domain-independent and stays that way by check:
-`grep -ric heap web/shell/` reports 0 for every file. `web/heap/` and the
-`web/session.js` boundary module hold the rest.
+**Web layer (`src/web/`, ~3.2k lines) — split on the shell/domain seam, no
+other internal structure yet.** `main.js` is down from 2,979 lines in one flat
+scope to ~1,700 lines of trace/worker/toolbar wiring plus the three coordinated
+views.
+`src/web/shell/` (433 lines) is domain-independent and stays that way by
+check: `grep -ric heap src/web/shell/` reports 0 for every file.
+`src/web/heap/` — analysis, the panel table, the events panel — and the
+`src/web/session.js` boundary module hold the rest.
 
 **Verification — two suites and a person.** `cargo test` (33) covers the
-engine; `node --test 'web/**/*.test.js'` (39) covers the JS pure functions and
-both persisted round-trips, with no npm and no browser. Rendering and pointer
-interaction are hand-verified, per
+engine; `node --test 'src/web/**/*.test.js'` (44) covers the JS pure functions,
+the panel table, and both persisted round-trips, with no npm and no browser.
+Rendering and pointer interaction are hand-verified, per
 [D001](decisions/D001-web-changes-are-hand-smoke-tested.md).
 
 **Docs — just restructured.** This repository adopted the protocol on
@@ -46,6 +48,11 @@ interaction are hand-verified, per
 ([T005](tickets/T005-spec-requirement-ids.md)) — `MAP-003`, `ANL-008` — and
 every live citation names one. Section numbers survive only in the
 explorations and in closed tickets, which are dated records.
+
+**Layout — `src/` in, `dist/` out.** Everything hand-written lives under
+`src/`, everything generated under `dist/`, and `dist/` is what `./serve.py`
+serves. A clean checkout is not servable until `./build.sh` has run; that was
+already true of the wasm and is now true of the whole tree.
 
 ## Next
 
@@ -84,4 +91,6 @@ must stay blocked — see [D002](decisions/D002-shell-split-before-host.md).
   the heap-owned fields in the persisted session
 - [T002](tickets/T002-panel-content-as-data.md) — declare panel content as data
   instead of a hand-maintained id list
+- [T007](tickets/T007-src-dist-layout.md) — sources under `src/`, build output
+  under `dist/`
 <!-- generated:end -->

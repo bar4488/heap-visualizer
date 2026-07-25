@@ -1,7 +1,7 @@
 ---
 id: T007
 title: Sources under src/, build output under dist/
-status: todo
+status: doing
 updated: 2026-07-25
 ---
 
@@ -46,19 +46,19 @@ Grounded against the tree on 2026-07-25:
 
 ## Done when
 
-- [ ] `src/core/` is the Rust crate and `src/web/` is the web layer's sources
+- [x] `src/core/` is the Rust crate and `src/web/` is the web layer's sources
       (`index.html`, `style.css`, the JS, `test/`); no `core/` or `web/` at the
       repository root.
-- [ ] `./build.sh` produces a complete `dist/`: the wasm, the JS, `index.html`,
+- [x] `./build.sh` produces a complete `dist/`: the wasm, the JS, `index.html`,
       `style.css`, and a generated `demo.heapl`. `./serve.py` serves `dist/`
       and the app loads.
-- [ ] `./build.sh web` skips the cargo build and refreshes only the web layer.
-- [ ] `.gitignore` names `dist/` and `src/core/target/`, and no build product
+- [x] `./build.sh web` skips the cargo build and refreshes only the web layer.
+- [x] `.gitignore` names `dist/` and `src/core/target/`, and no build product
       is ignored inside `src/`.
-- [ ] `cargo test --manifest-path src/core/Cargo.toml` passes (33) and
+- [x] `cargo test --manifest-path src/core/Cargo.toml` passes (33) and
       `node --test 'src/web/**/*.test.js'` passes (44), both from a clean
       checkout with no install step.
-- [ ] `README.md`, `docs/context.md`, and the spec's paths
+- [x] `README.md`, `docs/context.md`, and the spec's paths
       ([ARCH-005](../../spec/08-architecture.md#arch-005-module-layout),
       [TOOL-001](../../spec/10-tooling.md#tool-001-genpy--synthetic-trace-generator),
       [TOOL-002](../../spec/10-tooling.md#tool-002-build),
@@ -66,6 +66,7 @@ Grounded against the tree on 2026-07-25:
       in `spec/README.md`) name the new locations.
 - [ ] A person confirms the app still loads, renders, and interacts from
       `dist/`, per [D001](../decisions/D001-web-changes-are-hand-smoke-tested.md).
+      **This is the only item outstanding** — see Handoff.
 
 ## Non-goals
 
@@ -75,3 +76,63 @@ Grounded against the tree on 2026-07-25:
   questions — those arrive when the loop actually chafes.
 - Updating closed explorations that name `core/` and `web/` paths. They are
   dated records.
+
+## Work log
+
+The move itself was `git mv` twice; every relative URL in `index.html` and
+`main.js` survived untouched, because `dist/` mirrors what `web/` looked like
+(`main.js`, `shell/`, `heap/`, wasm and demo at the root). That was the reason
+for choosing a mirrored output layout over an emitted `js/` subdirectory: the
+worker URL in `main.js` resolves against the *document*, not the module, so
+`dist/js/main.js` would have silently looked for `dist/worker.js`.
+
+`build.sh` clears `dist/shell` and `dist/heap` before copying rather than
+merging into them. A module whose source file is deleted would otherwise keep
+being served, which is the classic stale-output failure and worth spending two
+lines to prevent.
+
+`demo.heapl` is now generated into `dist/` rather than living in the tree —
+`gen.py --seed 1` is deterministic, so the bundled demo is reproducible from a
+seed instead of from a 6.7 MB file someone happened to have. It is regenerated
+only when missing.
+
+The JS suite still runs against `src/web/`, not against `dist/`. Testing the
+sources keeps the "no install step" property and keeps a failure pointing at a
+file you can edit.
+
+Paths in the still-open [T001](T001-namespace-heap-session-state.md) and
+[T002](T002-panel-content-as-data.md) were left as written, with one note in
+each saying how to translate them. Closed artifacts were not touched at all.
+
+## Result
+
+```
+src/core/   the Rust crate            dist/   the served tree, generated
+src/web/    index.html, style.css,            wasm, js, index.html,
+            the JS, test/                     style.css, demo.heapl
+```
+
+`./build.sh` builds all of `dist/`; `./build.sh web` skips cargo and takes
+about a second. `./serve.py` serves `dist/`. `.gitignore` is `dist/` and
+`src/core/target/` — no build product is ignored inside `src/` any more.
+
+From a clean checkout: `cargo test --manifest-path src/core/Cargo.toml` is 33,
+`node --test 'src/web/**/*.test.js'` is 44, neither needs an install step. A
+freshly built `dist/` serves 200s for `/`, `main.js`, `worker.js`,
+`shell/panels.js`, `heap/panels.js`, the wasm, `style.css`, and `demo.heapl`.
+
+## Handoff
+
+The code is done, both suites pass, and the served tree answers every request
+it should. The remaining done-when item is a person's, per D001 — an agent
+checking HTTP status codes is not the same as the app rendering.
+
+```sh
+./build.sh && ./serve.py     # http://localhost:8630?trace=demo.heapl
+```
+
+What to look at: the map renders, the two timelines render, stepping and
+playback work, panels open and dock, and the demo trace loads from the toolbar
+button. Nothing about the app should have changed — that is the whole claim.
+
+Then check the last box and set `status: done`.

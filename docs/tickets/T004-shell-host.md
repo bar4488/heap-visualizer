@@ -9,7 +9,7 @@ updated: 2026-07-25
 
 ## Outcome
 
-`web/shell/` hosts more than one analysis domain: registries for document types,
+`src/web/shell/` hosts more than one analysis domain: registries for document types,
 views, panels and commands; a document model whose domain state the shell does
 not interpret; selection and navigation carried without being read; workspace
 persistence separate from per-domain state.
@@ -36,7 +36,7 @@ questions in explorations, and split.
 ## Done when
 
 - [ ] A second domain runs in the same shell as heap, with no heap identifier in
-      `web/shell/`.
+      `src/web/shell/`.
 - [ ] Workspace state persists independently of either domain's state.
 
 ## Non-goals
