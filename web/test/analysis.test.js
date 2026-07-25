@@ -4,7 +4,7 @@
 //
 // Note on scope: applyMarks rebuilds state from the fields it knows and does
 // *not* carry unknown fields through. That is current behavior and what these
-// tests pin; specs/07-analysis makes no forward-compatibility promise.
+// tests pin; spec/07-analysis makes no forward-compatibility promise.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';

@@ -14,7 +14,7 @@ sequence every time, so a regression has a consistent place to show up.
 ./build.sh && ./serve.py
 ```
 
-Open `http://localhost:8000/?trace=demo.heapl`. Use a fresh profile or clear
+Open `http://localhost:8630/?trace=demo.heapl`. Use a fresh profile or clear
 `localStorage` first when a step below depends on starting clean:
 
 ```js

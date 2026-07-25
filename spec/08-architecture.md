@@ -109,7 +109,7 @@ path that can end in a dock receives the dock API as an argument.
 
 The destination this serves is a domain-independent shell hosting several
 analysis domains, heap being the first; see
-[docs/findings/2026-07-24-2/web-architecture-direction](../docs/findings/2026-07-24-2/web-architecture-direction.md).
+[docs/explorations/E007-web-architecture-direction](../docs/explorations/E007-web-architecture-direction.md).
 
 ## 8.4 Protocol conventions
 

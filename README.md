@@ -71,15 +71,21 @@ Drop any `.heapl` file onto the page to load it.
 ## Tests
 
 ```sh
-cargo test --manifest-path core/Cargo.toml
+cargo test --manifest-path core/Cargo.toml   # engine, native, no wasm
+node --test 'web/**/*.test.js'               # JS, no npm, no browser
 ```
+
+Rendering and pointer interaction are hand-verified against
+[docs/smoke-checklist.md](docs/smoke-checklist.md).
 
 ## Layout
 
 - `core/` — Rust WASM engine (JSONL parser, columnar store, snapshot seeks,
   address-line raster, timeline binning). Plain C ABI, no wasm-bindgen.
 - `web/` — static viewer: `worker.js` owns the WASM + canvases, `main.js` is
-  DOM chrome and input.
+  DOM chrome and input, `shell/` is the domain-independent window/drawer layer
+  and `heap/` is everything that knows what an allocation is.
 - `gen.py` — deterministic synthetic trace generator.
-- `specs/` — the specification, split into modules (start at
-  [specs/README.md](specs/README.md)).
+- `spec/` — the specification, split into modules (start at
+  [spec/README.md](spec/README.md)).
+- `docs/` — how work is done here. Start at [docs/now.md](docs/now.md).

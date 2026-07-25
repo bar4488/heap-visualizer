@@ -1,3 +1,10 @@
+---
+id: E005
+title: "Review 2026-07-24: web layer structure"
+status: settled
+updated: 2026-07-24
+---
+
 # 03 — Web layer structure
 
 Nothing here is broken. Every finding in this file is future cost: the front end
@@ -35,7 +42,7 @@ F11 respectively, and the `setHtml`/event-delegation work from F12 removed
 some of the list-rebuild churn this entry also names. The remaining split
 (`panels.js`, `events-panel.js`, `analysis.js`, `session.js`, `timeline.js`,
 `addr-view.js`) was deliberately left undone: see the root
-[README's "F10: why it's still open"](README.md#f10-why-its-still-open) for
+[README's "F10: why it's still open"](E002-review-2026-07-24.md#f10-why-its-still-open) for
 the reasoning (call-site fan-out + no runtime verification available on the
 fixing side). `main.js` is smaller than it was but still one flat scope.
 

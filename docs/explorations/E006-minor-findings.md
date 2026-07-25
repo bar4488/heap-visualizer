@@ -1,3 +1,10 @@
+---
+id: E006
+title: "Review 2026-07-24: minor findings"
+status: settled
+updated: 2026-07-24
+---
+
 # 04 — Minor
 
 Small, self-contained items. Neither affects correctness of output today.

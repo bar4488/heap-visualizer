@@ -1,6 +1,13 @@
+---
+id: E003
+title: "Review 2026-07-24: the render hot path, measured"
+status: settled
+updated: 2026-07-24
+---
+
 # 01 — The render hot path
 
-[08-architecture §8.1](../../../specs/08-architecture.md) states the rule this
+[08-architecture §8.1](../../spec/08-architecture.md) states the rule this
 section is about:
 
 > **Nothing per frame may be O(live set).** Rendering enters the
@@ -275,7 +282,7 @@ log n) cost the strip was supposed to have.
 **Where** `core/src/timeline.rs:119`.
 
 **What** The green/red density bars are computed from prefix sums — O(width ·
-log n), exactly as [05-timelines](../../../specs/05-timelines.md) describes. The
+log n), exactly as [05-timelines](../../spec/05-timelines.md) describes. The
 tag lanes underneath are not: they iterate every event in every column's bin.
 
 ```rust

@@ -1,3 +1,10 @@
+---
+id: E004
+title: "Review 2026-07-24: engine soundness"
+status: settled
+updated: 2026-07-24
+---
+
 # 02 — Engine soundness and boundary design
 
 Three findings in the WASM core that are not performance: one is undefined
@@ -96,7 +103,7 @@ neither is the contract:
   `cfg.crop`, `cfg.overrides`, `cfg.tag_colors`, `cfg.color_mode`,
   `cfg.overlap_mode` or `cfg.ghosts`.
 - The worker discards the whole WASM instance per load, which resets
-  everything. [08-architecture §8.2](../../../specs/08-architecture.md)
+  everything. [08-architecture §8.2](../../spec/08-architecture.md)
   documents this, correctly, as a *memory* measure (Rust never returns pages to
   the browser).
 
@@ -139,10 +146,10 @@ ever raised past 400 or profiling shows it matters again.
 **Where** `core/src/lib.rs:805` (`hp_labels_json`), consumed at
 `web/worker.js:191`.
 
-**What** [08-architecture §8.1](../../../specs/08-architecture.md) establishes
+**What** [08-architecture §8.1](../../spec/08-architecture.md) establishes
 JSON strings as the uniform shape for structured results, which is a reasonable
 call for metadata, warnings and pick payloads. The label list, however, crosses
-**every frame**: built with `format!` in Rust (see [F5](01-render-hot-path.md#f5)),
+**every frame**: built with `format!` in Rust (see [F5](E003-render-hot-path.md#f5)),
 serialized, then `JSON.parse`d in the worker, to produce at most a few hundred
 records of four numeric fields and a short string.
 

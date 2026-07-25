@@ -122,7 +122,7 @@ pub extern "C" fn hp_parse_begin() {
     // color overrides (keyed by event index, which now means a different
     // allocation), tag colors or view modes. The engine is correct on its
     // own here — the worker's per-load re-instantiation is purely a memory
-    // measure (see specs/08-architecture §8.2), and native users (tests)
+    // measure (see spec/08-architecture §8.2), and native users (tests)
     // get the same clean slate.
     a.cfg = Cfg::new();
 }
