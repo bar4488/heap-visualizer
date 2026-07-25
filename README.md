@@ -75,8 +75,8 @@ cargo test --manifest-path core/Cargo.toml   # engine, native, no wasm
 node --test 'web/**/*.test.js'               # JS, no npm, no browser
 ```
 
-Rendering and pointer interaction are hand-verified against
-[docs/smoke-checklist.md](docs/smoke-checklist.md).
+Rendering and pointer interaction are hand-verified against the demo trace;
+see [docs/decisions/D001](docs/decisions/D001-web-changes-are-hand-smoke-tested.md).
 
 ## Layout
 

@@ -35,8 +35,8 @@ to 1,707 lines of trace/worker/toolbar wiring plus the three coordinated views.
 **Verification — two suites and a person.** `cargo test` (33) covers the
 engine; `node --test 'web/**/*.test.js'` (39) covers the JS pure functions and
 both persisted round-trips, with no npm and no browser. Rendering and pointer
-interaction are hand-verified against [smoke-checklist.md](smoke-checklist.md),
-per [D001](decisions/D001-web-changes-are-hand-smoke-tested.md).
+interaction are hand-verified, per
+[D001](decisions/D001-web-changes-are-hand-smoke-tested.md).
 
 **Docs — just restructured.** This repository adopted the protocol on
 2026-07-25. The reviews under the old `docs/findings/` are now

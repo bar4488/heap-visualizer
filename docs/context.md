@@ -50,11 +50,10 @@ input), `normAddr`, the session round-trip, and the `.heapa` round-trip.
 ## Verify a web change
 
 Rendering, pointer interaction, and the real worker round trip are **not**
-covered by either suite. They are hand-verified against
-[docs/smoke-checklist.md](smoke-checklist.md), by a person, per
+covered by either suite. They are hand-verified by a person, per
 [D001](decisions/D001-web-changes-are-hand-smoke-tested.md). An agent runs the
-two suites and `./build.sh`, then hands back which checklist steps the change
-touches.
+two suites and `./build.sh`, then hands back a plain-language list of what the
+change touches for a person to check against the demo trace.
 
 ## Layout
 

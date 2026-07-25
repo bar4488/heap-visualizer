@@ -9,9 +9,10 @@ updated: 2026-07-25
 ## Decision
 
 A commit carries one finding's fix, or one refactor slice, and nothing else. The
-smoke checklist ([D001](D001-web-changes-are-hand-smoke-tested.md)) runs before
-the next slice starts. If a slice turns out to need more than a lift-and-shift,
-it stops and splits rather than reaching for a redesign mid-move.
+change is hand-verified ([D001](D001-web-changes-are-hand-smoke-tested.md))
+before the next slice starts. If a slice turns out to need more than a
+lift-and-shift, it stops and splits rather than reaching for a redesign
+mid-move.
 
 ## Why
 

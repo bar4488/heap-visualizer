@@ -12,7 +12,6 @@ not edit it locally. This file is the project-specific part.
 |---|---|
 | [now.md](now.md) | Where the project stands, and the queue. The one entry point. |
 | [context.md](context.md) | How to build, run, test, and verify. |
-| [smoke-checklist.md](smoke-checklist.md) | The fixed hand-verification script for `web/`. |
 | [tickets/](tickets/) | Units of work. A ticket owns its own status. |
 | [decisions/](decisions/) | Rationale that must outlive the ticket that produced it. |
 | [explorations/](explorations/) | Reviews, proposals, open questions. Binding on nothing. |
@@ -27,10 +26,10 @@ is not. `spec/10-tooling.md` §10.3 is an example of a stance being reversed in
 place, and [T003](tickets/T003-typescript-at-the-contracts.md) will do it again
 to §10.2.
 
-**A web change is not verified by an agent.** `cargo test`, `node --test`, and
-`./build.sh` are what an agent can check. Rendering and pointer interaction go
-through [smoke-checklist.md](smoke-checklist.md), run by a person — see
-[D001](decisions/D001-web-changes-are-hand-smoke-tested.md).
+**A web change is not verified by an agent.** How to run what an agent can
+check, and what a person needs to check by hand instead, is in
+[context.md](context.md#verify-a-web-change) — see
+[D001](decisions/D001-web-changes-are-hand-smoke-tested.md) for why.
 
 **One finding or one refactor slice per commit** — see
 [D003](decisions/D003-one-slice-per-commit.md). With no automated coverage of

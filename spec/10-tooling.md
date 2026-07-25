@@ -76,6 +76,5 @@ importable; it stopped holding once the shell/domain split made the persisted
 shapes testable in isolation, and the split itself needed something to lean on.
 
 Rendering, pointer interaction and the real worker round trip are still
-verified by hand against the demo trace, to a fixed script:
-[docs/smoke-checklist.md](../docs/smoke-checklist.md).
+verified by hand against the demo trace; there is no fixed script.
 `window.__heap_visualizer` exposes UI state for console poking.
