@@ -72,6 +72,6 @@ two of them.
 
 <!-- generated:begin -->
 ## Doing
-
-Nothing in flight.
+- [T001](tickets/T001-namespace-heap-session-state.md) — namespace and version
+  the heap-owned fields in the persisted session
 <!-- generated:end -->

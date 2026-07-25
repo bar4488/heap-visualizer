@@ -118,35 +118,41 @@ initSession(makeDeps(ui, posted));
 test('buildSession captures every field the format promises', () => {
   const s = buildSession();
   assert.equal(s.heapVisualizerSession, 1);
-  assert.equal(s.rowBytes, '0x1000');
-  assert.equal(s.collapseMin, '4');
-  assert.equal(s.rowPx, '3');
-  assert.equal(s.colorMode, '2');
-  assert.equal(s.allocSizeFormat, 'hex');
-  assert.equal(s.showAll, true);
-  assert.equal(s.evFiltered, true);
-  assert.equal(s.sizeLabels, false);
-  assert.equal(s.addrLabels, true);
-  assert.deepEqual(s.xview, { zoom: 2.5, pan: 0.25 });
-  assert.deepEqual(s.crop, { lo: 100, hi: 900 });
-  assert.equal(s.playhead, 4321);
-  assert.deepEqual(s.filter.sites, [true, false, true]);
-  assert.deepEqual(s.filter.thrs, [false, true]);
-  assert.equal(s.filter.fmode, '2');
-  assert.equal(s.filter.sizeMin, '1k');
-  assert.equal(s.filter.sizeMax, '1m');
-  assert.deepEqual(s.filter.addrRanges, [{ lo: '0x1000', hi: '0x2000' }]);
+  const h = s.heap;
+  assert.equal(h.version, 1);
+  assert.equal(h.rowBytes, '0x1000');
+  assert.equal(h.collapseMin, '4');
+  assert.equal(h.rowPx, '3');
+  assert.equal(h.colorMode, '2');
+  assert.equal(h.allocSizeFormat, 'hex');
+  assert.equal(h.showAll, true);
+  assert.equal(h.evFiltered, true);
+  assert.equal(h.sizeLabels, false);
+  assert.equal(h.addrLabels, true);
+  assert.deepEqual(h.xview, { zoom: 2.5, pan: 0.25 });
+  assert.deepEqual(h.crop, { lo: 100, hi: 900 });
+  assert.equal(h.playhead, 4321);
+  assert.deepEqual(h.filter.sites, [true, false, true]);
+  assert.deepEqual(h.filter.thrs, [false, true]);
+  assert.equal(h.filter.fmode, '2');
+  assert.equal(h.filter.sizeMin, '1k');
+  assert.equal(h.filter.sizeMax, '1m');
+  assert.deepEqual(h.filter.addrRanges, [{ lo: '0x1000', hi: '0x2000' }]);
   assert.deepEqual(Object.keys(s.windows).sort(), [...PANEL_IDS].sort());
   assert.equal(s.windows['warnings-panel'].hidden, true);
   assert.deepEqual(s.windows['play-panel'],
     { hidden: false, left: '12px', top: '34px', right: 'auto', bottom: 'auto' });
 });
 
-test('buildSession -> applySession -> buildSession is a fixed point', () => {
-  const before = buildSession();
+test('the top level is shell state only — no heap concept escapes the heap key', () => {
+  const s = buildSession();
+  assert.deepEqual(Object.keys(s).sort(),
+    ['drawers', 'heap', 'heapVisualizerSession', 'windows']);
+});
 
-  // scramble everything the session owns, so a field applySession forgets to
-  // restore shows up as a difference rather than passing by luck
+// scrambles everything the session owns, so a field applySession forgets to
+// restore shows up as a difference rather than passing by luck
+function scramble() {
   doc.getElementById('row-bytes').value = '0x40';
   doc.getElementById('collapse-min').value = '99';
   doc.getElementById('row-px').value = '11';
@@ -168,13 +174,50 @@ test('buildSession -> applySession -> buildSession is a fixed point', () => {
   Object.assign(doc.getElementById('play-panel').style,
     { left: '999px', top: '999px', right: '', bottom: '' });
   doc.getElementById('warnings-panel').hidden = false;
+}
+
+test('buildSession -> applySession -> buildSession is a fixed point', () => {
+  const before = buildSession();
+  scramble();
 
   applySession(before);
   // playhead is applied by posting a seek; the UI state the worker would send
   // back is what buildSession reads, so mirror it here
-  ui.state = { seq: before.playhead, n: 100000 };
+  ui.state = { seq: before.heap.playhead, n: 100000 };
 
   assert.deepEqual(buildSession(), before);
+});
+
+// the shape written before the heap fields were namespaced: everything at the
+// top level, no `heap` key, no version
+function flatten(s) {
+  const { version, ...heap } = s.heap;
+  return { heapVisualizerSession: 1, ...heap, windows: s.windows, drawers: s.drawers };
+}
+
+test('a session written in the old flat shape restores identically', () => {
+  const before = buildSession();
+  const old = flatten(before);
+  scramble();
+
+  applySession(old);
+  ui.state = { seq: old.playhead, n: 100000 };
+
+  assert.deepEqual(buildSession(), before);
+});
+
+test('a heap section at an unknown version is skipped, and the shell layout still restores', () => {
+  const before = buildSession();
+  scramble();
+  const scrambled = buildSession();
+
+  applySession({ ...before, heap: { ...before.heap, version: 99 } });
+
+  const after = buildSession();
+  // shell state came back...
+  assert.deepEqual(after.windows, before.windows);
+  // ...and nothing from the unreadable heap section was applied
+  assert.deepEqual(after.heap, scrambled.heap);
 });
 
 test('applySession ignores a blob that is not a session', () => {
@@ -188,7 +231,7 @@ test('applySession ignores a blob that is not a session', () => {
 
 test('applySession drops address ranges that are not valid addresses', () => {
   const s = buildSession();
-  s.filter.addrRanges = [
+  s.heap.filter.addrRanges = [
     { lo: '0x10', hi: '0x20' },
     { lo: 'nonsense', hi: '0x20' },
     { lo: '0x10', hi: '' },
@@ -219,7 +262,7 @@ test('applySession restores drawer docking and widths', () => {
 test('applySession seeks to the saved playhead', () => {
   posted.length = 0;
   const s = buildSession();
-  s.playhead = 777;
+  s.heap.playhead = 777;
   applySession(s);
   assert.deepEqual(posted.filter((m) => m.type === 'seek'), [{ type: 'seek', seq: 777 }]);
 });

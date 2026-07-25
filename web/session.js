@@ -8,11 +8,12 @@
 // is also what makes the round-trip testable without a browser: a test
 // supplies a fake `deps` and a stub DOM.
 //
-// NOTE: the persisted shape here is deliberately unchanged from the
-// pre-split version — same keys, same `heapVisualizerSession: 1` marker.
-// Namespacing the heap-owned fields under a domain key with a version is a
-// separate change, to be made against these tests rather than alongside the
-// move.
+// The blob's top level is shell-owned workspace state — panel window geometry
+// and drawer layout. Everything whose meaning comes from a heap trace lives
+// under the `heap` key, which carries its own `version` so heap state can
+// change shape without the shell's envelope moving. Blobs written in the old
+// flat shape (every field at the top level, no `heap` key) still read, and
+// there is one read path for that one old shape — not a migration framework.
 
 import { $ } from './shell/dom.js';
 import { applyDrawersState, dockPanelAt } from './shell/drawers.js';
@@ -34,15 +35,28 @@ export function sessionKey() {
   return d.ui.fileName ? `heapviz:session:${d.ui.fileName}` : null;
 }
 
+// the shape version of the `heap` section, bumped when its fields change
+// shape in a way a reader must know about
+export const HEAP_SESSION_VERSION = 1;
+
 export function buildSession() {
   const windows = {};
   for (const id of d.PANEL_IDS) {
     const p = $(id);
     windows[id] = { hidden: p.hidden, left: p.style.left, top: p.style.top, right: p.style.right, bottom: p.style.bottom };
   }
-  const fmode = document.querySelector('input[name=fmode]:checked');
   return {
     heapVisualizerSession: 1,
+    windows,
+    drawers: d.ui.drawers || null,
+    heap: buildHeapSession(),
+  };
+}
+
+function buildHeapSession() {
+  const fmode = document.querySelector('input[name=fmode]:checked');
+  return {
+    version: HEAP_SESSION_VERSION,
     rowBytes: $('row-bytes').value,
     collapseMin: $('collapse-min').value,
     rowPx: $('row-px').value,
@@ -65,8 +79,6 @@ export function buildSession() {
       addrRanges: d.ui.addrRanges,
     },
     playhead: d.ui.state ? d.ui.state.seq : 0,
-    windows,
-    drawers: d.ui.drawers || null,
     // pinned allocation windows: re-fetched by creator event index on
     // restore (see applySession), since only the trace — not the info blob
     // itself — is worth persisting
@@ -78,8 +90,44 @@ export function buildSession() {
   };
 }
 
+// The interleaving below is deliberate: heap settings, then window geometry,
+// then crop and playhead, then drawers, then pinned windows. That is the order
+// the flat shape was applied in, and docking a drawer resizes the canvas, so
+// it must keep happening after the view messages rather than before them.
 export function applySession(obj) {
   if (!obj || obj.heapVisualizerSession !== 1) return;
+  const h = readHeapSection(obj);
+  if (h) applyHeapSettings(h);
+  applyWindows(obj);
+  if (h) applyHeapView(h);
+  applyDrawersState(obj.drawers);
+  if (h) restorePinnedWindows(h.pinned);
+}
+
+// the heap section, or null when there is none to trust. A blob in the old
+// flat shape has no `heap` key and carries the heap fields at the top level —
+// returning the envelope itself is the whole of that read path. A `heap`
+// section at an unknown version was written by a newer build: skip it rather
+// than half-apply fields whose meaning may have moved, and let the shell's own
+// layout restore around the heap defaults.
+function readHeapSection(obj) {
+  if (obj.heap === undefined) return obj;
+  if (!obj.heap || obj.heap.version !== HEAP_SESSION_VERSION) return null;
+  return obj.heap;
+}
+
+function applyWindows(obj) {
+  if (!obj.windows) return;
+  for (const id of d.PANEL_IDS) {
+    const w = obj.windows[id];
+    const p = $(id);
+    if (!w || !p) continue;
+    p.hidden = w.hidden;
+    if (w.left) { p.style.left = w.left; p.style.top = w.top; p.style.right = w.right; p.style.bottom = w.bottom; }
+  }
+}
+
+function applyHeapSettings(obj) {
   if (obj.rowBytes !== undefined) {
     $('row-bytes').value = obj.rowBytes;
     const v = d.rowBytesValue();
@@ -132,19 +180,11 @@ export function applySession(obj) {
     d.buildAddrRangesSection();
     d.sendFilter();
   }
-  if (obj.windows) {
-    for (const id of d.PANEL_IDS) {
-      const w = obj.windows[id];
-      const p = $(id);
-      if (!w || !p) continue;
-      p.hidden = w.hidden;
-      if (w.left) { p.style.left = w.left; p.style.top = w.top; p.style.right = w.right; p.style.bottom = w.bottom; }
-    }
-  }
+}
+
+function applyHeapView(obj) {
   if (obj.crop) d.setCrop(obj.crop.lo, obj.crop.hi);
   if (obj.playhead !== undefined) d.post({ type: 'seek', seq: obj.playhead });
-  applyDrawersState(obj.drawers);
-  restorePinnedWindows(obj.pinned);
 }
 
 // re-fetches each pinned allocation's info by creator event index (the trace

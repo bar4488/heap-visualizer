@@ -99,6 +99,16 @@ Two deliberately different persistence channels:
   creator event), playhead. Autosaved to `localStorage` keyed by trace file
   name and restored silently on load; no UI.
 
+The session blob must separate the two kinds of state it carries. Its top
+level is a single JSON object marked `heapVisualizerSession: 1` holding only
+workspace state — panel window geometry and drawer layout — and everything
+whose meaning comes from a heap trace must sit under a `heap` key carrying its
+own `version`. Reading a blob whose `heap` version is not one this build knows
+must restore the workspace state and leave heap state at its defaults, rather
+than apply the section partially. A blob written in the pre-namespace shape,
+with the heap fields at the top level and no `heap` key, must still restore
+in full.
+
 A third, tiny channel sits above both: **app preferences** (the overlap
 display mode and the freed-nested ghost toggle) are how the user wants
 *every* trace drawn, so they persist globally (`localStorage`, one key, not
