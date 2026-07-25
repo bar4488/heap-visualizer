@@ -83,6 +83,15 @@ got there, including the position that lost, is
 [T004](tickets/T004-shell-host.md) is blocked on a second domain existing and
 must stay blocked — see [D002](decisions/D002-shell-split-before-host.md).
 
+**One open question came out of the run itself.** All four web tickets finished
+agent-side and then waited on a person, and
+[E009](explorations/E009-the-hand-verification-bottleneck.md) separates what
+that check was actually for: boot and wiring, behavior through the real worker,
+and judgment about how it looks. Only the third is inherently a person's, and
+the cost side of [D001](decisions/D001-web-changes-are-hand-smoke-tested.md) was
+priced when this repository had no toolchain at all. D001 stands; the question
+is open.
+
 ## Not being done, deliberately
 
 - **F9** — JSON strings on the per-frame boundary. Reassessed and not worth it;
