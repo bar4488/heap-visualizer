@@ -408,11 +408,13 @@ expression, but recovered trees are never executable.
 
 ## Remaining work before a decision
 
-The language shape no longer needs an implementation comparison. The useful
-evidence is:
+The language shape no longer needs an implementation comparison.
+[T010](../tickets/T010-standalone-filter-dsl-parser.md) established the
+dependency-free parser, public source-spanned AST, syntax diagnostics, and
+parser limits. The remaining useful evidence is:
 
-1. turn the grammar, field table, missing-value rule, and performance gates
-   above into parser/type-checker/evaluator tests;
+1. turn the field table, missing-value rule, and performance gates above into
+   type-checker/evaluator tests;
 2. prototype the typed plan for numeric comparisons, boolean composition,
    sets, and ranges;
 3. benchmark it over 1 million and 10 million creator rows in release WASM;

@@ -41,11 +41,12 @@ python3 gen.py --seed 2 --ops 200000 --threads 8 --out dist/big.heapl
 
 ```sh
 cargo test --manifest-path src/core/Cargo.toml   # 33 engine tests, native, no wasm
+cargo test --manifest-path src/filter-dsl/Cargo.toml # filter DSL parser, native
 node --test 'src/web/**/*.test.ts'               # 44 web tests, no npm, no browser
 npx tsc -p tsconfig.test.json                    # type-check everything, emit nothing
 ```
 
-The two test suites run from a clean checkout with no install step — Node
+The three test suites run from a clean checkout with no install step — Node
 strips the types itself, which is why sources import each other as `./x.ts` and
 `tsc` rewrites those specifiers on the way out. The web suite runs against the
 sources in `src/web/`, not against `dist/`. Type-checking is the one thing that
@@ -70,6 +71,7 @@ establish.
 
 ```sh
 cargo test --manifest-path src/core/Cargo.toml
+cargo test --manifest-path src/filter-dsl/Cargo.toml
 node --test 'src/web/**/*.test.ts'
 npx tsc -p tsconfig.test.json
 ./build.sh web
@@ -98,6 +100,7 @@ risk only an eye can retire, name it in the ticket and in
 | Where | What |
 |---|---|
 | `src/core/` | Rust engine, ~4.9k lines: parse, columnar store, state, render, timeline. Also an `rlib`, so tests run natively. |
+| `src/filter-dsl/` | Dependency-free Rust crate for allocation-filter source spans, syntax trees, and parsing. |
 | `src/web/protocol.ts` | The main-thread ↔ worker message contract. Types only; both sides import it. |
 | `src/web/shell/` | Domain-independent: panel windows, drawers, tooltip, DOM helpers. Names no heap concept. |
 | `src/web/heap/` | Heap-specific: analysis data, the panel table, events panel, address helpers. |

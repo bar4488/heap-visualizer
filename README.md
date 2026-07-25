@@ -79,6 +79,7 @@ Drop any `.heapl` file onto the page to load it.
 
 ```sh
 cargo test --manifest-path src/core/Cargo.toml   # engine, native, no wasm
+cargo test --manifest-path src/filter-dsl/Cargo.toml # DSL parser, native
 node --test 'src/web/**/*.test.ts'               # web layer, no npm, no browser
 ```
 
@@ -94,6 +95,9 @@ to get any; what is checked instead, and how, is
 
 - `src/core/` — Rust WASM engine (JSONL parser, columnar store, snapshot seeks,
   address-line raster, timeline binning). Plain C ABI, no wasm-bindgen.
+- `src/filter-dsl/` — dependency-free Rust crate for the allocation filter
+  language. It owns source spans, syntax trees, and parsing independently of
+  the engine.
 - `src/web/` — the viewer's sources (TypeScript): `worker.ts` owns the WASM +
   canvases, `main.ts` is DOM chrome and input, `protocol.ts` is the message
   contract between them, `shell/` is the domain-independent window/drawer layer

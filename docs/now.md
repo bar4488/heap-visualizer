@@ -21,10 +21,14 @@ client-side.
 
 ## State
 
-**Rust core (`src/core/`, ~4.9k lines) — healthy.** Clean module boundaries, 33
-native tests asserting real invariants: snapshot seek ≡ forward replay, pick
-prefers the newest overlap, anchor stability across reflow. Every performance
-and soundness finding from the 2026-07-24 review is fixed.
+**Rust core (`src/core/`, ~4.9k lines) — healthy; filter language is a separate
+crate.** The engine has clean module boundaries and 33 native tests asserting
+real invariants: snapshot seek ≡ forward replay, pick prefers the newest
+overlap, anchor stability across reflow. Every performance and soundness
+finding from the 2026-07-24 review is fixed. `src/filter-dsl/` is
+dependency-free and not yet linked into the core; its 15 tests cover the E010
+grammar, source-spanned AST and parser limits. Type checking and evaluation do
+not exist yet.
 
 **Web layer (`src/web/`, ~3.2k lines) — all TypeScript now, split on the
 shell/domain seam, no other internal structure yet.** `main.ts` is down from
@@ -36,10 +40,11 @@ check: `grep -ric heap src/web/shell/` reports 0 for every file.
 `src/web/heap/` — analysis, the panel table, the events panel — and the
 `src/web/session.ts` boundary module hold the rest.
 
-**Verification — two suites, a type-checker, and a person.** `cargo test` (33)
-covers the engine; `node --test 'src/web/**/*.test.ts'` (44) covers the pure
-functions, the panel table, and both persisted round-trips, with no npm and no
-browser. `tsc` covers what neither reaches: the worker protocol
+**Verification — three suites, a type-checker, and a person.** `cargo test`
+covers the engine (33) and filter parser (15);
+`node --test 'src/web/**/*.test.ts'` (44) covers the pure functions, the panel
+table, and both persisted round-trips, with no npm and no browser. `tsc` covers
+what those do not reach: the worker protocol
 (`src/web/protocol.ts`, imported by both sides), the persisted shapes, and the
 panel records — a message name one side does not know fails the build. How
 strict that check is is a named list of flags rather than `strict: true`, ten
@@ -82,6 +87,11 @@ It also cost D001 an amendment — see Verification above. The ticket's Result
 has the evidence that closed it, which is the shape worth copying: a `dist/`
 built from the commit before the change, diffed against a `dist/` built after,
 with the entire remaining difference enumerated.
+
+[T010](tickets/T010-standalone-filter-dsl-parser.md) now establishes the first
+filter-language slice as a separate crate: parser only, with no core dependency
+or runtime behavior. The next language slice is type checking and name
+resolution, but it has no ticket yet.
 
 **[T009](tickets/T009-type-the-deps-contracts.md) is next, and is not urgent.**
 It types the `init*(deps)` contracts in
