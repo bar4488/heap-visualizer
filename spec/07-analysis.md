@@ -48,6 +48,13 @@ filter active. Applying an empty source turns filtering off. Dim/hide changes
 immediately when a non-empty filter is active because it does not change the
 match set.
 
+The focused editor offers contextual completion from the same core catalog
+that checks the expression: executable fields, type-valid operators and
+members, and observed site/thread/tag values. The attached list opens while
+typing; **Ctrl/⌘+Space** also opens it at an empty source. Up/Down selects,
+Enter or Tab inserts without applying, and Escape closes it. Completion never
+advertises a language surface the evaluator does not implement.
+
 The core owns checking, evaluation, and one creator-allocation match bitset.
 Rendering, filter-scoped range tagging ([ANL-002](#anl-002-acquiring-tags)),
 and the Events panel's filtered index

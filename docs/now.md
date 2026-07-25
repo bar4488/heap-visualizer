@@ -21,15 +21,16 @@ client-side.
 
 ## State
 
-**Rust core (`src/core/`, ~4.9k lines) — healthy; filter syntax is a separate
+**Rust core (`src/core/`, ~5.3k lines) — healthy; filter syntax is a separate
 crate and evaluation is integrated.** The engine has clean module boundaries
-and 34 native tests asserting
+and 37 native tests asserting
 real invariants: snapshot seek ≡ forward replay, pick prefers the newest
 overlap, anchor stability across reflow. Every performance and soundness
 finding from the 2026-07-24 review is fixed. `src/filter-dsl/` is
-dependency-free; its 15 tests cover the E010 grammar, source-spanned AST and
-parser limits. The core links it to type checking and a column-backed
-evaluator for the first set of built-in fields and operations.
+dependency-free; its 22 tests cover the E010 grammar, source-spanned AST,
+parser limits, and incomplete cursor contexts. The core links it to semantic
+checking, contextual completion, and a column-backed evaluator for the first
+set of built-in fields and operations.
 
 **Web layer (`src/web/`, ~3.2k lines) — all TypeScript now, split on the
 shell/domain seam, no other internal structure yet.** `main.ts` is down from
@@ -44,11 +45,13 @@ The Filter panel is now the E010 draft/applied expression editor and speaks
 the typed check/apply/mode worker protocol. The core exports the first
 column-backed evaluator for built-in allocation/death fields, boolean and
 numeric/string operations, sets/ranges, overlap, missing tests, and string /
-stack methods. `named()` and custom `field.*` columns still report direct
-diagnostics rather than being silently mis-evaluated.
+stack methods. Its attached completion list offers executable fields,
+type-valid operators/members, and live site/thread/tag values from that same
+core catalog. `named()` and custom `field.*` columns still report direct
+diagnostics and are not offered as completions.
 
 **Verification — three suites, a type-checker, and a person.** `cargo test`
-covers the engine (34) and filter parser (15);
+covers the engine (37) and filter parser/completion contexts (22);
 `node --test 'src/web/**/*.test.ts'` (44) covers the pure functions, the panel
 table, and both persisted round-trips, with no npm and no browser. `tsc` covers
 what those do not reach: the worker protocol
@@ -97,8 +100,9 @@ with the entire remaining difference enumerated.
 
 [T010](tickets/T010-standalone-filter-dsl-parser.md) established the first
 filter-language slice as a separate crate. Type checking, the first evaluator,
-and the expression editor now connect it to the core and web UI. Completion is
-the next language slice and has no ticket yet.
+the expression editor, and contextual completion now connect it to the core
+and web UI. `named()` and custom scalar fields are the next unfinished E010
+surfaces; neither has a ticket yet.
 
 **[T009](tickets/T009-type-the-deps-contracts.md) is next, and is not urgent.**
 It types the `init*(deps)` contracts in

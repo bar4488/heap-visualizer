@@ -1,7 +1,7 @@
 ---
 id: E011
 title: "Contextual completion for the filter DSL"
-status: open
+status: settled
 updated: 2026-07-25
 ---
 
@@ -319,3 +319,19 @@ search, snippets, or a JavaScript language catalog.
 The prerequisite is small but real: checking and completion need one shared
 semantic resolver. Building the popup first would make the visible part quick
 and the language boundary wrong.
+
+## Outcome
+
+_Settled and implemented 2026-07-25._
+
+The recommendation above is the implementation. The syntax crate reports
+cursor contexts without relaxing executable parsing; the core now performs
+the same semantic check before both Check and Apply, and emits typed candidates
+from its live site, thread, and tag catalogs. The worker carries the structured
+replacement span and items to a textarea-attached listbox.
+
+The initial surface deliberately omits `named()` and custom fields because
+their evaluator support still does not exist. Completion has no JavaScript
+language catalog, editor dependency, snippets, fuzzy matching, or caret mirror.
+Results are capped at 50, and byte-span replacement is tested across the
+UTF-8/UTF-16 boundary.

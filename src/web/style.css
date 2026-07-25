@@ -310,6 +310,7 @@ button.d-pin.pinned {
 
 .filter-row { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
 .filter-row .grow { flex: 1; }
+.filter-shortcut { color: var(--fg-dim); font-size: 10px; }
 .filter-editor textarea {
   box-sizing: border-box; width: 100%; min-height: 8em; resize: vertical;
   padding: 7px 8px; background: var(--bg); color: var(--fg);
