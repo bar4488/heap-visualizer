@@ -5,11 +5,13 @@
 //! resolution, type checking, and execution belong to later layers.
 
 mod ast;
+mod completion;
 mod error;
 mod lexer;
 mod parser;
 
 pub use ast::{BinaryOp, Expr, ExprKind, IntegerLiteral, Span, UnaryOp, Unit};
+pub use completion::{completion_context, CompletionContext, CompletionSite};
 pub use error::ParseError;
 pub use parser::parse;
 
