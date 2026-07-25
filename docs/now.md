@@ -26,18 +26,23 @@ native tests asserting real invariants: snapshot seek ≡ forward replay, pick
 prefers the newest overlap, anchor stability across reflow. Every performance
 and soundness finding from the 2026-07-24 review is fixed.
 
-**Web layer (`src/web/`, ~3.2k lines) — split on the shell/domain seam, no
-other internal structure yet.** `main.js` is down from 2,979 lines in one flat
+**Web layer (`src/web/`, ~3.2k lines) — TypeScript, split on the shell/domain
+seam, no other internal structure yet.** `main.js` is down from 2,979 lines in one flat
 scope to ~1,700 lines of trace/worker/toolbar wiring plus the three coordinated
 views.
 `src/web/shell/` (433 lines) is domain-independent and stays that way by
 check: `grep -ric heap src/web/shell/` reports 0 for every file.
 `src/web/heap/` — analysis, the panel table, the events panel — and the
-`src/web/session.js` boundary module hold the rest.
+`src/web/session.ts` boundary module hold the rest. `main.js` is the last
+JavaScript file left; it is type-checked in place until
+[T008](tickets/T008-convert-web-to-typescript.md) converts it.
 
-**Verification — two suites and a person.** `cargo test` (33) covers the
-engine; `node --test 'src/web/**/*.test.js'` (44) covers the JS pure functions,
-the panel table, and both persisted round-trips, with no npm and no browser.
+**Verification — two suites, a type-checker, and a person.** `cargo test` (33)
+covers the engine; `node --test 'src/web/**/*.test.ts'` (44) covers the pure
+functions, the panel table, and both persisted round-trips, with no npm and no
+browser. `tsc` covers what neither reaches: the worker protocol
+(`src/web/protocol.ts`, imported by both sides), the persisted shapes, and the
+panel records — a message name one side does not know fails the build.
 Rendering and pointer interaction are hand-verified, per
 [D001](decisions/D001-web-changes-are-hand-smoke-tested.md).
 
@@ -51,8 +56,10 @@ explorations and in closed tickets, which are dated records.
 
 **Layout — `src/` in, `dist/` out.** Everything hand-written lives under
 `src/`, everything generated under `dist/`, and `dist/` is what `./serve.py`
-serves. A clean checkout is not servable until `./build.sh` has run; that was
-already true of the wasm and is now true of the whole tree.
+serves. `./build.sh` builds all of it and refuses to emit anything if the types
+do not check; `./build.sh web` skips cargo. **What you are looking at in the
+browser is compiled output, not the file you edited** — source maps make that
+survivable, a stale `dist/` is the new way to be confused.
 
 ## Next
 
@@ -62,15 +69,15 @@ the decision is [D004](decisions/D004-typescript-is-the-language-for-web.md) and
 the argument that got there is
 [E008](explorations/E008-typescript-and-the-build-boundary.md). In order:
 
-1. [T007](tickets/T007-src-dist-layout.md) — sources under `src/`, output under
-   `dist/`, web layer still plain JS. The move lands on its own so a break in
-   the browser can be blamed on one change, not two.
-2. [T003](tickets/T003-typescript-at-the-contracts.md) — the toolchain and the
-   contracts: worker protocol, persisted shapes, panel records.
-3. [T008](tickets/T008-convert-web-to-typescript.md) — the rest of the
-   conversion. **Deferred on purpose**: it is the largest body of hand-verified
-   JS change left, and it should be picked up when there is appetite for
-   repeated smoke-testing.
+[T007](tickets/T007-src-dist-layout.md) (the layout) and
+[T003](tickets/T003-typescript-at-the-contracts.md) (the toolchain and the
+contracts) are both code-complete and waiting only on hand verification.
+
+What is left of the move is [T008](tickets/T008-convert-web-to-typescript.md) —
+`main.js`, the last JavaScript file, and raising strictness. **Deferred on
+purpose**: it is the largest body of hand-verified JS change left, and it
+should be picked up when there is appetite for repeated smoke-testing, not
+because it is next in a list.
 
 [T004](tickets/T004-shell-host.md) is blocked on a second domain existing and
 must stay blocked — see [D002](decisions/D002-shell-split-before-host.md).
@@ -93,4 +100,6 @@ must stay blocked — see [D002](decisions/D002-shell-split-before-host.md).
   instead of a hand-maintained id list
 - [T007](tickets/T007-src-dist-layout.md) — sources under `src/`, build output
   under `dist/`
+- [T003](tickets/T003-typescript-at-the-contracts.md) — TypeScript over the
+  worker protocol and the persisted shapes
 <!-- generated:end -->

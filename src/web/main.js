@@ -9,7 +9,7 @@ import {
   initRpc, request, requestLatest, cancelLatest, handleReply,
 } from './rpc.js';
 import {
-  $, dpr, setHtml, delegate, toCss, toCssLen,
+  $, $$, $1, dpr, setHtml, delegate, toCss, toCssLen,
 } from './shell/dom.js';
 import { raisePanel, showPanel, makePanelWindow } from './shell/panels.js';
 import { showTooltip, hideTooltip, positionTooltipNearMouse } from './shell/tooltip.js';
@@ -33,7 +33,7 @@ import {
   drawersState, dock, initDrawers, drawerEl, refreshDrawerDividers,
 } from './shell/drawers.js';
 
-// Mirrored from core/src/render.rs (CAT / RAMP): the engine paints
+// Mirrored from src/core/src/render.rs (CAT / RAMP): the engine paints
 // allocations, this file paints the matching legend chips and filter
 // swatches. Keep the two in sync by hand.
 const CAT = ['#58a6ff', '#3fb950', '#f2cc60', '#ff7b72', '#bc8cff', '#39c5cf',
@@ -41,7 +41,7 @@ const CAT = ['#58a6ff', '#3fb950', '#f2cc60', '#ff7b72', '#bc8cff', '#39c5cf',
 const RAMP = ['#0e4429', '#006d32', '#26a641', '#39d353'];
 const OPS = ['malloc', 'free', 'realloc'];
 
-const worker = new Worker('worker.js', { type: 'module' });
+const worker = /** @type {TypedWorker} */ (new Worker('worker.js', { type: 'module' }));
 initRpc(worker);
 
 const UI = {
@@ -299,7 +299,7 @@ worker.onmessage = (ev) => {
       break;
     default:
       // rpc replies (pick / tlhover / convert / alloc-info / tags-dump):
-      // resolved by reqId in one place, see rpc.js
+      // resolved by reqId in one place, see rpc.ts
       handleReply(m);
   }
 };
@@ -359,7 +359,7 @@ function onLoaded(m) {
   $('detail-panel').hidden = true;
   UI.detailInfo = null;
   // pinned allocation windows reference events of the previous trace
-  document.querySelectorAll('.pinned-detail').forEach((w) => w.remove());
+  $$('.pinned-detail').forEach((w) => w.remove());
   refreshDrawerDividers('left');
   refreshDrawerDividers('right');
   // the marks autosave embeds its own session snapshot, so applying both
@@ -588,7 +588,7 @@ function renderSearchResults() {
         <span class="sr-kind">${it.kind}</span><span class="sr-label">${esc(it.label)}</span><span class="sr-sub">${esc(it.sub || '')}</span>
       </div>`).join('')
     : '<div class="empty">no matches</div>';
-  list.querySelectorAll('.sr-row').forEach((row) => {
+  $$('.sr-row', list).forEach((row) => {
     row.onclick = () => { searchItems[+row.dataset.i].action(); closeSearchOverlay(); };
   });
 }
@@ -631,7 +631,8 @@ $('search-overlay').addEventListener('pointerdown', (e) => {
 });
 
 document.addEventListener('keydown', (e) => {
-  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+  const target = /** @type {any} */ (e.target);
+  if (target.tagName === 'INPUT' || target.tagName === 'SELECT') return;
   if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
   else if (e.key === 'ArrowRight') { e.preventDefault(); worker.postMessage({ type: 'step', delta: e.shiftKey ? 100 : 1 }); }
   else if (e.key === 'ArrowLeft') { e.preventDefault(); worker.postMessage({ type: 'step', delta: e.shiftKey ? -100 : -1 }); }
@@ -670,6 +671,7 @@ $('row-bytes').onchange = () => {
 $('row-px').onchange = () =>
   worker.postMessage({ type: 'set', key: 'rowPx', value: +$('row-px').value });
 // collapse threshold: plain number = rows, byte suffix / 0x… = bytes
+/** @returns {{ mode: 'rows' | 'bytes', value: number } | null} */
 function parseCollapseMin(v) {
   v = (v || '').trim().toLowerCase();
   if (!v) return null;
@@ -741,7 +743,7 @@ function refreshAllocSizeDisplays() {
   if (UI.detailInfo && !$('detail-panel').hidden) {
     buildDetailBody($('detail-body'), UI.detailInfo);
   }
-  document.querySelectorAll('.pinned-detail').forEach((win) => {
+  $$('.pinned-detail').forEach((win) => {
     if (win._allocInfo) buildDetailBody(win.querySelector('.panel-body'), win._allocInfo);
   });
   refreshEventsPanel();
@@ -810,12 +812,11 @@ function buildFilterPanel() {
   // their own dedicated wiring (buildTagsSection) driven by UI.tags state,
   // not raw checkbox DOM state
   for (const group of [sites, thrs]) {
-    group.querySelectorAll('input').forEach((inp) => { inp.onchange = sendFilter; });
-    group.querySelectorAll('.allnone a').forEach((a) => {
+    $$('input', group).forEach((inp) => { inp.onchange = sendFilter; });
+    $$('.allnone a', group).forEach((a) => {
       a.onclick = () => {
         const on = a.dataset.an === 'all';
-        group.querySelectorAll(`input[data-${a.dataset.sel}]`)
-          .forEach((b) => { b.checked = on; });
+        $$(`input[data-${a.dataset.sel}]`, group).forEach((b) => { b.checked = on; });
         sendFilter();
       };
     });
@@ -885,8 +886,8 @@ const lastSizeFilter = { min: 0, max: 0 };
 
 function sendFilter() {
   const panel = $('filter-panel');
-  const siteBoxes = [...panel.querySelectorAll('input[data-site]')];
-  const thrBoxes = [...panel.querySelectorAll('input[data-thr]')];
+  const siteBoxes = $$('input[data-site]', panel);
+  const thrBoxes = $$('input[data-thr]', panel);
   const sites = siteBoxes.filter((b) => b.checked).map((b) => +b.dataset.site);
   const thrs = thrBoxes.filter((b) => b.checked).map((b) => +b.dataset.thr);
   const rawMin = parseSize($('f-size-min').value);
@@ -926,7 +927,7 @@ function sendFilter() {
 }
 
 $('filter-clear').onclick = () => {
-  $('filter-panel').querySelectorAll('input[type=checkbox]').forEach((b) => { b.checked = true; });
+  $$('input[type=checkbox]', $('filter-panel')).forEach((b) => { b.checked = true; });
   $('f-size-min').value = '';
   $('f-size-max').value = '';
   UI.addrRanges = [];
@@ -943,7 +944,7 @@ $('filter-clear').onclick = () => {
 // ---------------------------------------------------------------------------
 
 // which panels exist, and what refills each from a loaded trace. The table
-// itself is web/heap/panels.js; the build functions are this file's, so they
+// itself is src/web/heap/panels.ts; the build functions are this file's, so they
 // are attached here where they are in scope.
 const PANELS = heapPanels({
   'play-panel': () => buildSpeedSelect(),
@@ -960,7 +961,7 @@ const PANELS = heapPanels({
 // the shell owns the window/drawer machinery (web/shell/); this is the
 // domain side of the handoff: the panel table, and the startup wiring.
 UI.drawers = drawersState;
-document.querySelectorAll('.panel').forEach((p) => makePanelWindow(p, dock));
+$$('.panel').forEach((p) => makePanelWindow(p, dock));
 initDrawers();
 
 // panel titles and open/close plumbing, both from the table. The events panel
@@ -976,7 +977,7 @@ for (const { id, title, toggle } of PANELS) {
     if (p.dataset.dockSide) refreshDrawerDividers(p.dataset.dockSide);
   };
 }
-document.querySelectorAll('.panel-close').forEach((b) => {
+$$('.panel-close').forEach((b) => {
   b.onclick = () => {
     const p = $(b.dataset.close);
     p.hidden = true;
@@ -998,13 +999,13 @@ function buildWarningsPanel() {
   html += UI.warnings.map((w) =>
     `<div class="warn-row" data-seq="${w.seq}"><span class="warn-seq">#${w.seq}</span><span class="warn-msg">${esc(w.msg)}</span></div>`).join('');
   list.innerHTML = html || '<i>none</i>';
-  list.querySelectorAll('.warn-row').forEach((row) => {
+  $$('.warn-row', list).forEach((row) => {
     row.onclick = () => worker.postMessage({ type: 'jump', seq: +row.dataset.seq + 1 });
   });
 }
 
 // ---------------------------------------------------------------------------
-// events panel (web/heap/events-panel.js): the virtualized sequential list.
+// events panel (src/web/heap/events-panel.ts): the virtualized sequential list.
 // ---------------------------------------------------------------------------
 
 initEventsPanel({
@@ -1017,7 +1018,7 @@ initEventsPanel({
 });
 
 // ---------------------------------------------------------------------------
-// analysis layer (web/heap/analysis.js): tags, names, colors, time marks,
+// analysis layer (src/web/heap/analysis.ts): tags, names, colors, time marks,
 // address marks, and the `.heapa` file. Wired here with what it still needs
 // from this scope.
 // ---------------------------------------------------------------------------
@@ -1037,7 +1038,7 @@ initAnalysis({
 });
 
 // ---------------------------------------------------------------------------
-// session (web/session.js): filters, layout, view/zoom, crop, window & drawer
+// session (src/web/session.ts): filters, layout, view/zoom, crop, window & drawer
 // state, playhead — everything *except* marks. It is the one module that
 // serializes both shell and heap state, so everything it needs from here is
 // handed over explicitly rather than shared through this scope.
@@ -1067,7 +1068,7 @@ function clearSelection() {
   UI.sel = null;
   UI.selMirror = null;
   $('sel-popover').hidden = true;
-  document.querySelectorAll('.tl-select, .tl-select-echo').forEach((el) => { el.hidden = true; });
+  $$('.tl-select, .tl-select-echo').forEach((el) => { el.hidden = true; });
   $('events-sel-band').hidden = true;
 }
 
@@ -1279,7 +1280,7 @@ function setupTimeline(stripId, canvas, kind) {
     hoverline.style.left = `${e.clientX - r.left}px`;
     if (selecting !== null) updateSelection(e.clientX);
     else if (dragging) seekTo(e.clientX);
-    queryTlHover(kind, e.clientX - r.left, e.clientY);
+    queryTlHover(kind, e.clientX - r.left);
   });
   strip.addEventListener('pointerleave', () => {
     hoverline.hidden = true;
@@ -1611,7 +1612,7 @@ function placeLivePanel(panel, reset = false) {
   const nx = clampX(x);
   let moved = Math.abs(nx - x) > 0.5;
   x = nx;
-  const pins = [...document.querySelectorAll('.pinned-detail')].map((w) => w.getBoundingClientRect());
+  const pins = $$('.pinned-detail').map((w) => w.getBoundingClientRect());
   const clash = () => pins.some((p) => Math.abs(p.left - x) < 48 && Math.abs(p.top - y) < 48);
   while (clash() && y > 40) {
     x = clampX(x + 28);
@@ -1674,12 +1675,12 @@ function createPinnedWindow(info, rect) {
     win.style.right = 'auto';
     win.style.bottom = 'auto';
   }
-  win.querySelector('.panel-close').onclick = () => {
+  $1('.panel-close', win).onclick = () => {
     const side = win.dataset.dockSide;
     win.remove();
     if (side) refreshDrawerDividers(side);
   };
-  win.querySelector('.d-pin').onclick = () => {
+  $1('.d-pin', win).onclick = () => {
     const side = win.dataset.dockSide;
     const rr = win.getBoundingClientRect();
     win.remove();

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   fmtBytes, fmtHexSize, fmtAllocSize, fmtNum, parseSize, esc, clampView,
-} from '../fmt.js';
+} from '../fmt.ts';
 
 test('fmtBytes: bytes below 1 KiB stay exact', () => {
   assert.equal(fmtBytes(0), '0 B');

@@ -3,9 +3,9 @@
 //
 // Nothing here knows what a panel contains. The drag path can end in a dock,
 // which is drawers.js's job — passed in as `dock` rather than imported, so
-// panels.js and drawers.js never form an import cycle.
+// panels.ts and drawers.ts never form an import cycle.
 
-import { $ } from './dom.js';
+import { $ } from './dom.ts';
 
 let panelZ = 40;
 

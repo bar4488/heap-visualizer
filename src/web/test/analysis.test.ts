@@ -9,14 +9,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { installDom, El } from './dom-stub.js';
+import { installDom, El } from './dom-stub.ts';
 
 const doc = installDom();
 
-const { initRpc, handleReply } = await import('../rpc.js');
-const { initSession } = await import('../session.js');
-const analysis = await import('../heap/analysis.js');
-const { heapPanels } = await import('../heap/panels.js');
+const { initRpc, handleReply } = await import('../rpc.ts');
+const { initSession } = await import('../session.ts');
+const analysis = await import('../heap/analysis.ts');
+const { heapPanels } = await import('../heap/panels.ts');
 
 const PANELS = heapPanels();
 
@@ -34,8 +34,8 @@ let tagsDump = { 1: [10, 11], 2: [20] };
 initRpc({
   postMessage(m) {
     posted.push(m);
-    if (m.type === 'tags-dump') queueMicrotask(() => handleReply({ reqId: m.reqId, tags: tagsDump }));
-    if (m.type === 'alloc-info') queueMicrotask(() => handleReply({ reqId: m.reqId, info: null }));
+    if (m.type === 'tags-dump') queueMicrotask(() => handleReply({ type: 'tags-dump', reqId: m.reqId, tags: tagsDump }));
+    if (m.type === 'alloc-info') queueMicrotask(() => handleReply({ type: 'alloc-info-result', reqId: m.reqId, info: null }));
   },
 });
 
@@ -195,7 +195,7 @@ test('applyMarks rejects a blob that is not an analysis file', () => {
 });
 
 test('applyMarks reports a non-analysis file when not loading quietly', () => {
-  analysis.applyMarks({ nope: true });
+  analysis.applyMarks({ nope: true }, false);
   assert.match(doc.getElementById('st-trace').textContent, /not a heap-visualizer marks file/);
   doc.getElementById('st-trace').textContent = '';
 });

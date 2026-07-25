@@ -6,13 +6,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { installDom, El } from './dom-stub.js';
+import { installDom, El } from './dom-stub.ts';
 
 const doc = installDom();
 
-const { initSession, buildSession, applySession } = await import('../session.js');
-const { drawersState } = await import('../shell/drawers.js');
-const { heapPanels } = await import('../heap/panels.js');
+const { initSession, buildSession, applySession } = await import('../session.ts');
+const { drawersState } = await import('../shell/drawers.ts');
+const { heapPanels } = await import('../heap/panels.ts');
 
 // the panel list comes from the domain's table, not a copy of it
 const PANELS = heapPanels();
@@ -50,7 +50,8 @@ function buildFixture() {
     r.checked = v === '2';
     fp.appendChild(r);
   }
-  for (const [attr, states] of [['data-site', [true, false, true]], ['data-thr', [false, true]]]) {
+  const boxes: [string, boolean[]][] = [['data-site', [true, false, true]], ['data-thr', [false, true]]];
+  for (const [attr, states] of boxes) {
     states.forEach((on, i) => {
       const b = new El('input');
       b.setAttribute(attr, String(i));

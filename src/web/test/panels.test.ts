@@ -6,7 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { heapPanels } from '../heap/panels.js';
+import { heapPanels } from '../heap/panels.ts';
 
 test('every record carries an id, a title, and a build slot', () => {
   const panels = heapPanels();

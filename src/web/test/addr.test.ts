@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { normAddr } from '../heap/addr.js';
+import { normAddr } from '../heap/addr.ts';
 
 test('normAddr: canonicalizes to lowercase 0x form', () => {
   assert.equal(normAddr('0x7fff'), '0x7fff');

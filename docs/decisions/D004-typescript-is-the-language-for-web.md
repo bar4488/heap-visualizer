@@ -14,7 +14,9 @@ served.
 
 The runtime is otherwise unchanged: native HTML, CSS, ES modules, Web Workers,
 `OffscreenCanvas`, WASM. No bundler, no framework, no npm packages in anything
-that ships. `typescript` is a dev dependency and the only one.
+that ships. The dev dependencies are `typescript` and `@types/node` — the
+second only so the test files, which Node runs directly, type-check — and
+nothing else.
 
 This reverses the zero-JS-build stance recorded in
 [TOOL-002](../../spec/10-tooling.md#tool-002-build), which said "no bundler, no

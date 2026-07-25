@@ -13,18 +13,26 @@ web_only=0
 [[ "${1:-}" == "web" ]] && web_only=1
 
 mkdir -p dist
+rm -rf dist/shell dist/heap
 
 if (( ! web_only )); then
   cargo build --release --target wasm32-unknown-unknown --manifest-path src/core/Cargo.toml
   cp src/core/target/wasm32-unknown-unknown/release/heap_visualizer_core.wasm dist/
 fi
 
-# The web layer has no compile step yet — T003 replaces this copy with tsc.
-# A module whose source file was deleted would otherwise keep being served, so
-# the copied subtrees are cleared rather than merged into.
-rm -rf dist/shell dist/heap
-cp src/web/index.html src/web/style.css src/web/*.js dist/
-cp -R src/web/shell src/web/heap dist/
+# TypeScript -> browser ES modules. tsc is configured with noEmitOnError, so a
+# type error leaves dist/ as it was rather than half-updated. The emitted tree
+# is cleared first: a module whose source file was deleted would otherwise keep
+# being served.
+#
+# The two configs check the same code; only tsconfig.test.json also covers the
+# tests, which are never emitted (node runs the .ts sources directly).
+npx tsc -p tsconfig.json
+npx tsc -p tsconfig.test.json
+
+# index.html and style.css compile to nothing, so they are copied. This is the
+# one part of the loop the build step costs you: a CSS tweak needs ./build.sh web.
+cp src/web/index.html src/web/style.css dist/
 
 # The demo trace is generated, not stored: gen.py is deterministic, so the
 # bundled demo is reproducible from a seed rather than from a file someone

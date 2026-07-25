@@ -1,4 +1,4 @@
-// Shell: dockable left/right drawers. Panels float by default (panels.js);
+// Shell: dockable left/right drawers. Panels float by default (panels.ts);
 // this adds an alternate home where any panel can stack, get hidden as a
 // group, and be resized — without changing anything about how floating
 // panels behave.
@@ -6,8 +6,8 @@
 // No domain knowledge: a drawer holds panel elements by id and never asks
 // what is inside one.
 
-import { $ } from './dom.js';
-import { raisePanel } from './panels.js';
+import { $, $$ } from './dom.ts';
+import { raisePanel } from './panels.ts';
 
 // no manual show/hide control: a drawer is visible exactly when it has a
 // docked window in it, empty otherwise — see refreshDrawerDividers
@@ -22,7 +22,7 @@ export function drawerEl(side) { return $(side === 'left' ? 'drawer-left' : 'dra
 
 export function refreshDrawerDividers(side) {
   const dr = drawerEl(side);
-  dr.querySelectorAll('.drawer-vresize').forEach((d) => d.remove());
+  $$('.drawer-vresize', dr).forEach((d) => d.remove());
   // a docked-but-closed (×'d) panel stays a DOM child so re-opening it from
   // the toolbar still works, but it shouldn't hold the drawer open or get a
   // divider of its own
@@ -136,7 +136,7 @@ export function initDrawers() {
 export function showDropPreview(p, side, clientY) {
   const dr = drawerEl(side);
   dr.hidden = false; // reveal as a preview even if currently empty
-  document.querySelectorAll('.drawer.drop-target').forEach((d) => { if (d !== dr) d.classList.remove('drop-target'); });
+  $$('.drawer.drop-target').forEach((d) => { if (d !== dr) d.classList.remove('drop-target'); });
   dr.classList.add('drop-target');
   const panels = [...dr.children].filter((c) => c.classList.contains('panel') && !c.hidden && c !== p);
   const ref = panels.find((cand) => {
@@ -164,7 +164,7 @@ export function showDropPreview(p, side, clientY) {
 
 export function clearDropPreview() {
   dndIndicator.hidden = true;
-  document.querySelectorAll('.drawer.drop-target').forEach((d) => d.classList.remove('drop-target'));
+  $$('.drawer.drop-target').forEach((d) => d.classList.remove('drop-target'));
 }
 
 export function dockPanelAt(p, side, beforeEl) {

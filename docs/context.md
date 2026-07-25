@@ -6,15 +6,16 @@ belongs in [spec/](../spec/README.md); this file is operational.
 ## Build
 
 ```sh
-./build.sh          # everything into dist/: the wasm, the web layer, and a
-                    # generated demo trace
-./build.sh web      # skip the cargo build; refresh only the web layer
+npm install         # typescript + @types/node, dev-only, once
+./build.sh          # everything into dist/: the wasm, the compiled web layer,
+                    # and a generated demo trace
+./build.sh web      # skip the cargo build; recompile only the web layer
 ```
 
 **`dist/` is the served tree and is entirely generated.** Hand-written files
 live under `src/`, build products under `dist/`, and nothing crosses. The web
-layer has no compile step yet — `build.sh` copies it — which is what
-[T003](tickets/T003-typescript-at-the-contracts.md) changes.
+layer is TypeScript; `tsc` emits browser ES modules with source maps, and
+refuses to emit at all if anything fails to type-check.
 
 Needs the wasm target: `rustup target add wasm32-unknown-unknown`. No local
 Rust toolchain? `./build-docker.sh` builds and exports a builder image with the
@@ -40,12 +41,16 @@ python3 gen.py --seed 2 --ops 200000 --threads 8 --out dist/big.heapl
 
 ```sh
 cargo test --manifest-path src/core/Cargo.toml   # 33 engine tests, native, no wasm
-node --test 'src/web/**/*.test.js'               # 44 JS tests, no npm, no browser
+node --test 'src/web/**/*.test.ts'               # 44 web tests, no npm, no browser
+npx tsc -p tsconfig.test.json                    # type-check everything, emit nothing
 ```
 
-Both run from a clean checkout with no install step, and the JS suite runs
-against the sources in `src/web/`, not against `dist/`.
-`src/web/test/dom-stub.js` is a ~200-line stand-in for the DOM surface the web
+The two test suites run from a clean checkout with no install step — Node
+strips the types itself, which is why sources import each other as `./x.ts` and
+`tsc` rewrites those specifiers on the way out. The web suite runs against the
+sources in `src/web/`, not against `dist/`. Type-checking is the one thing that
+needs `npm install`.
+`src/web/test/dom-stub.ts` is a ~200-line stand-in for the DOM surface the web
 layer actually touches — that is what makes the persisted round-trips testable
 without a browser.
 
@@ -69,11 +74,12 @@ one is the new way to be confused.
 | Where | What |
 |---|---|
 | `src/core/` | Rust engine, ~4.9k lines: parse, columnar store, state, render, timeline. Also an `rlib`, so tests run natively. |
+| `src/web/protocol.ts` | The main-thread ↔ worker message contract. Types only; both sides import it. |
 | `src/web/shell/` | Domain-independent: panel windows, drawers, tooltip, DOM helpers. Names no heap concept. |
 | `src/web/heap/` | Heap-specific: analysis data, the panel table, events panel, address helpers. |
-| `src/web/session.js` | The boundary: serializes shell state *and* heap state into one per-trace blob. |
-| `src/web/main.js` | Trace/worker/toolbar wiring plus the three coordinated views. |
-| `src/web/worker.js` | Worker side of the protocol; owns the WASM instance and OffscreenCanvas. |
+| `src/web/session.ts` | The boundary: serializes shell state *and* heap state into one per-trace blob. |
+| `src/web/main.js` | Trace/worker/toolbar wiring plus the three coordinated views. The last `.js` file — T008 converts it. |
+| `src/web/worker.ts` | Worker side of the protocol; owns the WASM instance and OffscreenCanvas. |
 | `dist/` | The served tree. Generated; not in git. |
 | `gen.py` | Synthetic `.heapl` trace generator. |
 

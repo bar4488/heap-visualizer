@@ -7,8 +7,13 @@
 // every incidental element the code writes a status string into would bury
 // the fixture. Tests assert on the elements they seed.
 
+// The stub is deliberately loose: an index signature rather than a field per
+// property, because its whole job is to answer whatever the code under test
+// happens to poke at.
 class ClassList {
-  constructor(el) { this.el = el; this.set = new Set(); }
+  [prop: string]: any;
+
+  constructor(el: any) { this.el = el; this.set = new Set(); }
   add(...c) { c.forEach((x) => this.set.add(x)); }
   remove(...c) { c.forEach((x) => this.set.delete(x)); }
   contains(c) { return this.set.has(c); }
@@ -22,6 +27,8 @@ class ClassList {
 let nextEl = 0;
 
 export class El {
+  [prop: string]: any;
+
   constructor(tag = 'div') {
     this.tagName = tag.toUpperCase();
     this._uid = ++nextEl;
@@ -231,18 +238,22 @@ export function makeLocalStorage() {
 // test — shell/dom.js reads `document` and `devicePixelRatio` at import time.
 export function installDom() {
   const doc = makeDocument();
-  globalThis.document = doc;
-  globalThis.localStorage = makeLocalStorage();
-  globalThis.innerWidth = 1280;
-  globalThis.innerHeight = 800;
-  globalThis.devicePixelRatio = 1;
-  globalThis.window = {
+  // These are fakes standing in for lib.dom's real types, which they do not
+  // and should not implement in full — one cast here, rather than a lie about
+  // each one's shape.
+  const g = globalThis as any;
+  g.document = doc;
+  g.localStorage = makeLocalStorage();
+  g.innerWidth = 1280;
+  g.innerHeight = 800;
+  g.devicePixelRatio = 1;
+  g.window = {
     devicePixelRatio: 1,
     innerWidth: 1280,
     innerHeight: 800,
     addEventListener() {},
     removeEventListener() {},
   };
-  globalThis.ResizeObserver = class { observe() {} disconnect() {} };
+  g.ResizeObserver = class { observe() {} disconnect() {} };
   return doc;
 }

@@ -9,10 +9,10 @@
 //
 // What it needs from main.js arrives through initEventsPanel(deps).
 
-import { $, toCss } from '../shell/dom.js';
-import { raisePanel } from '../shell/panels.js';
-import { refreshDrawerDividers } from '../shell/drawers.js';
-import { esc, fmtNum } from '../fmt.js';
+import { $, $$, toCss } from '../shell/dom.ts';
+import { raisePanel } from '../shell/panels.ts';
+import { refreshDrawerDividers } from '../shell/drawers.ts';
+import { esc, fmtNum } from '../fmt.ts';
 
 let d = null;
 
@@ -81,7 +81,7 @@ export function onEventsSlice(m) {
       <span class="ev-size">${d.fmtAllocSize(ev.size)}</span>
       <span class="ev-site">${ev.site ? esc(ev.site) : ''}</span>
     </div>`).join('');
-  $('events-rows').querySelectorAll('.ev-row').forEach((row) => {
+  $$('.ev-row', $('events-rows')).forEach((row) => {
     row.onclick = () => {
       const seq = +row.dataset.seq;
       if (d.ui.state && seq === d.ui.state.seq - 1) {
@@ -132,7 +132,7 @@ export function updateEventsPanel() {
     evScrollToSeq(cur);
     return;
   }
-  $('events-rows').querySelectorAll('.ev-row').forEach((row) => {
+  $$('.ev-row', $('events-rows')).forEach((row) => {
     row.classList.toggle('cur', +row.dataset.seq === cur);
   });
 }

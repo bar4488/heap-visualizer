@@ -1,10 +1,20 @@
 // heap-visualizer worker: owns the WASM engine and all OffscreenCanvas rendering.
 // The main thread only sends input events and receives state/query results.
 
-import { fmtBytes, fmtAllocSize as fmtAllocSizeMode, clampView } from './fmt.js';
+import { fmtBytes, fmtAllocSize as fmtAllocSizeMode, clampView } from './fmt.ts';
+import type { FromWorker, SettingKey, ToWorker } from './protocol.ts';
 
-let E = null;            // wasm exports
-let wasmModule = null;   // compiled module, re-instantiated per trace load
+// Shadows the global: nothing leaves this worker that the protocol does not
+// describe, and the main thread's switch is written against the same union.
+declare function postMessage(m: FromWorker): void;
+
+// The engine's exports are a plain C ABI — ~60 functions plus `memory` — and
+// the authoritative list is src/core/src/lib.rs. Describing them here would
+// make a second one to keep in sync, so they cross loosely.
+type Engine = any;
+
+let E: Engine = null;    // wasm exports
+let wasmModule: WebAssembly.Module | null = null; // compiled module, re-instantiated per trace load
 const td = new TextDecoder();
 const te = new TextEncoder();
 
@@ -39,6 +49,10 @@ const S = {
   lastTick: 0,
   dirty: { addr: true, tlt: true, tls: true },
   lastState: '',
+  // filled in as rendering happens rather than at startup: the last laid-out
+  // virtual height, and the move link of the last applied event
+  lastVirtualH: 0,
+  lastMoveLink: null as unknown,
 };
 
 const binCache = { 0: { key: '' }, 1: { key: '' } };
@@ -401,7 +415,7 @@ function frame(now) {
 // allowlist to keep in sync with the handlers. The preLoad appliers guard on
 // `E` (no instance exists before the first load); main.js re-sends every
 // setting after 'loaded', so nothing is lost.
-const SETTINGS = {
+const SETTINGS: Record<SettingKey, { preLoad?: boolean; apply(m: any): void }> = {
   rowBytes: {
     apply(m) {
       const anchor = captureAnchor();
@@ -510,7 +524,7 @@ const SETTINGS = {
   },
 };
 
-onmessage = async (ev) => {
+onmessage = async (ev: MessageEvent<ToWorker>) => {
   const m = ev.data;
   switch (m.type) {
     case 'init': {

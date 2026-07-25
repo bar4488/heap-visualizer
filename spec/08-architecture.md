@@ -95,11 +95,12 @@ answers.
 
 | | |
 |---|---|
-| `src/web/shell/` | `dom.js` (`$`, `setHtml`, `delegate`, device↔CSS px), `panels.js` (draggable windows, z-stack), `drawers.js` (dockable left/right drawers), `tooltip.js`. **No domain identifiers.** |
-| `src/web/heap/` | `analysis.js` (tags, names, colors, marks, `.heapa`), `panels.js` (the panel table), `events-panel.js`, `addr.js` |
-| `src/web/session.js` | The boundary: serializes shell state (window/drawer geometry) *and* heap state (view, crop, filters, playhead) into the one per-trace session blob |
-| `src/web/main.js` | Trace/worker/toolbar wiring and the three coordinated views |
-| `src/web/fmt.js`, `src/web/rpc.js` | Shared with the worker; the request/response layer |
+| `src/web/shell/` | `dom.ts` (`$`, `$$`, `setHtml`, `delegate`, device↔CSS px), `panels.ts` (draggable windows, z-stack), `drawers.ts` (dockable left/right drawers), `tooltip.ts`. **No domain identifiers.** |
+| `src/web/heap/` | `analysis.ts` (tags, names, colors, marks, `.heapa`), `panels.ts` (the panel table), `events-panel.ts`, `addr.ts` |
+| `src/web/session.ts` | The boundary: serializes shell state (window/drawer geometry) *and* heap state (view, crop, filters, playhead) into the one per-trace session blob |
+| `src/web/main.js` | Trace/worker/toolbar wiring and the three coordinated views. The last JavaScript file; converted by [T008](../docs/tickets/T008-convert-web-to-typescript.md) |
+| `src/web/fmt.ts`, `src/web/rpc.ts` | Shared with the worker; the request/response layer |
+| `src/web/protocol.ts` | The message protocol, types only. Both sides import it, so a message one side does not know about is a build error |
 
 Two rules keep the seam from eroding. **No module imports the shared `UI`
 object** — each receives what it needs through an `init*(deps)` call, so the
@@ -113,6 +114,11 @@ analysis domains, heap being the first; see
 
 ## ARCH-006: Protocol conventions
 
+- **One type describes the protocol** (`src/web/protocol.ts`), imported by both
+  sides: which messages exist, in which direction, carrying which fields. A
+  name or field on one side that the other does not know is a build error, not
+  a message that silently does nothing. Payloads that are engine JSON stay
+  loose there — `src/core/` owns those shapes and must not have a second owner.
 - Fire-and-forget commands (seek, set-config, tag) carry no reply; the next
   `state` message reflects them.
 - Query round-trips (pick, hover, events slice, address-at, convert) carry a

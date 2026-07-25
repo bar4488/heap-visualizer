@@ -1,0 +1,11 @@
+{
+  // Check config: everything, tests included, emitting nothing. `node --test`
+  // runs the .ts sources directly (Node strips the types), so the tests are
+  // never compiled — but they still have to type-check.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": ["src/web/**/*"],
+  "exclude": []
+}

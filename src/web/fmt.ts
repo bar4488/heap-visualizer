@@ -1,5 +1,5 @@
 // Shared helpers for BOTH JS layers: main.js (panels, tooltips, chrome) and
-// worker.js (in-allocation labels, view clamping). One definition replaces
+// worker.ts (in-allocation labels, view clamping). One definition replaces
 // the old mirrored copies and their change-both-together comments.
 //
 // clampView in particular must stay bit-identical between the two sides:

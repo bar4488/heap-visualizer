@@ -2,3 +2,4 @@ dist/
 src/core/target/
 images/*.tar
 *.heapl
+node_modules/

@@ -3,7 +3,7 @@
 // these are saved to and loaded from.
 //
 // This is durable, user-authored data, distinct from the transient view state
-// in session.js and from the shell's workspace state. The `.heapa` blob folds
+// in session.ts and from the shell's workspace state. The `.heapa` blob folds
 // a session snapshot in, so the one manually-exported file is a complete
 // picture rather than just the marks.
 //
@@ -11,11 +11,11 @@
 // send, the shared UI state, and the handful of render/refresh functions that
 // still live there.
 
-import { $, setHtml, delegate } from '../shell/dom.js';
-import { showPanel } from '../shell/panels.js';
-import { esc, fmtNum } from '../fmt.js';
-import { request } from '../rpc.js';
-import { buildSession, applySession } from '../session.js';
+import { $, $$, setHtml, delegate } from '../shell/dom.ts';
+import { showPanel } from '../shell/panels.ts';
+import { esc, fmtNum } from '../fmt.ts';
+import { request } from '../rpc.ts';
+import { buildSession, applySession } from '../session.ts';
 
 let d = null;
 
@@ -53,7 +53,7 @@ export function tagIdFor(name) {
 }
 
 export function syncTagDatalist() {
-  document.querySelectorAll('datalist.tag-names, #tag-names').forEach((dl) => {
+  $$('datalist.tag-names, #tag-names').forEach((dl) => {
     dl.innerHTML = d.ui.tags.map((t) => `<option value="${esc(t.name)}">`).join('');
   });
 }
@@ -223,7 +223,7 @@ export function addBookmark() {
 }
 
 export function updateMarkers() {
-  for (const [stripId, kind] of [['strip-t', 0], ['strip-s', 1]]) {
+  for (const [stripId, kind] of [['strip-t', 0], ['strip-s', 1]] as [string, number][]) {
     const strip = $(stripId);
     const marks = strip.querySelector('.tl-marks');
     const v = kind === 0 ? d.ui.tlT : d.ui.tlS;
@@ -235,7 +235,7 @@ export function updateMarkers() {
       return `<div class="mark" style="left:${x}px" data-bm="${i}" data-label="⚑ ${esc(b.name)}" title="${esc(b.name)} — click: jump in time · shift+click: also center the place"></div>`;
     }).join('');
     if (!setHtml(marks, html)) continue;
-    marks.querySelectorAll('.mark').forEach((el) => {
+    $$('.mark', marks).forEach((el) => {
       // plain click: time only (stay at the same address); shift+click: also
       // center where the event happened
       el.onclick = (ev) => d.post({
@@ -427,7 +427,7 @@ function wireAnalysisPanel() {
   });
 
   // all / none visibility toggles for the tags list (untagged included)
-  document.querySelectorAll('#tags-allnone a').forEach((a) => {
+  $$('#tags-allnone a').forEach((a) => {
     a.onclick = () => {
       const on = a.dataset.an === 'all';
       d.ui.untaggedVisible = on;
@@ -496,7 +496,7 @@ function wireAnalysisPanel() {
     const f = ev.target.files[0];
     if (f) {
       try {
-        applyMarks(JSON.parse(await f.text()));
+        applyMarks(JSON.parse(await f.text()), false);
       } catch (e) {
         $('st-trace').textContent = `marks load failed: ${e.message}`;
       }

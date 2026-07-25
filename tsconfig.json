@@ -1,0 +1,37 @@
+{
+  // Emit config: src/web -> dist, browser ES modules and nothing else.
+  // Tests are excluded from the emit; tsconfig.test.json checks them.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+
+    // Sources import each other as './x.ts', so `node --test` runs them with
+    // no build step at all; tsc rewrites those specifiers to './x.js' on the
+    // way out, which is what the browser loads.
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+
+    "rootDir": "src/web",
+    "outDir": "dist",
+    "sourceMap": true,
+    // A type error must not produce output: dist/ is what gets served, and a
+    // half-emitted tree that still loads is the worst possible failure here.
+    "noEmitOnError": true,
+
+    // main.js is still JavaScript (T008 converts it) but is type-checked, so
+    // a message that does not match the protocol fails from either side.
+    "allowJs": true,
+    "checkJs": true,
+
+    // Strictness is deliberately low while half the layer is still JS, and
+    // the DOM surface is typed loosely on purpose (see shell/dom.ts).
+    // Raising it is T008's, along with the last conversions.
+    "strict": false,
+    "noImplicitAny": false,
+    "skipLibCheck": true
+  },
+  "include": ["src/web/**/*"],
+  "exclude": ["src/web/test/**"]
+}

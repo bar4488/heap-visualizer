@@ -15,9 +15,9 @@
 // flat shape (every field at the top level, no `heap` key) still read, and
 // there is one read path for that one old shape — not a migration framework.
 
-import { $ } from './shell/dom.js';
-import { applyDrawersState, dockPanelAt } from './shell/drawers.js';
-import { normAddr } from './heap/addr.js';
+import { $, $$, $1 } from './shell/dom.ts';
+import { applyDrawersState, dockPanelAt } from './shell/drawers.ts';
+import { normAddr } from './heap/addr.ts';
 
 let d = null;
 
@@ -54,7 +54,7 @@ export function buildSession() {
 }
 
 function buildHeapSession() {
-  const fmode = document.querySelector('input[name=fmode]:checked');
+  const fmode = $1('input[name=fmode]:checked');
   return {
     version: HEAP_SESSION_VERSION,
     rowBytes: $('row-bytes').value,
@@ -74,15 +74,15 @@ function buildHeapSession() {
       sizeMax: $('f-size-max').value,
       // checkbox states by index — meaningful only against the same trace's
       // site/thread list, which is exactly what the file-name-scoped key gives us
-      sites: [...document.querySelectorAll('#filter-panel input[data-site]')].map((b) => b.checked),
-      thrs: [...document.querySelectorAll('#filter-panel input[data-thr]')].map((b) => b.checked),
+      sites: $$('#filter-panel input[data-site]').map((b) => b.checked),
+      thrs: $$('#filter-panel input[data-thr]').map((b) => b.checked),
       addrRanges: d.ui.addrRanges,
     },
     playhead: d.ui.state ? d.ui.state.seq : 0,
     // pinned allocation windows: re-fetched by creator event index on
     // restore (see applySession), since only the trace — not the info blob
     // itself — is worth persisting
-    pinned: [...document.querySelectorAll('.pinned-detail')].map((win) => ({
+    pinned: $$('.pinned-detail').map((win) => ({
       e: +win.dataset.e,
       dockSide: win.dataset.dockSide || null,
       left: win.style.left, top: win.style.top, right: win.style.right, bottom: win.style.bottom,
@@ -168,13 +168,13 @@ function applyHeapSettings(obj) {
   if (obj.xview) { d.ui.xview = obj.xview; d.sendXView(); }
   if (obj.filter) {
     const f = obj.filter;
-    const fr = document.querySelector(`input[name=fmode][value="${f.fmode}"]`);
+    const fr = $1(`input[name=fmode][value="${f.fmode}"]`);
     if (fr) fr.checked = true;
     if (f.sizeMin !== undefined) $('f-size-min').value = f.sizeMin;
     if (f.sizeMax !== undefined) $('f-size-max').value = f.sizeMax;
-    const siteBoxes = [...document.querySelectorAll('#filter-panel input[data-site]')];
+    const siteBoxes = $$('#filter-panel input[data-site]');
     (f.sites || []).forEach((checked, i) => { if (siteBoxes[i]) siteBoxes[i].checked = checked; });
-    const thrBoxes = [...document.querySelectorAll('#filter-panel input[data-thr]')];
+    const thrBoxes = $$('#filter-panel input[data-thr]');
     (f.thrs || []).forEach((checked, i) => { if (thrBoxes[i]) thrBoxes[i].checked = checked; });
     d.ui.addrRanges = (f.addrRanges || []).filter((r) => normAddr(r.lo) && normAddr(r.hi));
     d.buildAddrRangesSection();
@@ -192,7 +192,7 @@ function applyHeapView(obj) {
 // docked or floating exactly as saved
 async function restorePinnedWindows(pinned) {
   if (!pinned || !pinned.length) return;
-  document.querySelectorAll('.pinned-detail').forEach((w) => w.remove()); // avoid dupes on repeated restore
+  $$('.pinned-detail').forEach((w) => w.remove()); // avoid dupes on repeated restore
   for (const pw of pinned) {
     const info = await d.requestAllocInfo(pw.e);
     if (!info) continue; // stale/unknown event (e.g. mismatched trace): skip

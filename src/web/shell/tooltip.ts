@@ -3,7 +3,7 @@
 // another source has since put up. No domain knowledge: the caller supplies
 // the markup.
 
-import { $ } from './dom.js';
+import { $ } from './dom.ts';
 
 const tooltip = $('tooltip');
 let tooltipOwner = null;
