@@ -1,6 +1,6 @@
 # The Workflow Protocol
 
-Version: 4
+Version: 6
 
 A text interface that lets humans and agents work on a repository across many
 sessions without depending on conversation history.
@@ -8,20 +8,15 @@ sessions without depending on conversation history.
 **Start by reading `docs/now.md`.** It is the entry point: what to read first,
 where things stand, what to do next, and the current queue.
 
-This file is the whole protocol. It is binding on any repository that adopts it.
-When practice and this file disagree, one of them is wrong and the same change
-fixes it.
+This file is the whole protocol, and it is binding on any repository that adopts
+it. When practice and this file disagree, one of them is wrong and the same
+change fixes it.
 
-## This file is a copy
-
-This file is copied verbatim into each repository that adopts the protocol, as
-`PROTOCOL.md`, and imported by that repository's `CLAUDE.md`.
-
-**Do not edit it locally.** It carries no project-specific content and no links
-into any particular repository, so that adopting a later version is a literal
-overwrite. Anything about *your* project — build commands, module locations,
-environment quirks, identity — goes in `docs/context.md` and `docs/README.md`,
-which this protocol already provides for.
+It is copied verbatim into each adopting repository as `PROTOCOL.md` and imported
+by that repository's `CLAUDE.md`. **Do not edit it locally**, so that adopting a
+later version is a literal overwrite. Anything about *your* project — build
+commands, module locations, environment quirks, identity — goes in
+`docs/context.md` and `docs/README.md`.
 
 ## The shape
 
@@ -41,8 +36,8 @@ skills/               reusable procedures (add when one is earned)
 source and tests
 ```
 
-`spec/` holds **your product's** requirements, not this protocol. The protocol
-constrains how work is done; `spec/` states what the thing being built must do.
+`spec/` holds **your product's** requirements, not this protocol: the protocol
+constrains how work is done, `spec/` states what the thing being built must do.
 
 A repository adopting this starts with `PROTOCOL.md`, `CLAUDE.md`,
 `docs/now.md`, and `docs/tickets/`. Everything else appears when there is
@@ -58,10 +53,7 @@ A constraint cited but not defined in the repository is a defect in whatever
 cited it.
 
 **An agent must not write durable project knowledge to its own memory**, however
-convenient that is. Private memory is invisible to every other agent, every other
-machine, and every human, and it cannot be reviewed, corrected, or merged. An
-agent that learns something worth keeping writes it to the repository, where it
-already has a home:
+convenient that is. Everything worth keeping already has a home here:
 
 | What was learned | Where it goes |
 |---|---|
@@ -74,19 +66,18 @@ already has a home:
 | An unresolved question or a half-formed idea | an exploration |
 
 If a fact fits none of those, that is a signal it is not durable project
-knowledge. There is no memory directory, because a fact with two homes has no
-owner.
+knowledge. There is no memory directory.
 
 ## One fact, one owner
 
 A ticket owns its status. The spec owns expected behavior. A decision owns
 rationale. `docs/now.md` owns narrative. Git owns history.
 
-Anything derivable from those files is **rewritten from them, never patched.**
-The active queue is `rg '^status: doing$' docs/tickets` — editing one line of a
-written-out index because you know one thing changed is the failure mode, because
-that edit comes from memory rather than from the source. Rewriting the whole
-block from the query is correct whether a script or an agent does it.
+Anything derivable from those files is **rewritten from them, never patched** —
+the active queue is `rg '^status: doing$' docs/tickets`, and hand-editing one
+line of a written-out index writes from memory instead of from the source.
+Rewriting the whole block from the query is correct whether a script or an agent
+does it.
 
 Anything hand-maintained must be something no query can answer.
 
@@ -117,8 +108,7 @@ T031 — buy JS test coverage. Nothing after it is affordable first.
 
 There is **one** `now.md`, however many workers. It answers where the *project*
 stands — a single fact. A worker's own position belongs in the tickets it holds.
-N private copies are N views of the project, none authoritative, and prose does
-not merge. Isolation, where needed, belongs at the worktree level.
+Isolation, where needed, belongs at the worktree level.
 
 How concurrent work is divided between several workers — assignment, write
 scopes, isolation — is not specified here.
@@ -220,26 +210,21 @@ No module under `src/storage/` imports a concrete driver.
 
 **A milestone has no status field.** Its state is derived from its tickets:
 `done` when all are `done`, `doing` when any is, `todo` otherwise. It is *ready*
-when every milestone it depends on is done. A hand-written status would give one
-fact two owners, and it is the step by which a milestone becomes a second
-tracker.
+when every milestone it depends on is done.
 
-**Concurrently running milestones must have disjoint write scopes.** That is the
-property that makes parallel work safe, and it is checkable before any work
-starts. Overlap is not a merge to resolve later: either the two are one
-milestone, or one depends on the other.
+**Concurrently running milestones must have disjoint write scopes.** Overlap is
+not a merge to resolve later: either the two are one milestone, or one depends on
+the other.
 
 **Shared files are in no milestone's write scope** — `docs/now.md`, the spec,
 the indexes. They are written after merge, not mid-flight.
 
 A milestone owns membership, ordering, and scope. It does not own status,
 rationale, or narrative. Tickets carry no dependency field: ordering lives at
-the milestone level, where the graph is small enough to read.
+the milestone level.
 
-Reading the graph never requires traversing it. **A dependency on a milestone
-that is not open is already satisfied** — a done milestone is a resolved edge
-carrying no information — so only open milestones are ever examined, and there
-are few of those by construction.
+**A dependency on a milestone that is not open is already satisfied**, so reading
+the graph never requires traversing it — only open milestones are ever examined.
 
 ## The spec
 
@@ -253,9 +238,7 @@ citations must survive files being split, merged, renamed, and reordered. Never
 cite a requirement by section number; `spec/10.3` breaks the first time a section
 is inserted above it.
 
-Process rules — everything in this file — carry no identifiers. Nothing outside
-the spec cites them, so the numbering would serve only the spec's own
-convenience.
+Process rules — everything in this file — carry no identifiers.
 
 ```markdown
 ## STORE-004: User lookup behavior
@@ -269,7 +252,7 @@ or create a user implicitly.
 Declarative, testable or inspectable, independent of any plan, precise enough to
 detect non-conformance. Use `must`, `must not`, `may`. Avoid "should probably",
 "ideally", "where possible". Rationale belongs in a decision record, linked from
-the requirement — a spec carrying its own history becomes a changelog.
+the requirement.
 
 **When intended behavior changes, the spec changes in the same change** as the
 code and the tests. A ticket must not close while code and spec knowingly
@@ -298,20 +281,20 @@ Proposal · Risks · Outcome · Derived artifacts`.
 
 **A code review is an exploration.** It owns the diagnosis — what was found, how
 it was measured, how to reproduce it — and it does **not** own status. Each
-finding worth acting on becomes a ticket, and the ticket owns whether it is
-fixed. That is what keeps a review from becoming a second task tracker with its
-own numbering and its own drifting status table. Findings not worth acting on
-stay in the review with the reason; deliberate non-action is knowledge and costs
-one paragraph to keep. A review is written once and then left alone, as a dated
-record of what was true when it was made.
+finding worth acting on becomes a ticket, and that ticket owns whether it is
+fixed. Findings not worth acting on stay in the review with the reason. A review
+is written once and then left alone, as a dated record of what was true when it
+was made.
+
+In explorations, distinguish evidence from inference from suggestion, mark
+uncertain claims, preserve disagreement, and let ideas stay unresolved
+indefinitely.
 
 ## Closed artifacts are not updated
 
 A `done` ticket and a `settled` exploration are dated records of what was true
 when they were written. **They are not migrated to a new format, not updated to
-reflect later knowledge, and not rewritten when a convention changes.** Doing so
-falsifies the record, and it is unbounded busywork: every convention change would
-touch every artifact ever closed.
+reflect later knowledge, and not rewritten when a convention changes.**
 
 When a convention changes, note the translation once and centrally rather than
 everywhere it applies.
@@ -322,10 +305,6 @@ carries it — a new ticket, a new exploration, or the narrative in `docs/now.md
 
 This does not license leaving a broken link. A citation whose target no longer
 exists becomes plain text, so nothing dangles and nothing is falsified.
-
-In explorations, distinguish evidence from inference from suggestion, mark
-uncertain claims, preserve disagreement, and let ideas stay unresolved
-indefinitely.
 
 ## Decisions
 
@@ -375,8 +354,7 @@ reads, what it writes, its procedure, and when to stop.
 **A skill holds no state** — not "the active ticket is T014" but "read the queue
 from `docs/now.md`".
 
-Repository-local skills win over organization, user, and built-in ones, because
-they are closest to the code.
+Repository-local skills win over organization, user, and built-in ones.
 
 Add a skill when a procedure has repeated and been done wrong. The candidates,
 in the order they usually earn their place: `write-ticket`, `start-session`,
@@ -392,19 +370,24 @@ rg -A3 '^tickets:' docs/milestones     # membership, scope, and ordering
 rg 'STORE-004' .                       # everything touching a requirement
 ```
 
-These keep working because of lowercase keys, ISO dates, IDs in filenames, one
-entity per file, controlled status values, relative links, no important state in
-prose only, and files small enough to read in one pass.
+These keep working only if the conventions hold: lowercase keys, ISO dates, IDs
+in filenames, one entity per file, controlled status values, relative links, no
+important state in prose only.
 
 ## Adding a rule
 
 **A process rule requires two recorded instances of the failure it prevents.
 Until then it is a note, not a rule.**
 
-Version 2 of this protocol reached 78 rules before any repository had run it.
-Every one of them was individually defensible, and that is exactly how it
-happened: each addition was locally justified, and none was ever tested against
-evidence that the failure occurred.
+An instance does not have to be written down already. **A person who works in
+the repository reporting that the failure has happened repeatedly counts as two
+instances.** Record the report when it is accepted: who said it, when, and what
+kept happening.
+
+What does not count, in any form: an agent's own assertion that it struggled,
+and anyone's expectation that a failure is likely. The distinction is tense. A
+report of what has already happened is evidence; a prediction that something will
+happen is not.
 
 The same test applies to a new directory, a new status value, a new frontmatter
 field, a new skill, and a new validator: name the two times its absence hurt.
@@ -427,10 +410,3 @@ field, a new skill, and a new validator: name the two times its absence hurt.
 - An exploration treated as an approved requirement.
 - An unfinished session without a concrete handoff.
 - A new rule or mechanism with no recorded failure behind it.
-
-## Where the rationale lives
-
-This file states the rules. Why each one exists — the alternatives weighed, the
-costs accepted, and what would reverse it — is recorded in the decision records
-of the repository that develops this protocol, which cite the rules rather than
-the reverse. That direction is deliberate: it keeps this file portable.
