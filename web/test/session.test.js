@@ -12,9 +12,11 @@ const doc = installDom();
 
 const { initSession, buildSession, applySession } = await import('../session.js');
 const { drawersState } = await import('../shell/drawers.js');
+const { heapPanels } = await import('../heap/panels.js');
 
-const PANEL_IDS = ['play-panel', 'layout-panel', 'appearance-panel', 'filter-panel',
-  'analysis-panel', 'warnings-panel', 'events-panel'];
+// the panel list comes from the domain's table, not a copy of it
+const PANELS = heapPanels();
+const PANEL_IDS = PANELS.map((p) => p.id);
 
 // --- fixture ---------------------------------------------------------------
 
@@ -76,7 +78,7 @@ function makeDeps(ui, posted) {
   return {
     ui,
     post: (m) => posted.push(m),
-    PANEL_IDS,
+    panels: PANELS,
     allocSizeFormat: () => (doc.getElementById('alloc-size-format').value === 'hex' ? 'hex' : 'human'),
     rowBytesValue: () => parseInt(doc.getElementById('row-bytes').value, 16) || 0,
     sendCollapseMin: noop,

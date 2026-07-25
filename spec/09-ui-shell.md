@@ -23,6 +23,17 @@ closable, and z-stacked with most-recently-touched on top. Toolbar buttons
 toggle visibility; position persists per trace via the session
 ([07-analysis §7.7](07-analysis.md)).
 
+The set of session-restored panels must be declared as data — one record per
+panel carrying at least its element id, its title, and how it refills itself
+from a freshly loaded trace — and that declaration must be the only place a
+panel id is written. Nothing may keep a second list of panels alongside it,
+including the code that titles panels, the code that toggles them, and the
+code that persists their geometry. A build function declared against an id
+that is not in the table is an error, not a step that silently never runs.
+
+The declaration belongs to the domain, not to the shell: the shell places and
+persists whatever windows it is handed, and must not name a panel.
+
 ## 9.3 Docking drawers
 
 Any window can be **docked** by dragging it to a screen edge (or an already

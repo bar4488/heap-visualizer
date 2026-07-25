@@ -21,7 +21,7 @@ import { normAddr } from './heap/addr.js';
 
 let d = null;
 
-// deps: { ui, post, PANEL_IDS, allocSizeFormat, rowBytesValue, sendCollapseMin,
+// deps: { ui, post, panels, allocSizeFormat, rowBytesValue, sendCollapseMin,
 //         buildLegend, sendAllocSizeFormat, resetEventsPanel, sendXView,
 //         buildAddrRangesSection, sendFilter, setCrop, requestAllocInfo,
 //         createPinnedWindow, buildMarks, applyMarks }
@@ -41,7 +41,7 @@ export const HEAP_SESSION_VERSION = 1;
 
 export function buildSession() {
   const windows = {};
-  for (const id of d.PANEL_IDS) {
+  for (const { id } of d.panels) {
     const p = $(id);
     windows[id] = { hidden: p.hidden, left: p.style.left, top: p.style.top, right: p.style.right, bottom: p.style.bottom };
   }
@@ -118,7 +118,7 @@ function readHeapSection(obj) {
 
 function applyWindows(obj) {
   if (!obj.windows) return;
-  for (const id of d.PANEL_IDS) {
+  for (const { id } of d.panels) {
     const w = obj.windows[id];
     const p = $(id);
     if (!w || !p) continue;

@@ -74,4 +74,6 @@ two of them.
 ## Doing
 - [T001](tickets/T001-namespace-heap-session-state.md) — namespace and version
   the heap-owned fields in the persisted session
+- [T002](tickets/T002-panel-content-as-data.md) — declare panel content as data
+  instead of a hand-maintained id list
 <!-- generated:end -->

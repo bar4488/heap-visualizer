@@ -14,6 +14,7 @@ import {
 import { raisePanel, showPanel, makePanelWindow } from './shell/panels.js';
 import { showTooltip, hideTooltip, positionTooltipNearMouse } from './shell/tooltip.js';
 import { normAddr } from './heap/addr.js';
+import { heapPanels } from './heap/panels.js';
 import {
   initAnalysis, markDirty, tagIdFor, syncTagDatalist, buildMarksPanel,
   buildTagsSection, buildNamesSection, sendAddrMarks, gotoAddr, addAddrMark,
@@ -331,7 +332,6 @@ function onLoaded(m) {
   worker.postMessage({ type: 'set', key: 'ghostMode', value: $('ghost-mode').checked });
   clearSelection();
   syncTagDatalist();
-  buildMarksPanel();
   updateMarkers();
   $('btn-analysis').hidden = false;
   $('btn-analysis').classList.remove('active');
@@ -342,7 +342,6 @@ function onLoaded(m) {
   $('btn-play').disabled = false;
   UI.xview = { zoom: 1, pan: 0 };
   updateHzButton();
-  resetEventsPanel();
   $('trace-title').textContent = m.meta.title || UI.fileName || '';
   $('st-trace').textContent =
     `${UI.fileName || ''} · ${fmtNum(m.n)} events (M ${fmtNum(m.meta.nMalloc)} / F ${fmtNum(m.meta.nFree)} / R ${fmtNum(m.meta.nRealloc)})` +
@@ -352,13 +351,11 @@ function onLoaded(m) {
   const wc = m.meta.warnTotal;
   $('btn-warnings').hidden = wc === 0;
   $('warn-count').textContent = fmtNum(wc);
-  buildWarningsPanel();
 
-  // row size from the trace header; leave the default visible as a hint
-  setRowBytesInput(m.meta.rowBytes);
-  buildFilterPanel();
-  buildSpeedSelect();
-  buildLegend();
+  // every panel refills itself from the new trace, in table order — the UI
+  // fields each one reads were all reset above
+  for (const { build } of PANELS) build?.();
+
   $('detail-panel').hidden = true;
   UI.detailInfo = null;
   // pinned allocation windows reference events of the previous trace
@@ -945,28 +942,35 @@ $('filter-clear').onclick = () => {
 // the left/right drawers — lives in web/shell/ and knows nothing about heaps.
 // ---------------------------------------------------------------------------
 
-// dockable/floating panels tracked by session (drawers, window positions) —
-// detail-panel and its pinned clones are excluded: they're per-allocation
-// and not meaningful to restore across a session
-const PANEL_IDS = ['play-panel', 'layout-panel', 'appearance-panel', 'filter-panel', 'analysis-panel', 'warnings-panel', 'events-panel'];
+// which panels exist, and what refills each from a loaded trace. The table
+// itself is web/heap/panels.js; the build functions are this file's, so they
+// are attached here where they are in scope.
+const PANELS = heapPanels({
+  'play-panel': () => buildSpeedSelect(),
+  // the row size comes from the trace header, with the default left visible
+  // as a hint
+  'layout-panel': () => setRowBytesInput(UI.meta.rowBytes),
+  'appearance-panel': () => buildLegend(),
+  'filter-panel': () => buildFilterPanel(),
+  'analysis-panel': () => buildMarksPanel(),
+  'warnings-panel': () => buildWarningsPanel(),
+  'events-panel': () => resetEventsPanel(),
+});
 
 // the shell owns the window/drawer machinery (web/shell/); this is the
-// domain side of the handoff: which panels exist, and the startup wiring.
+// domain side of the handoff: the panel table, and the startup wiring.
 UI.drawers = drawersState;
 document.querySelectorAll('.panel').forEach((p) => makePanelWindow(p, dock));
 initDrawers();
 
-// panel open/close plumbing
-for (const [btn, panel] of [
-  ['btn-playcfg', 'play-panel'],
-  ['btn-layout', 'layout-panel'],
-  ['btn-appearance', 'appearance-panel'],
-  ['btn-filter', 'filter-panel'],
-  ['btn-analysis', 'analysis-panel'],
-  ['btn-warnings', 'warnings-panel'],
-]) {
-  $(btn).onclick = () => {
-    const p = $(panel);
+// panel titles and open/close plumbing, both from the table. The events panel
+// wires its own button (opening it also refreshes the virtualized list), which
+// is why its record carries no toggle.
+for (const { id, title, toggle } of PANELS) {
+  $(id).querySelector('.ph-t').textContent = title;
+  if (!toggle) continue;
+  $(toggle).onclick = () => {
+    const p = $(id);
     p.hidden = !p.hidden;
     if (!p.hidden) raisePanel(p);
     if (p.dataset.dockSide) refreshDrawerDividers(p.dataset.dockSide);
@@ -1042,7 +1046,7 @@ initAnalysis({
 initSession({
   ui: UI,
   post: (msg) => worker.postMessage(msg),
-  PANEL_IDS,
+  panels: PANELS,
   allocSizeFormat,
   rowBytesValue,
   sendCollapseMin,

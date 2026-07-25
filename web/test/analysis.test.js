@@ -16,9 +16,9 @@ const doc = installDom();
 const { initRpc, handleReply } = await import('../rpc.js');
 const { initSession } = await import('../session.js');
 const analysis = await import('../heap/analysis.js');
+const { heapPanels } = await import('../heap/panels.js');
 
-const PANEL_IDS = ['play-panel', 'layout-panel', 'appearance-panel', 'filter-panel',
-  'analysis-panel', 'warnings-panel', 'events-panel'];
+const PANELS = heapPanels();
 
 const CAT = ['#58a6ff', '#3fb950', '#f2cc60', '#ff7b72', '#bc8cff', '#39c5cf',
   '#f778ba', '#d29922', '#7ee787', '#ffa657', '#79c0ff', '#d2a8ff'];
@@ -46,7 +46,7 @@ function seedDom() {
   }
   doc._put('collapse-min', new El('input')).value = '4';
   doc._put('color-mode', new El('input')).value = '2';
-  for (const id of PANEL_IDS) doc.getElementById(id).classList.add('panel');
+  for (const { id } of PANELS) doc.getElementById(id).classList.add('panel');
 
   // the two timeline strips each own a .tl-marks layer that updateMarkers fills
   for (const id of ['strip-t', 'strip-s']) {
@@ -87,7 +87,7 @@ const noop = () => {};
 initSession({
   ui,
   post: (m) => posted.push(m),
-  PANEL_IDS,
+  panels: PANELS,
   allocSizeFormat: () => 'human',
   rowBytesValue: () => 0x1000,
   sendCollapseMin: noop,

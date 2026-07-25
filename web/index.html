@@ -91,7 +91,7 @@
 <div id="tooltip" hidden></div>
 
 <div id="play-panel" class="panel" hidden>
-  <div class="panel-head">Play <button class="panel-close" data-close="play-panel">×</button></div>
+  <div class="panel-head"><span class="ph-t"></span> <button class="panel-close" data-close="play-panel">×</button></div>
   <div class="panel-body">
     <div class="filter-row">
       <button id="btn-step-back" title="Step back one event (←, shift = ×100)">⏮</button>
@@ -111,7 +111,7 @@
 </div>
 
 <div id="layout-panel" class="panel" hidden>
-  <div class="panel-head">Layout <button class="panel-close" data-close="layout-panel">×</button></div>
+  <div class="panel-head"><span class="ph-t"></span> <button class="panel-close" data-close="layout-panel">×</button></div>
   <div class="panel-body">
     <div class="filter-row"><label>row bytes <input id="row-bytes" size="7" placeholder="0x1000"
       title="Bytes per address-line row (e.g. 4k or 0x1000; defaults to 0x1000)"></label></div>
@@ -137,7 +137,7 @@
 </div>
 
 <div id="appearance-panel" class="panel" hidden>
-  <div class="panel-head">Appearance <button class="panel-close" data-close="appearance-panel">×</button></div>
+  <div class="panel-head"><span class="ph-t"></span> <button class="panel-close" data-close="appearance-panel">×</button></div>
   <div class="panel-body">
     <div class="filter-row"><label>color <select id="color-mode">
       <option value="0">live</option>
@@ -160,7 +160,7 @@
 </div>
 
 <div id="filter-panel" class="panel" hidden>
-  <div class="panel-head">Filter <button class="panel-close" data-close="filter-panel">×</button></div>
+  <div class="panel-head"><span class="ph-t"></span> <button class="panel-close" data-close="filter-panel">×</button></div>
   <div class="panel-body">
     <div class="filter-row">
       <label><input type="radio" name="fmode" value="1" checked> dim others</label>
@@ -188,7 +188,7 @@
 </div>
 
 <div id="analysis-panel" class="panel" hidden>
-  <div class="panel-head">Marks
+  <div class="panel-head"><span class="ph-t"></span>
     <span class="head-actions">
       <button id="btn-mark" hidden title="Bookmark the current playhead position (m)">＋ mark</button>
       <button class="panel-close" data-close="analysis-panel">×</button>
@@ -211,7 +211,7 @@
 </div>
 
 <div id="warnings-panel" class="panel" hidden>
-  <div class="panel-head">Warnings <button class="panel-close" data-close="warnings-panel">×</button></div>
+  <div class="panel-head"><span class="ph-t"></span> <button class="panel-close" data-close="warnings-panel">×</button></div>
   <div class="panel-body" id="warnings-list"></div>
 </div>
 
@@ -239,7 +239,7 @@
 </div>
 
 <div id="events-panel" class="panel" hidden>
-  <div class="panel-head">Events
+  <div class="panel-head"><span class="ph-t"></span>
     <span class="head-actions">
       <label title="Only list events whose allocation passes the current Filter (an F follows the allocation it frees)"><input type="checkbox" id="ev-filtered"> filtered</label>
       <label title="Keep the current event in view while stepping / playing"><input type="checkbox" id="ev-follow" checked> follow</label>
