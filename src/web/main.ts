@@ -30,7 +30,7 @@ import {
   restoreMarksAutosave, resetSessionSnapshot,
 } from './session.ts';
 import {
-  drawersState, dock, initDrawers, drawerEl, refreshDrawerDividers,
+  applyDrawersState, drawersState, dock, initDrawers, drawerEl, refreshDrawerDividers,
 } from './shell/drawers.ts';
 import type {
   AllocInfo, Domain, FromWorker, Range, TraceMeta,
@@ -427,8 +427,7 @@ function onLoaded(m) {
   UI.detailInfo = null;
   // pinned allocation windows reference events of the previous trace
   $$('.pinned-detail').forEach((w) => w.remove());
-  refreshDrawerDividers('left');
-  refreshDrawerDividers('right');
+  applyDefaultPanelLayout();
   // the marks autosave embeds its own session snapshot, so applying both
   // would run applySession twice back-to-back (double seeks, double
   // filter/layout messages, pinned windows torn down and rebuilt) — prefer
@@ -1029,6 +1028,23 @@ const PANELS = heapPanels({
 UI.drawers = drawersState;
 $$('.panel').forEach((p) => makePanelWindow(p, dock));
 initDrawers();
+
+// The domain declares the first-visit workspace. Reapply it for every newly
+// loaded trace before attempting a trace-scoped restore: a layout from the
+// previous trace must not become the accidental default for one with no save.
+function applyDefaultPanelLayout() {
+  const defaults = {
+    left: PANELS.filter((p) => p.dock === 'left').map((p) => p.id),
+    right: PANELS.filter((p) => p.dock === 'right').map((p) => p.id),
+    widthLeft: 300,
+    widthRight: 300,
+    collapsedLeft: false,
+    collapsedRight: false,
+  };
+  for (const { id, open } of PANELS) $(id).hidden = !open;
+  applyDrawersState(defaults);
+}
+applyDefaultPanelLayout();
 
 // panel titles and open/close plumbing, both from the table. The events panel
 // wires its own button (opening it also refreshes the virtualized list), which
