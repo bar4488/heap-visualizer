@@ -353,15 +353,15 @@ button.d-pin.pinned {
 .filter-status.invalid { color: var(--red); }
 .filter-status.applied { color: var(--green); }
 .filter-editor.applying { opacity: 0.72; }
-.saved-filter-head, .saved-filter-row {
+.filter-action-row, .saved-filter-head, .saved-filter-row {
   display: flex; align-items: center; gap: 6px;
 }
-.saved-filter-head {
+.filter-action-row, .saved-filter-head {
   margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border);
   color: var(--fg-dim); font-size: 11px;
 }
-.saved-filter-head .grow, .saved-filter-row .grow { flex: 1; min-width: 0; }
-.saved-filter-head input { width: 110px; }
+.filter-action-row .grow, .saved-filter-head .grow, .saved-filter-row .grow { flex: 1; min-width: 0; }
+.filter-action-row input, .saved-filter-head input { width: 110px; }
 .saved-filter-list { margin-top: 5px; }
 .saved-filter-row { margin-top: 4px; }
 .saved-filter-row input {

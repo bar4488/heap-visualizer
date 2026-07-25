@@ -105,6 +105,7 @@ export type Command =
   | { type: 'tlview'; kind: Domain; lo: number; hi: number }
   | { type: 'tag-event'; e: number; tag: number }
   | { type: 'tag-range'; kind: Domain; lo: number; hi: number; tag: number; byFree?: boolean }
+  | { type: 'tag-filter'; tag: number }
   | { type: 'tag-events'; events: number[] | Uint32Array; tag: number }
   | { type: 'retag'; from: number; to: number }
   | { type: 'tags-clear' }

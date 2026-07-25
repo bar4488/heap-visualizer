@@ -26,6 +26,9 @@ render.
   range — the creator each `F`/`R` kills). Tagging by frees exists because
   "what died during this dip?" is as common a question as "what was born?".
 - **Single tagging** from the allocation panel.
+- **Filter-to-tag**: the Filter panel snapshots every creator allocation in
+  the currently applied match set into a named tag. An existing tag name is
+  reused; later filter edits do not change the snapshot.
 - **Filter-scoped**: when a filter is active, range tagging applies only to
   allocations the filter matches — the filter defines the working set, so
   filter+drag composes into "tag all `json_node` allocations born here".

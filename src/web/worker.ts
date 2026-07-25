@@ -806,6 +806,13 @@ onmessage = async (ev: MessageEvent<ToWorker>) => {
       tagsChanged();
       break;
     }
+    case 'tag-filter': {
+      if (!S.loaded) break;
+      const count = E.hp_tag_filter_matches(m.tag);
+      postMessage({ type: 'tagged', count, tag: m.tag });
+      tagsChanged();
+      break;
+    }
     case 'tags-dump': {
       if (!S.loaded) {
         postMessage({ type: 'tags-dump', reqId: m.reqId, tags: {} });

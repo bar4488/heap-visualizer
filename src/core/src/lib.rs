@@ -725,6 +725,33 @@ pub extern "C" fn hp_tag_event(e: u32, tag: u32) {
     }
 }
 
+/// Snapshot the current applied filter's creator match set into `tag`.
+/// Without an applied filter there is no working set, so this tags nothing.
+#[no_mangle]
+pub extern "C" fn hp_tag_filter_matches(tag: u32) -> u32 {
+    tag_filter_matches(unsafe { &mut *app() }, tag)
+}
+
+fn tag_filter_matches(a: &mut App, tag: u32) -> u32 {
+    let Some(bits) = a.cfg.filter.matches.as_ref() else {
+        return 0;
+    };
+    let to_tag: Vec<u32> = (0..a.store.len())
+        .filter(|&e| {
+            matches!(a.store.op[e as usize], OP_M | OP_R)
+                && bits
+                    .get(e as usize / 64)
+                    .is_some_and(|word| word & (1 << (e % 64)) != 0)
+        })
+        .collect();
+    let tag = tag.min(255) as u8;
+    for &e in &to_tag {
+        a.store.set_tag(e, tag);
+    }
+    a.ev_dirty = true;
+    to_tag.len() as u32
+}
+
 /// Tag allocations touched by events in the seq range [lo, hi). With
 /// `by_free == 0` that is every allocation *created* in the range (M/R);
 /// with `by_free != 0` it is every allocation *freed* in the range (the
@@ -1793,6 +1820,28 @@ not json at all
         // 3 (realloc without a site field → unconstrained, passes)
         assert_eq!(to_tag, vec![1, 3]);
         assert_eq!(a.store.tag, vec![0, 1, 0, 1, 0]);
+    }
+
+    #[test]
+    fn tag_filter_matches_snapshots_only_applied_matches() {
+        let mut a = load(SAMPLE);
+        let expr = heap_visualizer_filter_dsl::parse("size >= 128").unwrap();
+        let mut bits = vec![0u64; (a.store.len() as usize).div_ceil(64)];
+        for e in 0..a.store.len() {
+            if matches!(a.store.op[e as usize], OP_M | OP_R)
+                && filter_eval::evaluate(&expr, &a.store, e, &[]).unwrap()
+            {
+                bits[e as usize / 64] |= 1 << (e % 64);
+            }
+        }
+        a.cfg.filter.matches = Some(bits);
+
+        assert_eq!(tag_filter_matches(&mut a, 2), 2);
+        assert_eq!(a.store.tag, vec![0, 2, 0, 2, 0]);
+
+        let mut no_filter = load(SAMPLE);
+        assert_eq!(tag_filter_matches(&mut no_filter, 1), 0);
+        assert!(no_filter.store.tag.iter().all(|&tag| tag == 0));
     }
 
     #[test]

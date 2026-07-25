@@ -177,6 +177,13 @@
     <div id="filter-completions" class="filter-completions"
       role="listbox" aria-label="Filter completions" hidden></div>
     <div id="filter-status" class="filter-status" role="status">Empty</div>
+    <div class="filter-action-row">
+      <span>tag matches</span>
+      <span class="grow"></span>
+      <input id="filter-tag-name" type="text" placeholder="tag name"
+        aria-label="Tag name for current filter matches" list="tag-names">
+      <button id="filter-to-tag" type="button">Tag matches</button>
+    </div>
     <div class="saved-filter-head">
       <span>saved filters</span>
       <span class="grow"></span>

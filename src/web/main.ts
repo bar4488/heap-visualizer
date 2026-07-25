@@ -1109,6 +1109,28 @@ function saveCurrentFilter() {
   setFilterStatus(`Saved “${name}”`);
 }
 
+function tagFilterMatches() {
+  if (!UI.filterApplied) {
+    setFilterStatus('Apply a filter before tagging matches', 'invalid');
+    return;
+  }
+  const input = $('filter-tag-name');
+  const name = input.value.trim();
+  if (!name) {
+    input.focus();
+    return;
+  }
+  const existing = UI.tags.findIndex((tag) => tag.name === name);
+  if (existing < 0 && UI.tags.length >= 255) {
+    $('st-info').textContent = 'cannot create another tag: the 255-tag limit is reached';
+    return;
+  }
+  const tag = tagIdFor(name);
+  worker.postMessage({ type: 'tag-filter', tag });
+  buildLegend();
+  markDirty();
+}
+
 $('filter-source').oninput = filterEdited;
 $('filter-source').onkeydown = (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
@@ -1148,6 +1170,13 @@ $('filter-completions').onpointermove = (e) => {
 };
 $('filter-apply').onclick = () => { void applyFilterSource(); };
 $('saved-filter-save').onclick = saveCurrentFilter;
+$('filter-to-tag').onclick = tagFilterMatches;
+$('filter-tag-name').onkeydown = (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    tagFilterMatches();
+  }
+};
 $('saved-filter-name').onkeydown = (event) => {
   if (event.key === 'Enter') {
     event.preventDefault();

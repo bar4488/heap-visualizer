@@ -1,7 +1,7 @@
 ---
 id: T014
 title: Tag every allocation the filter matches
-status: todo
+status: done
 updated: 2026-07-25
 ---
 
@@ -41,3 +41,12 @@ and not a live tag.
 - Scoping the snapshot to a selection or crop — range tagging already composes
   with the filter.
 - Raising the 255-tag ceiling.
+
+## Result
+
+The core now snapshots the applied creator-match bitset into a tag and returns
+zero when there is no applied filter. The typed `tag-filter` worker command
+refreshes rendering, tag counts, and the existing `tagged` status. The Filter
+panel action reuses an existing name, observes the 255-tag ceiling, and marks
+the analysis dirty. The focused core test and
+`npx tsc -p tsconfig.test.json` pass.
