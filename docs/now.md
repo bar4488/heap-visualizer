@@ -16,7 +16,8 @@ client-side.
 | [context](context.md) | Build, run, test, verify |
 | [spec/README](../spec/README.md) | The authoritative spec, ten modules. When behavior and spec disagree, one of them is wrong. |
 | [spec/01-overview](../spec/01-overview.md), [spec/08-architecture](../spec/08-architecture.md) | Goals and the three-layer split, in that order |
-| [E007](explorations/E007-web-architecture-direction.md) | Where `web/` is going and why the host is last |
+| [E007](explorations/E007-web-architecture-direction.md) | Where the web layer is going and why the host is last |
+| [D004](decisions/D004-typescript-is-the-language-for-web.md), [E008](explorations/E008-typescript-and-the-build-boundary.md) | Why it is TypeScript with a build step, and what that costs |
 
 ## State
 
@@ -48,18 +49,24 @@ explorations and in closed tickets, which are dated records.
 
 ## Next
 
-[T001](tickets/T001-namespace-heap-session-state.md) — namespace and version
-the heap-owned fields in the persisted session. It is the constraint carried out
-of the shell/domain split, and it is the cheapest it will ever be: one writer,
-and the session round-trip test already exists to check old-shape-in against
-new-shape-out. Do it before [T002](tickets/T002-panel-content-as-data.md).
+**The web layer is moving to TypeScript, with a real compile step.** That
+reverses [TOOL-002](../spec/10-tooling.md#tool-002-build)'s zero-build stance;
+the decision is [D004](decisions/D004-typescript-is-the-language-for-web.md) and
+the argument that got there is
+[E008](explorations/E008-typescript-and-the-build-boundary.md). In order:
 
-After that the order is T002 (panels as data), then
-[T003](tickets/T003-typescript-at-the-contracts.md) (types at the contracts).
+1. [T007](tickets/T007-src-dist-layout.md) — sources under `src/`, output under
+   `dist/`, web layer still plain JS. The move lands on its own so a break in
+   the browser can be blamed on one change, not two.
+2. [T003](tickets/T003-typescript-at-the-contracts.md) — the toolchain and the
+   contracts: worker protocol, persisted shapes, panel records.
+3. [T008](tickets/T008-convert-web-to-typescript.md) — the rest of the
+   conversion. **Deferred on purpose**: it is the largest body of hand-verified
+   JS change left, and it should be picked up when there is appetite for
+   repeated smoke-testing.
+
 [T004](tickets/T004-shell-host.md) is blocked on a second domain existing and
 must stay blocked — see [D002](decisions/D002-shell-split-before-host.md).
-[T005](tickets/T005-spec-requirement-ids.md) is mechanical and fits between any
-two of them.
 
 ## Not being done, deliberately
 
