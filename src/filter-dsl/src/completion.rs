@@ -136,7 +136,7 @@ fn string_at_cursor(source: &str, cursor: usize) -> Option<(Span, String)> {
             }
         }
         let end = i;
-        if cursor > start && cursor <= end {
+        if cursor > start && (cursor < end || (!closed && cursor == end)) {
             let prefix_end = cursor.min(end.saturating_sub(closed as usize));
             return Some((
                 Span::new(start, end),

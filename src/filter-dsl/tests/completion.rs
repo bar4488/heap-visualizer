@@ -78,6 +78,12 @@ fn string_values_replace_the_literal_and_preserve_utf8_spans() {
     let got = context("site == \"", 9);
     assert_eq!(got.replacement, Span::new(8, 9));
     assert_eq!(got.prefix, "");
+
+    let source = "site == \"a\"";
+    assert!(matches!(
+        context(source, source.len()).site,
+        CompletionSite::Operator { .. }
+    ));
 }
 
 #[test]
