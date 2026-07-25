@@ -1,7 +1,7 @@
 ---
 id: T002
 title: Declare panel content as data instead of a hand-maintained id list
-status: doing
+status: done
 updated: 2026-07-25
 ---
 
@@ -41,9 +41,9 @@ era, and it is cheap to act on now.
       reports 0 for every file.
 - [x] [SHELL-003](../../spec/09-ui-shell.md#shell-003-panels-are-declared-as-data) describes panels as
       declared records.
-- [ ] A person checks that every panel opens, docks, floats, and restores, per
-      [D001](../decisions/D001-web-changes-are-hand-smoke-tested.md). **This is
-      the only item outstanding** — see Handoff.
+- [x] A person checked that every panel opens, docks, floats, and restores on
+      2026-07-25, per
+      [D001](../decisions/D001-web-changes-are-hand-smoke-tested.md).
 
 ## Non-goals
 
@@ -97,10 +97,10 @@ the web layer to `src/web/` and the served tree to `dist/`. Read `web/x.js` as
 `node --test 'src/web/**/*.test.js'`. The work itself is unaffected.
 
 
-The code is done and both suites pass; the remaining done-when item is a
+The code was done and both suites passed; the last done-when item was a
 person's, per D001.
 
-What to check, against `demo.heapl` (`./serve.py`, then
+What was checked, against `demo.heapl` (`./serve.py`, then
 `http://localhost:8630?trace=demo.heapl`):
 
 1. Each of the seven toolbar buttons opens and closes its panel, and each panel
@@ -111,4 +111,4 @@ What to check, against `demo.heapl` (`./serve.py`, then
    site/thread lists, the legend, the marks panel, the warnings list, the
    events list, the speed select, and the row-bytes hint.
 
-Then check the last box and set `status: done`.
+Checked on 2026-07-25; nothing came back.

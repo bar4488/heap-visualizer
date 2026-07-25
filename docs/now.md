@@ -63,21 +63,22 @@ survivable, a stale `dist/` is the new way to be confused.
 
 ## Next
 
-**The web layer is moving to TypeScript, with a real compile step.** That
-reverses [TOOL-002](../spec/10-tooling.md#tool-002-build)'s zero-build stance;
-the decision is [D004](decisions/D004-typescript-is-the-language-for-web.md) and
-the argument that got there is
-[E008](explorations/E008-typescript-and-the-build-boundary.md). In order:
+**Nothing is in flight.** The 2026-07-25 run closed T001, T002, T005, T007 and
+T003 — the session namespacing, the panel table, spec requirement ids, the
+`src/`-to-`dist/` split, and TypeScript at the contracts. All four web changes
+were hand-verified against `dist/`.
 
-[T007](tickets/T007-src-dist-layout.md) (the layout) and
-[T003](tickets/T003-typescript-at-the-contracts.md) (the toolchain and the
-contracts) are both code-complete and waiting only on hand verification.
+The one thing left of the TypeScript move is
+[T008](tickets/T008-convert-web-to-typescript.md) — `main.js`, the last
+JavaScript file, and raising strictness. **Deferred on purpose**: it is the
+largest body of hand-verified JS change left, and it should be picked up when
+there is appetite for repeated smoke-testing, not because it is next in a list.
+Re-ground it before starting; T003 moved the ground under it.
 
-What is left of the move is [T008](tickets/T008-convert-web-to-typescript.md) —
-`main.js`, the last JavaScript file, and raising strictness. **Deferred on
-purpose**: it is the largest body of hand-verified JS change left, and it
-should be picked up when there is appetite for repeated smoke-testing, not
-because it is next in a list.
+Why the language changed at all is
+[D004](decisions/D004-typescript-is-the-language-for-web.md); the argument that
+got there, including the position that lost, is
+[E008](explorations/E008-typescript-and-the-build-boundary.md).
 
 [T004](tickets/T004-shell-host.md) is blocked on a second domain existing and
 must stay blocked — see [D002](decisions/D002-shell-split-before-host.md).
@@ -94,12 +95,6 @@ must stay blocked — see [D002](decisions/D002-shell-split-before-host.md).
 
 <!-- generated:begin -->
 ## Doing
-- [T001](tickets/T001-namespace-heap-session-state.md) — namespace and version
-  the heap-owned fields in the persisted session
-- [T002](tickets/T002-panel-content-as-data.md) — declare panel content as data
-  instead of a hand-maintained id list
-- [T007](tickets/T007-src-dist-layout.md) — sources under `src/`, build output
-  under `dist/`
-- [T003](tickets/T003-typescript-at-the-contracts.md) — TypeScript over the
-  worker protocol and the persisted shapes
+
+Nothing in flight.
 <!-- generated:end -->

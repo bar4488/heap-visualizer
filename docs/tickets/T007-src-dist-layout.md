@@ -1,7 +1,7 @@
 ---
 id: T007
 title: Sources under src/, build output under dist/
-status: doing
+status: done
 updated: 2026-07-25
 ---
 
@@ -64,9 +64,9 @@ Grounded against the tree on 2026-07-25:
       [TOOL-002](../../spec/10-tooling.md#tool-002-build),
       [TOOL-003](../../spec/10-tooling.md#tool-003-tests), and the module map
       in `spec/README.md`) name the new locations.
-- [ ] A person confirms the app still loads, renders, and interacts from
-      `dist/`, per [D001](../decisions/D001-web-changes-are-hand-smoke-tested.md).
-      **This is the only item outstanding** — see Handoff.
+- [x] A person confirmed on 2026-07-25 that the app still loads, renders, and
+      interacts from `dist/`, per
+      [D001](../decisions/D001-web-changes-are-hand-smoke-tested.md).
 
 ## Non-goals
 
@@ -121,18 +121,18 @@ From a clean checkout: `cargo test --manifest-path src/core/Cargo.toml` is 33,
 freshly built `dist/` serves 200s for `/`, `main.js`, `worker.js`,
 `shell/panels.js`, `heap/panels.js`, the wasm, `style.css`, and `demo.heapl`.
 
-## Handoff
+## Hand verification
 
-The code is done, both suites pass, and the served tree answers every request
-it should. The remaining done-when item is a person's, per D001 — an agent
-checking HTTP status codes is not the same as the app rendering.
+The code was done, both suites pass, and the served tree answers every request
+it should. The last done-when item was a person's, per D001 — an agent checking HTTP
+status codes is not the same as the app rendering.
 
 ```sh
 ./build.sh && ./serve.py     # http://localhost:8630?trace=demo.heapl
 ```
 
-What to look at: the map renders, the two timelines render, stepping and
+What was looked at: the map renders, the two timelines render, stepping and
 playback work, panels open and dock, and the demo trace loads from the toolbar
 button. Nothing about the app should have changed — that is the whole claim.
 
-Then check the last box and set `status: done`.
+Checked on 2026-07-25; nothing came back.

@@ -1,7 +1,7 @@
 ---
 id: T001
 title: Namespace and version the heap-owned fields in the persisted session
-status: doing
+status: done
 updated: 2026-07-25
 ---
 
@@ -40,9 +40,8 @@ Constraint and reasoning: [E007 §3](../explorations/E007-web-architecture-direc
       concept: `grep -ric heap web/shell/` reports 0 for every file.
 - [x] [ANL-008](../../spec/07-analysis.md#anl-008-the-session-blobs-shape) describes the persisted
       shape as written.
-- [ ] A person checks save-session / reload / restore by hand, per
-      [D001](../decisions/D001-web-changes-are-hand-smoke-tested.md). **This is
-      the only item outstanding** — see Handoff.
+- [x] A person checked save-session / reload / restore by hand on 2026-07-25,
+      per [D001](../decisions/D001-web-changes-are-hand-smoke-tested.md).
 
 ## Non-goals
 
@@ -97,11 +96,11 @@ the web layer to `src/web/` and the served tree to `dist/`. Read `web/x.js` as
 `node --test 'src/web/**/*.test.js'`. The work itself is unaffected.
 
 
-The code is done and both suites pass. The ticket stays `doing` because D001
-says an agent does not report a web change as verified on unit tests alone, and
-the one remaining done-when item is a person's.
+The code is done and both suites pass. D001 says an agent does not report a web
+change as verified on unit tests alone, so the last done-when item was a
+person's.
 
-What a person needs to check, against `demo.heapl` (`./serve.py`, then
+What a person checked, against `demo.heapl` (`./serve.py`, then
 `http://localhost:8630?trace=demo.heapl`):
 
 1. Move and dock a panel, set a filter and a crop, pin an allocation window,
@@ -111,4 +110,4 @@ What a person needs to check, against `demo.heapl` (`./serve.py`, then
    restore the same way. `localStorage.setItem` with a hand-written flat blob
    works too; the read path is the same one the new test covers.
 
-Then check the last box and set `status: done`.
+Checked on 2026-07-25; nothing came back.

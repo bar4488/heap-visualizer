@@ -1,7 +1,7 @@
 ---
 id: T003
 title: TypeScript over the worker protocol and the persisted shapes
-status: doing
+status: done
 updated: 2026-07-25
 ---
 
@@ -54,10 +54,11 @@ that argued it out is
       and why the zero-toolchain stance was traded away, and
       [TOOL-003](../../spec/10-tooling.md#tool-003-tests) matches how the tests
       are actually run.
-- [ ] A person confirms the built output loads and behaves, per
+- [x] A person confirmed on 2026-07-25 that the built output loads and
+      behaves, per
       [D001](../decisions/D001-web-changes-are-hand-smoke-tested.md) — the
-      served tree is now a build artifact, so this is the check that matters.
-      **This is the only item outstanding** — see Handoff.
+      served tree is a build artifact now, so this was the check that
+      mattered.
 
 ## Non-goals
 
@@ -142,17 +143,17 @@ $ ./build.sh web; echo $?
 step. `npx tsc -p tsconfig.json` and `npx tsc -p tsconfig.test.json` are both
 clean, and `build.sh` runs both.
 
-## Handoff
+## Hand verification
 
-Everything an agent can check is checked. The remaining done-when item is a
-person's, and it matters more than usual here: what gets served is now compiled
-output rather than the files you edited.
+Everything an agent could check was checked. The last done-when item was a
+person's, and it mattered more than usual here: what gets served is compiled
+output now, not the files you edited.
 
 ```sh
 npm install && ./build.sh && ./serve.py    # http://localhost:8630?trace=demo.heapl
 ```
 
-What to look at, in rough order of what compilation could plausibly have
+What was looked at, in rough order of what compilation could plausibly have
 broken:
 
 1. The page loads and the map renders — that is the module graph and the
@@ -166,4 +167,4 @@ broken:
    source maps are emitted, and are the reason compiled debugging was judged
    acceptable in D004.
 
-Then check the last box and set `status: done`.
+Checked on 2026-07-25; nothing came back.
