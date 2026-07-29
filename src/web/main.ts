@@ -871,13 +871,14 @@ function buildLegend() {
     html = `<span class="chip">young <span class="ramp" style="background:linear-gradient(90deg,#7ee787,#39c5cf,#1f4fa8)"></span> old (log age vs oldest live)</span>`;
   } else if (mode === 5) {
     html = UI.tags.map((t, i) => {
-      const predicate = `tag == ${quoteFilterString(t.name)}`;
+      const predicate = `tags contains ${quoteFilterString(t.name)}`;
       return `<button class="chip filter-chip${hasTopLevelPredicate(UI.filterApplied, predicate) ? ' active' : ''}"
         data-filter-predicate="${esc(predicate)}"><span class="swatch" style="background:${t.color}"></span>${esc(t.name)} · ${fmtNum(UI.tagCounts[i + 1] || 0)}</button>`;
     }).join('');
-    const missing = 'tag is missing';
-    html += `<button class="chip filter-chip${hasTopLevelPredicate(UI.filterApplied, missing) ? ' active' : ''}"
-      data-filter-predicate="${missing}"><span class="swatch" style="background:#39414a"></span>untagged · ${fmtNum(UI.tagCounts[0] || 0)}</button>`;
+    // untagged is the empty membership set, not a missing value
+    const untagged = 'tags == {}';
+    html += `<button class="chip filter-chip${hasTopLevelPredicate(UI.filterApplied, untagged) ? ' active' : ''}"
+      data-filter-predicate="${untagged}"><span class="swatch" style="background:#39414a"></span>untagged · ${fmtNum(UI.tagCounts[0] || 0)}</button>`;
     if (!UI.tags.length) {
       html = '<span class="chip">no tags yet</span>' + html;
     }

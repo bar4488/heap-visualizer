@@ -9,6 +9,7 @@ pub(crate) enum TokenKind {
     False,
     In,
     Overlaps,
+    Contains,
     Is,
     Not,
     Missing,
@@ -143,6 +144,8 @@ impl Lexer<'_> {
             "false" => TokenKind::False,
             "in" => TokenKind::In,
             "overlaps" => TokenKind::Overlaps,
+            // also a string method name; `postfix` accepts it after `.`
+            "contains" => TokenKind::Contains,
             "is" => TokenKind::Is,
             "not" => TokenKind::Not,
             "missing" => TokenKind::Missing,

@@ -25,8 +25,8 @@ test('parenthesizes a top-level disjunction before adding a conjunct', () => {
     '(site == "a" || site == "b") && thread == 4',
   );
   assert.equal(
-    toggleFilterPredicate('site == "a" && thread == 4', 'tag == "hot"', '||'),
-    'site == "a" && thread == 4 || tag == "hot"',
+    toggleFilterPredicate('site == "a" && thread == 4', 'tags contains "hot"', '||'),
+    'site == "a" && thread == 4 || tags contains "hot"',
   );
 });
 
@@ -38,25 +38,29 @@ test('operators inside strings and nesting are not top-level splits', () => {
     toggleFilterPredicate(source, 'site == "a && b"'),
     '(thread == 1 || thread == 2)',
   );
+
+  const withSet = 'tags == {"a", "b"} && thread == 1';
+  assert.equal(hasTopLevelPredicate(withSet, 'tags == {"a", "b"}'), true);
+  assert.equal(toggleFilterPredicate(withSet, 'thread == 1'), 'tags == {"a", "b"}');
 });
 
 test('removes the connector beside the first or middle operand', () => {
   assert.equal(
-    toggleFilterPredicate('site == "a" || thread == 2 || tag is missing', 'site == "a"'),
-    'thread == 2 || tag is missing',
+    toggleFilterPredicate('site == "a" || thread == 2 || tags == {}', 'site == "a"'),
+    'thread == 2 || tags == {}',
   );
   assert.equal(
-    toggleFilterPredicate('site == "a" && thread == 2 && tag is missing', 'thread == 2'),
-    'site == "a" && tag is missing',
+    toggleFilterPredicate('site == "a" && thread == 2 && tags == {}', 'thread == 2'),
+    'site == "a" && tags == {}',
   );
 });
 
 test('does not treat a predicate inside a tighter-precedence branch as a root operand', () => {
-  const source = 'site == "a" || thread == 2 && tag is missing';
+  const source = 'site == "a" || thread == 2 && tags == {}';
   assert.equal(hasTopLevelPredicate(source, 'thread == 2'), false);
   assert.equal(
     toggleFilterPredicate(source, 'thread == 2'),
-    '(site == "a" || thread == 2 && tag is missing) && thread == 2',
+    '(site == "a" || thread == 2 && tags == {}) && thread == 2',
   );
 });
 

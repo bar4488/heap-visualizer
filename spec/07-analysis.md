@@ -36,15 +36,13 @@ render.
   filter+drag composes into "tag all `json_node` allocations born here".
 
 Tags can overlap, be renamed, recolored, and deleted (delete removes only that
-membership and compacts higher tag ids down). Filtering by tag is
-membership-aware: `tag == "a"` and `tag in {"a", "b"}` match when any
-membership satisfies the predicate.
+membership and compacts higher tag ids down).
 
 ## ANL-003: Filter
 
 The Filter panel is one multiline allocation-expression editor plus **dim
 others** (default) / **hide others** presentation mode. The expression surface
-and semantics are the version-1 DSL defined by
+and semantics are the allocation DSL sketched by
 [E010](../docs/explorations/E010-filter-expression-language.md): there are no
 checkbox predicates, quick filters, or hidden conjunctions with another
 representation.
@@ -84,9 +82,36 @@ the expression with visible source of the form
 `span overlaps 0x1000..0x1800` and applies it immediately; it does not mutate
 separate filter state.
 
+A missing test (`is missing`, `is not missing`) applies only to an optional
+field. On a required one the answer would be constant, so it is a diagnostic
+instead.
+
 Only the successfully applied source, dim/hide mode, and filter-language
 version persist in the heap session. An unapplied draft, compiled plan, and
-match bits do not.
+match bits do not. The persisted language version is **2**; a source stored
+under an earlier version is not restored, because it may name a field the
+current language does not have.
+
+## ANL-009: Filtering by tag
+
+An allocation's memberships are one set-typed filter field, `tags`, whose
+members are the current tag names. It is never missing: an untagged allocation
+has the empty set.
+
+- `tags == {"a", "aa"}` must be true only when the memberships are exactly
+  those names. Set equality is order-insensitive and ignores repeated members
+  in the literal, and `!=` is its negation.
+- `tags contains "a"` must be true when `a` is one of the memberships.
+  `contains` is a binary operator requiring a set on the left and one member of
+  that set's type on the right; on any other operands it is a diagnostic. It is
+  distinct from the `string.contains(…)` method, which still takes a `.`.
+- `tags == {}` must match every untagged allocation and nothing else.
+- `tags == "a"` and `tags is missing` must be diagnostics, not silently true or
+  false. There is no scalar `tag` field, and no operation on `tags` may mean
+  "any one membership satisfies this" other than `contains`.
+
+The tag legend chip writes `tags contains "<name>"` and the untagged chip
+writes `tags == {}` ([ANL-003](#anl-003-filter)).
 
 ## ANL-004: Crop
 

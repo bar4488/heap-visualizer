@@ -39,6 +39,13 @@ impl CheckedType {
         Self { ty, optional: true }
     }
 
+    fn member_kind(self) -> Option<ValueKind> {
+        match self.ty {
+            Type::Set(kind) => Some(kind),
+            _ => None,
+        }
+    }
+
     fn value_kind(self) -> Option<ValueKind> {
         match self.ty {
             Type::Bool => Some(ValueKind::Bool),
@@ -54,10 +61,17 @@ enum Value {
     Bool(bool),
     Int(i128),
     String(String),
-    Strings(Vec<String>),
     Range(i128, i128),
     Set(Vec<Value>),
     Missing,
+}
+
+const fn scalar_type(kind: ValueKind) -> Type {
+    match kind {
+        ValueKind::Bool => Type::Bool,
+        ValueKind::Int => Type::Int,
+        ValueKind::String => Type::String,
+    }
 }
 
 #[derive(Debug)]
@@ -80,7 +94,9 @@ fn field_type(name: &str, expr: &Expr) -> Result<CheckedType, EvalError> {
         "id" | "address" | "end" | "size" | "seq" | "time" => CheckedType::required(Type::Int),
         "usable" | "thread" | "lifetime" => CheckedType::optional(Type::Int),
         "span" => CheckedType::required(Type::Range),
-        "site" | "tag" => CheckedType::optional(Type::String),
+        "site" => CheckedType::optional(Type::String),
+        // memberships are a set, empty rather than missing when untagged
+        "tags" => CheckedType::required(Type::Set(ValueKind::String)),
         "stack" => CheckedType::required(Type::String),
         "freed" => CheckedType::required(Type::Bool),
         _ => return Err(EvalError::at(expr, format!("unknown field `{name}`"))),
@@ -114,8 +130,14 @@ fn check_type(expr: &Expr, store: &Store) -> Result<CheckedType, EvalError> {
             }
         }
         ExprKind::IsMissing { expr: inner, .. } => {
-            check_type(inner, store)?;
-            required(Type::Bool)
+            // only an optional value can be missing; on anything else the test
+            // is a constant, which is a mistake worth reporting rather than
+            // silently answering false — `tags` is a set, empty when untagged
+            if check_type(inner, store)?.optional {
+                required(Type::Bool)
+            } else {
+                Err(EvalError::at(expr, "`is missing` requires an optional field"))
+            }
         }
         ExprKind::Set(items) => {
             let Some(first) = items.first() else {
@@ -181,10 +203,16 @@ fn check_type(expr: &Expr, store: &Store) -> Result<CheckedType, EvalError> {
         ExprKind::Index { .. } => Err(EvalError::at(expr, "custom fields are not available yet")),
         ExprKind::Binary { op, left, right } => {
             let left_ty = check_type(left, store)?;
-            let right_ty = if *op == BinaryOp::In
-                && matches!(&right.kind, ExprKind::Set(items) if items.is_empty())
+            // an empty set literal has no type of its own; against `in` or an
+            // equality it takes its member type from the left operand
+            let right_ty = if matches!(&right.kind, ExprKind::Set(items) if items.is_empty())
+                && matches!(op, BinaryOp::In | BinaryOp::Equal | BinaryOp::NotEqual)
             {
-                CheckedType::required(Type::Set(left_ty.value_kind().unwrap_or(ValueKind::Bool)))
+                let kind = left_ty
+                    .member_kind()
+                    .or_else(|| left_ty.value_kind())
+                    .unwrap_or(ValueKind::Bool);
+                CheckedType::required(Type::Set(kind))
             } else {
                 check_type(right, store)?
             };
@@ -197,8 +225,17 @@ fn check_type(expr: &Expr, store: &Store) -> Result<CheckedType, EvalError> {
                     }
                 }
                 BinaryOp::Equal | BinaryOp::NotEqual => {
-                    if same_values(left_ty, right_ty) {
+                    let same_sets = left_ty.member_kind().is_some()
+                        && left_ty.member_kind() == right_ty.member_kind();
+                    if same_values(left_ty, right_ty) || same_sets {
                         required(Type::Bool)
+                    } else if left_ty.member_kind().is_some()
+                        && left_ty.member_kind() == right_ty.value_kind()
+                    {
+                        Err(EvalError::at(
+                            expr,
+                            "a set compares to a set; use `contains` to test one member",
+                        ))
                     } else {
                         Err(EvalError::at(
                             expr,
@@ -250,6 +287,14 @@ fn check_type(expr: &Expr, store: &Store) -> Result<CheckedType, EvalError> {
                         Err(EvalError::at(expr, "`overlaps` requires two ranges"))
                     }
                 }
+                BinaryOp::Contains => match left_ty.member_kind() {
+                    Some(kind) if right_ty.value_kind() == Some(kind) => required(Type::Bool),
+                    Some(_) => Err(EvalError::at(
+                        expr,
+                        "`contains` requires a member of the set's type",
+                    )),
+                    None => Err(EvalError::at(expr, "`contains` requires a set on the left")),
+                },
             }
         }
     }
@@ -331,7 +376,14 @@ fn expression_items(expected: Option<Type>) -> Vec<CompletionItem> {
         ("size", "field", "bytes", Type::Int, "size ", 2),
         ("span", "field", "address range", Type::Range, "span ", 2),
         ("stack", "field", "string", Type::String, "stack ", 2),
-        ("tag", "field", "string, optional", Type::String, "tag ", 2),
+        (
+            "tags",
+            "field",
+            "string set",
+            Type::Set(ValueKind::String),
+            "tags ",
+            2,
+        ),
         (
             "thread",
             "field",
@@ -386,7 +438,11 @@ fn operator_items(ty: CheckedType, leading_space: bool) -> Vec<CompletionItem> {
             ("in", Some("set")),
         ],
         Type::Range => vec![("overlaps", Some("half-open range"))],
-        Type::Set(_) => Vec::new(),
+        Type::Set(_) => vec![
+            ("==", Some("the whole set")),
+            ("!=", Some("the whole set")),
+            ("contains", Some("one member")),
+        ],
     };
     if ty.optional {
         labels.push(("is", Some("missing test")));
@@ -457,7 +513,7 @@ fn observed_items(
                 item(&label, insert, "value", Some("observed thread"), 0)
             })
             .collect(),
-        "tag" => labels
+        "tags" => labels
             .iter()
             .map(|value| string_item(value, "current tag", in_set))
             .collect(),
@@ -482,6 +538,12 @@ fn operand_items(
             items
         }
         OperandKind::RangeEnd => expression_items(Some(Type::Int)),
+        // a set-typed left operand compares only to a set literal
+        OperandKind::Binary(BinaryOp::Equal | BinaryOp::NotEqual)
+            if left_ty.is_some_and(|ty| ty.member_kind().is_some()) =>
+        {
+            vec![item("{", "{", "operator", Some("constant set"), 0)]
+        }
         OperandKind::Binary(BinaryOp::In) => {
             let mut items = vec![item("{", "{", "operator", Some("constant set"), 0)];
             if left_ty.is_some_and(|ty| ty.ty == Type::Int) {
@@ -499,6 +561,7 @@ fn operand_items(
                 | BinaryOp::GreaterEqual => left_ty.map(|ty| ty.ty),
                 BinaryOp::Add | BinaryOp::Subtract => Some(Type::Int),
                 BinaryOp::Overlaps => Some(Type::Range),
+                BinaryOp::Contains => left_ty.and_then(CheckedType::member_kind).map(scalar_type),
                 BinaryOp::And | BinaryOp::Or => Some(Type::Bool),
                 BinaryOp::In => unreachable!(),
             };
@@ -691,17 +754,13 @@ fn field(
                 Value::String(s.stacks[id as usize].clone())
             }
         }
-        "tag" => {
-            let values: Vec<String> = s
-                .tag_ids(e)
+        // every membership, in tag-id order; empty for an untagged allocation
+        "tags" => Value::Set(
+            s.tag_ids(e)
                 .filter_map(|id| labels.get(id as usize - 1).cloned())
-                .collect();
-            if values.is_empty() {
-                Value::Missing
-            } else {
-                Value::Strings(values)
-            }
-        }
+                .map(Value::String)
+                .collect(),
+        ),
         "freed" => Value::Bool(s.death[i] != NONE_U32),
         "lifetime" => {
             let d = s.death[i];
@@ -721,25 +780,20 @@ fn equal(a: &Value, b: &Value) -> Result<bool, String> {
         (Value::Bool(a), Value::Bool(b)) => Ok(a == b),
         (Value::Int(a), Value::Int(b)) => Ok(a == b),
         (Value::String(a), Value::String(b)) => Ok(a == b),
-        (Value::Strings(a), Value::String(b)) | (Value::String(b), Value::Strings(a)) => {
-            Ok(a.iter().any(|value| value == b))
-        }
-        (Value::Strings(a), Value::Strings(b)) => {
-            Ok(a.iter().any(|value| b.contains(value)))
-        }
+        // set equality is exact and order-insensitive: same members, both ways
+        (Value::Set(a), Value::Set(b)) => Ok(contains_all(a, b) && contains_all(b, a)),
         _ => Err("equality operands have incompatible types".into()),
     }
 }
 
-fn string_order(a: &str, b: &str, op: BinaryOp) -> bool {
-    let ord = a.cmp(b);
-    match op {
-        BinaryOp::Less => ord.is_lt(),
-        BinaryOp::LessEqual => ord.is_le(),
-        BinaryOp::Greater => ord.is_gt(),
-        BinaryOp::GreaterEqual => ord.is_ge(),
-        _ => false,
-    }
+fn contains_all(haystack: &[Value], needles: &[Value]) -> bool {
+    needles.iter().all(|needle| member(haystack, needle))
+}
+
+fn member(haystack: &[Value], needle: &Value) -> bool {
+    haystack
+        .iter()
+        .any(|value| equal(value, needle).unwrap_or(false))
 }
 
 fn order(a: &Value, b: &Value, op: BinaryOp) -> Result<bool, String> {
@@ -747,12 +801,6 @@ fn order(a: &Value, b: &Value, op: BinaryOp) -> Result<bool, String> {
         (Value::Missing, _) | (_, Value::Missing) => return Ok(false),
         (Value::Int(a), Value::Int(b)) => a.cmp(b),
         (Value::String(a), Value::String(b)) => a.cmp(b),
-        (Value::Strings(a), Value::String(b)) => {
-            return Ok(a.iter().any(|a| string_order(a, b, op)));
-        }
-        (Value::String(a), Value::Strings(b)) => {
-            return Ok(b.iter().any(|b| string_order(a, b, op)));
-        }
         _ => return Err("ordering operands have incompatible types".into()),
     };
     Ok(match op {
@@ -856,14 +904,6 @@ fn eval(expr: &Expr, s: &Store, e: u32, labels: &[String]) -> Result<Value, Eval
                                 ))
                             }
                         }),
-                        (Value::Strings(values), Value::String(b)) => Value::Bool(
-                            values.iter().any(|a| match name.as_str() {
-                                "contains" => a.contains(b),
-                                "starts_with" => a.starts_with(b),
-                                "ends_with" => a.ends_with(b),
-                                _ => false,
-                            }),
-                        ),
                         _ => {
                             return Err(EvalError::at(
                                 expr,
@@ -910,8 +950,17 @@ fn eval(expr: &Expr, s: &Store, e: u32, labels: &[String]) -> Result<Value, Eval
                     },
                     BinaryOp::In => Value::Bool(match b {
                         Value::Range(lo, hi) => matches!(a, Value::Int(v) if lo <= v && v < hi),
-                        Value::Set(values) => values.iter().any(|v| equal(&a, v).unwrap_or(false)),
+                        Value::Set(values) => member(&values, &a),
                         _ => return Err(EvalError::at(expr, "`in` requires a set or range")),
+                    }),
+                    BinaryOp::Contains => Value::Bool(match a {
+                        Value::Set(values) => member(&values, &b),
+                        _ => {
+                            return Err(EvalError::at(
+                                expr,
+                                "`contains` requires a set on the left",
+                            ))
+                        }
                     }),
                     BinaryOp::Overlaps => Value::Bool(match (a, b) {
                         (Value::Range(a0, a1), Value::Range(b0, b1)) => a0 < b1 && b0 < a1,

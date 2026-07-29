@@ -74,7 +74,15 @@ impl Parser {
             None
         };
         if let Some(op) = op {
-            let right = self.additive()?;
+            // equality is the only comparison a set literal can appear in:
+            // `tags == {"a", "aa"}` compares whole sets
+            let right = if matches!(op, BinaryOp::Equal | BinaryOp::NotEqual)
+                && self.at(&TokenKind::LeftBrace)
+            {
+                self.set()?
+            } else {
+                self.additive()?
+            };
             return Ok(binary(op, left, right));
         }
         if self.take(&TokenKind::In).is_some() {
@@ -88,6 +96,10 @@ impl Parser {
         if self.take(&TokenKind::Overlaps).is_some() {
             let right = self.range()?;
             return Ok(binary(BinaryOp::Overlaps, left, right));
+        }
+        if self.take(&TokenKind::Contains).is_some() {
+            let right = self.additive()?;
+            return Ok(binary(BinaryOp::Contains, left, right));
         }
         if self.take(&TokenKind::Is).is_some() {
             let negated = self.take(&TokenKind::Not).is_some();
@@ -190,11 +202,17 @@ impl Parser {
         loop {
             if self.take(&TokenKind::Dot).is_some() {
                 let name_token = self.advance();
-                let TokenKind::Identifier(name) = name_token.kind else {
-                    return Err(ParseError::new(
-                        "expected a field or method name after `.`",
-                        name_token.span,
-                    ));
+                // `contains` is also a binary operator keyword; after `.` it is
+                // the string method, so accept it as an ordinary name here
+                let name = match name_token.kind {
+                    TokenKind::Identifier(name) => name,
+                    TokenKind::Contains => "contains".to_owned(),
+                    _ => {
+                        return Err(ParseError::new(
+                            "expected a field or method name after `.`",
+                            name_token.span,
+                        ))
+                    }
                 };
                 let span = expr.span.join(name_token.span);
                 expr = Expr::new(

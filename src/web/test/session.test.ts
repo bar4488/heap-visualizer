@@ -133,7 +133,7 @@ test('buildSession captures every field the format promises', () => {
   assert.deepEqual(h.xview, { zoom: 2.5, pan: 0.25 });
   assert.deepEqual(h.crop, { lo: 100, hi: 900 });
   assert.equal(h.playhead, 4321);
-  assert.equal(h.filter.languageVersion, 1);
+  assert.equal(h.filter.languageVersion, 2);
   assert.equal(h.filter.source, 'size >= 1KiB && size <= 1MiB');
   assert.equal(h.filter.mode, 2);
   assert.deepEqual(Object.keys(s.windows).sort(), [...PANEL_IDS].sort());
@@ -230,6 +230,16 @@ test('applySession ignores a filter with an unknown language version', () => {
   const s = buildSession();
   s.heap.filter.languageVersion = 99;
   s.heap.filter.source = 'size > 0';
+  ui.filterApplied = '';
+  applySession(s);
+  assert.equal(ui.filterApplied, '');
+});
+
+// a version-1 source can say `tag == "x"`, which no longer checks (T016)
+test('applySession ignores a filter written in language version 1', () => {
+  const s = buildSession();
+  s.heap.filter.languageVersion = 1;
+  s.heap.filter.source = 'tag == "hot"';
   ui.filterApplied = '';
   applySession(s);
   assert.equal(ui.filterApplied, '');

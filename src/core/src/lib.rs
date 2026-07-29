@@ -1874,7 +1874,7 @@ not json at all
         let mut a = load(SAMPLE);
         a.store.add_tag(1, 1);
         let labels = vec!["a".to_string(), "b".to_string()];
-        let expr = heap_visualizer_filter_dsl::parse(r#"tag in {"a"}"#).unwrap();
+        let expr = heap_visualizer_filter_dsl::parse(r#"tags contains "a""#).unwrap();
         let mut bits = vec![0u64; (a.store.len() as usize).div_ceil(64)];
         for e in 0..a.store.len() {
             if matches!(a.store.op[e as usize], OP_M | OP_R)
@@ -1888,8 +1888,13 @@ not json at all
         assert_eq!(tag_filter_matches(&mut a, 2), 1);
         assert_eq!(tags(&a.store)[1], vec![1, 2]);
         assert!(filter_eval::evaluate(&expr, &a.store, 1, &labels).unwrap());
-        let b = heap_visualizer_filter_dsl::parse(r#"tag in {"b"}"#).unwrap();
+        let b = heap_visualizer_filter_dsl::parse(r#"tags contains "b""#).unwrap();
         assert!(filter_eval::evaluate(&b, &a.store, 1, &labels).unwrap());
+        // and the whole membership set is now visible to the language
+        let both = heap_visualizer_filter_dsl::parse(r#"tags == {"b", "a"}"#).unwrap();
+        assert!(filter_eval::evaluate(&both, &a.store, 1, &labels).unwrap());
+        let only_a = heap_visualizer_filter_dsl::parse(r#"tags == {"a"}"#).unwrap();
+        assert!(!filter_eval::evaluate(&only_a, &a.store, 1, &labels).unwrap());
 
         let mut dump = String::new();
         tags_dump_json(&a.store, &mut dump);
@@ -2094,6 +2099,37 @@ not json at all
     }
 
     #[test]
+    fn tags_evaluate_as_a_membership_set() {
+        let mut a = load(SAMPLE);
+        let labels = vec!["a".to_string(), "b".to_string()];
+        a.store.add_tag(0, 1);
+        a.store.add_tag(0, 2);
+        a.store.add_tag(1, 2);
+        let matches = |source: &str, e: u32| {
+            let expr = heap_visualizer_filter_dsl::parse(source).unwrap();
+            filter_eval::evaluate(&expr, &a.store, e, &labels).unwrap()
+        };
+
+        // exact set equality, order-insensitive
+        assert!(matches(r#"tags == {"a", "b"}"#, 0));
+        assert!(matches(r#"tags == {"b", "a"}"#, 0));
+        assert!(!matches(r#"tags == {"b"}"#, 0));
+        assert!(matches(r#"tags == {"b"}"#, 1));
+        assert!(matches(r#"tags != {"a"}"#, 1));
+
+        // membership
+        assert!(matches(r#"tags contains "b""#, 0));
+        assert!(matches(r#"tags contains "b""#, 1));
+        assert!(!matches(r#"tags contains "a""#, 1));
+
+        // untagged is the empty set, not a missing value
+        assert!(matches("tags == {}", 3));
+        assert!(!matches("tags != {}", 3));
+        assert!(!matches("tags == {}", 0));
+        assert!(!matches(r#"tags contains "a""#, 3));
+    }
+
+    #[test]
     fn filter_check_rejects_semantic_errors_before_scanning() {
         let valid = heap_visualizer_filter_dsl::parse(
             r#"size >= 100 && site.starts_with("a")"#,
@@ -2117,6 +2153,33 @@ not json at all
 
         let empty_set = heap_visualizer_filter_dsl::parse("site in {}").unwrap();
         assert!(filter_eval::check(&empty_set, &store).is_ok());
+
+        // `tags` is a set: it compares to a set, tests one member with
+        // `contains`, and is never missing
+        let parse = |source: &str| heap_visualizer_filter_dsl::parse(source).unwrap();
+        assert!(filter_eval::check(&parse(r#"tags == {"a", "b"}"#), &store).is_ok());
+        assert!(filter_eval::check(&parse("tags == {}"), &store).is_ok());
+        assert!(filter_eval::check(&parse(r#"tags contains "a""#), &store).is_ok());
+        assert_eq!(
+            filter_eval::check(&parse(r#"tag == "a""#), &store).unwrap_err().message,
+            "unknown field `tag`"
+        );
+        assert_eq!(
+            filter_eval::check(&parse(r#"tags == "a""#), &store).unwrap_err().message,
+            "a set compares to a set; use `contains` to test one member"
+        );
+        assert_eq!(
+            filter_eval::check(&parse("tags contains 1"), &store).unwrap_err().message,
+            "`contains` requires a member of the set's type"
+        );
+        assert_eq!(
+            filter_eval::check(&parse(r#"site contains "a""#), &store).unwrap_err().message,
+            "`contains` requires a set on the left"
+        );
+        assert_eq!(
+            filter_eval::check(&parse("tags is missing"), &store).unwrap_err().message,
+            "`is missing` requires an optional field"
+        );
 
         let tick_store = Store { unit: "tick".into(), ..Store::default() };
         let time_unit = heap_visualizer_filter_dsl::parse("time > 1ms").unwrap();
@@ -2142,7 +2205,7 @@ not json at all
         assert!(out.contains("\"insertText\":\"\\\"a\\\" \""));
 
         out.clear();
-        let source = "tag == \"q";
+        let source = "tags contains \"q";
         filter_eval::push_completions_json(
             &mut out, source, source.len(), &a.store, &a.tag_labels,
         );
@@ -2178,25 +2241,36 @@ not json at all
         for numeric in ["abs", "address", "id", "size", "thread"] {
             assert!(out.contains(&format!("\"label\":\"{numeric}\"")), "{out}");
         }
-        for incompatible in ["false", "freed", "site", "span", "tag", "true"] {
+        for incompatible in ["false", "freed", "site", "span", "tags", "true"] {
             assert!(!out.contains(&format!("\"label\":\"{incompatible}\"")), "{out}");
         }
 
-        let out = complete("tag");
+        let out = complete("tags");
         assert!(out.contains("\"label\":\"==\""));
         assert!(out.contains("\"insertText\":\" == \""));
-        assert!(!out.contains("\"label\":\"tag\""));
+        assert!(out.contains("\"label\":\"contains\""));
+        assert!(!out.contains("\"label\":\"tags\""));
+        // a set is not optional and does not order
+        assert!(!out.contains("\"label\":\"is\""));
+        assert!(!out.contains("\"label\":\"<\""));
 
-        let out = complete("tag == ");
-        for string in ["parser", "suspect", "site", "stack", "tag"] {
+        // the whole set compares only to a set literal
+        let out = complete("tags == ");
+        assert!(out.contains("\"label\":\"{\""), "{out}");
+        for incompatible in ["parser", "suspect", "site", "tags"] {
+            assert!(!out.contains(&format!("\"label\":\"{incompatible}\"")), "{out}");
+        }
+
+        let out = complete("tags contains ");
+        for string in ["parser", "suspect", "site", "stack"] {
             assert!(out.contains(&format!("\"label\":\"{string}\"")), "{out}");
         }
-        for incompatible in ["false", "freed", "size", "span", "true"] {
+        for incompatible in ["false", "freed", "size", "span", "tags", "true"] {
             assert!(!out.contains(&format!("\"label\":\"{incompatible}\"")), "{out}");
         }
         assert!(out.contains("\"insertText\":\"\\\"suspect\\\" \""));
 
-        let out = complete("tag in {");
+        let out = complete("tags == {");
         assert!(out.contains("\"label\":\"suspect\""));
         assert!(out.contains("\"insertText\":\"\\\"suspect\\\"\""));
         assert!(!out.contains("\"label\":\"site\""));
@@ -2209,7 +2283,7 @@ not json at all
         assert!(out.contains("\"label\":\"span\""));
         assert!(!out.contains("\"label\":\"size\""));
 
-        let out = complete("tag in {\"suspect\"");
+        let out = complete("tags == {\"suspect\"");
         assert!(out.contains("\"label\":\",\""));
         assert!(out.contains("\"label\":\"}\""));
     }

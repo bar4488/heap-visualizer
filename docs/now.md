@@ -1,6 +1,6 @@
 # Now
 
-_Updated: 2026-07-25._
+_Updated: 2026-07-29._
 
 A heap allocation visualizer: a `.heapl` JSONL trace of malloc/free/realloc
 events on an address-line map with two coordinated timelines and full time
@@ -50,9 +50,11 @@ position: exact fields advance to operators, right-hand expressions are
 filtered to the required type, calls/sets/ranges progress through their
 delimiters, and live site/thread/tag values come from that same core catalog.
 Tag candidates update on create, rename, delete, and restore, including escaped
-labels. Allocations can carry overlapping tags; tag predicates match any
-membership, and filter-to-tag adds its snapshot without removing the tags that
-selected it. `named()` and custom `field.*` columns still report direct diagnostics
+labels. Allocations can carry overlapping tags, and the language says so: the
+field is the set-typed `tags`, `tags == {"a", "aa"}` is exact set equality,
+`tags contains "a"` is membership, `tags == {}` is untagged, and filter-to-tag
+adds its snapshot without removing the tags that selected it.
+`named()` and custom `field.*` columns still report direct diagnostics
 and are not offered as completions.
 
 The expression is also the single state behind the filter actions. Site,
@@ -99,7 +101,13 @@ survivable, a stale `dist/` is the new way to be confused.
 
 ## Next
 
-**Nothing is in flight.** [T010](tickets/T010-default-docked-layout.md) closed
+**Nothing is in flight.** [T016](tickets/T016-tags-is-a-string-set.md) closed on
+2026-07-29. One note about how it closed, because it is unusual: the agent that
+wrote it could not run `node` at all, so `cargo test` is the only suite it saw
+pass. The web suite, `tsc` and `./build.sh web` were run by a person and
+reported passing, and the ticket closed on that report.
+
+[T010](tickets/T010-default-docked-layout.md) closed
 on 2026-07-25. A trace with no saved session now starts with Events open in the
 left drawer and Layout, Appearance, Filter and Marks open in the right; Play,
 Warnings and Allocation remain floating and closed. Each populated drawer can
@@ -128,6 +136,18 @@ allocations now carry real overlapping memberships, so snapshotting matches
 selected by tag `a` into tag `b` preserves both groups. Counts, filters,
 `.heapa` persistence, the allocation panel, and segmented map stripes all use
 the complete membership set.
+
+[T016](tickets/T016-tags-is-a-string-set.md) fixed the second one, in the
+language rather than the engine. The scalar `tag`, whose `==` secretly meant
+"any membership satisfies this", is gone; `tags` is a set field with exact
+equality, a `contains` operator for one member, and `tags == {}` for untagged.
+`Value::Strings` and its equality/ordering/string-method overloads are gone with
+it, `is missing` now requires an optional operand instead of answering a
+constant, and the session's persisted filter is language version 2 — a
+version-1 source is read back as no filter rather than restored broken. Saved
+filters in a `.heapa` file carry no version, so an old `tag == "x"` there
+reports a diagnostic when set; nothing migrates it. The rule is
+[ANL-009](../spec/07-analysis.md#anl-009-filtering-by-tag).
 
 [E014](explorations/E014-overlapping-tags-cost-model.md) records the resulting
 cost model and semantics. The current tag-indexed bitsets are compact for a few

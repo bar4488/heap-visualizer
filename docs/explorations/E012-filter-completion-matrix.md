@@ -184,3 +184,14 @@ single-token insertion text.
 - escaped and Unicode tag labels round-trip through the WASM catalog;
 - completion acceptance produces the next intended cursor state; and
 - the existing UTF-8/UTF-16 replacement tests remain green.
+
+## Correction — 2026-07-29
+
+Every `tag` row above names a field that no longer exists.
+[T016](../tickets/T016-tags-is-a-string-set.md) replaced the scalar `tag` with
+the set-typed `tags`, so the completion positions changed shape: after `tags`
+the operators are `==`, `!=` and `contains` (not `<`, `in`, or `is`); `tags ==`
+offers only `{`; `tags contains` and `tags == {` are where the current tag
+labels appear. Everything else in this matrix — the sites, the ranking, the
+escaping, the delimiters — still describes the implementation. The rest of this
+document is left as the dated record it was.
