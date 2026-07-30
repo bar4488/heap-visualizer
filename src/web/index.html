@@ -13,6 +13,7 @@
   <button id="btn-open" title="Open a .heapl trace">Open…</button>
   <input type="file" id="file-input" accept=".heapl,.jsonl,.json,.txt" hidden>
   <button id="btn-demo" title="Load the bundled demo trace">Demo</button>
+  <button id="btn-guide" title="Guide: what the views show and how to drive them">Guide</button>
   <span id="trace-title" class="title"></span>
 
   <span class="sep"></span>
@@ -46,6 +47,17 @@
 <div id="legend" hidden></div>
 
 <div id="workspace">
+<!-- The guide is not a panel and not a dockable drawer (spec SHELL-009): it is
+     its own surface at the left edge of the workspace, outside #drawer-left. -->
+<aside id="guide" hidden>
+  <div id="guide-bar">
+    <span id="guide-title">Guide</span>
+    <span class="grow"></span>
+    <button id="guide-close" title="Close the guide">×</button>
+  </div>
+  <div id="guide-body"></div>
+  <div id="guide-resize" title="Drag to resize the guide"></div>
+</aside>
 <div id="drawer-left" class="drawer" hidden></div>
 <main id="views">
   <section class="tl-strip" id="strip-t">

@@ -1,0 +1,18 @@
+# One buffer grown five times. Each R kills the old allocation and creates a
+# new one at the same seq, so stepping onto it draws the move link.
+{"op":"H","v":1,"unit":"ns","arena_base":"0x555555550000","row_bytes":4096,"title":"guide: realloc chain"}
+{"t":100,"op":"M","id":1,"addr":"0x555555551000","size":64,"thr":0,"site":"vec_push"}
+# neighbours, so the buffer cannot grow in place
+{"t":110,"op":"M","id":2,"addr":"0x555555551040","size":64,"thr":0,"site":"vec_meta"}
+{"t":120,"op":"M","id":3,"addr":"0x555555551080","size":64,"thr":0,"site":"vec_meta"}
+{"t":200,"op":"R","id":4,"old_id":1,"addr":"0x555555552000","size":128,"old_addr":"0x555555551000","old_size":64,"thr":0,"site":"vec_push"}
+{"t":300,"op":"R","id":5,"old_id":4,"addr":"0x555555553000","size":512,"old_addr":"0x555555552000","old_size":128,"thr":0,"site":"vec_push"}
+{"t":400,"op":"R","id":6,"old_id":5,"addr":"0x555555555000","size":4096,"old_addr":"0x555555553000","old_size":512,"thr":0,"site":"vec_push"}
+# in-place grow: addr is unchanged, so this R draws no move
+{"t":500,"op":"R","id":7,"old_id":6,"addr":"0x555555555000","size":8192,"old_addr":"0x555555555000","old_size":4096,"thr":0,"site":"vec_push"}
+{"t":600,"op":"R","id":8,"old_id":7,"addr":"0x55555555a000","size":65536,"old_addr":"0x555555555000","old_size":8192,"thr":0,"site":"vec_push"}
+# shrink, and it moves back down
+{"t":700,"op":"R","id":9,"old_id":8,"addr":"0x555555551100","size":256,"old_addr":"0x55555555a000","old_size":65536,"thr":0,"site":"vec_shrink"}
+{"t":800,"op":"F","id":2,"addr":"0x555555551040","size":64,"thr":0}
+{"t":810,"op":"F","id":3,"addr":"0x555555551080","size":64,"thr":0}
+{"t":900,"op":"F","id":9,"addr":"0x555555551100","size":256,"thr":0}

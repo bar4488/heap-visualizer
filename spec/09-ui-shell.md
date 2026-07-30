@@ -9,7 +9,9 @@ everything else is a **window** the user summons, places, and dismisses.
   Appearance, Filter, Events, Marks), horizontal-zoom pill, crop pill, marks
   Save/Load, jump box, warnings badge.
 - **Legend strip** under the toolbar when a color mode needs one.
-- **Workspace**: optional left/right drawers flanking the three stacked views.
+- **Workspace**: optional left/right drawers flanking the three stacked views,
+  with the guide surface ([SHELL-009](#shell-009-the-guide-surface)) outside
+  them at the left edge.
 - **Status bar** (bottom): playhead position (seq + t), live count/bytes,
   transient info line, trace summary line.
 - Overlays above everything as needed: tooltip, selection popover, search
@@ -129,3 +131,28 @@ that are consulted continuously already docked and open:
 
 A restored session overrides this **wholly**, not as a patch on top of it: a
 window the default docks and the session does not must end up floating.
+
+## SHELL-009: The guide surface
+
+The user-facing guide is **not a window**. It must not appear in the panel
+declaration ([SHELL-003](#shell-003-panels-are-declared-as-data)), must not
+dock, float, or z-stack ([SHELL-002](#shell-002-panels-are-windows),
+[SHELL-004](#shell-004-docking-drawers)), and must not carry per-trace session
+geometry. It is its own surface at the left edge of the workspace, outside the
+docking drawers, toggled from the toolbar and closable.
+
+Its content must be plain markdown authored under `src/`, such that each
+section read as raw text is complete prose. The only non-prose element is a
+link naming a real element id: one form highlights that element in the running
+app, the others act on it.
+
+Content may ship **scenario traces** — small hand-written `.heapl` files, each
+demonstrating a specific case the bundled demo does not. A scenario is offered
+as an ordinary link to `?trace=…` autoload
+([TOOL-002](10-tooling.md)), so the guide has no loading path of its own.
+
+**The guide must reach application state only by driving the real controls** —
+clicking the element, or setting its value and dispatching the event that
+element's own handler is bound to. It must not post to the worker, mutate
+shared UI state, or un-hide a panel behind its toolbar toggle. A guide action
+whose target id does not exist must report that and change nothing.

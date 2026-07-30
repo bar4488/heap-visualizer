@@ -1,0 +1,32 @@
+# Two bursts separated by 0.4 s of idle. The point: the same events are a
+# sliver on the time strip and a wide band on the events strip.
+# seq is omitted throughout — it is assigned from stream position (TRACE-007).
+{"op":"H","v":1,"unit":"ns","arena_base":"0x555555550000","row_bytes":4096,"title":"guide: bursts"}
+{"t":1000,"op":"M","id":1,"addr":"0x555555551000","size":64,"thr":0,"site":"parse_token"}
+{"t":1000,"op":"M","id":2,"addr":"0x555555551040","size":64,"thr":0,"site":"parse_token"}
+{"t":1000,"op":"M","id":3,"addr":"0x555555551080","size":64,"thr":0,"site":"parse_token"}
+{"t":1001,"op":"M","id":4,"addr":"0x5555555510c0","size":128,"thr":0,"site":"parse_token"}
+{"t":1001,"op":"M","id":5,"addr":"0x555555551140","size":128,"thr":0,"site":"parse_token"}
+{"t":1002,"op":"M","id":6,"addr":"0x5555555511c0","size":256,"thr":0,"site":"parse_token"}
+{"t":1002,"op":"M","id":7,"addr":"0x5555555512c0","size":256,"thr":0,"site":"parse_token"}
+{"t":1003,"op":"M","id":8,"addr":"0x5555555513c0","size":512,"thr":0,"site":"build_ast"}
+{"t":1003,"op":"F","id":1,"addr":"0x555555551000","size":64,"thr":0}
+{"t":1004,"op":"F","id":2,"addr":"0x555555551040","size":64,"thr":0}
+{"t":1004,"op":"M","id":9,"addr":"0x555555551000","size":128,"thr":0,"site":"build_ast"}
+{"t":1005,"op":"M","id":10,"addr":"0x5555555515c0","size":1024,"thr":0,"site":"build_ast"}
+# 0.4 s of nothing. On the events strip this gap has zero width.
+{"t":400000000,"op":"M","id":11,"addr":"0x555555552000","size":4096,"thr":1,"site":"emit_buffer"}
+{"t":400000001,"op":"M","id":12,"addr":"0x555555553000","size":4096,"thr":1,"site":"emit_buffer"}
+{"t":400000001,"op":"F","id":3,"addr":"0x555555551080","size":64,"thr":0}
+{"t":400000002,"op":"F","id":4,"addr":"0x5555555510c0","size":128,"thr":0}
+{"t":400000002,"op":"F","id":5,"addr":"0x555555551140","size":128,"thr":0}
+{"t":400000003,"op":"M","id":13,"addr":"0x555555554000","size":8192,"thr":1,"site":"emit_buffer"}
+{"t":400000003,"op":"F","id":6,"addr":"0x5555555511c0","size":256,"thr":0}
+{"t":400000004,"op":"F","id":7,"addr":"0x5555555512c0","size":256,"thr":0}
+{"t":400000004,"op":"M","id":14,"addr":"0x555555556000","size":2048,"thr":1,"site":"emit_buffer"}
+{"t":400000005,"op":"F","id":8,"addr":"0x5555555513c0","size":512,"thr":0}
+{"t":400000005,"op":"F","id":9,"addr":"0x555555551000","size":128,"thr":0}
+{"t":800000000,"op":"F","id":11,"addr":"0x555555552000","size":4096,"thr":1}
+{"t":800000000,"op":"F","id":12,"addr":"0x555555553000","size":4096,"thr":1}
+{"t":800000001,"op":"F","id":13,"addr":"0x555555554000","size":8192,"thr":1}
+# id 10 and id 14 are never freed.

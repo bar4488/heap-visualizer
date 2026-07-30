@@ -31,6 +31,7 @@ import {
 import {
   applyFilterCompletion, utf8Offset,
 } from './filter-completion.ts';
+import { initGuide } from './guide.ts';
 import {
   hasTopLevelPredicate, quoteFilterString, toggleFilterPredicate,
 } from './filter-actions.ts';
@@ -1369,6 +1370,10 @@ initSession({
   buildMarks,
   applyMarks,
 });
+
+// The guide drawer takes no deps: it reaches the app only by driving the real
+// controls wired above (spec SHELL-009), so there is nothing to hand it.
+initGuide();
 
 function clearSelection() {
   UI.sel = null;

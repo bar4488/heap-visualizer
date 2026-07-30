@@ -1,0 +1,22 @@
+# Things that are wrong with the traced program, drawn rather than rejected:
+# a real overlap, a freed allocation nested in a live one, usable slack,
+# a double free, and a free of an id that was never allocated.
+{"op":"H","v":1,"unit":"ns","arena_base":"0x555555550000","row_bytes":4096,"title":"guide: defects"}
+{"t":100,"op":"M","id":1,"addr":"0x555555551000","size":2048,"thr":0,"site":"arena_block"}
+# id 2 starts inside id 1 and both stay live: the shared bytes render orange.
+{"t":200,"op":"M","id":2,"addr":"0x555555551400","size":1024,"thr":0,"site":"stale_writer"}
+# a pool with two allocations carved out of it
+{"t":300,"op":"M","id":3,"addr":"0x555555552000","size":4096,"thr":0,"site":"pool_reserve"}
+{"t":400,"op":"M","id":4,"addr":"0x555555552100","size":512,"thr":0,"site":"pool_item"}
+{"t":500,"op":"M","id":5,"addr":"0x555555552400","size":512,"thr":0,"site":"pool_item"}
+# id 4 dies while its parent stays live: recessed, not gone (mark freed nested)
+{"t":600,"op":"F","id":4,"addr":"0x555555552100","size":512,"thr":0}
+# requested 100, allocator gave 128: the extra 28 bytes draw as a slack band
+{"t":700,"op":"M","id":6,"addr":"0x555555553000","size":100,"usable":128,"thr":0,"site":"small_node"}
+{"t":800,"op":"M","id":7,"addr":"0x555555553100","size":48,"usable":64,"thr":0,"site":"small_node"}
+# double free of id 4
+{"t":900,"op":"F","id":4,"addr":"0x555555552100","size":512,"thr":0}
+# free of an id that never existed
+{"t":1000,"op":"F","id":99,"addr":"0x5555555ff000","size":32,"thr":0}
+{"t":1100,"op":"F","id":5,"addr":"0x555555552400","size":512,"thr":0}
+{"t":1200,"op":"F","id":2,"addr":"0x555555551400","size":1024,"thr":0}

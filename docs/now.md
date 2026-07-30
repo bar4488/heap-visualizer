@@ -1,6 +1,6 @@
 # Now
 
-_Updated: 2026-07-25._
+_Updated: 2026-07-30._
 
 A heap allocation visualizer: a `.heapl` JSONL trace of malloc/free/realloc
 events on an address-line map with two coordinated timelines and full time
@@ -135,7 +135,22 @@ tags, but inverse event-to-tags scans reach count refresh, filter evaluation,
 timeline index rebuilds, export, and rendering. The exploration proposes
 measurement and separable optimizations; none is queued.
 
-**[T009](tickets/T009-type-the-deps-contracts.md) is next, and is not urgent.**
+**The guide drawer is complete.**
+[E015](explorations/E015-interactive-tutorial.md) settled, over three steers,
+what it is: a reference-density technical guide authored as plain markdown,
+living in **its own drawer** at the left edge of the workspace — outside the
+panel system, free to look unlike a panel — whose prose can highlight and drive
+the real UI. [T016](tickets/T016-guide-drawer-prototype.md) is the prototype and
+[SHELL-009](../spec/09-ui-shell.md#shell-009-the-guide-surface) is the rule it
+must not break: the guide reaches app state **only** by driving real controls,
+never by posting to the worker or touching shared state. What is still open —
+what persists, how wide the action vocabulary goes, how much content there is —
+E015 lists, to be answered from using it. The prototype ships five markdown
+sections and five focused scenario traces; its build, automated checks, and
+browser interaction have been verified.
+
+**[T009](tickets/T009-type-the-deps-contracts.md) is next after it, and is not
+urgent.**
 It types the `init*(deps)` contracts in
 `analysis.ts`, `session.ts` and `events-panel.ts` — today a comment above each
 `init*` and a `let d = null` under it. That one pattern is ~200 of the errors

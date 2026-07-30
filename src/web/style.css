@@ -596,3 +596,95 @@ input[type="color"] {
 #addr-overlay .ml-new { fill: none; stroke: var(--green); stroke-width: 1.5; }
 #addr-overlay .ml-line { stroke: var(--fg-dim); stroke-width: 1; stroke-dasharray: 2 3; }
 #addr-overlay .hover-rect { fill: rgba(230,237,243,0.14); stroke: rgba(230,237,243,0.85); stroke-width: 1; }
+
+/* ---------- guide drawer ----------
+   Same design language as the rest of the app: the panel palette, the system
+   font stack, the accent blue. It is not a panel (spec SHELL-009) and it is
+   wider than one, but it should look like it belongs here. */
+
+#guide {
+  flex: 0 0 auto;
+  width: 360px;
+  position: relative;
+  display: flex; flex-direction: column;
+  background: var(--bg2);
+  border-right: 1px solid var(--border);
+  overflow: hidden;
+}
+
+#guide-bar {
+  flex: 0 0 28px;
+  display: flex; align-items: center; gap: 6px;
+  padding: 0 4px 0 10px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+  user-select: none;
+}
+#guide-title { font-size: 12px; }
+#guide-close {
+  background: none; border: none; color: var(--fg-dim);
+  font-size: 14px; padding: 0 6px; line-height: 1;
+}
+#guide-close:hover { color: var(--fg); }
+
+#guide-body {
+  flex: 1; min-height: 0;
+  overflow-y: auto;
+  padding: 8px 14px 40px;
+  font-size: 12.5px; line-height: 1.5;
+}
+#guide-body .g-section + .g-section { border-top: 1px solid var(--border); margin-top: 18px; }
+#guide-body h2 {
+  font-size: 11px; font-weight: 600;
+  letter-spacing: 0.6px; text-transform: uppercase;
+  color: var(--accent);
+  margin: 20px 0 7px;
+}
+#guide-body h3 { font-size: 12.5px; font-weight: 600; margin: 14px 0 5px; }
+#guide-body p { margin: 0 0 8px; color: var(--fg); }
+#guide-body ul { margin: 0 0 9px; padding-left: 17px; }
+#guide-body li { margin-bottom: 4px; }
+#guide-body hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
+#guide-body code {
+  font-family: ui-monospace, monospace; font-size: 11.5px;
+  background: var(--bg3); border: 1px solid var(--border); border-radius: 3px;
+  padding: 0 3px;
+}
+#guide-body pre {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 5px;
+  padding: 7px 9px; overflow-x: auto; margin: 0 0 9px;
+}
+#guide-body pre code { background: none; border: none; padding: 0; }
+#guide-body a { color: var(--accent); }
+#guide-body strong { color: var(--fg); font-weight: 600; }
+
+/* an action link: inline in the prose, and visibly a thing that does something */
+#guide-body .g-act {
+  font: inherit; font-size: 11.5px;
+  font-family: ui-monospace, monospace;
+  background: rgba(88,166,255,0.1);
+  color: var(--accent);
+  border: 1px solid rgba(88,166,255,0.35);
+  border-radius: 4px;
+  padding: 0 5px;
+  cursor: pointer;
+}
+#guide-body .g-act:hover { background: rgba(88,166,255,0.2); border-color: var(--accent); }
+#guide-body .g-fail { color: var(--red); font-family: ui-monospace, monospace; }
+
+#guide-resize {
+  position: absolute; top: 0; bottom: 0; right: -3px; width: 7px;
+  cursor: col-resize; z-index: 5;
+}
+
+/* what the guide points at, in the real app: the same accent the drop-target
+   outline uses, so "the guide means this one" reads as app feedback */
+.g-target {
+  outline: 2px solid var(--accent) !important;
+  outline-offset: 1px;
+  animation: g-target-pulse 0.9s ease-out 2;
+}
+@keyframes g-target-pulse {
+  0% { box-shadow: 0 0 0 2px rgba(88,166,255,0.5); }
+  100% { box-shadow: 0 0 0 11px rgba(88,166,255,0); }
+}

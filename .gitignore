@@ -3,4 +3,5 @@ src/core/target/
 src/filter-dsl/target/
 images/*.tar
 *.heapl
+!src/web/guide/traces/*.heapl
 node_modules/

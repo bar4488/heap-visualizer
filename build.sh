@@ -34,6 +34,12 @@ npx tsc -p tsconfig.test.json
 # one part of the loop the build step costs you: a CSS tweak needs ./build.sh web.
 cp src/web/index.html src/web/style.css dist/
 
+# Guide content is plain markdown, fetched at runtime and rendered client-side,
+# so it is copied like the other non-compiling sources. Cleared first for the
+# same reason the emitted tree is: a deleted section must stop being served.
+rm -rf dist/guide
+cp -r src/web/guide dist/guide
+
 # The demo trace is generated, not stored: gen.py is deterministic, so the
 # bundled demo is reproducible from a seed rather than from a file someone
 # happens to have. Only when missing — it is 6.7 MB.
