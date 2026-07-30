@@ -38,6 +38,12 @@ export function sessionKey() {
 // shape in a way a reader must know about
 export const HEAP_SESSION_VERSION = 2;
 
+// the filter language a persisted source is written in, bumped when a source
+// written by an older build would no longer check. Version 2 renamed the
+// scalar `tag` field to the set-typed `tags` (T016), so a version-1 source is
+// read back as no filter rather than restored broken.
+export const FILTER_LANGUAGE_VERSION = 2;
+
 export function buildSession() {
   const windows = {};
   for (const { id } of d.panels) {
@@ -67,7 +73,7 @@ function buildHeapSession() {
     xview: d.ui.xview,
     crop: d.ui.crop,
     filter: {
-      languageVersion: 1,
+      languageVersion: FILTER_LANGUAGE_VERSION,
       source: d.ui.filterApplied,
       mode: d.ui.filterMode,
     },
@@ -161,7 +167,7 @@ function applyHeapSettings(obj) {
   if (obj.xview) { d.ui.xview = obj.xview; d.sendXView(); }
   if (obj.filter) {
     const f = obj.filter;
-    if (f.languageVersion !== 1 || typeof f.source !== 'string') return;
+    if (f.languageVersion !== FILTER_LANGUAGE_VERSION || typeof f.source !== 'string') return;
     d.ui.filterMode = f.mode === 2 ? 2 : 1;
     const fr = $1(`input[name=fmode][value="${d.ui.filterMode}"]`);
     if (fr) fr.checked = true;

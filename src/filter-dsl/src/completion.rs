@@ -223,12 +223,35 @@ fn operand_context(source: &str, value_start: usize) -> Option<CompletionSite> {
                 | TokenKind::GreaterEqual
                 | TokenKind::In
                 | TokenKind::Overlaps
+                | TokenKind::Contains
                 | TokenKind::Plus
                 | TokenKind::Minus
                 | TokenKind::DotDot
         )
     })?;
     let after = &meaningful[op + 1..];
+    // `in` and equality can be followed by a set literal, so the cursor may sit
+    // at a member rather than at the operand itself
+    let takes_set = matches!(
+        meaningful[op].kind,
+        TokenKind::In | TokenKind::EqualEqual | TokenKind::BangEqual
+    );
+    if takes_set
+        && after
+            .first()
+            .is_some_and(|token| matches!(token.kind, TokenKind::LeftBrace))
+    {
+        if !after
+            .last()
+            .is_some_and(|token| matches!(token.kind, TokenKind::LeftBrace | TokenKind::Comma))
+        {
+            return None;
+        }
+        return operand_site(source, meaningful, op, OperandKind::SetMember);
+    }
+    if !after.is_empty() {
+        return None;
+    }
     let kind = match meaningful[op].kind {
         TokenKind::EqualEqual => OperandKind::Binary(BinaryOp::Equal),
         TokenKind::BangEqual => OperandKind::Binary(BinaryOp::NotEqual),
@@ -237,31 +260,24 @@ fn operand_context(source: &str, value_start: usize) -> Option<CompletionSite> {
         TokenKind::Greater => OperandKind::Binary(BinaryOp::Greater),
         TokenKind::GreaterEqual => OperandKind::Binary(BinaryOp::GreaterEqual),
         TokenKind::Overlaps => OperandKind::Binary(BinaryOp::Overlaps),
+        TokenKind::Contains => OperandKind::Binary(BinaryOp::Contains),
         TokenKind::Plus => OperandKind::Binary(BinaryOp::Add),
         TokenKind::Minus => OperandKind::Binary(BinaryOp::Subtract),
         TokenKind::DotDot => OperandKind::RangeEnd,
-        TokenKind::In => {
-            if after
-                .first()
-                .is_some_and(|token| matches!(token.kind, TokenKind::LeftBrace))
-            {
-                if !after.last().is_some_and(|token| {
-                    matches!(token.kind, TokenKind::LeftBrace | TokenKind::Comma)
-                }) {
-                    return None;
-                }
-                OperandKind::SetMember
-            } else if after.is_empty() {
-                OperandKind::Binary(BinaryOp::In)
-            } else {
-                return None;
-            }
-        }
+        TokenKind::In => OperandKind::Binary(BinaryOp::In),
         _ => return None,
     };
-    if !matches!(meaningful[op].kind, TokenKind::In) && !after.is_empty() {
-        return None;
-    }
+    operand_site(source, meaningful, op, kind)
+}
+
+/// The completion site for the operator at `op`, with the left operand parsed
+/// back out of the source that precedes it.
+fn operand_site(
+    source: &str,
+    meaningful: &[Token],
+    op: usize,
+    kind: OperandKind,
+) -> Option<CompletionSite> {
     let start = meaningful[..op]
         .iter()
         .rposition(|token| {
@@ -277,6 +293,7 @@ fn operand_context(source: &str, value_start: usize) -> Option<CompletionSite> {
                     | TokenKind::GreaterEqual
                     | TokenKind::In
                     | TokenKind::Overlaps
+                    | TokenKind::Contains
                     | TokenKind::Plus
                     | TokenKind::Minus
                     | TokenKind::DotDot

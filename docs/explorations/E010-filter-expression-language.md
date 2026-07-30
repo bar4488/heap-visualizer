@@ -43,7 +43,8 @@ not part of the DSL.
 size >= 4KiB
 site == "json_node" && thread in {2, 4}
 span overlaps 0x7f00_0000..0x7f10_0000
-tag in {"suspect", "parser"} && lifetime > 500ms
+tags contains "suspect" && lifetime > 500ms
+tags == {"suspect", "parser"}
 freed && site.starts_with("xml_")
 stack.contains("parse_config")
 field.pool == "gfx" && field.refs >= 3
@@ -67,9 +68,11 @@ source       = or_expr EOF ;
 or_expr      = and_expr { "||" and_expr } ;
 and_expr     = comparison { "&&" comparison } ;
 comparison   = additive [
-                 ( "==" | "!=" | "<" | "<=" | ">" | ">=" ) additive
+                 ( "==" | "!=" ) ( additive | set )
+               | ( "<" | "<=" | ">" | ">=" ) additive
                | "in" ( set | range )
                | "overlaps" range
+               | "contains" additive
                | "is" [ "not" ] "missing"
                ] ;
 range        = additive ".." additive ;
@@ -110,7 +113,7 @@ From tightest to loosest:
 1. field access, indexing, and calls;
 2. `!`;
 3. `+` and `-`;
-4. comparisons, `in`, `overlaps`, and missing tests;
+4. comparisons, `in`, `overlaps`, `contains`, and missing tests;
 5. `&&`;
 6. `||`.
 
@@ -129,9 +132,16 @@ address
 time
 string
 range<T>
+set<T>
 allocation
 missing T
 ```
+
+A `set<T>` compares to a set literal of the same member type with `==` and
+`!=` — exact, order-insensitive equality — and tests one member with the
+`contains` operator. It has no ordering and is never missing; an empty set is
+an ordinary value, and against `==`, `!=`, or `in` an empty set literal takes
+its member type from the other operand.
 
 All numeric values are integral. There are no floats and no implicit
 string/number or signed/unsigned conversions.
@@ -188,7 +198,7 @@ The subject is always the creator allocation:
 | `site` | `missing string` | Allocation site |
 | `thread` | `missing integer` | Producer thread id |
 | `stack` | stack | Creator stack |
-| `tag` | `missing string` | Current analysis tag |
+| `tags` | `set<string>` | Current analysis tag memberships; empty when untagged |
 | `name` | `missing string` | Current allocation name |
 | `freed` | bool | Whether a matching death event exists |
 | `lifetime` | `missing time` | Death time minus creator time |
@@ -231,6 +241,12 @@ Renaming an allocation invalidates a compiled filter that uses `named`.
 `in` tests equality against a constant set or membership in a half-open range.
 Set constants are deduplicated while compiling. Equality requires identical
 types; ordering is available only for numeric types and strings.
+
+`contains` is a binary operator, not a call: `set<T> contains T -> bool`. It
+requires a set on the left, so it never doubles as a second spelling of
+`string.contains(…)`. `in` and `contains` are converses on a constant set, but
+only `contains` reads left-to-right when the *set* is the field —
+`tags contains "a"`.
 
 ## Missing values
 
@@ -348,7 +364,7 @@ membership comes only from those bits.
 Site and thread catalogs already live in the core. Tag assignments do too, but
 tag labels and allocation names currently live in web/worker state. The worker
 must mirror those analysis symbols into the core whenever they change so
-expressions such as `tag == "suspect"` and `named("request root")` resolve in
+expressions such as `tags contains "suspect"` and `named("request root")` resolve in
 the same place as every other filter operation. The web remains the authoring
 owner; the core copy is execution context, not a second persisted model.
 

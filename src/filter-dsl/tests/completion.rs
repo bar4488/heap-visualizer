@@ -57,7 +57,13 @@ fn member_context_carries_the_receiver() {
 fn operands_carry_the_left_expression_and_operator() {
     for (source, cursor, expected, operator) in [
         ("site == ", 8, "site", OperandKind::Binary(BinaryOp::Equal)),
-        ("size > 0 && tag in {", 20, "tag", OperandKind::SetMember),
+        ("size > 0 && tags == {", 21, "tags", OperandKind::SetMember),
+        (
+            "tags contains ",
+            14,
+            "tags",
+            OperandKind::Binary(BinaryOp::Contains),
+        ),
         (
             "span overlaps ",
             14,
@@ -90,8 +96,8 @@ fn string_values_replace_the_literal_and_preserve_utf8_spans() {
     assert_eq!(got.prefix, "hé");
     assert!(matches!(got.site, CompletionSite::Operand { .. }));
 
-    let got = context("tag in {\"sus", 12);
-    assert_eq!(got.replacement, Span::new(8, 12));
+    let got = context("tags == {\"sus", 13);
+    assert_eq!(got.replacement, Span::new(9, 13));
     assert_eq!(got.prefix, "sus");
     assert!(matches!(
         got.site,
@@ -134,11 +140,11 @@ fn call_arguments_and_set_delimiters_are_distinct() {
     ));
 
     assert!(matches!(
-        context("tag in {\"suspect\"", 17).site,
+        context("tags == {\"suspect\"", 18).site,
         CompletionSite::SetDelimiter
     ));
     assert!(matches!(
-        context("tag in {\"a\", ", 13).site,
+        context("tags == {\"a\", ", 14).site,
         CompletionSite::Operand {
             kind: OperandKind::SetMember,
             ..

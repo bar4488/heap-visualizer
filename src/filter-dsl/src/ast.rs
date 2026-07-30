@@ -51,6 +51,7 @@ pub enum BinaryOp {
     GreaterEqual,
     In,
     Overlaps,
+    Contains,
     Add,
     Subtract,
 }

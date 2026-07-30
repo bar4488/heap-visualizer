@@ -23,7 +23,8 @@ fn parses_the_documented_examples() {
         "size >= 4KiB",
         "site == \"json_node\" && thread in {2, 4}",
         "span overlaps 0x7f00_0000..0x7f10_0000",
-        "tag in {\"suspect\", \"parser\"} && lifetime > 500ms",
+        "tags contains \"suspect\" && lifetime > 500ms",
+        "tags == {\"suspect\", \"parser\"}",
         "freed && site.starts_with(\"xml_\")",
         "stack.contains(\"parse_config\")",
         "field.pool == \"gfx\" && field.refs >= 3",
@@ -99,6 +100,36 @@ fn parses_sets_ranges_and_missing_tests() {
         missing.kind,
         ExprKind::IsMissing { negated: true, .. }
     ));
+}
+
+#[test]
+fn sets_compare_for_equality_and_contains_one_member() {
+    let equality = parse("tags == {\"a\", \"aa\"}").unwrap();
+    let (op, left, right) = binary(&equality);
+    assert_eq!(op, BinaryOp::Equal);
+    assert_eq!(identifier(left), "tags");
+    assert!(matches!(&right.kind, ExprKind::Set(items) if items.len() == 2));
+
+    let empty = parse("tags != {}").unwrap();
+    let (op, _, right) = binary(&empty);
+    assert_eq!(op, BinaryOp::NotEqual);
+    assert!(matches!(&right.kind, ExprKind::Set(items) if items.is_empty()));
+
+    let membership = parse("tags contains \"a\"").unwrap();
+    let (op, left, right) = binary(&membership);
+    assert_eq!(op, BinaryOp::Contains);
+    assert_eq!(identifier(left), "tags");
+    assert!(matches!(&right.kind, ExprKind::String(value) if value == "a"));
+
+    // `contains` is still the string method name after a `.`
+    let method = parse("stack.contains(\"parse\")").unwrap();
+    let ExprKind::Call { callee, .. } = &method.kind else {
+        panic!("expected a method call");
+    };
+    assert!(matches!(&callee.kind, ExprKind::Field { name, .. } if name == "contains"));
+
+    // and a set literal is not an operand of the ordering comparisons
+    assert!(parse("tags < {\"a\"}").is_err());
 }
 
 #[test]

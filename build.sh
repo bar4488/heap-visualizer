@@ -12,6 +12,12 @@ cd "$(dirname "$0")"
 web_only=0
 [[ "${1:-}" == "web" ]] && web_only=1
 
+tsc=node_modules/.bin/tsc
+if [[ ! -x "$tsc" ]]; then
+  echo "error: TypeScript compiler not found; run npm install" >&2
+  exit 1
+fi
+
 mkdir -p dist
 rm -rf dist/shell dist/heap
 
@@ -27,8 +33,8 @@ fi
 #
 # The two configs check the same code; only tsconfig.test.json also covers the
 # tests, which are never emitted (node runs the .ts sources directly).
-npx tsc -p tsconfig.json
-npx tsc -p tsconfig.test.json
+"$tsc" -p tsconfig.json
+"$tsc" -p tsconfig.test.json
 
 # index.html and style.css compile to nothing, so they are copied. This is the
 # one part of the loop the build step costs you: a CSS tweak needs ./build.sh web.
