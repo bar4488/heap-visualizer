@@ -246,6 +246,12 @@ must stay blocked — see [D002](decisions/D002-shell-split-before-host.md).
 
 **Nothing else is queued, and that is the correct state.** T009 and the blocked
 T004 are the whole of the backlog.
+[E016](explorations/E016-what-to-build-next.md) collects the candidates that are
+named around the repository but not queued — the two unfinished E010 surfaces,
+undo/redo, multiple open traces, E015's open guide questions, E014's unmeasured
+costs — with what is actually known about each and a proposed order. **It binds
+nothing and has produced no tickets**, and it opens with the question that would
+reorder it: whether `named()` and custom `field.*` are wanted at all.
 [E009](explorations/E009-the-hand-verification-bottleneck.md) asked whether the
 verification pass should be partly mechanized, and settled at no: the changes
 it was written against worked first try, so the risk never showed up. No
