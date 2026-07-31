@@ -1,7 +1,7 @@
 // The guide drawer: a document beside the app, deliberately outside the panel
 // system (spec SHELL-009).
 //
-// Two rules shape this file, and both are the point of the prototype (T016):
+// Two rules shape this file, and both are the point of the prototype (T019):
 //
 //  1. **It is not a panel.** No record in heap/panels.ts, no window chrome, no
 //     dock/float, no session geometry. It is its own drawer at the left edge of
@@ -54,8 +54,10 @@ let highlightTimer = 0;
  * Inline markdown, applied to already-escaped text: `code`, **strong**, *em*,
  * and links. Action links (`#show:` / `#do:` / `#set:`) become buttons rather
  * than anchors — they act on this page instead of navigating.
+ *
+ * Exported for the web suite (T024); nothing else imports it.
  */
-function inline(text: string): string {
+export function inline(text: string): string {
   return text
     .replace(/`([^`]+)`/g, '<code>$1</code>')
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
@@ -74,8 +76,12 @@ function inline(text: string): string {
     });
 }
 
-/** Markdown-lite: the block grammar the guide pages actually use. */
-function render(src: string): string {
+/**
+ * Markdown-lite: the block grammar the guide pages actually use.
+ *
+ * Exported for the web suite (T024); nothing else imports it.
+ */
+export function render(src: string): string {
   const out: string[] = [];
   let list: string[] | null = null;
   let code: string[] | null = null;
