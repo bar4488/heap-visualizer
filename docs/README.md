@@ -65,6 +65,28 @@ Citations written before [T005](tickets/T005-spec-requirement-ids.md) landed on
 explorations and closed tickets, which are dated records and are not migrated;
 translate one by opening the file and finding the identifier on that heading.
 
+**Three ticket numbers were issued twice and repaired on 2026-07-31**
+([T020](tickets/T020-repair-duplicate-identifiers.md), under
+[D006](decisions/D006-a-duplicated-identifier-is-repaired-by-renumbering.md)).
+Citations in the repository were all swept; **git commit messages were not**, so
+a message naming one of these means the ticket on the left:
+
+| A commit message saying | Means |
+|---|---|
+| `T010`, before 2026-07-25 16:27 | [T010 standalone filter DSL parser](tickets/T010-standalone-filter-dsl-parser.md) |
+| `T010`, from 2026-07-25 16:27 | [T017 default docked layout](tickets/T017-default-docked-layout.md) |
+| `T016`, `resolve build.sh` | [T018 build.sh resolves the local tsc](tickets/T018-build-resolves-local-tsc.md) |
+| `T016: add interactive guide drawer` | [T019 guide drawer prototype](tickets/T019-guide-drawer-prototype.md) |
+| `T016: model tags as a string set` | [T016 tags is a string set](tickets/T016-tags-is-a-string-set.md) |
+
+Before issuing a number, check the space — with the **long** flag, because
+`rg -h` is ripgrep's help and turns the check into a no-op:
+
+```sh
+rg --no-filename '^id: T' docs/tickets | sort -u | tail -1
+rg --no-filename '^id: T' docs/tickets | sort | uniq -d    # must print nothing
+```
+
 Explorations and closed tickets are dated records. They are not updated when a
 convention changes, and a wrong claim in one gets a dated correction appended
 rather than an edit.

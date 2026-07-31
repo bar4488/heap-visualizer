@@ -1,11 +1,11 @@
 ---
-id: T010
+id: T017
 title: Panels open into a docked default layout, and drawers collapse
 status: done
 updated: 2026-07-25
 ---
 
-# T010: Panels Open Into a Docked Default Layout, and Drawers Collapse
+# T017: Panels Open Into a Docked Default Layout, and Drawers Collapse
 
 ## Outcome
 

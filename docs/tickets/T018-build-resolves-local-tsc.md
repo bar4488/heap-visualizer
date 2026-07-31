@@ -1,11 +1,11 @@
 ---
-id: T016
+id: T018
 title: build.sh resolves the local tsc, not npx's package lookup
 status: done
 updated: 2026-07-29
 ---
 
-# T016: build.sh Resolves the Local tsc, Not npx's Package Lookup
+# T018: build.sh Resolves the Local tsc, Not npx's Package Lookup
 
 ## Outcome
 
