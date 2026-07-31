@@ -48,9 +48,12 @@ underneath, which is deliberately not planned from here.
       typed and non-null by construction.
 - [ ] The `// deps: { … }` comments are gone, replaced by the types they
       described.
-- [ ] `npx tsc -p tsconfig.test.json --strictNullChecks 2>&1 | grep -c 'error TS'`
+- [ ] `node_modules/.bin/tsc -p tsconfig.test.json --strictNullChecks 2>&1 | grep -c 'error TS'`
       reports no `'d' is possibly 'null'` errors, and the same command with
       `--noImplicitAny` reports no `Variable 'd' implicitly has an 'any' type`.
+      Not `npx tsc`: without `npm install` that pipes a missing compiler's
+      message into `grep -c` and reads as zero
+      ([T021](T021-live-docs-drop-npx-tsc.md)).
 - [ ] `node --test 'src/web/**/*.test.ts'` and `cargo test` pass, and
       `./build.sh` emits a `dist/` that loads.
 

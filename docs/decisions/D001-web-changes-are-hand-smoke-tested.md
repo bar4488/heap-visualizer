@@ -36,7 +36,7 @@ where the next session will see it.
 ```sh
 cargo test --manifest-path src/core/Cargo.toml   # the engine
 node --test 'src/web/**/*.test.ts'               # the pure functions, both round-trips
-npx tsc -p tsconfig.test.json                    # the protocol and the persisted shapes
+node_modules/.bin/tsc -p tsconfig.test.json      # the protocol and the persisted shapes
 ./build.sh web                                   # refuses to emit if the types do not check
 ./serve.py                                       # then curl the entry points for 200
 ```

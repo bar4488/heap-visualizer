@@ -1,8 +1,8 @@
 ---
 id: E014
 title: Overlapping tags — cost model, semantics, and optimization options
-status: open
-updated: 2026-07-25
+status: settled
+updated: 2026-07-31
 ---
 
 # E014: Overlapping Tags — Cost Model, Semantics, and Optimization Options
@@ -343,13 +343,61 @@ this exploration does not itself authorize building a browser harness.
 - In tag color mode and timeline lanes, should lowest-id color remain the
   summary convention, should colors blend, or should overlap get a distinct
   visual treatment?
-- Should ordering operators be rejected for `tag` now that it is a set-valued
-  field?
+- ~~Should ordering operators be rejected for `tag` now that it is a set-valued
+  field?~~ **Answered by T016** — see the correction below. Ordering on tags is
+  gone, along with the scalar field it was defined on.
 - Is the comma-name regression worth fixing immediately even if no performance
   work is selected?
 
+## Correction, 2026-07-31
+
+**The DSL sections of this document describe a language that no longer exists.**
+They are left standing above as the analysis that was true on 2026-07-25;
+[T016](../tickets/T016-tags-is-a-string-set.md) replaced it four days later.
+
+Three claims are now wrong:
+
+- **"The expression evaluator exposes `tag` as an optional string to the type
+  checker"** (§Filter allocation) and **"`tag` remains typed as `missing
+  string`"** (§The DSL has set semantics behind a scalar type). The field is
+  `tags`, and `filter_eval.rs:99` types it
+  `CheckedType::required(Type::Set(ValueKind::String))` — a required set, not an
+  optional scalar. `is missing` now requires an optional operand rather than
+  answering a constant for this field.
+- **The behavior table** — `tag == "a"` meaning "any membership equals `a`",
+  `tag != "a"`, `tag in {…}`, and string methods and ordering comparisons
+  distributing over memberships. All of it is gone. `tags == {"a", "aa"}` is
+  exact set equality, `tags contains "a"` is membership, and `tags == {}` is
+  untagged. `Value::Strings` and its equality, ordering and string-method
+  overloads were deleted with the scalar; `filter_eval.rs:758` builds a
+  `Value::Set`.
+- **The cost row "Evaluate a filter that reads `tag` — `O(C * H)` plus string
+  allocation"** measured the `Vec<String>` clone-per-event path this document
+  objected to. That path is the one T016 removed, so the row does not describe
+  any code that runs. It has not been re-measured.
+
+The rule the language now follows is
+[ANL-009](../../spec/07-analysis.md#anl-009-filtering-by-tag).
+
+**Nothing else in this document is corrected.** The storage cost model, the
+`O(N * H)` refresh and rebuild passes, the rendering allocation, the counts-are-
+memberships point, the one-body-color problem, and the comma-name ambiguity were
+all about the engine and the UI rather than the language, and none of them was
+touched by T016. They stand unmeasured.
+
 ## Outcome
 
-Open. The overlapping model is correct and remains in place. No optimization,
-benchmark, DSL change, or UI ticket follows from this document until the user
-chooses one.
+**Settled: nothing was selected.** The overlapping model is correct and remains
+in place. No optimization, benchmark, or UI ticket came out of this document,
+and none is queued — the costs it identifies are real but were never observed
+to hurt on a trace anyone actually opened, and `PROTOCOL.md` asks for a
+measurement rather than an expectation before work is filed.
+
+The one question here that did get answered was answered elsewhere and for a
+different reason: T016 removed ordering on tags as a consequence of making
+`tags` a set, not because this document asked.
+
+What remains, if the cost ever shows up in use: the benchmark plan in
+§Measurement is written and can be executed as filed, minus the `tag in {"a"}`
+row, which no longer names a real expression. Re-open by filing a ticket with a
+reproduction, not by re-opening this file.

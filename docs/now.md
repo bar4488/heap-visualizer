@@ -1,6 +1,12 @@
 # Now
 
-_Updated: 2026-07-30._
+_Updated: 2026-07-31._
+
+**No count in this file is written by hand.** Test counts, module sizes and
+requirement totals are derivable, and the ones that used to be here had all
+drifted — two of them disagreed with each other about the same crate. Run the
+command instead; [context](context.md#test) lists them, and
+[T022](tickets/T022-docs-cite-commands-not-counts.md) is why.
 
 A heap allocation visualizer: a `.heapl` JSONL trace of malloc/free/realloc
 events on an address-line map with two coordinated timelines and full time
@@ -21,23 +27,23 @@ client-side.
 
 ## State
 
-**Rust core (`src/core/`, ~5.3k lines) — healthy; filter syntax is a separate
+**Rust core (`src/core/`) — healthy; filter syntax is a separate
 crate and evaluation is integrated.** The engine has clean module boundaries
-and 41 native tests asserting
+and its native tests assert
 real invariants: snapshot seek ≡ forward replay, pick prefers the newest
 overlap, anchor stability across reflow. Every performance and soundness
 finding from the 2026-07-24 review is fixed. `src/filter-dsl/` is
-dependency-free; its 23 tests cover the E010 grammar, source-spanned AST,
+dependency-free; its tests cover the E010 grammar, source-spanned AST,
 parser limits, and incomplete cursor contexts. The core links it to semantic
 checking, contextual completion, and a column-backed evaluator for the first
 set of built-in fields and operations.
 
-**Web layer (`src/web/`, ~3.2k lines) — all TypeScript now, split on the
-shell/domain seam, no other internal structure yet.** `main.ts` is down from
-2,979 lines in one flat scope to ~1,750 lines of trace/worker/toolbar wiring
+**Web layer (`src/web/`) — all TypeScript now, split on the
+shell/domain seam, no other internal structure yet.** `main.ts` was one flat
+scope and is now trace/worker/toolbar wiring
 plus the three coordinated views, and it owns `UIState`, the shared state every
 other module takes as `deps.ui`.
-`src/web/shell/` (433 lines) is domain-independent and stays that way by
+`src/web/shell/` is domain-independent and stays that way by
 check: `grep -ric heap src/web/shell/` reports 0 for every file.
 `src/web/heap/` — analysis, the panel table, the events panel — and the
 `src/web/session.ts` boundary module hold the rest.
@@ -65,14 +71,20 @@ into an ordinary tag. Pure source rewrites and marks parsing are covered by
 the web suite, while the core match snapshot has a native invariant test.
 
 **Verification — three suites, a type-checker, and a person.** `cargo test`
-covers the engine (40) and filter parser/completion contexts (23);
-`node --test 'src/web/**/*.test.ts'` (56) covers the pure functions, the panel
-table, and both persisted round-trips, with no npm and no browser. `tsc` covers
+covers the engine and the filter parser/completion contexts;
+`node --test 'src/web/**/*.test.ts'` covers the pure functions, the panel
+table, the guide's markdown renderer, and both persisted round-trips, with no
+npm and no browser. `tsc` covers
 what those do not reach: the worker protocol
 (`src/web/protocol.ts`, imported by both sides), the persisted shapes, and the
 panel records — a message name one side does not know fails the build. How
-strict that check is is a named list of flags rather than `strict: true`, ten
+strict that check is is a named list of flags rather than `strict: true`, most
 on and two off, per [D005](decisions/D005-strictness-is-per-flag.md).
+
+**Invoke the compiler as `node_modules/.bin/tsc`.** `npx tsc` works only when
+`node_modules/` is already there; without it npx fetches an unrelated package
+and a piped `| grep -c 'error TS'` reads zero errors from a compiler that never
+ran ([T021](tickets/T021-live-docs-drop-npx-tsc.md)).
 
 Rendering, pointer interaction and the real worker round trip are covered by
 nothing, and no harness is coming
@@ -87,10 +99,20 @@ to drive one. Recipes are in [context](context.md).
 **Docs — just restructured.** This repository adopted the protocol on
 2026-07-25. The reviews under the old `docs/findings/` are now
 `docs/explorations/E001`–`E006`, moved unedited except for link repair, and
-`specs/` is now `spec/`. The spec's 61 requirements carry permanent ids
+`specs/` is now `spec/`. Every spec requirement carries a permanent id
 ([T005](tickets/T005-spec-requirement-ids.md)) — `MAP-003`, `ANL-008` — and
 every live citation names one. Section numbers survive only in the
 explorations and in closed tickets, which are dated records.
+
+**Three ticket numbers were issued twice and were repaired on 2026-07-31.**
+`T010` named two tickets and `T016` named three; the later files are now `T017`,
+`T018` and `T019`. Citations in the repository were swept, git commit messages
+were not, and the translation table is in
+[README](README.md#a-note-on-the-identifier-spaces). Before issuing a number,
+run the duplicate check there — with the long `--no-filename` flag, because
+`rg -h` is ripgrep's help and makes the check pass no matter what.
+[D006](decisions/D006-a-duplicated-identifier-is-repaired-by-renumbering.md) is
+the rule.
 
 **Layout — `src/` in, `dist/` out.** Everything hand-written lives under
 `src/`, everything generated under `dist/`, and `dist/` is what `./serve.py`
@@ -101,13 +123,38 @@ survivable, a stale `dist/` is the new way to be confused.
 
 ## Next
 
-**Nothing is in flight.** [T016](tickets/T016-tags-is-a-string-set.md) closed on
+**Nothing is in flight.** A review of the merged batch on 2026-07-31 found five
+defects, all in the repository's own record-keeping rather than in the product,
+and all five closed the same day:
+
+- **[T020](tickets/T020-repair-duplicate-identifiers.md)** — `T010` named two
+  tickets and `T016` named three. Renumbered under
+  [D006](decisions/D006-a-duplicated-identifier-is-repaired-by-renumbering.md).
+- **[T021](tickets/T021-live-docs-drop-npx-tsc.md)** — four live files still
+  told a reader to run `npx tsc`, which T018 had shown does not run the
+  compiler in a checkout without `npm install`.
+- **[T022](tickets/T022-docs-cite-commands-not-counts.md)** — every
+  hand-written count in `now.md` and `context.md` had drifted. They are gone,
+  not corrected.
+- **[T023](tickets/T023-reground-e014-and-e015.md)** — E014 was describing a
+  filter language T016 deleted four days after it was written.
+- **[T024](tickets/T024-guide-renderer-tests.md)** — the guide's markdown
+  renderer shipped with no assertion on it.
+
+None of the five was found by a suite, and none could have been: they are all
+claims in prose that stopped being true. The one mechanical check that came out
+of it is the duplicate-id query in
+[README](README.md#a-note-on-the-identifier-spaces), which is a query rather
+than a validator because `PROTOCOL.md` wants two recorded failures before a
+mechanism, and there is now exactly one recorded pair.
+
+[T016](tickets/T016-tags-is-a-string-set.md) closed on
 2026-07-29. One note about how it closed, because it is unusual: the agent that
 wrote it could not run `node` at all, so `cargo test` is the only suite it saw
 pass. The web suite, `tsc` and `./build.sh web` were run by a person and
 reported passing, and the ticket closed on that report.
 
-[T010](tickets/T010-default-docked-layout.md) closed
+[T017](tickets/T017-default-docked-layout.md) closed
 on 2026-07-25. A trace with no saved session now starts with Events open in the
 left drawer and Layout, Appearance, Filter and Marks open in the right; Play,
 Warnings and Allocation remain floating and closed. Each populated drawer can
@@ -149,34 +196,45 @@ filters in a `.heapa` file carry no version, so an old `tag == "x"` there
 reports a diagnostic when set; nothing migrates it. The rule is
 [ANL-009](../spec/07-analysis.md#anl-009-filtering-by-tag).
 
-[E014](explorations/E014-overlapping-tags-cost-model.md) records the resulting
-cost model and semantics. The current tag-indexed bitsets are compact for a few
-tags, but inverse event-to-tags scans reach count refresh, filter evaluation,
-timeline index rebuilds, export, and rendering. The exploration proposes
-measurement and separable optimizations; none is queued.
+[E014](explorations/E014-overlapping-tags-cost-model.md) recorded the resulting
+cost model and semantics and is **settled: nothing was selected.** The current
+tag-indexed bitsets are compact for a few
+tags, but inverse event-to-tags scans reach count refresh, timeline index
+rebuilds, export, and rendering. It proposes
+measurement and separable optimizations; none is queued, and none should be
+until a trace someone actually opens is slow. Its DSL sections describe the
+pre-T016 scalar `tag` and carry a dated correction saying so — the engine
+sections stand unmeasured.
 
 **The guide drawer is complete.**
 [E015](explorations/E015-interactive-tutorial.md) settled, over three steers,
 what it is: a reference-density technical guide authored as plain markdown,
 living in **its own drawer** at the left edge of the workspace — outside the
 panel system, free to look unlike a panel — whose prose can highlight and drive
-the real UI. [T016](tickets/T016-guide-drawer-prototype.md) is the prototype and
+the real UI. [T019](tickets/T019-guide-drawer-prototype.md) is the prototype and
 [SHELL-009](../spec/09-ui-shell.md#shell-009-the-guide-surface) is the rule it
 must not break: the guide reaches app state **only** by driving real controls,
 never by posting to the worker or touching shared state. What is still open —
 what persists, how wide the action vocabulary goes, how much content there is —
-E015 lists, to be answered from using it. The prototype ships five markdown
+E015 lists, to be answered from using it; that file stays `open` deliberately,
+and was re-grounded on 2026-07-31 against what actually shipped. The prototype
+ships five markdown
 sections and five focused scenario traces; its build, automated checks, and
-browser interaction have been verified.
+browser interaction have been verified. Its markdown renderer is now covered by
+the web suite ([T024](tickets/T024-guide-renderer-tests.md)), including a check
+that every `#show:`/`#do:`/`#set:` id in a page exists in `index.html` and that
+every scenario link resolves — the class of bug T019's third pass had to find
+by hand.
 
 **[T009](tickets/T009-type-the-deps-contracts.md) is next after it, and is not
 urgent.**
 It types the `init*(deps)` contracts in
 `analysis.ts`, `session.ts` and `events-panel.ts` — today a comment above each
-`init*` and a `let d = null` under it. That one pattern is ~200 of the errors
-under each of the two type-checking flags that are still off; what is left
+`init*` and a `let d = null` under it. That one pattern is the largest single
+cause under each of the two type-checking flags that are still off; what is left
 underneath is deliberately not planned yet, per
-[D005](decisions/D005-strictness-is-per-flag.md).
+[D005](decisions/D005-strictness-is-per-flag.md), which carries the measured
+counts.
 
 Why the language changed at all is
 [D004](decisions/D004-typescript-is-the-language-for-web.md); the argument that
@@ -186,7 +244,8 @@ got there, including the position that lost, is
 [T004](tickets/T004-shell-host.md) is blocked on a second domain existing and
 must stay blocked — see [D002](decisions/D002-shell-split-before-host.md).
 
-**Nothing else is queued, and that is the correct state.**
+**Nothing else is queued, and that is the correct state.** T009 and the blocked
+T004 are the whole of the backlog.
 [E009](explorations/E009-the-hand-verification-bottleneck.md) asked whether the
 verification pass should be partly mechanized, and settled at no: the changes
 it was written against worked first try, so the risk never showed up. No

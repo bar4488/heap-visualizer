@@ -1,7 +1,7 @@
 ---
 id: E012
 title: "A complete interaction matrix for filter DSL completion"
-status: complete
+status: settled
 updated: 2026-07-25
 ---
 
@@ -184,6 +184,23 @@ single-token insertion text.
 - escaped and Unicode tag labels round-trip through the WASM catalog;
 - completion acceptance produces the next intended cursor state; and
 - the existing UTF-8/UTF-16 replacement tests remain green.
+
+## Outcome
+
+**Settled: the matrix was implemented as specified.** Contextual completion in
+`src/filter-dsl/src/completion.rs` follows the cursor positions, acceptance and
+progression, ranking, and escaping described above, and the required tests are
+in `src/filter-dsl/tests/completion.rs`. The implementation boundary held: the
+DSL crate answers positions, and the core supplies live site/thread/tag values
+from its own catalog.
+
+One row did not survive contact, and it is the correction below rather than a
+change of mind about the design.
+
+_(Recorded 2026-07-31 by [T025](../tickets/T025-e012-carries-a-controlled-status.md),
+which found this file carrying `status: complete` — a value neither documented
+query matches. The section is added because a settled exploration is required
+to carry one; nothing above it was edited.)_
 
 ## Correction — 2026-07-29
 

@@ -40,25 +40,42 @@ python3 gen.py --seed 2 --ops 200000 --threads 8 --out dist/big.heapl
 ## Test
 
 ```sh
-cargo test --manifest-path src/core/Cargo.toml   # 40 engine/filter tests, native, no wasm
-cargo test --manifest-path src/filter-dsl/Cargo.toml # 23 DSL parser/completion tests, native
-node --test 'src/web/**/*.test.ts'               # 56 web tests, no npm, no browser
-npx tsc -p tsconfig.test.json                    # type-check everything, emit nothing
+cargo test --manifest-path src/core/Cargo.toml        # the engine and filter evaluation, native, no wasm
+cargo test --manifest-path src/filter-dsl/Cargo.toml  # the DSL parser and completion contexts, native
+node --test 'src/web/**/*.test.ts'                    # the web suite, no npm, no browser
+node_modules/.bin/tsc -p tsconfig.test.json           # type-check everything, emit nothing
 ```
+
+**Counts are not written down anywhere here.** Each command prints its own, and
+a number in prose is a number that goes stale between the commit that changes
+it and the commit that notices — which is what
+[T022](tickets/T022-docs-cite-commands-not-counts.md) was filed for.
+
+**Invoke the compiler as `node_modules/.bin/tsc`, not `npx tsc`.** `typescript`
+is a devDependency, so with `node_modules/` absent npx fetches an unrelated
+package from the registry whose entire content is a message saying it is not
+the compiler — and a piped `| grep -c 'error TS'` reads that as zero errors.
+`./build.sh` resolves the same binary and fails with a message naming
+`npm install`, so it is the safer habit. See
+[T018](tickets/T018-build-resolves-local-tsc.md) and
+[T021](tickets/T021-live-docs-drop-npx-tsc.md).
 
 The three test suites run from a clean checkout with no install step — Node
 strips the types itself, which is why sources import each other as `./x.ts` and
 `tsc` rewrites those specifiers on the way out. The web suite runs against the
 sources in `src/web/`, not against `dist/`. Type-checking is the one thing that
 needs `npm install`.
-`src/web/test/dom-stub.ts` is a ~200-line stand-in for the DOM surface the web
-layer actually touches — that is what makes the persisted round-trips testable
+`src/web/test/dom-stub.ts` is a stand-in for the DOM surface the web layer
+actually touches — that is what makes the persisted round-trips testable
 without a browser.
 
-What the JS suite covers is deliberately narrow: `fmt.js` in full (`clampView`
+What the web suite covers is deliberately narrow: `fmt.ts` in full (`clampView`
 included — it is the one function both threads run on the same input),
-`normAddr`, the panel table, the session round-trip, and the `.heapa`
-round-trip.
+`normAddr`, the panel table, the filter-action source rewrites, the guide's
+markdown renderer, the session round-trip, and the `.heapa` round-trip.
+
+What it does not cover, and what no suite will: see
+[Verify a web change](#verify-a-web-change).
 
 ## Verify a web change
 
@@ -73,7 +90,7 @@ establish.
 cargo test --manifest-path src/core/Cargo.toml
 cargo test --manifest-path src/filter-dsl/Cargo.toml
 node --test 'src/web/**/*.test.ts'
-npx tsc -p tsconfig.test.json
+node_modules/.bin/tsc -p tsconfig.test.json
 ./build.sh web
 ./serve.py &     # then: curl -s -o /dev/null -w '%{http_code}\n' localhost:8630/main.js
 ```
@@ -99,7 +116,7 @@ risk only an eye can retire, name it in the ticket and in
 
 | Where | What |
 |---|---|
-| `src/core/` | Rust engine, ~4.9k lines: parse, columnar store, state, render, timeline. Also an `rlib`, so tests run natively. |
+| `src/core/` | Rust engine: parse, columnar store, state, render, timeline. Also an `rlib`, so tests run natively. |
 | `src/filter-dsl/` | Dependency-free Rust crate for allocation-filter source spans, syntax trees, and parsing. |
 | `src/web/protocol.ts` | The main-thread ↔ worker message contract. Types only; both sides import it. |
 | `src/web/shell/` | Domain-independent: panel windows, drawers, tooltip, DOM helpers. Names no heap concept. |

@@ -2,7 +2,7 @@
 id: E015
 title: A technical guide drawer inside the app
 status: open
-updated: 2026-07-29
+updated: 2026-07-31
 ---
 
 # E015: A Technical Guide Drawer Inside the App
@@ -244,13 +244,35 @@ describes a filter can **apply it**.
 
 ## Derived artifacts
 
-- **[T016](../tickets/T016-guide-drawer-prototype.md)** — the prototype:
+- **[T019](../tickets/T019-guide-drawer-prototype.md)** — the prototype:
   `#guide` at the left edge of the workspace, `src/web/guide/*.md`,
   `#show:` / `#do:` / `#set:` acting on real controls.
 - **[SHELL-009](../../spec/09-ui-shell.md#shell-009-the-guide-surface)** — the
   guide surface is not a window, and reaches app state only through real
-  controls. Written with T016 because the code would otherwise knowingly
+  controls. Written with T019 because the code would otherwise knowingly
   disagree with SHELL-001's account of the workspace.
+- **[T024](../tickets/T024-guide-renderer-tests.md)** — the markdown renderer
+  the prototype shipped untested.
+
+## Where it stands, 2026-07-31
+
+Re-grounded against the code rather than against the proposal above. What
+shipped, and is true now:
+
+- Five sections under `src/web/guide/` — the map, time, selecting, filters,
+  tags and marks — plus five hand-written scenario traces under
+  `src/web/guide/traces/`. Both directories are copied to `dist/` by
+  `build.sh`.
+- The action vocabulary is exactly the three verbs proposed: `#show:` rings an
+  element, `#do:` clicks it, `#set:` assigns and dispatches. Nothing was added.
+- Two constraints came out of use rather than design, and both are in
+  `guide.ts`: a `#show:` on a control inside a closed panel opens that panel by
+  clicking its **real** toolbar toggle, read from `heapPanels()`; and no action
+  may move the reader's place in the prose, which cost `scrollIntoView` and
+  bought a nearest-scrollable-ancestor scroll plus a pinned `#guide-body`
+  scroll position.
+- Nothing persists. Not open state, not reading position, not the dragged
+  width. The `?guide=1` parameter is the whole of it.
 
 ## Outcome
 
@@ -259,7 +281,18 @@ the running app; it is **its own drawer**, outside the panel system and free to
 look different; its register is technical reference, not a guided tour; and
 actions reach the app only by driving real controls.
 
-Still open, and now answerable from use rather than argument: what persists
-(nothing does today), whether one highlight treatment is enough, how wide the
-action vocabulary should get beyond `show`/`do`/`set`, how much content there
-should be, and whether prose cites or restates spec facts.
+Still open, and answerable from use rather than argument:
+
+- **What persists.** Nothing does. Whether reading position or open state
+  should is the question the bespoke-drawer choice deferred, and it is still
+  deferred.
+- **Whether one highlight treatment is enough**, now that `#show:` also has to
+  open a closed panel to reach its target.
+- **How wide the action vocabulary should get.** `show`/`do`/`set` covered all
+  five sections without strain, which is evidence but not a limit.
+- **How much content there should be**, and **whether prose cites or restates
+  spec facts.** The five sections restate; nothing has yet gone stale against
+  the spec, so the cost of that choice is still unpaid rather than absent.
+
+This file stays open until those are answered from using the thing. It is not
+waiting on a decision anyone can make by reading it.

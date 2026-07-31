@@ -44,9 +44,15 @@ ticket, says exactly what is left. Measured on 2026-07-25, from a clean
 | both | 645 | |
 
 ```sh
-npx tsc -p tsconfig.test.json --strictNullChecks 2>&1 | grep -c 'error TS'
-npx tsc -p tsconfig.test.json --noImplicitAny 2>&1 | grep -c 'error TS'
+node_modules/.bin/tsc -p tsconfig.test.json --strictNullChecks 2>&1 | grep -c 'error TS'
+node_modules/.bin/tsc -p tsconfig.test.json --noImplicitAny 2>&1 | grep -c 'error TS'
 ```
+
+The counts above were measured with `npx tsc`, which resolves the same local
+binary whenever `node_modules/` is present, so they stand. The invocation is
+spelled out here because the piped form is the one that fails quietly without
+it: npx would fetch an unrelated package and `grep -c` would report **0
+errors** rather than an error ([T021](../tickets/T021-live-docs-drop-npx-tsc.md)).
 
 `d` is `analysis.ts`, `session.ts` and `events-panel.ts` holding their injected
 dependencies as module state:
