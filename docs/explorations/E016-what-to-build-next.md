@@ -195,11 +195,10 @@ measurement nobody has needed to take.
 
 ## Questions
 
-- Is A worth doing at all, or is the filter language complete enough in
-  practice? E010 calls custom fields "required in the first version"; that was
-  written before any of the language shipped, and nothing since has recorded a
-  user wanting them. **This is the one question that could reorder the whole
-  list**, and it is a question for the person who wanted the language.
+- ~~Is A worth doing at all?~~ **Answered 2026-08-01: yes, and it is being
+  built.** Custom fields also gained a UI half that this document did not
+  anticipate — presenting them in the app, not only filtering on them. See
+  `## Derived artifacts`.
 - Does undo/redo mean the analysis operations only, or the navigation history
   too? E007 lists renaming, tag edits and mark moves. Time travel already has
   its own model, and conflating them is a design error worth naming before it
@@ -210,5 +209,23 @@ measurement nobody has needed to take.
 
 ## Derived artifacts
 
-None. This file has produced no tickets, and should not until the first
-question above is answered.
+Candidate A was taken on 2026-08-01, with a UI half added to it that this
+document had not anticipated. Two of its estimates were wrong and the tickets
+record the corrections:
+
+- [T026](../tickets/T026-custom-field-catalog.md) — the core collects a catalog
+  of custom trace fields. **A's "design work is already done" was too
+  generous**: E010 asserts the catalog is collected at parse time, and it is
+  not. `store.extras` holds raw JSON text and nothing in the core reads it.
+- [T027](../tickets/T027-custom-field-filtering.md) — `field.*` and
+  `field["k"]` check, evaluate, and complete. The parser and lexer were already
+  done, as A claimed; only the semantic layer rejects them.
+- [T028](../tickets/T028-named-resolves-an-allocation.md) — `named()`. **A
+  missed this entirely**: allocation names have never reached the core.
+  `worker.ts` calls `hp_set_names` behind a `typeof` guard for an export that
+  does not exist, so the call has always been a silent no-op.
+- [T029](../tickets/T029-custom-fields-in-the-ui.md) — custom fields as their
+  own typed, click-to-filter section of the allocation panel, plus the catalog
+  listed in the Filter panel.
+
+Nothing here changes the standing of B–F.
