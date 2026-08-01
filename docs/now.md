@@ -131,170 +131,34 @@ survivable, a stale `dist/` is the new way to be confused.
 
 ## Next
 
-**Nothing is in flight.**
+**Nothing is in flight.** T009 and the blocked T004 are the whole of the
+backlog, and that is the correct state.
 
-[T026](tickets/T026-custom-field-catalog.md) through
-[T029](tickets/T029-custom-fields-in-the-ui.md) closed the custom-fields and
-`named()` batch on 2026-08-01 — [E016](explorations/E016-what-to-build-next.md)
-candidate A, plus a UI half E016 had not anticipated. Grounding corrected two
-of that document's estimates, and both are worth knowing:
+**[T009](tickets/T009-type-the-deps-contracts.md) is next, and is not urgent.**
+It types the `init*(deps)` contracts in `analysis.ts`, `session.ts` and
+`events-panel.ts` — today a comment above each `init*` and a `let d = null`
+under it, and the largest single cause under each of the two type-checking
+flags still off ([D005](decisions/D005-strictness-is-per-flag.md), which
+carries the measured counts). Its `updated` is 2026-07-25 and the web layer has
+moved since; re-ground it before starting.
 
-- **E010 asserts the core collects a catalog of custom field names and types at
-  parse time. It never did.** `store.extras` held raw JSON object-body
-  fragments and nothing in the core read them, so the catalog was its own
-  ticket rather than something the evaluator could assume.
-- **Allocation names had never reached the core at all.** `worker.ts` called
-  `hp_set_names` behind a `typeof` guard for an export that existed nowhere in
-  `src/core/`, so every rename since the feature shipped was a silent no-op as
-  far as the engine was concerned. The export exists now, and a test pins the
-  wire shape so the two ends cannot drift again.
+**[T004](tickets/T004-shell-host.md) is blocked and must stay blocked** until a
+second domain is concrete — see
+[D002](decisions/D002-shell-split-before-host.md).
 
-Values resolve **once per distinct interned extras fragment**, never per event:
-records carrying identical custom keys share one interned copy, and a filter
-reads each referenced key out of each copy in a single scan before the creator
-loop starts. That is a spec'd constraint in ANL-010, not an implementation
-detail.
+[E016](explorations/E016-what-to-build-next.md) is the standing list of what is
+not queued and why, with a proposed order. It binds nothing. Its candidate A
+(the custom-field and `named()` surfaces) closed on 2026-08-01; what remains is
+T009, an exploration for undo/redo, an exploration for multiple open traces,
+and two candidates it argues should stay untouched.
 
-Two smaller things came out of it. `receiver_before_dot` in the filter-dsl
-crate could only ever see one token, which is why `site.contains` completed and
-`named("x").` produced nothing; it now walks back over a balanced parenthesis.
-And `gen.py` gained `--fields`, because no trace in the repository carried any
-— off by default, and output without it is byte-identical to before.
-
-A review of the merged batch on 2026-07-31 found five
-defects, all in the repository's own record-keeping rather than in the product,
-and all five closed the same day:
-
-- **[T020](tickets/T020-repair-duplicate-identifiers.md)** — `T010` named two
-  tickets and `T016` named three. Renumbered under
-  [D006](decisions/D006-a-duplicated-identifier-is-repaired-by-renumbering.md).
-- **[T021](tickets/T021-live-docs-drop-npx-tsc.md)** — four live files still
-  told a reader to run `npx tsc`, which T018 had shown does not run the
-  compiler in a checkout without `npm install`.
-- **[T022](tickets/T022-docs-cite-commands-not-counts.md)** — every
-  hand-written count in `now.md` and `context.md` had drifted. They are gone,
-  not corrected.
-- **[T023](tickets/T023-reground-e014-and-e015.md)** — E014 was describing a
-  filter language T016 deleted four days after it was written.
-- **[T024](tickets/T024-guide-renderer-tests.md)** — the guide's markdown
-  renderer shipped with no assertion on it.
-
-None of the five was found by a suite, and none could have been: they are all
-claims in prose that stopped being true. The one mechanical check that came out
-of it is the duplicate-id query in
-[README](README.md#a-note-on-the-identifier-spaces), which is a query rather
-than a validator because `PROTOCOL.md` wants two recorded failures before a
-mechanism, and there is now exactly one recorded pair.
-
-[T016](tickets/T016-tags-is-a-string-set.md) closed on
-2026-07-29. One note about how it closed, because it is unusual: the agent that
-wrote it could not run `node` at all, so `cargo test` is the only suite it saw
-pass. The web suite, `tsc` and `./build.sh web` were run by a person and
-reported passing, and the ticket closed on that report.
-
-[T017](tickets/T017-default-docked-layout.md) closed
-on 2026-07-25. A trace with no saved session now starts with Events open in the
-left drawer and Layout, Appearance, Filter and Marks open in the right; Play,
-Warnings and Allocation remain floating and closed. Each populated drawer can
-collapse to a narrow rail without closing or undocking its windows, and that
-state persists with the rest of the per-trace layout. A saved layout replaces
-the default wholly.
-
-The data shape, persistence, override, build and served output are verified.
-Per D001, the rendered rail geometry and pointer interaction were not driven
-in a browser; those remain the part a person's ordinary use can inspect.
-
-[T010](tickets/T010-standalone-filter-dsl-parser.md) established the first
-filter-language slice as a separate crate. Type checking, the evaluator, the
-expression editor, and contextual completion connect it to the core and web UI,
-and T026–T029 finished the two surfaces it had left.
-
-[T011](tickets/T011-legend-chips-toggle-filter.md) through
-[T014](tickets/T014-filter-to-tag.md) closed the filter-action batch: legend
-toggles, replace-and-apply match range, saved filters in marks, and a snapshot
-of current matches into a tag. All cheap checks pass; as before, real pointer
-interaction and the worker/browser round trip are not automated.
-
-[T015](tickets/T015-overlapping-tags.md) fixed the first filter-to-tag defect:
-allocations now carry real overlapping memberships, so snapshotting matches
-selected by tag `a` into tag `b` preserves both groups. Counts, filters,
-`.heapa` persistence, the allocation panel, and segmented map stripes all use
-the complete membership set.
-
-[T016](tickets/T016-tags-is-a-string-set.md) fixed the second one, in the
-language rather than the engine. The scalar `tag`, whose `==` secretly meant
-"any membership satisfies this", is gone; `tags` is a set field with exact
-equality, a `contains` operator for one member, and `tags == {}` for untagged.
-`Value::Strings` and its equality/ordering/string-method overloads are gone with
-it, `is missing` now requires an optional operand instead of answering a
-constant, and the session's persisted filter is language version 2 — a
-version-1 source is read back as no filter rather than restored broken. Saved
-filters in a `.heapa` file carry no version, so an old `tag == "x"` there
-reports a diagnostic when set; nothing migrates it. The rule is
-[ANL-009](../spec/07-analysis.md#anl-009-filtering-by-tag).
-
-[E014](explorations/E014-overlapping-tags-cost-model.md) recorded the resulting
-cost model and semantics and is **settled: nothing was selected.** The current
-tag-indexed bitsets are compact for a few
-tags, but inverse event-to-tags scans reach count refresh, timeline index
-rebuilds, export, and rendering. It proposes
-measurement and separable optimizations; none is queued, and none should be
-until a trace someone actually opens is slow. Its DSL sections describe the
-pre-T016 scalar `tag` and carry a dated correction saying so — the engine
-sections stand unmeasured.
-
-**The guide drawer is complete.**
-[E015](explorations/E015-interactive-tutorial.md) settled, over three steers,
-what it is: a reference-density technical guide authored as plain markdown,
-living in **its own drawer** at the left edge of the workspace — outside the
-panel system, free to look unlike a panel — whose prose can highlight and drive
-the real UI. [T019](tickets/T019-guide-drawer-prototype.md) is the prototype and
-[SHELL-009](../spec/09-ui-shell.md#shell-009-the-guide-surface) is the rule it
-must not break: the guide reaches app state **only** by driving real controls,
-never by posting to the worker or touching shared state. What is still open —
-what persists, how wide the action vocabulary goes, how much content there is —
-E015 lists, to be answered from using it; that file stays `open` deliberately,
-and was re-grounded on 2026-07-31 against what actually shipped. The prototype
-ships five markdown
-sections and five focused scenario traces; its build, automated checks, and
-browser interaction have been verified. Its markdown renderer is now covered by
-the web suite ([T024](tickets/T024-guide-renderer-tests.md)), including a check
-that every `#show:`/`#do:`/`#set:` id in a page exists in `index.html` and that
-every scenario link resolves — the class of bug T019's third pass had to find
-by hand.
-
-**[T009](tickets/T009-type-the-deps-contracts.md) is next after it, and is not
-urgent.**
-It types the `init*(deps)` contracts in
-`analysis.ts`, `session.ts` and `events-panel.ts` — today a comment above each
-`init*` and a `let d = null` under it. That one pattern is the largest single
-cause under each of the two type-checking flags that are still off; what is left
-underneath is deliberately not planned yet, per
-[D005](decisions/D005-strictness-is-per-flag.md), which carries the measured
-counts.
-
-Why the language changed at all is
-[D004](decisions/D004-typescript-is-the-language-for-web.md); the argument that
-got there, including the position that lost, is
-[E008](explorations/E008-typescript-and-the-build-boundary.md).
-
-[T004](tickets/T004-shell-host.md) is blocked on a second domain existing and
-must stay blocked — see [D002](decisions/D002-shell-split-before-host.md).
-
-**Nothing else is queued, and that is the correct state.** T009 and the blocked
-T004 are the whole of the backlog.
-[E016](explorations/E016-what-to-build-next.md) collects the candidates that are
-named around the repository but not queued, with what is actually known about
-each and a proposed order. **It binds nothing.** Its candidate A is now done;
-what it still lists is T009, an exploration for undo/redo, an exploration for
-multiple open traces, and two candidates it argues should stay untouched —
-E015's guide questions, which answer themselves from use, and E014's costs,
-which want a measurement nobody has needed to take.
-[E009](explorations/E009-the-hand-verification-bottleneck.md) asked whether the
-verification pass should be partly mechanized, and settled at no: the changes
-it was written against worked first try, so the risk never showed up. No
-tooling came out of it, and the later D001 amendment did not change that — it
-moved who runs the checks that already exist, not whether new ones get built.
+**How work is written here changed on 2026-08-01.**
+[D007](decisions/D007-prose-serves-the-code.md) binds: one record per finished
+ticket (the commit body), ticket bodies default to `Outcome` and `Done when`,
+this file is not a changelog, and one ticket per deliverable. The reasoning and
+the measurements are [E018](explorations/E018-the-protocol-costs-too-much-prose.md);
+friction with `PROTOCOL.md` itself goes in
+[E017](explorations/E017-protocol-friction.md) as dated entries.
 
 ## Not being done, deliberately
 

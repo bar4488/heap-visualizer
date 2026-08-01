@@ -16,6 +16,7 @@ not edit it locally. This file is the project-specific part.
 | [decisions/](decisions/) | Rationale that must outlive the ticket that produced it. |
 | [explorations/](explorations/) | Reviews, proposals, open questions. Binding on nothing. |
 | [E017](explorations/E017-protocol-friction.md) | Friction with `PROTOCOL.md` itself. Append a dated entry; never settled. |
+| [D007](decisions/D007-prose-serves-the-code.md) | **How much to write.** One record per finished ticket, `now.md` is not a changelog. Read before filing one. |
 | [../spec/](../spec/README.md) | What the product must do. Authoritative. |
 
 ## The three things worth knowing before you touch anything
@@ -34,6 +35,14 @@ then says plainly what that did *not* cover. It does not hand a cheap check
 back to a person, and a person's pass is not a gate on closing a ticket. The
 recipes are in [context.md](context.md#verify-a-web-change); the reasoning is
 [D001](decisions/D001-web-changes-are-hand-smoke-tested.md).
+
+**Prose serves the code.** Most of a session goes to code. One record per
+finished ticket — the commit body — ticket bodies default to `Outcome` and
+`Done when`, and `now.md` is not a changelog. What this does *not* license is
+skipping the grounding pass or a spec change;
+[D007](decisions/D007-prose-serves-the-code.md) says why, and
+[E018](explorations/E018-the-protocol-costs-too-much-prose.md) has the
+measurements.
 
 **One finding or one refactor slice per commit** — see
 [D003](decisions/D003-one-slice-per-commit.md). With no automated coverage of
