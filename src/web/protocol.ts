@@ -32,6 +32,21 @@ export type EventRow = { seq: number; [field: string]: any };
 /** Engine JSON: trace metadata from the load pass. */
 export type TraceMeta = { [field: string]: any };
 
+/**
+ * Engine JSON: one caller-defined trace field, as `hp_fields_json` renders it.
+ * `type` is the single type the field can be filtered as; `null` means the
+ * trace held several types under this key, or held an object or an array,
+ * either of which the filter language cannot address.
+ */
+export type TraceField = {
+  name: string;
+  type: 'bool' | 'int' | 'string' | null;
+  /** Some event carried this key as JSON `null`, so it can be missing. */
+  optional: boolean;
+  /** Events of any op carrying the key — creators and frees alike. */
+  events: number;
+};
+
 export type FilterDiagnostic = {
   message: string;
   /** UTF-8 byte offsets into the submitted source. */

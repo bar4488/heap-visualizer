@@ -29,6 +29,8 @@ pub struct Parser {
     thr_map: HashMap<i64, u16>,
     stack_map: HashMap<String, u32>,
     extra_map: HashMap<String, u32>,
+    /// Custom field name -> index into `store.fields`.
+    field_map: HashMap<String, u32>,
     seq_warned: bool,
 }
 
@@ -74,6 +76,7 @@ impl Parser {
             thr_map: HashMap::new(),
             stack_map: HashMap::new(),
             extra_map: HashMap::new(),
+            field_map: HashMap::new(),
             seq_warned: false,
         }
     }
@@ -133,6 +136,7 @@ impl Parser {
         self.thr_map = HashMap::new();
         self.stack_map = HashMap::new();
         self.extra_map = HashMap::new();
+        self.field_map = HashMap::new();
     }
 
     fn line(&mut self, line: &[u8]) {
@@ -197,9 +201,65 @@ impl Parser {
             return i;
         }
         let i = self.store.extras.len() as u32;
+        // The catalog is built here, on the fragment that is new, so each
+        // distinct combination of custom keys is scanned exactly once however
+        // many events carry it.
+        let members = self.catalog_fragment(&ex);
         self.extra_map.insert(ex.clone(), i);
         self.store.extras.push(ex);
+        self.store.extra_fields.push(members);
         i
+    }
+
+    /// Record every key of one raw object-body fragment (`"k":v,"k2":v2`) in
+    /// the field catalog, returning the catalog indexes it carries.
+    fn catalog_fragment(&mut self, ex: &str) -> Vec<u32> {
+        let bytes = ex.as_bytes();
+        let mut sc = Scan::new(bytes);
+        let mut members = Vec::new();
+        loop {
+            let Some((lo, hi)) = sc.string_span() else {
+                break;
+            };
+            if !sc.eat(b':') {
+                break;
+            }
+            sc.ws();
+            let shape = match sc.peek() {
+                b'"' => FIELD_STRING,
+                b't' | b'f' => FIELD_BOOL,
+                b'n' => FIELD_NULL,
+                b'{' | b'[' => FIELD_OTHER,
+                _ => FIELD_INT,
+            };
+            if sc.skip_value().is_none() {
+                break;
+            }
+            let name = unescape(&bytes[lo..hi]);
+            let index = match self.field_map.get(&name) {
+                Some(&index) => index,
+                None => {
+                    let index = self.store.fields.len() as u32;
+                    self.field_map.insert(name.clone(), index);
+                    self.store.fields.push(FieldInfo {
+                        name,
+                        types: 0,
+                        events: 0,
+                    });
+                    index
+                }
+            };
+            self.store.fields[index as usize].types |= shape;
+            // a fragment repeating a key counts once; the value the evaluator
+            // will read is the first, so the duplicate is not a second member
+            if !members.contains(&index) {
+                members.push(index);
+            }
+            if !sc.eat(b',') {
+                break;
+            }
+        }
+        members
     }
 
     fn apply(&mut self, mut raw: Raw) {
@@ -287,7 +347,13 @@ impl Parser {
         let extra = if raw.extra.is_empty() {
             NONE_U32
         } else {
-            self.intern_extra(std::mem::take(&mut raw.extra))
+            let index = self.intern_extra(std::mem::take(&mut raw.extra));
+            // exact per-key event counts, without re-scanning the fragment
+            for i in 0..self.store.extra_fields[index as usize].len() {
+                let field = self.store.extra_fields[index as usize][i] as usize;
+                self.store.fields[field].events += 1;
+            }
+            index
         };
 
         // resolve the killed allocation for F / R
@@ -489,6 +555,8 @@ impl Default for Store {
             thr_count: Vec::new(),
             stacks: Vec::new(),
             extras: Vec::new(),
+            fields: Vec::new(),
+            extra_fields: Vec::new(),
             has_header: false,
             version: 1,
             unit: "ns".to_string(),

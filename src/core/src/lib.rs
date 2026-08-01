@@ -1015,6 +1015,38 @@ pub extern "C" fn hp_labels_json() {
     ret_str(&a.scratch.labels);
 }
 
+/// The catalog of caller-defined trace fields: what a producer attached to
+/// events, what types it was seen holding, and how many events carry it.
+/// `type` is the one type the field can be filtered as, or null when it was
+/// seen holding several, or held an object or array.
+#[no_mangle]
+pub extern "C" fn hp_fields_json() {
+    let a = unsafe { &mut *app() };
+    a.out.clear();
+    a.out.push('[');
+    for (index, f) in a.store.fields.iter().enumerate() {
+        if index > 0 {
+            a.out.push(',');
+        }
+        a.out.push_str("{\"name\":");
+        push_json_str(&mut a.out, &f.name);
+        a.out.push_str(",\"type\":");
+        a.out.push_str(match f.scalar() {
+            Some(FIELD_BOOL) => "\"bool\"",
+            Some(FIELD_INT) => "\"int\"",
+            Some(FIELD_STRING) => "\"string\"",
+            _ => "null",
+        });
+        a.out.push_str(",\"optional\":");
+        a.out.push_str(if f.optional() { "true" } else { "false" });
+        a.out.push_str(",\"events\":");
+        a.out.push_str(&f.events.to_string());
+        a.out.push('}');
+    }
+    a.out.push(']');
+    ret_str(&a.out);
+}
+
 #[no_mangle]
 pub extern "C" fn hp_pick(w: u32, x: u32, y: f64, scroll: f64) {
     let a = unsafe { &mut *app() };
@@ -1755,6 +1787,89 @@ not json at all
         assert!(info.contains("\"extra\":{\"pool\":\"gfx\",\"refs\":3}"));
         let info2 = render::alloc_info(&a.store, &mut a.view, &a.cfg, 200, 0x2000, 1, 0.0);
         assert!(!info2.contains("\"extra\""));
+    }
+
+    fn field(a: &App, name: &str) -> FieldInfo {
+        a.store
+            .fields
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap_or_else(|| panic!("no `{name}` in the catalog"))
+            .clone()
+    }
+
+    #[test]
+    fn field_catalog_records_names_types_and_counts() {
+        let src = r#"{"op":"H","v":1,"unit":"ns","row_bytes":4096}
+{"seq":0,"t":100,"op":"M","id":1,"addr":"0x1000","size":64,"pool":"gfx","refs":3}
+{"seq":1,"t":200,"op":"M","id":2,"addr":"0x2000","size":32,"pool":"ui"}
+{"seq":2,"t":300,"op":"F","id":1,"reason":"shutdown"}
+"#;
+        let a = load(src);
+        let pool = field(&a, "pool");
+        assert_eq!(pool.types, FIELD_STRING);
+        assert_eq!(pool.events, 2);
+        assert_eq!(pool.scalar(), Some(FIELD_STRING));
+        let refs = field(&a, "refs");
+        assert_eq!(refs.types, FIELD_INT);
+        assert_eq!(refs.events, 1);
+        // a key carried only by an F record is real: death.field.<k> reads it
+        assert_eq!(field(&a, "reason").events, 1);
+        assert_eq!(a.store.fields.len(), 3);
+    }
+
+    #[test]
+    fn field_catalog_records_every_observed_shape() {
+        let src = r#"{"op":"H","v":1,"unit":"ns","row_bytes":4096}
+{"seq":0,"t":100,"op":"M","id":1,"addr":"0x1000","size":64,"mixed":3}
+{"seq":1,"t":200,"op":"M","id":2,"addr":"0x2000","size":32,"mixed":"x"}
+{"seq":2,"t":300,"op":"M","id":3,"addr":"0x3000","size":32,"maybe":null,"flag":true}
+{"seq":3,"t":400,"op":"M","id":4,"addr":"0x4000","size":32,"maybe":7,"nested":{"a":[1,2]}}
+"#;
+        let a = load(src);
+        // a key with two scalar types is catalogued with both and is not
+        // filterable as either
+        let mixed = field(&a, "mixed");
+        assert_eq!(mixed.types, FIELD_INT | FIELD_STRING);
+        assert_eq!(mixed.scalar(), None);
+        assert_eq!(mixed.events, 2);
+        // null is missingness, not a type: the field stays typed and optional
+        let maybe = field(&a, "maybe");
+        assert_eq!(maybe.types, FIELD_NULL | FIELD_INT);
+        assert_eq!(maybe.scalar(), Some(FIELD_INT));
+        assert!(maybe.optional());
+        assert_eq!(field(&a, "flag").scalar(), Some(FIELD_BOOL));
+        // present, displayable, not filterable
+        let nested = field(&a, "nested");
+        assert_eq!(nested.types, FIELD_OTHER);
+        assert_eq!(nested.scalar(), None);
+    }
+
+    #[test]
+    fn field_catalog_scans_each_distinct_fragment_once() {
+        let mut src = String::from("{\"op\":\"H\",\"v\":1,\"unit\":\"ns\",\"row_bytes\":4096}\n");
+        for i in 0..50u64 {
+            src.push_str(&format!(
+                "{{\"seq\":{i},\"t\":{},\"op\":\"M\",\"id\":{},\"addr\":\"0x{:x}\",\"size\":16,\"pool\":\"gfx\"}}\n",
+                i * 10,
+                i + 1,
+                0x1000 + i * 0x100
+            ));
+        }
+        let a = load(&src);
+        // one interned fragment shared by fifty events, one catalog entry,
+        // and a count that still saw every event
+        assert_eq!(a.store.extras.len(), 1);
+        assert_eq!(a.store.extra_fields, vec![vec![0u32]]);
+        assert_eq!(field(&a, "pool").events, 50);
+    }
+
+    #[test]
+    fn a_trace_without_custom_fields_has_an_empty_catalog() {
+        let a = load(SAMPLE);
+        assert!(a.store.fields.is_empty());
+        assert!(a.store.extras.is_empty());
+        assert!(a.store.extra_fields.is_empty());
     }
 
     #[test]

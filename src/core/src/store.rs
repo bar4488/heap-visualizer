@@ -35,6 +35,45 @@ pub fn warn_name(code: u8) -> &'static str {
     }
 }
 
+// Observed value shapes for a custom trace field, as a bitmask. A field is
+// filterable only when exactly one of the four scalar bits is set (`null` is
+// missingness, not a type of its own, so it never disqualifies a field).
+pub const FIELD_NULL: u8 = 1 << 0;
+pub const FIELD_BOOL: u8 = 1 << 1;
+pub const FIELD_INT: u8 = 1 << 2;
+pub const FIELD_STRING: u8 = 1 << 3;
+/// An object or an array: present in the trace, displayable, not filterable.
+pub const FIELD_OTHER: u8 = 1 << 4;
+/// The scalar bits, minus `null`. `types & FIELD_SCALARS` having exactly one
+/// bit is what makes a field typed.
+pub const FIELD_SCALARS: u8 = FIELD_BOOL | FIELD_INT | FIELD_STRING;
+
+/// One caller-defined top-level field observed somewhere in the trace.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct FieldInfo {
+    pub name: String,
+    /// Bitmask of the `FIELD_*` shapes this key was seen holding.
+    pub types: u8,
+    /// Events of any op carrying this key. `death.field.<k>` reads the death
+    /// event's fragment, so a key seen only on `F` records is real; counting
+    /// creators only would report it as absent.
+    pub events: u32,
+}
+
+impl FieldInfo {
+    /// The single scalar type this field can be filtered as, if there is one.
+    /// `null` is ignored: it makes the field optional, not untyped.
+    pub fn scalar(&self) -> Option<u8> {
+        let scalars = self.types & FIELD_SCALARS;
+        (scalars.count_ones() == 1 && self.types & FIELD_OTHER == 0).then_some(scalars)
+    }
+
+    /// True when the key was ever absent-as-null or holds a non-scalar.
+    pub fn optional(&self) -> bool {
+        self.types & FIELD_NULL != 0
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct Warning {
     /// Event index (seq) the warning is attached to; NONE_U32 if none.
@@ -96,6 +135,14 @@ pub struct Store {
     pub thr_count: Vec<u32>,
     pub stacks: Vec<String>,
     pub extras: Vec<String>,
+    /// Catalog of the caller-defined top-level fields seen anywhere in the
+    /// trace, in first-observation order. Built as fragments are interned —
+    /// each distinct fragment is scanned once, never once per event — so a
+    /// `&Store` can be type-checked against without a rebuild.
+    pub fields: Vec<FieldInfo>,
+    /// Parallel to `extras`: the `fields` indexes each interned fragment
+    /// carries. Lets an event bump its keys' counts without re-scanning JSON.
+    pub extra_fields: Vec<Vec<u32>>,
 
     // header
     pub has_header: bool,

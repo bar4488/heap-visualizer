@@ -1,6 +1,6 @@
 # The Workflow Protocol
 
-Version: 6
+Version: 8
 
 A text interface that lets humans and agents work on a repository across many
 sessions without depending on conversation history.
@@ -49,6 +49,13 @@ All durable project knowledge lives in the repository. Not in conversation
 history, agent memory, a scratchpad, or an external tracker. **Uncommitted work
 is not repository state.**
 
+**An agent commits its own work.** Changing files and stopping produces nothing
+durable: the next session opens on a tree it did not make and cannot tell
+finished work from abandoned work. Commit each coherent piece as it completes —
+not once at the end of a long session, and not only when asked. Work nobody
+asked for is committed or reverted, never left in the tree for someone else to
+classify. If something must stay uncommitted, `docs/now.md` says what and why.
+
 A constraint cited but not defined in the repository is a defect in whatever
 cited it.
 
@@ -64,6 +71,7 @@ convenient that is. Everything worth keeping already has a home here:
 | Something true about the product's behavior | the spec |
 | Something learned while doing a piece of work | that ticket's work log |
 | An unresolved question or a half-formed idea | an exploration |
+| Friction with this protocol itself | the friction exploration |
 
 If a fact fits none of those, that is a signal it is not durable project
 knowledge. There is no memory directory.
@@ -79,7 +87,17 @@ line of a written-out index writes from memory instead of from the source.
 Rewriting the whole block from the query is correct whether a script or an agent
 does it.
 
-Anything hand-maintained must be something no query can answer.
+Anything hand-maintained as current state must be something no query can answer.
+
+**Minimize hard-coded mutable values in prose.** Test totals, passing-test
+counts, lines of code, file sizes, and current version numbers go stale while
+still looking precise. If the repository can derive a value, prefer the command
+that derives it or state the useful conclusion without the number.
+
+An exact value belongs when it defines behavior or preserves evidence: a
+requirement threshold, an identifier, a canonical version field, or a dated
+measurement whose command and context are recorded. Historical records do not
+pretend to describe the current tree.
 
 ## `docs/now.md`
 
@@ -92,7 +110,7 @@ rewritten from ticket status: the queue.
 ```markdown
 ## State
 
-**Engine — healthy.** 33 tests asserting real invariants.
+**Engine — healthy.** Integration tests assert its persistence invariants.
 
 **Web layer — works, no internal boundaries.** Future cost, and the active work.
 
@@ -290,6 +308,35 @@ In explorations, distinguish evidence from inference from suggestion, mark
 uncertain claims, preserve disagreement, and let ideas stay unresolved
 indefinitely.
 
+## Friction with this protocol
+
+When the thing that went wrong is **this file** — a case it does not cover, a
+rule that produced something the user did not intend, a step that read as
+unintuitive, an instruction you had to guess at — record it. Do not fix it
+locally and do not invent a channel for it. This file is copied verbatim, so a
+local edit is lost at the next update and invisible to every other repository
+using it.
+
+It goes in **one** exploration, named for protocol friction, `status: open`
+permanently, appended to and never settled. One dated entry, no ceremony:
+
+```markdown
+### 2026-07-25 — who rewrites the queue when two milestones finish at once
+
+Both milestones were done in the same session. Nothing says which one's closing
+session rewrites `docs/now.md`, so I did it by hand from
+`rg '^status: doing$' docs/tickets` and moved on. Expected the protocol to name
+an owner.
+```
+
+What happened, what you expected, what you did instead. An entry is a record,
+not a change request and not an earned rule: `Adding a rule` below decides that,
+and an entry written *before* the failure — "an agent might misread this" — is
+not an instance and is not filed as one.
+
+The log is read when the protocol is next revised. Nothing promises a response
+to any single entry.
+
 ## Closed artifacts are not updated
 
 A `done` ticket and a `settled` exploration are dated records of what was true
@@ -314,6 +361,27 @@ API compatibility policy, a rejected architecture, a security boundary — and
 justified by a rule, that rule has a file. Not for routine implementation
 choices.
 
+## Frontmatter
+
+Every artifact opens with YAML frontmatter. Lowercase keys, ISO `YYYY-MM-DD`
+dates, and these fields — no more, until something actually reads one:
+
+| File | Required keys | `status` |
+|---|---|---|
+| `docs/tickets/T001-*.md` | `id` `title` `status` `updated` | `todo` `doing` `done` |
+| `docs/explorations/E001-*.md` | `id` `title` `status` `updated` | `open` `settled` |
+| `docs/decisions/D001-*.md` | `id` `title` `created` | none — a decision does not have one |
+| `docs/milestones/M001-*.md` | `id` `title` `tickets` `updated` | none — derived from its tickets |
+| `docs/now.md` | `updated` | — |
+
+A milestone also carries `write_scope` and `depends_on` when they apply. Cross
+links — `related`, `authors`, a requirement reference — are optional anywhere and
+belong in the body if only a human reads them.
+
+`updated` means *this was last true then*, which is what tells you a ticket needs
+re-grounding. `created` never changes, which is why a decision carries that one
+instead.
+
 ## Identifiers
 
 One number space per artifact type — `T001`, `E001`, `D001`, `M001` — global and
@@ -328,12 +396,14 @@ ticket and everything it references. Ground it. Look at the code and tests.
 Confirm the ticket's assumptions still hold. Set it to `doing`.
 
 **During:** stay in scope with the done-when items visible. Record findings, not
-narration. Update the spec when intended behavior changes. **File a new ticket
-instead of expanding this one.**
+narration. Update the spec when intended behavior changes. **Commit each piece as
+it completes**, rather than accumulating a session's work in the tree. **File a
+new ticket instead of expanding this one.**
 
 **Stop** on a blocking contradiction: requirements conflict, required behavior is
 undefined, an unapproved destructive migration is needed, or the work cannot
-finish in scope.
+finish in scope. Stopping is not a reason to leave the tree dirty: commit what
+exists, then stop.
 
 **Finish, complete:** verify each done-when item, run the tests, confirm the spec
 matches, write the result, regenerate the queue, file follow-up tickets, commit.
@@ -408,5 +478,6 @@ field, a new skill, and a new validator: name the two times its absence hurt.
 - A skill holding project state.
 - Scope expanded silently instead of becoming a new ticket.
 - An exploration treated as an approved requirement.
+- This file edited locally, or its friction recorded nowhere.
 - An unfinished session without a concrete handoff.
 - A new rule or mechanism with no recorded failure behind it.
