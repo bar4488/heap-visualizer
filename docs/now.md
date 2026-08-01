@@ -1,6 +1,6 @@
 # Now
 
-_Updated: 2026-07-31._
+_Updated: 2026-08-01._
 
 **No count in this file is written by hand.** Test counts, module sizes and
 requirement totals are derivable, and the ones that used to be here had all
@@ -60,8 +60,16 @@ labels. Allocations can carry overlapping tags, and the language says so: the
 field is the set-typed `tags`, `tags == {"a", "aa"}` is exact set equality,
 `tags contains "a"` is membership, `tags == {}` is untagged, and filter-to-tag
 adds its snapshot without removing the tags that selected it.
-`named()` and custom `field.*` columns still report direct diagnostics
-and are not offered as completions.
+**The E010 language is now complete on the two surfaces that were missing.**
+Custom trace fields are filterable — `field.pool`, `field["allocator-class"]`,
+`death.field.reason` — checked against a catalog the load pass builds, and
+`named("x")` resolves one allocation by its user-given name at check time.
+[ANL-010](../spec/07-analysis.md#anl-010-filtering-on-custom-trace-fields) and
+[ANL-011](../spec/07-analysis.md#anl-011-filtering-relative-to-a-named-allocation)
+are the rules. Both have a UI: an allocation's custom fields are their own
+typed section of the allocation panel, each with a one-click predicate, and the
+Filter panel lists the trace's whole field catalog. `python3 gen.py --fields`
+makes a trace carrying some.
 
 The expression is also the single state behind the filter actions. Site,
 thread, tag, and untagged legend chips toggle visible predicates and apply
@@ -123,7 +131,37 @@ survivable, a stale `dist/` is the new way to be confused.
 
 ## Next
 
-**Nothing is in flight.** A review of the merged batch on 2026-07-31 found five
+**Nothing is in flight.**
+
+[T026](tickets/T026-custom-field-catalog.md) through
+[T029](tickets/T029-custom-fields-in-the-ui.md) closed the custom-fields and
+`named()` batch on 2026-08-01 — [E016](explorations/E016-what-to-build-next.md)
+candidate A, plus a UI half E016 had not anticipated. Grounding corrected two
+of that document's estimates, and both are worth knowing:
+
+- **E010 asserts the core collects a catalog of custom field names and types at
+  parse time. It never did.** `store.extras` held raw JSON object-body
+  fragments and nothing in the core read them, so the catalog was its own
+  ticket rather than something the evaluator could assume.
+- **Allocation names had never reached the core at all.** `worker.ts` called
+  `hp_set_names` behind a `typeof` guard for an export that existed nowhere in
+  `src/core/`, so every rename since the feature shipped was a silent no-op as
+  far as the engine was concerned. The export exists now, and a test pins the
+  wire shape so the two ends cannot drift again.
+
+Values resolve **once per distinct interned extras fragment**, never per event:
+records carrying identical custom keys share one interned copy, and a filter
+reads each referenced key out of each copy in a single scan before the creator
+loop starts. That is a spec'd constraint in ANL-010, not an implementation
+detail.
+
+Two smaller things came out of it. `receiver_before_dot` in the filter-dsl
+crate could only ever see one token, which is why `site.contains` completed and
+`named("x").` produced nothing; it now walks back over a balanced parenthesis.
+And `gen.py` gained `--fields`, because no trace in the repository carried any
+— off by default, and output without it is byte-identical to before.
+
+A review of the merged batch on 2026-07-31 found five
 defects, all in the repository's own record-keeping rather than in the product,
 and all five closed the same day:
 
@@ -167,10 +205,9 @@ Per D001, the rendered rail geometry and pointer interaction were not driven
 in a browser; those remain the part a person's ordinary use can inspect.
 
 [T010](tickets/T010-standalone-filter-dsl-parser.md) established the first
-filter-language slice as a separate crate. Type checking, the first evaluator,
-the expression editor, and contextual completion now connect it to the core
-and web UI. `named()` and custom scalar fields are the next unfinished E010
-surfaces; neither has a ticket yet.
+filter-language slice as a separate crate. Type checking, the evaluator, the
+expression editor, and contextual completion connect it to the core and web UI,
+and T026–T029 finished the two surfaces it had left.
 
 [T011](tickets/T011-legend-chips-toggle-filter.md) through
 [T014](tickets/T014-filter-to-tag.md) closed the filter-action batch: legend
@@ -247,11 +284,12 @@ must stay blocked — see [D002](decisions/D002-shell-split-before-host.md).
 **Nothing else is queued, and that is the correct state.** T009 and the blocked
 T004 are the whole of the backlog.
 [E016](explorations/E016-what-to-build-next.md) collects the candidates that are
-named around the repository but not queued — the two unfinished E010 surfaces,
-undo/redo, multiple open traces, E015's open guide questions, E014's unmeasured
-costs — with what is actually known about each and a proposed order. **It binds
-nothing and has produced no tickets**, and it opens with the question that would
-reorder it: whether `named()` and custom `field.*` are wanted at all.
+named around the repository but not queued, with what is actually known about
+each and a proposed order. **It binds nothing.** Its candidate A is now done;
+what it still lists is T009, an exploration for undo/redo, an exploration for
+multiple open traces, and two candidates it argues should stay untouched —
+E015's guide questions, which answer themselves from use, and E014's costs,
+which want a measurement nobody has needed to take.
 [E009](explorations/E009-the-hand-verification-bottleneck.md) asked whether the
 verification pass should be partly mechanized, and settled at no: the changes
 it was written against worked first try, so the risk never showed up. No
