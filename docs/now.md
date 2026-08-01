@@ -24,6 +24,7 @@ client-side.
 | [spec/01-overview](../spec/01-overview.md), [spec/08-architecture](../spec/08-architecture.md) | Goals and the three-layer split, in that order |
 | [E007](explorations/E007-web-architecture-direction.md) | Where the web layer is going and why the host is last |
 | [D004](decisions/D004-typescript-is-the-language-for-web.md), [E008](explorations/E008-typescript-and-the-build-boundary.md) | Why it is TypeScript with a build step, and what that costs |
+| [D007](decisions/D007-prose-serves-the-code.md) | **How much to write.** Read before filing a ticket or editing this file. |
 
 ## State
 
@@ -68,8 +69,10 @@ Custom trace fields are filterable — `field.pool`, `field["allocator-class"]`,
 [ANL-011](../spec/07-analysis.md#anl-011-filtering-relative-to-a-named-allocation)
 are the rules. Both have a UI: an allocation's custom fields are their own
 typed section of the allocation panel, each with a one-click predicate, and the
-Filter panel lists the trace's whole field catalog. `python3 gen.py --fields`
-makes a trace carrying some.
+Filter panel lists the trace's whole field catalog — the panel section is
+`src/web/heap/custom-fields.ts`, pure and tested. `python3 gen.py --fields`
+makes a trace carrying custom fields; no other trace in the repository has
+any.
 
 The expression is also the single state behind the filter actions. Site,
 thread, tag, and untagged legend chips toggle visible predicates and apply
@@ -131,8 +134,9 @@ survivable, a stale `dist/` is the new way to be confused.
 
 ## Next
 
-**Nothing is in flight.** T009 and the blocked T004 are the whole of the
-backlog, and that is the correct state.
+**Nothing is in flight**, and the working tree is clean. The backlog is T009,
+T030, and the blocked T004 — the queue below is generated from
+`rg '^status: doing$' docs/tickets`, which currently returns nothing.
 
 **[T009](tickets/T009-type-the-deps-contracts.md) is next, and is not urgent.**
 It types the `init*(deps)` contracts in `analysis.ts`, `session.ts` and
@@ -141,6 +145,12 @@ under it, and the largest single cause under each of the two type-checking
 flags still off ([D005](decisions/D005-strictness-is-per-flag.md), which
 carries the measured counts). Its `updated` is 2026-07-25 and the web layer has
 moved since; re-ground it before starting.
+
+**[T030](tickets/T030-v8-frontmatter-conformance.md) is small and mechanical.**
+`PROTOCOL.md` moved from version 6 to version 8 on 2026-08-01 and its new
+frontmatter table leaves this file and D001–D006 non-conformant. The trap is in
+the ticket: on a decision, `created` is not a rename of `updated`, and at least
+one of the six carries an amendment date rather than a creation date.
 
 **[T004](tickets/T004-shell-host.md) is blocked and must stay blocked** until a
 second domain is concrete — see
