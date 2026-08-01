@@ -15,6 +15,7 @@ not edit it locally. This file is the project-specific part.
 | [tickets/](tickets/) | Units of work. A ticket owns its own status. |
 | [decisions/](decisions/) | Rationale that must outlive the ticket that produced it. |
 | [explorations/](explorations/) | Reviews, proposals, open questions. Binding on nothing. |
+| [E017](explorations/E017-protocol-friction.md) | Friction with `PROTOCOL.md` itself. Append a dated entry; never settled. |
 | [../spec/](../spec/README.md) | What the product must do. Authoritative. |
 
 ## The three things worth knowing before you touch anything
