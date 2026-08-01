@@ -98,6 +98,6 @@ as a correction to what the ticket first said: `death.field.<k>` reads the
 death event's fragment, so a key appearing only on `F` records is filterable,
 and a creator-only count would have shown it as `0` and read as absent.
 
-Verified: `cargo test` (46 tests, four of them new here), `node --test`, `tsc`,
+Verified: `cargo test` (four tests new here), `node --test`, `tsc`,
 `./build.sh`, and `hp_fields_json` present in the emitted `dist/` wasm. Nothing
 user-visible changed, so there was nothing to look at in a browser.

@@ -575,10 +575,11 @@ fn filter_diagnostic_json(out: &mut String, kind: &str, message: &str, start: us
 pub extern "C" fn hp_filter_check(len: u32, cursor: u32) {
     let a = unsafe { &mut *app() };
     let source = std::str::from_utf8(&a.buf[..len as usize]).unwrap_or("");
+    let ctx = filter_eval::Ctx::new(&a.store, &a.tag_labels);
     let result = heap_visualizer_filter_dsl::parse(source)
         .map_err(|error| (error.message, error.span))
         .and_then(|expr| {
-            filter_eval::check(&expr, &a.store).map_err(|error| (error.message, error.span))
+            filter_eval::check(&expr, &ctx).map_err(|error| (error.message, error.span))
         });
     match result {
         Ok(()) => a.out = "{\"valid\":true,\"available\":true".into(),
@@ -592,13 +593,7 @@ pub extern "C" fn hp_filter_check(len: u32, cursor: u32) {
             a.out.push('}');
         }
     }
-    filter_eval::push_completions_json(
-        &mut a.out,
-        source,
-        cursor as usize,
-        &a.store,
-        &a.tag_labels,
-    );
+    filter_eval::push_completions_json(&mut a.out, source, cursor as usize, &ctx);
     a.out.push('}');
     ret_str(&a.out);
 }
@@ -622,11 +617,16 @@ pub extern "C" fn hp_filter_apply(len: u32) {
             return;
         }
     };
-    if let Err(err) = filter_eval::check(&expr, &a.store) {
+    let ctx = filter_eval::Ctx::new(&a.store, &a.tag_labels);
+    if let Err(err) = filter_eval::check(&expr, &ctx) {
         filter_diagnostic_json(&mut a.out, "success", &err.message, err.span.start, err.span.end);
         ret_str(&a.out);
         return;
     }
+    // custom field values are resolved once per distinct interned fragment,
+    // before the scan, so the per-event loop below never parses JSON
+    let fields = filter_eval::FieldValues::resolve(&expr, &a.store);
+    let ctx = ctx.with_fields(&fields);
     let mut bits = vec![0u64; (a.store.len() as usize).div_ceil(64)];
     let mut matches = 0u32;
     let mut creators = 0u32;
@@ -635,7 +635,7 @@ pub extern "C" fn hp_filter_apply(len: u32) {
             continue;
         }
         creators += 1;
-        match filter_eval::evaluate(&expr, &a.store, e, &a.tag_labels) {
+        match filter_eval::evaluate(&expr, &ctx, e) {
             Ok(true) => {
                 bits[e as usize / 64] |= 1 << (e % 64);
                 matches += 1;
@@ -1362,6 +1362,16 @@ mod tests {
         a
     }
 
+    /// A checking context over a loaded app. Evaluation of custom fields needs
+    /// `.with_fields(&FieldValues::resolve(..))` on top; nothing else does.
+    fn ctx<'a>(a: &'a App, labels: &'a [String]) -> filter_eval::Ctx<'a> {
+        filter_eval::Ctx::new(&a.store, labels)
+    }
+
+    fn store_ctx(store: &Store) -> filter_eval::Ctx<'_> {
+        filter_eval::Ctx::new(store, &[])
+    }
+
     fn tags(store: &Store) -> Vec<Vec<u8>> {
         (0..store.len())
             .map(|e| store.tag_ids(e).collect())
@@ -1969,7 +1979,7 @@ not json at all
         let mut bits = vec![0u64; (a.store.len() as usize).div_ceil(64)];
         for e in 0..a.store.len() {
             if matches!(a.store.op[e as usize], OP_M | OP_R)
-                && filter_eval::evaluate(&expr, &a.store, e, &[]).unwrap()
+                && filter_eval::evaluate(&expr, &ctx(&a, &[]), e).unwrap()
             {
                 bits[e as usize / 64] |= 1 << (e % 64);
             }
@@ -1993,7 +2003,7 @@ not json at all
         let mut bits = vec![0u64; (a.store.len() as usize).div_ceil(64)];
         for e in 0..a.store.len() {
             if matches!(a.store.op[e as usize], OP_M | OP_R)
-                && filter_eval::evaluate(&expr, &a.store, e, &labels).unwrap()
+                && filter_eval::evaluate(&expr, &ctx(&a, &labels), e).unwrap()
             {
                 bits[e as usize / 64] |= 1 << (e % 64);
             }
@@ -2002,14 +2012,14 @@ not json at all
 
         assert_eq!(tag_filter_matches(&mut a, 2), 1);
         assert_eq!(tags(&a.store)[1], vec![1, 2]);
-        assert!(filter_eval::evaluate(&expr, &a.store, 1, &labels).unwrap());
+        assert!(filter_eval::evaluate(&expr, &ctx(&a, &labels), 1).unwrap());
         let b = heap_visualizer_filter_dsl::parse(r#"tags contains "b""#).unwrap();
-        assert!(filter_eval::evaluate(&b, &a.store, 1, &labels).unwrap());
+        assert!(filter_eval::evaluate(&b, &ctx(&a, &labels), 1).unwrap());
         // and the whole membership set is now visible to the language
         let both = heap_visualizer_filter_dsl::parse(r#"tags == {"b", "a"}"#).unwrap();
-        assert!(filter_eval::evaluate(&both, &a.store, 1, &labels).unwrap());
+        assert!(filter_eval::evaluate(&both, &ctx(&a, &labels), 1).unwrap());
         let only_a = heap_visualizer_filter_dsl::parse(r#"tags == {"a"}"#).unwrap();
-        assert!(!filter_eval::evaluate(&only_a, &a.store, 1, &labels).unwrap());
+        assert!(!filter_eval::evaluate(&only_a, &ctx(&a, &labels), 1).unwrap());
 
         let mut dump = String::new();
         tags_dump_json(&a.store, &mut dump);
@@ -2203,14 +2213,188 @@ not json at all
         let expr = heap_visualizer_filter_dsl::parse(
             r#"size >= 100 && site == "b" && span overlaps 0x1800..0x2800"#,
         ).unwrap();
-        assert!(!filter_eval::evaluate(&expr, &a.store, 0, &[]).unwrap());
-        assert!(filter_eval::evaluate(&expr, &a.store, 1, &[]).unwrap());
+        assert!(!filter_eval::evaluate(&expr, &ctx(&a, &[]), 0).unwrap());
+        assert!(filter_eval::evaluate(&expr, &ctx(&a, &[]), 1).unwrap());
 
         let methods = heap_visualizer_filter_dsl::parse(
             r#"freed && site.starts_with("a")"#,
         ).unwrap();
-        assert!(filter_eval::evaluate(&methods, &a.store, 0, &[]).unwrap());
-        assert!(!filter_eval::evaluate(&methods, &a.store, 1, &[]).unwrap());
+        assert!(filter_eval::evaluate(&methods, &ctx(&a, &[]), 0).unwrap());
+        assert!(!filter_eval::evaluate(&methods, &ctx(&a, &[]), 1).unwrap());
+    }
+
+    /// Two creators with custom fields, one of them freed by an F record that
+    /// carries its own. Event 0 is freed at event 2; event 1 is never freed.
+    const CUSTOM: &str = r#"{"op":"H","v":1,"unit":"ns","row_bytes":4096}
+{"seq":0,"t":100,"op":"M","id":1,"addr":"0x1000","size":64,"pool":"gfx","refcount":3,"allocator-class":"slab","live":true}
+{"seq":1,"t":200,"op":"M","id":2,"addr":"0x2000","size":32,"pool":"ui","refcount":9,"allocator-class":"bump","live":false}
+{"seq":2,"t":300,"op":"F","id":1,"reason":"shutdown"}
+"#;
+
+    fn matches_custom(a: &App, source: &str) -> Vec<u32> {
+        let expr = heap_visualizer_filter_dsl::parse(source).unwrap();
+        let base = ctx(a, &[]);
+        filter_eval::check(&expr, &base).unwrap_or_else(|e| panic!("{source}: {}", e.message));
+        let fields = filter_eval::FieldValues::resolve(&expr, &a.store);
+        let full = base.with_fields(&fields);
+        (0..a.store.len())
+            .filter(|&e| matches!(a.store.op[e as usize], OP_M | OP_R))
+            .filter(|&e| filter_eval::evaluate(&expr, &full, e).unwrap())
+            .collect()
+    }
+
+    fn custom_error(a: &App, source: &str) -> String {
+        let expr = heap_visualizer_filter_dsl::parse(source).unwrap();
+        filter_eval::check(&expr, &ctx(a, &[])).unwrap_err().message
+    }
+
+    #[test]
+    fn custom_fields_filter_in_all_four_spellings() {
+        let a = load(CUSTOM);
+        assert_eq!(matches_custom(&a, r#"field.pool == "gfx""#), vec![0]);
+        assert_eq!(
+            matches_custom(&a, r#"field["allocator-class"] == "bump""#),
+            vec![1]
+        );
+        assert_eq!(matches_custom(&a, "field.refcount >= 5"), vec![1]);
+        assert_eq!(matches_custom(&a, "field.live"), vec![0]);
+        // the death event's own fields, read through the allocation
+        assert_eq!(
+            matches_custom(&a, r#"death.field.reason == "shutdown""#),
+            vec![0]
+        );
+        assert_eq!(
+            matches_custom(&a, r#"death.field["reason"] == "shutdown""#),
+            vec![0]
+        );
+        // string methods and sets reach custom fields like any other string
+        assert_eq!(matches_custom(&a, r#"field.pool.starts_with("g")"#), vec![0]);
+        assert_eq!(
+            matches_custom(&a, r#"field.pool in {"gfx", "ui"}"#),
+            vec![0, 1]
+        );
+    }
+
+    #[test]
+    fn a_custom_field_is_optional_everywhere() {
+        let a = load(CUSTOM);
+        // event 1 is never freed, so its death fields are missing, and a
+        // comparison against a missing value is false rather than an error
+        assert_eq!(matches_custom(&a, "death.field.reason is missing"), vec![1]);
+        assert_eq!(
+            matches_custom(&a, r#"death.field.reason != "shutdown""#),
+            vec![] as Vec<u32>
+        );
+        // a key no event carries at all is a diagnostic, not a silent false
+        assert_eq!(
+            custom_error(&a, r#"field.nope == "x""#),
+            "no trace field `nope` in this trace"
+        );
+        assert_eq!(
+            custom_error(&a, r#"death.field["nope"] == "x""#),
+            "no trace field `nope` in this trace"
+        );
+    }
+
+    #[test]
+    fn an_untypable_custom_field_is_a_diagnostic() {
+        let a = load(r#"{"op":"H","v":1,"unit":"ns","row_bytes":4096}
+{"seq":0,"t":100,"op":"M","id":1,"addr":"0x1000","size":64,"mixed":3,"nested":{"a":1},"maybe":null}
+{"seq":1,"t":200,"op":"M","id":2,"addr":"0x2000","size":32,"mixed":"x","maybe":7}
+"#);
+        assert_eq!(
+            custom_error(&a, "field.mixed == 3"),
+            "`mixed` holds integer and string in this trace, so it has no single type to filter on"
+        );
+        assert_eq!(
+            custom_error(&a, "field.nested == 3"),
+            "`nested` holds an object or an array, which cannot be filtered"
+        );
+        // a null observation makes the field optional, not untypable
+        assert_eq!(matches_custom(&a, "field.maybe == 7"), vec![1]);
+        assert_eq!(matches_custom(&a, "field.maybe is missing"), vec![0]);
+    }
+
+    #[test]
+    fn a_started_field_reference_says_what_is_missing() {
+        let a = load(CUSTOM);
+        assert_eq!(
+            custom_error(&a, "field"),
+            "`field` needs a key, as `field.pool` or `field[\"pool\"]`"
+        );
+        assert_eq!(
+            custom_error(&a, "death.field"),
+            "`death.field` needs a key, as `death.field.reason`"
+        );
+        assert_eq!(
+            custom_error(&a, r#"site["x"] == "a""#),
+            "only `field[...]` and `death.field[...]` take a key"
+        );
+    }
+
+    #[test]
+    fn custom_field_values_resolve_once_per_fragment() {
+        let mut src = String::from("{\"op\":\"H\",\"v\":1,\"unit\":\"ns\",\"row_bytes\":4096}\n");
+        for i in 0..200u64 {
+            src.push_str(&format!(
+                "{{\"seq\":{i},\"t\":{},\"op\":\"M\",\"id\":{},\"addr\":\"0x{:x}\",\"size\":16,\"pool\":\"{}\"}}\n",
+                i * 10,
+                i + 1,
+                0x1000 + i * 0x100,
+                if i % 2 == 0 { "gfx" } else { "ui" }
+            ));
+        }
+        let a = load(&src);
+        // two distinct fragments behind two hundred events
+        assert_eq!(a.store.extras.len(), 2);
+        let expr = heap_visualizer_filter_dsl::parse(r#"field.pool == "gfx""#).unwrap();
+        let fields = filter_eval::FieldValues::resolve(&expr, &a.store);
+        assert_eq!(fields.rows(), 2);
+        assert_eq!(matches_custom(&a, r#"field.pool == "gfx""#).len(), 100);
+    }
+
+    #[test]
+    fn completion_offers_custom_fields_and_their_values() {
+        let a = load(CUSTOM);
+        let complete = |source: &str| {
+            let mut out = String::new();
+            filter_eval::push_completions_json(
+                &mut out,
+                source,
+                source.len(),
+                &ctx(&a, &a.tag_labels),
+            );
+            out
+        };
+        assert!(complete("").contains("\"label\":\"field\""));
+        let keys = complete("field.");
+        assert!(keys.contains("\"label\":\"pool\""));
+        assert!(keys.contains("\"label\":\"refcount\""));
+        // a key needing brackets is not completable after a `.`
+        assert!(!keys.contains("allocator-class"));
+        // the values the key was seen holding, like site and thread
+        let values = complete("field.pool == ");
+        assert!(values.contains("\"gfx\""));
+        assert!(values.contains("\"ui\""));
+        // fields of the freeing event hang off `death.`
+        assert!(complete("death.").contains("\"label\":\"field\""));
+        assert!(complete("death.field.").contains("\"label\":\"reason\""));
+    }
+
+    #[test]
+    fn completion_never_offers_an_unfilterable_field() {
+        let a = load(r#"{"op":"H","v":1,"unit":"ns","row_bytes":4096}
+{"seq":0,"t":100,"op":"M","id":1,"addr":"0x1000","size":64,"mixed":3,"nested":{"a":1}}
+{"seq":1,"t":200,"op":"M","id":2,"addr":"0x2000","size":32,"mixed":"x"}
+"#);
+        let mut out = String::new();
+        filter_eval::push_completions_json(&mut out, "field.", 6, &ctx(&a, &[]));
+        assert!(!out.contains("mixed"));
+        assert!(!out.contains("nested"));
+        // and with nothing filterable in the trace, `field` is not offered
+        let mut root = String::new();
+        filter_eval::push_completions_json(&mut root, "", 0, &ctx(&a, &[]));
+        assert!(!root.contains("\"label\":\"field\""));
     }
 
     #[test]
@@ -2222,7 +2406,7 @@ not json at all
         a.store.add_tag(1, 2);
         let matches = |source: &str, e: u32| {
             let expr = heap_visualizer_filter_dsl::parse(source).unwrap();
-            filter_eval::evaluate(&expr, &a.store, e, &labels).unwrap()
+            filter_eval::evaluate(&expr, &ctx(&a, &labels), e).unwrap()
         };
 
         // exact set equality, order-insensitive
@@ -2250,56 +2434,56 @@ not json at all
             r#"size >= 100 && site.starts_with("a")"#,
         ).unwrap();
         let store = Store { unit: "ns".into(), ..Store::default() };
-        assert!(filter_eval::check(&valid, &store).is_ok());
+        assert!(filter_eval::check(&valid, &store_ctx(&store)).is_ok());
 
         let wrong_method = heap_visualizer_filter_dsl::parse(
             r#"size.starts_with("1")"#,
         ).unwrap();
         assert_eq!(
-            filter_eval::check(&wrong_method, &store).unwrap_err().message,
+            filter_eval::check(&wrong_method, &store_ctx(&store)).unwrap_err().message,
             "`starts_with` requires one string argument"
         );
 
         let not_boolean = heap_visualizer_filter_dsl::parse("size + 1").unwrap();
         assert_eq!(
-            filter_eval::check(&not_boolean, &store).unwrap_err().message,
+            filter_eval::check(&not_boolean, &store_ctx(&store)).unwrap_err().message,
             "filter expression must produce bool"
         );
 
         let empty_set = heap_visualizer_filter_dsl::parse("site in {}").unwrap();
-        assert!(filter_eval::check(&empty_set, &store).is_ok());
+        assert!(filter_eval::check(&empty_set, &store_ctx(&store)).is_ok());
 
         // `tags` is a set: it compares to a set, tests one member with
         // `contains`, and is never missing
         let parse = |source: &str| heap_visualizer_filter_dsl::parse(source).unwrap();
-        assert!(filter_eval::check(&parse(r#"tags == {"a", "b"}"#), &store).is_ok());
-        assert!(filter_eval::check(&parse("tags == {}"), &store).is_ok());
-        assert!(filter_eval::check(&parse(r#"tags contains "a""#), &store).is_ok());
+        assert!(filter_eval::check(&parse(r#"tags == {"a", "b"}"#), &store_ctx(&store)).is_ok());
+        assert!(filter_eval::check(&parse("tags == {}"), &store_ctx(&store)).is_ok());
+        assert!(filter_eval::check(&parse(r#"tags contains "a""#), &store_ctx(&store)).is_ok());
         assert_eq!(
-            filter_eval::check(&parse(r#"tag == "a""#), &store).unwrap_err().message,
+            filter_eval::check(&parse(r#"tag == "a""#), &store_ctx(&store)).unwrap_err().message,
             "unknown field `tag`"
         );
         assert_eq!(
-            filter_eval::check(&parse(r#"tags == "a""#), &store).unwrap_err().message,
+            filter_eval::check(&parse(r#"tags == "a""#), &store_ctx(&store)).unwrap_err().message,
             "a set compares to a set; use `contains` to test one member"
         );
         assert_eq!(
-            filter_eval::check(&parse("tags contains 1"), &store).unwrap_err().message,
+            filter_eval::check(&parse("tags contains 1"), &store_ctx(&store)).unwrap_err().message,
             "`contains` requires a member of the set's type"
         );
         assert_eq!(
-            filter_eval::check(&parse(r#"site contains "a""#), &store).unwrap_err().message,
+            filter_eval::check(&parse(r#"site contains "a""#), &store_ctx(&store)).unwrap_err().message,
             "`contains` requires a set on the left"
         );
         assert_eq!(
-            filter_eval::check(&parse("tags is missing"), &store).unwrap_err().message,
+            filter_eval::check(&parse("tags is missing"), &store_ctx(&store)).unwrap_err().message,
             "`is missing` requires an optional field"
         );
 
         let tick_store = Store { unit: "tick".into(), ..Store::default() };
         let time_unit = heap_visualizer_filter_dsl::parse("time > 1ms").unwrap();
         assert_eq!(
-            filter_eval::check(&time_unit, &tick_store).unwrap_err().message,
+            filter_eval::check(&time_unit, &store_ctx(&tick_store)).unwrap_err().message,
             "time literals are unavailable for a tick trace"
         );
     }
@@ -2310,25 +2494,25 @@ not json at all
         a.tag_labels = vec!["suspect".into(), "quoted \"tag\"".into()];
 
         let mut out = String::new();
-        filter_eval::push_completions_json(&mut out, "span ", 5, &a.store, &a.tag_labels);
+        filter_eval::push_completions_json(&mut out, "span ", 5, &ctx(&a, &a.tag_labels));
         assert!(out.contains("\"label\":\"overlaps\""));
         assert!(!out.contains("\"label\":\"contains\""));
 
         out.clear();
-        filter_eval::push_completions_json(&mut out, "site == \"", 9, &a.store, &a.tag_labels);
+        filter_eval::push_completions_json(&mut out, "site == \"", 9, &ctx(&a, &a.tag_labels));
         assert!(out.contains("\"label\":\"a\""));
         assert!(out.contains("\"insertText\":\"\\\"a\\\" \""));
 
         out.clear();
         let source = "tags contains \"q";
         filter_eval::push_completions_json(
-            &mut out, source, source.len(), &a.store, &a.tag_labels,
+            &mut out, source, source.len(), &ctx(&a, &a.tag_labels),
         );
         assert!(out.contains("\"label\":\"quoted \\\"tag\\\"\""));
         assert!(out.contains("\"insertText\":\"\\\"quoted \\\\\\\"tag\\\\\\\"\\\" \""));
 
         out.clear();
-        filter_eval::push_completions_json(&mut out, "", 0, &a.store, &a.tag_labels);
+        filter_eval::push_completions_json(&mut out, "", 0, &ctx(&a, &a.tag_labels));
         assert!(out.contains("\"label\":\"size\""));
         assert!(!out.contains("\"label\":\"named\""));
         assert!(!out.contains("\"label\":\"field\""));
@@ -2341,7 +2525,7 @@ not json at all
         let complete = |source: &str| {
             let mut out = String::new();
             filter_eval::push_completions_json(
-                &mut out, source, source.len(), &a.store, &a.tag_labels,
+                &mut out, source, source.len(), &ctx(&a, &a.tag_labels),
             );
             out
         };
@@ -2416,7 +2600,7 @@ not json at all
         let mut store = Store::default();
         store.sites = (0..60).map(|index| format!("site-{index:02}")).collect();
         let mut out = String::new();
-        filter_eval::push_completions_json(&mut out, "site == \"", 9, &store, &[]);
+        filter_eval::push_completions_json(&mut out, "site == \"", 9, &store_ctx(&store));
         assert_eq!(out.matches("\"kind\":\"value\"").count(), 50);
         assert!(out.contains("\"hasMore\":true"));
         assert!(out.contains("\"label\":\"site-00\""));

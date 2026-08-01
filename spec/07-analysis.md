@@ -86,6 +86,41 @@ A missing test (`is missing`, `is not missing`) applies only to an optional
 field. On a required one the answer would be constant, so it is a diagnostic
 instead.
 
+## ANL-010: Filtering on custom trace fields
+
+The unrecognized top-level keys a producer attaches to records
+([TRACE-001](02-trace-format.md#trace-001-general-rules)) are filterable.
+`field.<key>` and `field["<key>"]` read the allocation's own record;
+`death.field.<key>` and `death.field["<key>"]` read the record that freed it.
+Bracket and dot access are the same field; the brackets exist for keys that
+are not identifier-shaped.
+
+The load pass must record every observed key, the value shapes it was seen
+holding, and how many events carry it. Checking is against that catalog, so
+what a filter may say depends on the trace in hand:
+
+- A key seen holding exactly one of bool, integer, or string has that type,
+  and is always **optional** — an event whose record omits the key, and an
+  event whose record has it as JSON `null`, are both missing.
+- A key the trace never carried must be a diagnostic naming it. It must not be
+  silently false.
+- A key seen holding more than one type, or holding an object or an array,
+  must be a diagnostic saying which. Only scalars are addressable; nested
+  values remain visible in the allocation panel
+  ([ANL-006](#anl-006-the-allocation-panel-and-pinned-windows)) and are not
+  filterable.
+- `death.field.<key>` on an allocation that is never freed is missing.
+
+Custom fields are otherwise ordinary operands: string methods, sets, ranges,
+ordering, and the missing tests all apply per their own rules. Completion
+offers `field.`, the catalogued keys under it, and the values each key was
+observed holding — but never a key that failed to type, per the rule above
+that completion advertises nothing the evaluator rejects.
+
+Resolution must not be per event. Records with identical custom keys share one
+interned copy, and a filter resolves each referenced key once per distinct
+copy.
+
 Only the successfully applied source, dim/hide mode, and filter-language
 version persist in the heap session. An unapplied draft, compiled plan, and
 match bits do not. The persisted language version is **2**; a source stored

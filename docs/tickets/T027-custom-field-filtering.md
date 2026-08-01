@@ -1,7 +1,7 @@
 ---
 id: T027
 title: Custom trace fields are filterable
-status: todo
+status: done
 updated: 2026-08-01
 ---
 
@@ -47,32 +47,32 @@ context struct rather than a fourth positional argument** — call sites are
 
 ## Done when
 
-- [ ] `field.<ident>` and `field["<any key>"]` type-check against the catalog:
+- [x] `field.<ident>` and `field["<any key>"]` type-check against the catalog:
       a key observed as one scalar type gets that type and is **optional**
       (absence and JSON `null` are both missing); a key never observed is a
       diagnostic naming it; a key observed with two scalar types, or observed
       only as an object/array, is a diagnostic saying so.
-- [ ] `death.field.<ident>` and `death.field["k"]` resolve against the *death*
+- [x] `death.field.<ident>` and `death.field["k"]` resolve against the *death*
       event's fragment, and are missing when the allocation is never freed.
-- [ ] Evaluation resolves each referenced key once per distinct interned
+- [x] Evaluation resolves each referenced key once per distinct interned
       fragment, not once per event.
-- [ ] `is missing` / `is not missing` work on a custom field, per
+- [x] `is missing` / `is not missing` work on a custom field, per
       [ANL-003](../../spec/07-analysis.md#anl-003-filter)'s rule that the test
       requires an optional operand.
-- [ ] Completion offers `field.` at expression position and the observed keys
+- [x] Completion offers `field.` at expression position and the observed keys
       after it, with the observed type as detail; observed *values* are offered
       as operands the way `site` and `thread` already are
       (`filter_eval.rs:observed_items`). A key that failed to type is never
       offered — ANL-003 requires that completion not advertise what the
       evaluator will reject.
-- [ ] `check`/`evaluate` take one context value carrying tag labels and
+- [x] `check`/`evaluate` take one context value carrying tag labels and
       resolved fields, not a growing argument list.
-- [ ] Native tests cover: each of the four spellings above, a missing key, a
+- [x] Native tests cover: each of the four spellings above, a missing key, a
       mixed-type key, a null value, a non-scalar value, and `death.field`
       on a never-freed allocation.
-- [ ] [ANL-003](../../spec/07-analysis.md#anl-003-filter) states the custom
+- [x] [ANL-003](../../spec/07-analysis.md#anl-003-filter) states the custom
       field surface and its missing/diagnostic rules.
-- [ ] `cargo test` passes, `node --test 'src/web/**/*.test.ts'` passes,
+- [x] `cargo test` passes, `node --test 'src/web/**/*.test.ts'` passes,
       `node_modules/.bin/tsc -p tsconfig.test.json` is clean, and `./build.sh`
       emits a `dist/` that loads. Not `npx tsc`
       ([T021](T021-live-docs-drop-npx-tsc.md)).
@@ -86,3 +86,52 @@ context struct rather than a fourth positional argument** — call sites are
 - The persisted filter language version. Adding a field surface does not
   invalidate a stored version-2 source; nothing that parsed before stops
   parsing.
+
+## Result
+
+The whole change is in the semantic layer, as the grounding predicted: no
+lexer or parser change was needed, and the two "not available yet" arms became
+real ones.
+
+**`Ctx` replaced the argument list.** `check(expr, ctx)` and
+`evaluate(expr, ctx, e)` now carry the store, the tag labels, and the resolved
+field values as one value. `Ctx::new` is enough to check or complete —
+checking never reads a value — and `with_fields` adds what evaluation needs.
+T028 adds names to the same struct rather than a fifth parameter.
+
+**Resolution is per fragment.** `FieldValues::resolve` walks the expression for
+referenced keys, then scans each distinct interned fragment once, reading every
+wanted key in that one pass. `hp_filter_apply` builds it before the scan, so
+the per-event loop does no JSON parsing at all.
+`custom_field_values_resolve_once_per_fragment` pins the property: two hundred
+events over two distinct fragments resolve two rows.
+
+**`null` is missingness, not a type.** A key seen holding `null` and integers
+is a filterable optional integer; only two *scalar* types, or an object or
+array, make it untypable. The diagnostic names the shapes it actually saw
+rather than saying "unsupported".
+
+Two things the ticket did not anticipate, both now spec'd in
+[ANL-010](../../spec/07-analysis.md#anl-010-filtering-on-custom-trace-fields):
+
+- **A bare `field` or `death.field` had to say something useful.** Both used to
+  fall through to "unknown field" or "unknown death field `field`", which is
+  wrong — the user has started a reference, not misspelled a field. Each now
+  names the spelling it wants.
+- **Bracket keys cannot be completed after a `.`.** `field.` offers only
+  identifier-shaped keys, because that is what can legally follow the dot the
+  user already typed. A key like `allocator-class` is filterable, checked, and
+  evaluated, but is discoverable through the Filter panel's catalog listing
+  (T029) rather than through completion. `completion_offers_custom_fields_and_their_values`
+  asserts the exclusion so it stays deliberate.
+
+Not covered: the `hp_filter_apply` and `hp_filter_check` externs themselves.
+They read the `app()` global and no test in this repository drives an `hp_`
+export directly, so the tests exercise `check`/`evaluate`/`push_completions_json`
+under them. What that leaves unverified is the wiring inside those two
+functions, which is where `FieldValues::resolve` is called.
+
+Verified: `cargo test` (seven tests new here), `node --test`, `tsc`,
+`./build.sh`. Not driven in a browser, and there is no trace in the repository
+carrying custom fields to drive it with — `gen.py` does not emit any. T029
+needs one and will write it.

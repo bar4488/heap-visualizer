@@ -3,7 +3,201 @@ use heap_visualizer_filter_dsl::{
 };
 
 use crate::json::push_json_str;
-use crate::store::{Store, NONE_U16, NONE_U32};
+use crate::store::{Store, FIELD_BOOL, FIELD_INT, FIELD_OTHER, FIELD_SCALARS, FIELD_STRING, NONE_U16, NONE_U32};
+
+/// Everything checking and evaluation need besides the expression and the
+/// event: the trace, the analysis objects the web layer owns, and the custom
+/// field values resolved for this expression.
+pub struct Ctx<'a> {
+    pub store: &'a Store,
+    /// Tag names by id order, pushed in by the web layer.
+    pub labels: &'a [String],
+    pub fields: &'a FieldValues,
+}
+
+impl<'a> Ctx<'a> {
+    /// A context for checking or completing, before any field is resolved.
+    /// Evaluation needs `with_fields`; checking never reads a value.
+    pub fn new(store: &'a Store, labels: &'a [String]) -> Self {
+        Self {
+            store,
+            labels,
+            fields: FieldValues::none(),
+        }
+    }
+
+    pub fn with_fields(self, fields: &'a FieldValues) -> Self {
+        Self { fields, ..self }
+    }
+}
+
+/// Custom field values, resolved once per interned extras fragment rather
+/// than once per event.
+///
+/// The fragments are deduplicated at parse time, so a trace of a million
+/// events carrying three distinct combinations of custom keys resolves three
+/// times. Without this the per-event filter scan would re-parse a JSON
+/// fragment for every event it looks at.
+#[derive(Default)]
+pub struct FieldValues {
+    /// Referenced key names, in first-seen order.
+    keys: Vec<String>,
+    /// `values[fragment][key]`, parallel to `store.extras` and `keys`.
+    values: Vec<Vec<Value>>,
+}
+
+impl FieldValues {
+    pub fn none() -> &'static Self {
+        static NONE: FieldValues = FieldValues {
+            keys: Vec::new(),
+            values: Vec::new(),
+        };
+        &NONE
+    }
+
+    /// Resolve every custom key `expr` references, for every distinct
+    /// fragment in the trace. Call once per filter, not once per event.
+    pub fn resolve(expr: &Expr, store: &Store) -> Self {
+        let mut keys = Vec::new();
+        collect_keys(expr, &mut keys);
+        if keys.is_empty() {
+            return Self::default();
+        }
+        let values = store
+            .extras
+            .iter()
+            .map(|fragment| resolve_fragment(fragment, &keys))
+            .collect();
+        Self { keys, values }
+    }
+
+    /// Distinct fragments resolved, for the test that guards the "once per
+    /// fragment, not once per event" property this type exists for.
+    pub fn rows(&self) -> usize {
+        self.values.len()
+    }
+
+    /// The value of `key` in the fragment interned at `fragment`, which is
+    /// `NONE_U32` for an event carrying no custom fields at all.
+    fn get(&self, key: &str, fragment: u32) -> Value {
+        if fragment == NONE_U32 {
+            return Value::Missing;
+        }
+        let Some(index) = self.keys.iter().position(|k| k == key) else {
+            return Value::Missing;
+        };
+        self.values
+            .get(fragment as usize)
+            .and_then(|row| row.get(index))
+            .cloned()
+            .unwrap_or(Value::Missing)
+    }
+}
+
+/// Which event's fragment a custom field reads: the allocation's own, or the
+/// one on the event that freed it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FieldRoot {
+    Alloc,
+    Death,
+}
+
+/// Recognize `field.k`, `field["k"]`, `death.field.k` and `death.field["k"]`.
+/// Everything else — including `death.seq` and a string method call — is not a
+/// custom field reference and is handled by the caller.
+fn custom_field(expr: &Expr) -> Option<(FieldRoot, &str)> {
+    let (base, key) = match &expr.kind {
+        ExprKind::Field { base, name } => (base, name.as_str()),
+        ExprKind::Index { base, key } => (base, key.as_str()),
+        _ => return None,
+    };
+    match &base.kind {
+        ExprKind::Identifier(root) if root == "field" => Some((FieldRoot::Alloc, key)),
+        ExprKind::Field { base: inner, name } if name == "field" => {
+            matches!(&inner.kind, ExprKind::Identifier(root) if root == "death")
+                .then_some((FieldRoot::Death, key))
+        }
+        _ => None,
+    }
+}
+
+/// True for `field` / `death.field` with no key on it yet — a reference the
+/// user has started and not finished.
+fn is_field_root(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Identifier(name) => name == "field",
+        ExprKind::Field { base, name } => {
+            name == "field" && matches!(&base.kind, ExprKind::Identifier(r) if r == "death")
+        }
+        _ => false,
+    }
+}
+
+fn collect_keys(expr: &Expr, out: &mut Vec<String>) {
+    if let Some((_, key)) = custom_field(expr) {
+        if !out.iter().any(|k| k == key) {
+            out.push(key.to_string());
+        }
+    }
+    let mut visit = |child: &Expr| collect_keys(child, out);
+    match &expr.kind {
+        ExprKind::Unary { expr, .. } | ExprKind::IsMissing { expr, .. } => visit(expr),
+        ExprKind::Binary { left, right, .. } | ExprKind::Range { start: left, end: right } => {
+            visit(left);
+            visit(right);
+        }
+        ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => visit(base),
+        ExprKind::Call { callee, arguments } => {
+            visit(callee);
+            arguments.iter().for_each(visit);
+        }
+        ExprKind::Set(items) => items.iter().for_each(visit),
+        _ => {}
+    }
+}
+
+/// Read the wanted keys out of one raw object-body fragment in a single scan,
+/// so a fragment is parsed once however many keys the expression names.
+fn resolve_fragment(fragment: &str, keys: &[String]) -> Vec<Value> {
+    let bytes = fragment.as_bytes();
+    let mut out = vec![Value::Missing; keys.len()];
+    let mut sc = crate::json::Scan::new(bytes);
+    loop {
+        let Some((lo, hi)) = sc.string_span() else {
+            break;
+        };
+        if !sc.eat(b':') {
+            break;
+        }
+        let name = crate::json::unescape(&bytes[lo..hi]);
+        sc.ws();
+        let shape = sc.peek();
+        let Some((vlo, vhi)) = sc.skip_value() else {
+            break;
+        };
+        // a repeated key keeps its first value, matching the catalog's count
+        if let Some(index) = keys.iter().position(|k| *k == name) {
+            if matches!(out[index], Value::Missing) {
+                out[index] = match shape {
+                    b'"' => Value::String(crate::json::unescape(&bytes[vlo + 1..vhi - 1])),
+                    b't' => Value::Bool(true),
+                    b'f' => Value::Bool(false),
+                    // null, objects and arrays are all missing to the
+                    // evaluator; the checker has already rejected the last two
+                    b'n' | b'{' | b'[' => Value::Missing,
+                    _ => core::str::from_utf8(&bytes[vlo..vhi])
+                        .ok()
+                        .and_then(|t| t.parse::<i128>().ok())
+                        .map_or(Value::Missing, Value::Int),
+                };
+            }
+        }
+        if !sc.eat(b',') {
+            break;
+        }
+    }
+    out
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Type {
@@ -99,20 +293,74 @@ fn field_type(name: &str, expr: &Expr) -> Result<CheckedType, EvalError> {
         "tags" => CheckedType::required(Type::Set(ValueKind::String)),
         "stack" => CheckedType::required(Type::String),
         "freed" => CheckedType::required(Type::Bool),
+        // a started custom field reference, not a field of its own
+        "field" => {
+            return Err(EvalError::at(
+                expr,
+                "`field` needs a key, as `field.pool` or `field[\"pool\"]`",
+            ))
+        }
         _ => return Err(EvalError::at(expr, format!("unknown field `{name}`"))),
     })
+}
+
+/// Type a custom field against the catalog the load pass built. A key is
+/// always optional: it may be absent from an event's fragment, or present as
+/// JSON `null`, and both are missing.
+fn custom_field_type(key: &str, expr: &Expr, ctx: &Ctx) -> Result<CheckedType, EvalError> {
+    let Some(info) = ctx.store.fields.iter().find(|f| f.name == key) else {
+        return Err(EvalError::at(
+            expr,
+            format!("no trace field `{key}` in this trace"),
+        ));
+    };
+    match info.scalar() {
+        Some(FIELD_BOOL) => Ok(CheckedType::optional(Type::Bool)),
+        Some(FIELD_INT) => Ok(CheckedType::optional(Type::Int)),
+        Some(FIELD_STRING) => Ok(CheckedType::optional(Type::String)),
+        _ if info.types & FIELD_SCALARS == 0 => Err(EvalError::at(
+            expr,
+            format!("`{key}` holds an object or an array, which cannot be filtered"),
+        )),
+        _ => Err(EvalError::at(
+            expr,
+            format!(
+                "`{key}` holds {} in this trace, so it has no single type to filter on",
+                shape_list(info.types)
+            ),
+        )),
+    }
+}
+
+fn shape_list(types: u8) -> String {
+    let mut names = Vec::new();
+    for (bit, name) in [
+        (FIELD_BOOL, "bool"),
+        (FIELD_INT, "integer"),
+        (FIELD_STRING, "string"),
+        (FIELD_OTHER, "object or array"),
+    ] {
+        if types & bit != 0 {
+            names.push(name);
+        }
+    }
+    match names.split_last() {
+        Some((last, [])) => (*last).to_string(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+        None => "nothing".to_string(),
+    }
 }
 
 fn same_values(left: CheckedType, right: CheckedType) -> bool {
     left.value_kind().is_some() && left.value_kind() == right.value_kind()
 }
 
-fn check_type(expr: &Expr, store: &Store) -> Result<CheckedType, EvalError> {
+fn check_type(expr: &Expr, ctx: &Ctx) -> Result<CheckedType, EvalError> {
     let required = |ty| Ok(CheckedType::required(ty));
     match &expr.kind {
         ExprKind::Bool(_) => required(Type::Bool),
         ExprKind::Integer(value) => {
-            integer(value.value, value.unit, &store.unit)
+            integer(value.value, value.unit, &ctx.store.unit)
                 .map_err(|message| EvalError::at(expr, message))?;
             required(Type::Int)
         }
@@ -122,7 +370,7 @@ fn check_type(expr: &Expr, store: &Store) -> Result<CheckedType, EvalError> {
             op: UnaryOp::Not,
             expr: inner,
         } => {
-            let ty = check_type(inner, store)?;
+            let ty = check_type(inner, ctx)?;
             if ty.ty == Type::Bool {
                 required(Type::Bool)
             } else {
@@ -133,7 +381,7 @@ fn check_type(expr: &Expr, store: &Store) -> Result<CheckedType, EvalError> {
             // only an optional value can be missing; on anything else the test
             // is a constant, which is a mistake worth reporting rather than
             // silently answering false — `tags` is a set, empty when untagged
-            if check_type(inner, store)?.optional {
+            if check_type(inner, ctx)?.optional {
                 required(Type::Bool)
             } else {
                 Err(EvalError::at(expr, "`is missing` requires an optional field"))
@@ -143,19 +391,19 @@ fn check_type(expr: &Expr, store: &Store) -> Result<CheckedType, EvalError> {
             let Some(first) = items.first() else {
                 return Err(EvalError::at(expr, "cannot infer the type of an empty set"));
             };
-            let first = check_type(first, store)?;
+            let first = check_type(first, ctx)?;
             let Some(kind) = first.value_kind() else {
                 return Err(EvalError::at(expr, "set members must be scalar values"));
             };
             for item in &items[1..] {
-                if check_type(item, store)?.value_kind() != Some(kind) {
+                if check_type(item, ctx)?.value_kind() != Some(kind) {
                     return Err(EvalError::at(expr, "set members must have one type"));
                 }
             }
             required(Type::Set(kind))
         }
         ExprKind::Range { start, end } => {
-            if check_type(start, store)?.ty == Type::Int && check_type(end, store)?.ty == Type::Int
+            if check_type(start, ctx)?.ty == Type::Int && check_type(end, ctx)?.ty == Type::Int
             {
                 required(Type::Range)
             } else {
@@ -163,9 +411,16 @@ fn check_type(expr: &Expr, store: &Store) -> Result<CheckedType, EvalError> {
             }
         }
         ExprKind::Field { base, name } => {
-            if matches!(&base.kind, ExprKind::Identifier(root) if root == "death") {
+            if let Some((_, key)) = custom_field(expr) {
+                custom_field_type(key, expr, ctx)
+            } else if matches!(&base.kind, ExprKind::Identifier(root) if root == "death") {
                 match name.as_str() {
                     "seq" | "time" => Ok(CheckedType::optional(Type::Int)),
+                    // `death.field` alone is a started reference, not a typo
+                    "field" => Err(EvalError::at(
+                        expr,
+                        "`death.field` needs a key, as `death.field.reason`",
+                    )),
                     _ => Err(EvalError::at(expr, format!("unknown death field `{name}`"))),
                 }
             } else {
@@ -174,7 +429,7 @@ fn check_type(expr: &Expr, store: &Store) -> Result<CheckedType, EvalError> {
         }
         ExprKind::Call { callee, arguments } => match &callee.kind {
             ExprKind::Identifier(name) if name == "abs" => {
-                if arguments.len() == 1 && check_type(&arguments[0], store)?.ty == Type::Int {
+                if arguments.len() == 1 && check_type(&arguments[0], ctx)?.ty == Type::Int {
                     required(Type::Int)
                 } else {
                     Err(EvalError::at(expr, "abs requires one number"))
@@ -182,8 +437,8 @@ fn check_type(expr: &Expr, store: &Store) -> Result<CheckedType, EvalError> {
             }
             ExprKind::Field { base, name } => {
                 if arguments.len() != 1
-                    || check_type(base, store)?.ty != Type::String
-                    || check_type(&arguments[0], store)?.ty != Type::String
+                    || check_type(base, ctx)?.ty != Type::String
+                    || check_type(&arguments[0], ctx)?.ty != Type::String
                 {
                     return Err(EvalError::at(
                         expr,
@@ -200,9 +455,15 @@ fn check_type(expr: &Expr, store: &Store) -> Result<CheckedType, EvalError> {
             }
             _ => Err(EvalError::at(expr, "unknown function")),
         },
-        ExprKind::Index { .. } => Err(EvalError::at(expr, "custom fields are not available yet")),
+        ExprKind::Index { .. } => match custom_field(expr) {
+            Some((_, key)) => custom_field_type(key, expr, ctx),
+            None => Err(EvalError::at(
+                expr,
+                "only `field[...]` and `death.field[...]` take a key",
+            )),
+        },
         ExprKind::Binary { op, left, right } => {
-            let left_ty = check_type(left, store)?;
+            let left_ty = check_type(left, ctx)?;
             // an empty set literal has no type of its own; against `in` or an
             // equality it takes its member type from the left operand
             let right_ty = if matches!(&right.kind, ExprKind::Set(items) if items.is_empty())
@@ -214,7 +475,7 @@ fn check_type(expr: &Expr, store: &Store) -> Result<CheckedType, EvalError> {
                     .unwrap_or(ValueKind::Bool);
                 CheckedType::required(Type::Set(kind))
             } else {
-                check_type(right, store)?
+                check_type(right, ctx)?
             };
             match op {
                 BinaryOp::And | BinaryOp::Or => {
@@ -300,8 +561,8 @@ fn check_type(expr: &Expr, store: &Store) -> Result<CheckedType, EvalError> {
     }
 }
 
-pub fn check(expr: &Expr, store: &Store) -> Result<(), EvalError> {
-    let ty = check_type(expr, store)?;
+pub fn check(expr: &Expr, ctx: &Ctx) -> Result<(), EvalError> {
+    let ty = check_type(expr, ctx)?;
     if ty.ty == Type::Bool {
         Ok(())
     } else {
@@ -348,7 +609,7 @@ fn string_item(label: &str, detail: &'static str, in_set: bool) -> CompletionIte
     }
 }
 
-fn expression_items(expected: Option<Type>) -> Vec<CompletionItem> {
+fn expression_items(expected: Option<Type>, ctx: &Ctx) -> Vec<CompletionItem> {
     let descriptors = [
         ("abs", "function", "number -> number", Type::Int, "abs(", 2),
         ("address", "field", "address", Type::Int, "address ", 2),
@@ -411,6 +672,92 @@ fn expression_items(expected: Option<Type>) -> Vec<CompletionItem> {
     if expected.is_none() {
         items.push(item("death", "death.", "field", Some("event namespace"), 2));
     }
+    // `field.` is offered only when this trace actually carries a filterable
+    // custom field of the wanted type — ANL-003 forbids advertising a surface
+    // the evaluator will reject
+    if ctx
+        .store
+        .fields
+        .iter()
+        .any(|f| catalog_type(f).is_some_and(|ty| expected.is_none_or(|want| want == ty)))
+    {
+        items.push(item(
+            "field",
+            "field.",
+            "field",
+            Some("trace fields"),
+            2,
+        ));
+    }
+    items
+}
+
+/// The filter type of a catalogued field, or None when it cannot be filtered.
+fn catalog_type(info: &crate::store::FieldInfo) -> Option<Type> {
+    match info.scalar()? {
+        FIELD_BOOL => Some(Type::Bool),
+        FIELD_INT => Some(Type::Int),
+        FIELD_STRING => Some(Type::String),
+        _ => None,
+    }
+}
+
+fn identifier_shaped(key: &str) -> bool {
+    let mut chars = key.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Catalogued keys offered after `field.` / `death.field.`. Only
+/// identifier-shaped keys can be completed here — a key needing brackets is
+/// reachable from the Filter panel's catalog listing instead.
+fn field_key_items(ctx: &Ctx) -> Vec<CompletionItem> {
+    ctx.store
+        .fields
+        .iter()
+        .filter(|f| identifier_shaped(&f.name) && catalog_type(f).is_some())
+        .map(|f| {
+            let detail = match f.scalar() {
+                Some(FIELD_BOOL) => "bool, optional",
+                Some(FIELD_INT) => "integer, optional",
+                _ => "string, optional",
+            };
+            item(&f.name, format!("{} ", f.name), "member", Some(detail), 0)
+        })
+        .collect()
+}
+
+/// Distinct values a custom key was seen holding, for operand completion —
+/// the same affordance `site` and `thread` already have. Scans the interned
+/// fragments, of which there are far fewer than events.
+fn observed_field_values(key: &str, ctx: &Ctx, in_set: bool) -> Vec<CompletionItem> {
+    let keys = [key.to_string()];
+    let mut items = Vec::new();
+    let mut seen: Vec<Value> = Vec::new();
+    for fragment in &ctx.store.extras {
+        let value = resolve_fragment(fragment, &keys).remove(0);
+        if matches!(value, Value::Missing) || seen.iter().any(|v| equal(v, &value).unwrap_or(false))
+        {
+            continue;
+        }
+        match &value {
+            Value::String(text) => items.push(string_item(text, "observed value", in_set)),
+            Value::Int(number) => {
+                let label = number.to_string();
+                let insert = if in_set {
+                    label.clone()
+                } else {
+                    format!("{label} ")
+                };
+                items.push(item(&label, insert, "value", Some("observed value"), 0));
+            }
+            // bool has two values and they are already offered as literals
+            _ => {}
+        }
+        seen.push(value);
+    }
     items
 }
 
@@ -456,14 +803,28 @@ fn operator_items(ty: CheckedType, leading_space: bool) -> Vec<CompletionItem> {
         .collect()
 }
 
-fn member_items(receiver: &Expr, store: &Store) -> Vec<CompletionItem> {
+fn member_items(receiver: &Expr, ctx: &Ctx) -> Vec<CompletionItem> {
     if matches!(&receiver.kind, ExprKind::Identifier(name) if name == "death") {
-        return vec![
+        let mut items = vec![
             item("seq", "seq ", "member", Some("integer, optional"), 0),
             item("time", "time ", "member", Some("time, optional"), 0),
         ];
+        if !field_key_items(ctx).is_empty() {
+            items.push(item(
+                "field",
+                "field.",
+                "member",
+                Some("fields on the freeing event"),
+                1,
+            ));
+        }
+        return items;
     }
-    if check_type(receiver, store).is_ok_and(|ty| ty.ty == Type::String) {
+    // `field.` and `death.field.`
+    if is_field_root(receiver) {
+        return field_key_items(ctx);
+    }
+    if check_type(receiver, ctx).is_ok_and(|ty| ty.ty == Type::String) {
         return vec![
             item("contains", "contains(", "member", Some("string -> bool"), 0),
             item(
@@ -485,22 +846,22 @@ fn member_items(receiver: &Expr, store: &Store) -> Vec<CompletionItem> {
     Vec::new()
 }
 
-fn observed_items(
-    subject: &Expr,
-    store: &Store,
-    labels: &[String],
-    in_set: bool,
-) -> Vec<CompletionItem> {
+fn observed_items(subject: &Expr, ctx: &Ctx, in_set: bool) -> Vec<CompletionItem> {
+    if let Some((_, key)) = custom_field(subject) {
+        return observed_field_values(key, ctx, in_set);
+    }
     let ExprKind::Identifier(name) = &subject.kind else {
         return Vec::new();
     };
     match name.as_str() {
-        "site" => store
+        "site" => ctx
+            .store
             .sites
             .iter()
             .map(|value| string_item(value, "observed site", in_set))
             .collect(),
-        "thread" => store
+        "thread" => ctx
+            .store
             .thrs
             .iter()
             .map(|value| {
@@ -513,7 +874,8 @@ fn observed_items(
                 item(&label, insert, "value", Some("observed thread"), 0)
             })
             .collect(),
-        "tags" => labels
+        "tags" => ctx
+            .labels
             .iter()
             .map(|value| string_item(value, "current tag", in_set))
             .collect(),
@@ -521,23 +883,18 @@ fn observed_items(
     }
 }
 
-fn operand_items(
-    left: &Expr,
-    kind: OperandKind,
-    store: &Store,
-    labels: &[String],
-) -> Vec<CompletionItem> {
-    let left_ty = check_type(left, store).ok();
+fn operand_items(left: &Expr, kind: OperandKind, ctx: &Ctx) -> Vec<CompletionItem> {
+    let left_ty = check_type(left, ctx).ok();
     match kind {
         OperandKind::SetMember => {
-            let mut items = observed_items(left, store, labels, true);
+            let mut items = observed_items(left, ctx, true);
             if left_ty.is_some_and(|ty| ty.ty == Type::Bool) {
                 items.push(item("false", "false", "value", Some("bool"), 1));
                 items.push(item("true", "true", "value", Some("bool"), 1));
             }
             items
         }
-        OperandKind::RangeEnd => expression_items(Some(Type::Int)),
+        OperandKind::RangeEnd => expression_items(Some(Type::Int), ctx),
         // a set-typed left operand compares only to a set literal
         OperandKind::Binary(BinaryOp::Equal | BinaryOp::NotEqual)
             if left_ty.is_some_and(|ty| ty.member_kind().is_some()) =>
@@ -547,7 +904,7 @@ fn operand_items(
         OperandKind::Binary(BinaryOp::In) => {
             let mut items = vec![item("{", "{", "operator", Some("constant set"), 0)];
             if left_ty.is_some_and(|ty| ty.ty == Type::Int) {
-                items.extend(expression_items(Some(Type::Int)));
+                items.extend(expression_items(Some(Type::Int), ctx));
             }
             items
         }
@@ -565,60 +922,61 @@ fn operand_items(
                 BinaryOp::And | BinaryOp::Or => Some(Type::Bool),
                 BinaryOp::In => unreachable!(),
             };
-            let mut items = observed_items(left, store, labels, false);
-            items.extend(expression_items(expected));
+            let mut items = observed_items(left, ctx, false);
+            items.extend(expression_items(expected, ctx));
             items
         }
     }
 }
 
-fn call_argument_items(callee: &Expr, store: &Store) -> Vec<CompletionItem> {
+fn call_argument_items(callee: &Expr, ctx: &Ctx) -> Vec<CompletionItem> {
     match &callee.kind {
-        ExprKind::Identifier(name) if name == "abs" => expression_items(Some(Type::Int)),
+        ExprKind::Identifier(name) if name == "abs" => expression_items(Some(Type::Int), ctx),
         ExprKind::Field { base, name }
             if matches!(name.as_str(), "contains" | "starts_with" | "ends_with")
-                && check_type(base, store).is_ok_and(|ty| ty.ty == Type::String) =>
+                && check_type(base, ctx).is_ok_and(|ty| ty.ty == Type::String) =>
         {
-            expression_items(Some(Type::String))
+            expression_items(Some(Type::String), ctx)
         }
         _ => Vec::new(),
     }
 }
 
-pub fn push_completions_json(
-    out: &mut String,
-    source: &str,
-    cursor: usize,
-    store: &Store,
-    labels: &[String],
-) {
+pub fn push_completions_json(out: &mut String, source: &str, cursor: usize, ctx: &Ctx) {
     let Some(context) = completion_context(source, cursor) else {
         return;
     };
     let mut replacement = context.replacement;
     let mut prefix = context.prefix.clone();
     let mut items = match &context.site {
-        CompletionSite::Expression => expression_items(None),
+        CompletionSite::Expression => expression_items(None, ctx),
         CompletionSite::Exact { expression } => {
-            if matches!(&expression.kind, ExprKind::Identifier(name) if name == "death") {
+            if matches!(&expression.kind, ExprKind::Identifier(name) if name == "death")
+                || is_field_root(expression)
+            {
                 replacement = Span::new(context.replacement.end, context.replacement.end);
                 prefix.clear();
-                vec![item(".", ".", "operator", Some("death members"), 0)]
-            } else if let Ok(ty) = check_type(expression, store) {
+                let detail = if is_field_root(expression) {
+                    "trace field keys"
+                } else {
+                    "death members"
+                };
+                vec![item(".", ".", "operator", Some(detail), 0)]
+            } else if let Ok(ty) = check_type(expression, ctx) {
                 replacement = Span::new(context.replacement.end, context.replacement.end);
                 prefix.clear();
                 operator_items(ty, true)
             } else {
-                expression_items(None)
+                expression_items(None, ctx)
             }
         }
-        CompletionSite::Operator { expression } => check_type(expression, store)
+        CompletionSite::Operator { expression } => check_type(expression, ctx)
             .map_or_else(|_| Vec::new(), |ty| operator_items(ty, false)),
-        CompletionSite::Member { receiver } => member_items(receiver, store),
-        CompletionSite::Operand { left, kind } => operand_items(left, *kind, store, labels),
+        CompletionSite::Member { receiver } => member_items(receiver, ctx),
+        CompletionSite::Operand { left, kind } => operand_items(left, *kind, ctx),
         CompletionSite::CallArgument { callee, index } => {
             if *index == 0 {
-                call_argument_items(callee, store)
+                call_argument_items(callee, ctx)
             } else {
                 Vec::new()
             }
@@ -706,13 +1064,21 @@ fn time_factor(unit: &str, nanos: u128) -> Result<u128, String> {
     Ok(nanos / per_tick)
 }
 
-fn field(
-    name: &str,
-    s: &Store,
-    e: u32,
-    labels: &[String],
-    expr: &Expr,
-) -> Result<Value, EvalError> {
+/// The extras fragment a custom field reads for creator event `e`: its own,
+/// or the one on the event that freed it. `NONE_U32` when there is no such
+/// event, or it carried no custom fields — both are missing.
+fn custom_fragment(root: FieldRoot, s: &Store, e: u32) -> u32 {
+    match root {
+        FieldRoot::Alloc => s.extra_at(e),
+        FieldRoot::Death => match s.death[e as usize] {
+            NONE_U32 => NONE_U32,
+            death => s.extra_at(death),
+        },
+    }
+}
+
+fn field(name: &str, ctx: &Ctx, e: u32, expr: &Expr) -> Result<Value, EvalError> {
+    let s = ctx.store;
     let i = e as usize;
     Ok(match name {
         "id" => Value::Int(s.id[i] as i128),
@@ -757,7 +1123,7 @@ fn field(
         // every membership, in tag-id order; empty for an untagged allocation
         "tags" => Value::Set(
             s.tag_ids(e)
-                .filter_map(|id| labels.get(id as usize - 1).cloned())
+                .filter_map(|id| ctx.labels.get(id as usize - 1).cloned())
                 .map(Value::String)
                 .collect(),
         ),
@@ -812,25 +1178,25 @@ fn order(a: &Value, b: &Value, op: BinaryOp) -> Result<bool, String> {
     })
 }
 
-pub fn evaluate(expr: &Expr, s: &Store, e: u32, labels: &[String]) -> Result<bool, EvalError> {
-    match eval(expr, s, e, labels)? {
+pub fn evaluate(expr: &Expr, ctx: &Ctx, e: u32) -> Result<bool, EvalError> {
+    match eval(expr, ctx, e)? {
         Value::Bool(v) => Ok(v),
         Value::Missing => Ok(false),
         _ => Err(EvalError::at(expr, "filter expression must produce bool")),
     }
 }
 
-fn eval(expr: &Expr, s: &Store, e: u32, labels: &[String]) -> Result<Value, EvalError> {
+fn eval(expr: &Expr, ctx: &Ctx, e: u32) -> Result<Value, EvalError> {
     let err = |m: String| EvalError::at(expr, m);
     Ok(match &expr.kind {
         ExprKind::Bool(v) => Value::Bool(*v),
-        ExprKind::Integer(v) => Value::Int(integer(v.value, v.unit, &s.unit).map_err(err)?),
+        ExprKind::Integer(v) => Value::Int(integer(v.value, v.unit, &ctx.store.unit).map_err(err)?),
         ExprKind::String(v) => Value::String(v.clone()),
-        ExprKind::Identifier(name) => field(name, s, e, labels, expr)?,
+        ExprKind::Identifier(name) => field(name, ctx, e, expr)?,
         ExprKind::Unary {
             op: UnaryOp::Not,
             expr: inner,
-        } => match eval(inner, s, e, labels)? {
+        } => match eval(inner, ctx, e)? {
             Value::Bool(v) => Value::Bool(!v),
             Value::Missing => Value::Bool(false),
             _ => return Err(EvalError::at(expr, "`!` requires bool")),
@@ -838,29 +1204,31 @@ fn eval(expr: &Expr, s: &Store, e: u32, labels: &[String]) -> Result<Value, Eval
         ExprKind::IsMissing {
             expr: inner,
             negated,
-        } => Value::Bool(matches!(eval(inner, s, e, labels)?, Value::Missing) ^ *negated),
+        } => Value::Bool(matches!(eval(inner, ctx, e)?, Value::Missing) ^ *negated),
         ExprKind::Set(items) => Value::Set(
             items
                 .iter()
-                .map(|x| eval(x, s, e, labels))
+                .map(|x| eval(x, ctx, e))
                 .collect::<Result<_, _>>()?,
         ),
         ExprKind::Range { start, end } => {
-            match (eval(start, s, e, labels)?, eval(end, s, e, labels)?) {
+            match (eval(start, ctx, e)?, eval(end, ctx, e)?) {
                 (Value::Int(a), Value::Int(b)) => Value::Range(a, b),
                 _ => return Err(EvalError::at(expr, "range bounds must be numeric")),
             }
         }
         ExprKind::Field { base, name } => {
-            if let ExprKind::Identifier(root) = &base.kind {
+            if let Some((root, key)) = custom_field(expr) {
+                ctx.fields.get(key, custom_fragment(root, ctx.store, e))
+            } else if let ExprKind::Identifier(root) = &base.kind {
                 if root == "death" {
-                    let d = s.death[e as usize];
+                    let d = ctx.store.death[e as usize];
                     if d == NONE_U32 {
                         Value::Missing
                     } else {
                         match name.as_str() {
                             "seq" => Value::Int(d as i128),
-                            "time" => Value::Int(s.t[d as usize] as i128),
+                            "time" => Value::Int(ctx.store.t[d as usize] as i128),
                             _ => {
                                 return Err(EvalError::at(
                                     expr,
@@ -882,7 +1250,7 @@ fn eval(expr: &Expr, s: &Store, e: u32, labels: &[String]) -> Result<Value, Eval
         ExprKind::Call { callee, arguments } => {
             let args = arguments
                 .iter()
-                .map(|x| eval(x, s, e, labels))
+                .map(|x| eval(x, ctx, e))
                 .collect::<Result<Vec<_>, _>>()?;
             match &callee.kind {
                 ExprKind::Identifier(name) if name == "abs" && args.len() == 1 => match args[0] {
@@ -890,7 +1258,7 @@ fn eval(expr: &Expr, s: &Store, e: u32, labels: &[String]) -> Result<Value, Eval
                     _ => return Err(EvalError::at(expr, "abs requires a number")),
                 },
                 ExprKind::Field { base, name } if args.len() == 1 => {
-                    let hay = eval(base, s, e, labels)?;
+                    let hay = eval(base, ctx, e)?;
                     match (&hay, &args[0]) {
                         (Value::Missing, _) | (_, Value::Missing) => Value::Bool(false),
                         (Value::String(a), Value::String(b)) => Value::Bool(match name.as_str() {
@@ -915,20 +1283,26 @@ fn eval(expr: &Expr, s: &Store, e: u32, labels: &[String]) -> Result<Value, Eval
                 _ => return Err(EvalError::at(expr, "unknown function")),
             }
         }
-        ExprKind::Index { .. } => {
-            return Err(EvalError::at(expr, "custom fields are not available yet"))
-        }
+        ExprKind::Index { .. } => match custom_field(expr) {
+            Some((root, key)) => ctx.fields.get(key, custom_fragment(root, ctx.store, e)),
+            None => {
+                return Err(EvalError::at(
+                    expr,
+                    "only `field[...]` and `death.field[...]` take a key",
+                ))
+            }
+        },
         ExprKind::Binary { op, left, right } => {
             if *op == BinaryOp::And || *op == BinaryOp::Or {
-                let a = evaluate(left, s, e, labels)?;
+                let a = evaluate(left, ctx, e)?;
                 if (*op == BinaryOp::And && !a) || (*op == BinaryOp::Or && a) {
                     Value::Bool(a)
                 } else {
-                    Value::Bool(evaluate(right, s, e, labels)?)
+                    Value::Bool(evaluate(right, ctx, e)?)
                 }
             } else {
-                let a = eval(left, s, e, labels)?;
-                let b = eval(right, s, e, labels)?;
+                let a = eval(left, ctx, e)?;
+                let b = eval(right, ctx, e)?;
                 match op {
                     BinaryOp::Equal => Value::Bool(equal(&a, &b).map_err(err)?),
                     BinaryOp::NotEqual => Value::Bool(
