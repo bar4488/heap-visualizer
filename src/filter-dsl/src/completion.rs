@@ -202,11 +202,36 @@ fn after_is(source: &str) -> Option<bool> {
 
 fn receiver_before_dot(source: &str, dot: usize) -> Option<Expr> {
     let tokens = lex(&source[..dot]).ok()?;
-    let token = tokens
+    let meaningful: Vec<_> = tokens
         .iter()
-        .rev()
-        .find(|token| !matches!(token.kind, TokenKind::Eof))?;
-    parse(&source[token.span.start..token.span.end]).ok()
+        .filter(|token| !matches!(token.kind, TokenKind::Eof))
+        .collect();
+    let last = meaningful.last()?;
+    // A receiver is one token — `site`, `stack` — except when it is a call:
+    // `named("x").` ends in `)`, so walk back to the matching `(` and take
+    // the callee in front of it.
+    let start = if matches!(last.kind, TokenKind::RightParen) {
+        let mut depth = 0usize;
+        let mut open = None;
+        for (index, token) in meaningful.iter().enumerate().rev() {
+            match token.kind {
+                TokenKind::RightParen => depth += 1,
+                TokenKind::LeftParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        open = Some(index);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let open = open?;
+        meaningful.get(open.checked_sub(1)?)?.span.start
+    } else {
+        last.span.start
+    };
+    parse(&source[start..dot]).ok()
 }
 
 fn operand_context(source: &str, value_start: usize) -> Option<CompletionSite> {

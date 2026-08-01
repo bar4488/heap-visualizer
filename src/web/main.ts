@@ -837,12 +837,50 @@ function refreshAllocSizeDisplays() {
   refreshEventsPanel();
 }
 
-// the worker draws in-allocation labels; it needs the user-assigned names
+// the worker draws in-allocation labels; it needs the user-assigned names,
+// and so does the core, which resolves `named("x")` against them
 function sendNames() {
   worker.postMessage({
     type: 'names',
     names: [...UI.names.entries()].map(([e, v]) => [e, v.name]),
   });
+  void renamedFilterRefresh();
+}
+
+/** Does this source resolve an allocation by name? */
+function usesNamed(source) {
+  return /\bnamed\s*\(/.test(source);
+}
+
+// `named("x")` is resolved when the filter compiles, so a rename leaves an
+// applied filter matching against a name nobody can see any more. Re-apply it
+// against the names as they are now; if it no longer resolves, stop filtering
+// rather than keep a match set whose reason is gone.
+async function renamedFilterRefresh() {
+  if (usesNamed($('filter-source').value)) filterEdited();
+  const source = UI.filterApplied;
+  if (!source || !usesNamed(source)) return;
+  const result = await request('filter-apply', { source });
+  if (result.success) {
+    filterChanged();
+    return;
+  }
+  // Turn filtering off, but leave the editor alone: the source is the thing
+  // the user has to fix, and clearing it would delete their work.
+  await request('filter-apply', { source: '' });
+  UI.filterApplied = '';
+  $('btn-filter').classList.remove('active');
+  filterChanged();
+  if (result.diagnostic) showFilterDiagnostic(result.diagnostic);
+}
+
+// everything downstream of the applied match set changing
+function filterChanged() {
+  worker.postMessage({ type: 'filter-mode', mode: UI.filterApplied ? UI.filterMode : 0 });
+  buildLegend();
+  evState.total = -1;
+  evState.lastSeq = -1;
+  refreshEventsPanel();
 }
 
 // ---------------------------------------------------------------------------
@@ -1059,11 +1097,7 @@ async function applyFilterSource(source = $('filter-source').value) {
     } else {
       setFilterStatus('Edited; applied filter is still active');
     }
-    worker.postMessage({ type: 'filter-mode', mode: UI.filterApplied ? UI.filterMode : 0 });
-    buildLegend();
-    evState.total = -1;
-    evState.lastSeq = -1;
-    refreshEventsPanel();
+    filterChanged();
     return true;
   } finally {
     if (generation === filterApplyGeneration) {

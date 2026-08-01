@@ -42,6 +42,10 @@ struct App {
     ev_filtered: Vec<u32>,
     ev_dirty: bool,
     tag_labels: Vec<String>,
+    /// Creator event -> user-given allocation name. Owned by the web layer and
+    /// pushed in on every change, exactly as `tag_labels` is; the core holds a
+    /// copy so `named()` can resolve.
+    names: Vec<(u32, String)>,
 }
 
 impl App {
@@ -59,6 +63,7 @@ impl App {
             ev_filtered: Vec::new(),
             ev_dirty: true,
             tag_labels: Vec::new(),
+            names: Vec::new(),
         }
     }
 }
@@ -129,6 +134,7 @@ pub extern "C" fn hp_parse_begin() {
     // get the same clean slate.
     a.cfg = Cfg::new();
     a.tag_labels.clear();
+    a.names.clear();
 }
 
 #[no_mangle]
@@ -575,7 +581,7 @@ fn filter_diagnostic_json(out: &mut String, kind: &str, message: &str, start: us
 pub extern "C" fn hp_filter_check(len: u32, cursor: u32) {
     let a = unsafe { &mut *app() };
     let source = std::str::from_utf8(&a.buf[..len as usize]).unwrap_or("");
-    let ctx = filter_eval::Ctx::new(&a.store, &a.tag_labels);
+    let ctx = filter_eval::Ctx::new(&a.store, &a.tag_labels, &a.names);
     let result = heap_visualizer_filter_dsl::parse(source)
         .map_err(|error| (error.message, error.span))
         .and_then(|expr| {
@@ -617,7 +623,7 @@ pub extern "C" fn hp_filter_apply(len: u32) {
             return;
         }
     };
-    let ctx = filter_eval::Ctx::new(&a.store, &a.tag_labels);
+    let ctx = filter_eval::Ctx::new(&a.store, &a.tag_labels, &a.names);
     if let Err(err) = filter_eval::check(&expr, &ctx) {
         filter_diagnostic_json(&mut a.out, "success", &err.message, err.span.start, err.span.end);
         ret_str(&a.out);
@@ -669,6 +675,48 @@ pub extern "C" fn hp_filter_set_mode(mode: u32) {
     let a = unsafe { &mut *app() };
     a.cfg.filter.mode = mode.min(render::FILTER_HIDE as u32) as u8;
     a.ev_dirty = true;
+}
+
+/// Allocation names, as `[[event, "name"], ...]`. Pushed by the web layer,
+/// which owns them and persists them in `.heapa`; the core keeps a copy only
+/// so a filter can resolve `named("x")`.
+#[no_mangle]
+pub extern "C" fn hp_set_names(len: u32) {
+    let a = unsafe { &mut *app() };
+    let data = &a.buf[..len as usize];
+    a.names = parse_names(data);
+}
+
+fn parse_names(data: &[u8]) -> Vec<(u32, String)> {
+    let mut sc = json::Scan::new(data);
+    let mut names = Vec::new();
+    if !sc.eat(b'[') {
+        return names;
+    }
+    loop {
+        if sc.eat(b']') {
+            break;
+        }
+        if !sc.eat(b'[') {
+            break;
+        }
+        let Some(event) = sc.integer() else {
+            break;
+        };
+        let _ = sc.eat(b',');
+        let Some((lo, hi)) = sc.string_span() else {
+            break;
+        };
+        let _ = sc.eat(b']');
+        if event >= 0 {
+            names.push((event as u32, json::unescape(&data[lo..hi])));
+        }
+        if !sc.eat(b',') {
+            let _ = sc.eat(b']');
+            break;
+        }
+    }
+    names
 }
 
 #[no_mangle]
@@ -1365,11 +1413,11 @@ mod tests {
     /// A checking context over a loaded app. Evaluation of custom fields needs
     /// `.with_fields(&FieldValues::resolve(..))` on top; nothing else does.
     fn ctx<'a>(a: &'a App, labels: &'a [String]) -> filter_eval::Ctx<'a> {
-        filter_eval::Ctx::new(&a.store, labels)
+        filter_eval::Ctx::new(&a.store, labels, &a.names)
     }
 
     fn store_ctx(store: &Store) -> filter_eval::Ctx<'_> {
-        filter_eval::Ctx::new(store, &[])
+        filter_eval::Ctx::new(store, &[], &[])
     }
 
     fn tags(store: &Store) -> Vec<Vec<u8>> {
@@ -2395,6 +2443,124 @@ not json at all
         let mut root = String::new();
         filter_eval::push_completions_json(&mut root, "", 0, &ctx(&a, &[]));
         assert!(!root.contains("\"label\":\"field\""));
+    }
+
+    #[test]
+    fn named_resolves_one_allocation_at_check_time() {
+        let mut a = load(SAMPLE);
+        a.names = vec![(0, "request root".into())];
+        let near = heap_visualizer_filter_dsl::parse(
+            r#"abs(seq - named("request root").seq) <= 1"#,
+        ).unwrap();
+        let c = ctx(&a, &[]);
+        assert!(filter_eval::check(&near, &c).is_ok());
+        // events 0 and 1 are within one of the reference, event 3 is not
+        assert!(filter_eval::evaluate(&near, &c, 0).unwrap());
+        assert!(filter_eval::evaluate(&near, &c, 1).unwrap());
+        assert!(!filter_eval::evaluate(&near, &c, 3).unwrap());
+
+        // a field read through the reference is that field's ordinary type
+        let addr = heap_visualizer_filter_dsl::parse(
+            r#"address >= named("request root").address"#,
+        ).unwrap();
+        assert!(filter_eval::check(&addr, &c).is_ok());
+        assert!(filter_eval::evaluate(&addr, &c, 0).unwrap());
+    }
+
+    #[test]
+    fn named_requires_exactly_one_match() {
+        let mut a = load(SAMPLE);
+        let parse = |s: &str| heap_visualizer_filter_dsl::parse(s).unwrap();
+        let expr = parse(r#"named("ghost").seq == 0"#);
+
+        // nothing named at all
+        assert_eq!(
+            filter_eval::check(&expr, &ctx(&a, &[])).unwrap_err().message,
+            "no allocation is named `ghost`"
+        );
+
+        // two allocations wearing the name: picking one silently would be
+        // wrong in a way nothing reports
+        a.names = vec![(0, "ghost".into()), (1, "ghost".into())];
+        assert_eq!(
+            filter_eval::check(&expr, &ctx(&a, &[])).unwrap_err().message,
+            "2 allocations are named `ghost`; the name must be unique"
+        );
+
+        // and the same expression checks once the name is unique again
+        a.names = vec![(0, "ghost".into())];
+        assert!(filter_eval::check(&expr, &ctx(&a, &[])).is_ok());
+    }
+
+    #[test]
+    fn named_is_a_reference_not_a_value() {
+        let mut a = load(SAMPLE);
+        a.names = vec![(0, "root".into())];
+        let parse = |s: &str| heap_visualizer_filter_dsl::parse(s).unwrap();
+        let c = ctx(&a, &[]);
+        // a bare reference produces no bool
+        assert_eq!(
+            filter_eval::check(&parse(r#"named("root")"#), &c).unwrap_err().message,
+            "filter expression must produce bool"
+        );
+        // and cannot be compared with anything
+        assert_eq!(
+            filter_eval::check(&parse(r#"named("root") == 1"#), &c).unwrap_err().message,
+            "equality operands have incompatible types"
+        );
+        // the argument is a constant, resolved while checking
+        assert_eq!(
+            filter_eval::check(&parse("named(site).seq == 0"), &c).unwrap_err().message,
+            "named requires one string constant, as `named(\"request root\")`"
+        );
+    }
+
+    #[test]
+    fn a_rename_invalidates_a_filter_that_used_the_old_name() {
+        let mut a = load(SAMPLE);
+        a.names = vec![(0, "before".into())];
+        let expr = heap_visualizer_filter_dsl::parse(r#"named("before").seq == 0"#).unwrap();
+        assert!(filter_eval::check(&expr, &ctx(&a, &[])).is_ok());
+        // the web layer pushes the new map; the same source stops checking
+        a.names = vec![(0, "after".into())];
+        assert_eq!(
+            filter_eval::check(&expr, &ctx(&a, &[])).unwrap_err().message,
+            "no allocation is named `before`"
+        );
+    }
+
+    #[test]
+    fn names_arrive_as_the_worker_sends_them() {
+        // exactly the shape of JSON.stringify([...UI.names.entries()])
+        let parsed = parse_names(br#"[[3,"request root"],[7,"quoted \"one\""]]"#);
+        assert_eq!(
+            parsed,
+            vec![
+                (3u32, "request root".to_string()),
+                (7u32, "quoted \"one\"".to_string()),
+            ]
+        );
+        assert!(parse_names(b"[]").is_empty());
+    }
+
+    #[test]
+    fn completion_offers_named_and_the_names_that_exist() {
+        let mut a = load(SAMPLE);
+        let complete = |a: &App, source: &str| {
+            let mut out = String::new();
+            filter_eval::push_completions_json(&mut out, source, source.len(), &ctx(a, &[]));
+            out
+        };
+        // with no names, the surface is not advertised
+        assert!(!complete(&a, "").contains("\"label\":\"named\""));
+
+        a.names = vec![(0, "request root".into())];
+        assert!(complete(&a, "").contains("\"label\":\"named\""));
+        assert!(complete(&a, "named(").contains("request root"));
+        // and its members are the ordinary allocation fields
+        let members = complete(&a, r#"named("request root")."#);
+        assert!(members.contains("\"label\":\"address\""));
+        assert!(members.contains("\"label\":\"size\""));
     }
 
     #[test]

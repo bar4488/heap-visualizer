@@ -121,6 +121,31 @@ Resolution must not be per event. Records with identical custom keys share one
 interned copy, and a filter resolves each referenced key once per distinct
 copy.
 
+## ANL-011: Filtering relative to a named allocation
+
+`named("<name>")` refers to the one allocation carrying that name
+([ANL-001](#anl-001-the-analysis-objects)), so a filter can be written relative
+to a specific allocation: `address >= named("request root").address`,
+`abs(seq - named("request root").seq) <= 10`.
+
+- It is a **reference, not a value**. Reading a field of it —
+  `named("x").size` — yields that field's ordinary type. The bare reference
+  compared to anything must be a diagnostic.
+- The argument is a string constant. It is resolved while the expression is
+  checked, not while it is evaluated.
+- Zero allocations with the name, and more than one, must both be diagnostics
+  stating which. A filter must never silently pick one of several.
+- Names are owned and persisted by the web layer
+  ([ANL-007](#anl-007-persistence--heapa-files-and-autosave)); the core holds a
+  pushed copy for resolution only, as it does for tag names.
+
+**A name change invalidates a filter that resolved one.** When names change,
+the draft is re-checked and an applied expression using `named()` is re-applied
+against the names as they are now. If it no longer resolves, filtering must
+turn off and report why rather than keep matching a name that no longer
+exists; the editor's text is left alone, because it is what the user has to
+fix.
+
 Only the successfully applied source, dim/hide mode, and filter-language
 version persist in the heap session. An unapplied draft, compiled plan, and
 match bits do not. The persisted language version is **2**; a source stored

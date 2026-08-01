@@ -650,7 +650,7 @@ onmessage = async (ev: MessageEvent<ToWorker>) => {
     }
     case 'names':
       S.names = new Map(m.names);
-      if (S.loaded && typeof E.hp_set_names === 'function') {
+      if (S.loaded) {
         const len = writeBuf(te.encode(JSON.stringify(m.names)));
         E.hp_set_names(len);
       }

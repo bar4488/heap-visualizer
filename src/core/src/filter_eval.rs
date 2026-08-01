@@ -12,17 +12,37 @@ pub struct Ctx<'a> {
     pub store: &'a Store,
     /// Tag names by id order, pushed in by the web layer.
     pub labels: &'a [String],
+    /// Creator event -> user-given name, pushed in by the web layer.
+    pub names: &'a [(u32, String)],
     pub fields: &'a FieldValues,
 }
 
 impl<'a> Ctx<'a> {
     /// A context for checking or completing, before any field is resolved.
     /// Evaluation needs `with_fields`; checking never reads a value.
-    pub fn new(store: &'a Store, labels: &'a [String]) -> Self {
+    pub fn new(store: &'a Store, labels: &'a [String], names: &'a [(u32, String)]) -> Self {
         Self {
             store,
             labels,
+            names,
             fields: FieldValues::none(),
+        }
+    }
+
+    /// The creator event carrying `name`, or the count when that is not
+    /// exactly one — `named()` is a reference to a single allocation.
+    fn named(&self, name: &str) -> Result<u32, usize> {
+        let mut found = None;
+        let mut count = 0;
+        for (event, label) in self.names {
+            if label == name {
+                count += 1;
+                found.get_or_insert(*event);
+            }
+        }
+        match (count, found) {
+            (1, Some(event)) => Ok(event),
+            _ => Err(count),
         }
     }
 
@@ -121,6 +141,12 @@ fn custom_field(expr: &Expr) -> Option<(FieldRoot, &str)> {
     }
 }
 
+/// True for a `named(...)` call, whatever its argument turns out to be.
+fn is_named_call(expr: &Expr) -> bool {
+    matches!(&expr.kind, ExprKind::Call { callee, .. }
+        if matches!(&callee.kind, ExprKind::Identifier(name) if name == "named"))
+}
+
 /// True for `field` / `death.field` with no key on it yet — a reference the
 /// user has started and not finished.
 fn is_field_root(expr: &Expr) -> bool {
@@ -206,6 +232,9 @@ enum Type {
     String,
     Range,
     Set(ValueKind),
+    /// One allocation, reached through `named("x")`. Not a value: it has no
+    /// equality or ordering, and only a field read gets anything out of it.
+    Allocation,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -332,6 +361,37 @@ fn custom_field_type(key: &str, expr: &Expr, ctx: &Ctx) -> Result<CheckedType, E
     }
 }
 
+/// The string constant `named(...)` takes. E010 resolves the reference while
+/// compiling, so the argument cannot be an expression.
+fn named_argument<'a>(arguments: &'a [Expr], expr: &Expr) -> Result<&'a str, EvalError> {
+    match arguments {
+        [Expr {
+            kind: ExprKind::String(name),
+            ..
+        }] => Ok(name),
+        _ => Err(EvalError::at(
+            expr,
+            "named requires one string constant, as `named(\"request root\")`",
+        )),
+    }
+}
+
+/// Resolve `named("x")` against the names the web layer pushed in. Zero and
+/// several are both errors: the reference names one allocation, and a filter
+/// that silently picked one of two would be wrong in a way nothing reports.
+fn named_event(arguments: &[Expr], expr: &Expr, ctx: &Ctx) -> Result<u32, EvalError> {
+    let name = named_argument(arguments, expr)?;
+    ctx.named(name).map_err(|count| {
+        EvalError::at(
+            expr,
+            match count {
+                0 => format!("no allocation is named `{name}`"),
+                _ => format!("{count} allocations are named `{name}`; the name must be unique"),
+            },
+        )
+    })
+}
+
 fn shape_list(types: u8) -> String {
     let mut names = Vec::new();
     for (bit, name) in [
@@ -413,6 +473,12 @@ fn check_type(expr: &Expr, ctx: &Ctx) -> Result<CheckedType, EvalError> {
         ExprKind::Field { base, name } => {
             if let Some((_, key)) = custom_field(expr) {
                 custom_field_type(key, expr, ctx)
+            } else if is_named_call(base) {
+                // `?` rather than `is_ok_and`: an unresolvable name must
+                // surface its own diagnostic, not "field access is not valid"
+                check_type(base, ctx)?;
+                // the fields of a named allocation are the ordinary fields
+                field_type(name, expr)
             } else if matches!(&base.kind, ExprKind::Identifier(root) if root == "death") {
                 match name.as_str() {
                     "seq" | "time" => Ok(CheckedType::optional(Type::Int)),
@@ -452,6 +518,12 @@ fn check_type(expr: &Expr, ctx: &Ctx) -> Result<CheckedType, EvalError> {
                         format!("unknown string method `{name}`"),
                     )),
                 }
+            }
+            ExprKind::Identifier(name) if name == "named" => {
+                // resolved while checking, so a name that is gone or ambiguous
+                // is a diagnostic rather than a filter that quietly matches
+                named_event(arguments, expr, ctx)?;
+                required(Type::Allocation)
             }
             _ => Err(EvalError::at(expr, "unknown function")),
         },
@@ -672,6 +744,16 @@ fn expression_items(expected: Option<Type>, ctx: &Ctx) -> Vec<CompletionItem> {
     if expected.is_none() {
         items.push(item("death", "death.", "field", Some("event namespace"), 2));
     }
+    // `named(...)` reads a field, so it fits wherever that field's type does
+    if !ctx.names.is_empty() {
+        items.push(item(
+            "named",
+            "named(\"",
+            "function",
+            Some("one named allocation"),
+            2,
+        ));
+    }
     // `field.` is offered only when this trace actually carries a filterable
     // custom field of the wanted type — ANL-003 forbids advertising a surface
     // the evaluator will reject
@@ -790,6 +872,9 @@ fn operator_items(ty: CheckedType, leading_space: bool) -> Vec<CompletionItem> {
             ("!=", Some("the whole set")),
             ("contains", Some("one member")),
         ],
+        // a reference is not a value: the only thing to do with it is read a
+        // field, and that is a member completion rather than an operator
+        Type::Allocation => Vec::new(),
     };
     if ty.optional {
         labels.push(("is", Some("missing test")));
@@ -823,6 +908,13 @@ fn member_items(receiver: &Expr, ctx: &Ctx) -> Vec<CompletionItem> {
     // `field.` and `death.field.`
     if is_field_root(receiver) {
         return field_key_items(ctx);
+    }
+    if check_type(receiver, ctx).is_ok_and(|ty| ty.ty == Type::Allocation) {
+        return expression_items(None, ctx)
+            .into_iter()
+            .filter(|c| c.kind == "field" && !matches!(c.label.as_str(), "death" | "field"))
+            .map(|c| item(&c.label, c.insert.trim_end(), "member", c.detail, 0))
+            .collect();
     }
     if check_type(receiver, ctx).is_ok_and(|ty| ty.ty == Type::String) {
         return vec![
@@ -931,6 +1023,15 @@ fn operand_items(left: &Expr, kind: OperandKind, ctx: &Ctx) -> Vec<CompletionIte
 
 fn call_argument_items(callee: &Expr, ctx: &Ctx) -> Vec<CompletionItem> {
     match &callee.kind {
+        ExprKind::Identifier(name) if name == "named" => {
+            let mut names: Vec<&String> = ctx.names.iter().map(|(_, name)| name).collect();
+            names.sort_unstable();
+            names.dedup();
+            names
+                .into_iter()
+                .map(|name| string_item(name, "named allocation", false))
+                .collect()
+        }
         ExprKind::Identifier(name) if name == "abs" => expression_items(Some(Type::Int), ctx),
         ExprKind::Field { base, name }
             if matches!(name.as_str(), "contains" | "starts_with" | "ends_with")
@@ -1220,6 +1321,13 @@ fn eval(expr: &Expr, ctx: &Ctx, e: u32) -> Result<Value, EvalError> {
         ExprKind::Field { base, name } => {
             if let Some((root, key)) = custom_field(expr) {
                 ctx.fields.get(key, custom_fragment(root, ctx.store, e))
+            } else if let ExprKind::Call { callee, arguments } = &base.kind {
+                if matches!(&callee.kind, ExprKind::Identifier(f) if f == "named") {
+                    let target = named_event(arguments, base, ctx)?;
+                    field(name, ctx, target, expr)?
+                } else {
+                    return Err(EvalError::at(expr, "field access is not valid here"));
+                }
             } else if let ExprKind::Identifier(root) = &base.kind {
                 if root == "death" {
                     let d = ctx.store.death[e as usize];
@@ -1279,6 +1387,12 @@ fn eval(expr: &Expr, ctx: &Ctx, e: u32) -> Result<Value, EvalError> {
                             ))
                         }
                     }
+                }
+                ExprKind::Identifier(name) if name == "named" => {
+                    return Err(EvalError::at(
+                        expr,
+                        "`named(...)` is an allocation; read a field of it, as `named(\"x\").address`",
+                    ))
                 }
                 _ => return Err(EvalError::at(expr, "unknown function")),
             }
