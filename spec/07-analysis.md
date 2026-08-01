@@ -61,6 +61,13 @@ Active styling is derived from the successfully applied source. String values
 are escaped as DSL literals, and adding a conjunct parenthesizes an existing
 top-level disjunction so its meaning is preserved.
 
+The Filter panel lists the trace's custom field catalog — each key, the type
+it can be filtered as, and how many events carry it — so what is filterable is
+visible without selecting an allocation first. Clicking one inserts its
+reference into the expression without applying. A key the language cannot
+address is listed and disabled, so its absence from completion is explained.
+A trace carrying no custom fields shows no listing.
+
 The current expression can be saved under a trace-local name. The Filter panel
 lists saved filters and can set and apply one again, rename it, or delete it.
 Saving an existing name overwrites its source. A saved filter is source text,
@@ -192,9 +199,21 @@ allocs / Tag freed**. Escape clears.
 ## ANL-006: The allocation panel and pinned windows
 
 Clicking an allocation (or stepping onto an event) opens the allocation
-panel: full info (id, range, size/usable, site, thread, birth/death, stack,
-  extra wire-format fields) plus the editing surface — name, tags, highlight
-color, focus/birth/death navigation. **Pinning** (📌) freezes the current
+panel: full info (id, range, size/usable, site, thread, birth/death, stack)
+plus the editing surface — name, tags, highlight color, focus/birth/death
+navigation.
+
+The record's **custom fields** ([TRACE-001](02-trace-format.md#trace-001-general-rules))
+are a separate, labelled section below the engine's own, so a producer's data
+is never mistaken for a field the viewer defines. Values are presented
+according to their type, and each field the filter language can address
+carries an action that writes the predicate matching this value and applies it
+— one gesture, as the legend chips are ([ANL-003](#anl-003-filter)). A field
+holding an object or an array is shown and carries no such action, because
+[ANL-010](#anl-010-filtering-on-custom-trace-fields) cannot express it. An
+allocation carrying no custom fields shows no section.
+
+**Pinning** (📌) freezes the current
 panel as an independent window and lets the next selection open fresh; any
 number of allocations can be pinned side by side for comparison
 ([09-ui-shell](09-ui-shell.md)).

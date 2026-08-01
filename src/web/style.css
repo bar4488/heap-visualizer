@@ -395,6 +395,26 @@ button.d-pin.pinned {
   border-color: var(--border); background: var(--bg3);
 }
 .saved-filter-list .empty { color: var(--fg-dim); font-size: 11px; }
+
+/* the trace's custom field catalog: what this trace can be filtered on */
+.filter-fields-list {
+  margin-top: 5px;
+  display: grid; grid-template-columns: 1fr max-content max-content;
+  align-items: baseline; column-gap: 8px; row-gap: 2px;
+  font-family: ui-monospace, monospace; font-size: 11px;
+}
+.filter-fields-row { display: contents; }
+.filter-fields-row .ff-name {
+  text-align: left; padding: 1px 3px; border: 1px solid transparent;
+  border-radius: 4px; background: none; color: var(--accent);
+  cursor: pointer; font: inherit; overflow-wrap: anywhere;
+}
+.filter-fields-row .ff-name:hover { border-color: var(--border); background: var(--bg3); }
+.filter-fields-row .ff-name[disabled] {
+  color: var(--fg-dim); cursor: default; text-decoration: line-through;
+}
+.filter-fields-row .ff-type { color: var(--fg-dim); }
+.filter-fields-row .ff-count { color: var(--fg-dim); font-variant-numeric: tabular-nums; }
 .check-group { border-top: 1px solid var(--border); padding-top: 6px; margin-top: 6px; }
 .check-group .group-title { color: var(--fg-dim); font-size: 11px; margin-bottom: 3px; }
 .check-group label { display: flex; gap: 6px; padding: 1px 0; cursor: pointer; color: var(--fg); }
@@ -544,6 +564,34 @@ input[type="color"] {
 .detail-body .row { display: flex; gap: 8px; }
 .detail-body .k { color: var(--fg-dim); width: 64px; flex: none; }
 .detail-body .actions { margin-top: 8px; display: flex; gap: 6px; }
+
+/* custom trace fields: a producer's own data, kept visually distinct from
+   the engine's fields above it (ANL-006) */
+.detail-body .cf-head {
+  display: flex; align-items: center; gap: 8px;
+  margin: 7px 0 3px; color: var(--fg-dim);
+  font-size: 10.5px; text-transform: lowercase; letter-spacing: 0.04em;
+}
+.detail-body .cf-head::after {
+  content: ''; flex: 1; height: 1px; background: var(--border);
+}
+.detail-body .cf-list {
+  display: grid; grid-template-columns: max-content 1fr auto;
+  align-items: baseline; column-gap: 8px; row-gap: 1px;
+}
+/* the row is a pass-through so its three cells join the grid above */
+.detail-body .cf-row { display: contents; }
+.detail-body .cf-row .k { width: auto; }
+.detail-body .cf-value { overflow-wrap: anywhere; }
+.detail-body .cf-value.cf-string { color: var(--fg); }
+.detail-body .cf-value.cf-number { color: var(--accent); }
+.detail-body .cf-filter {
+  padding: 0 4px; min-width: 18px; line-height: 1.3;
+  background: none; border: 1px solid transparent; border-radius: 4px;
+  color: var(--fg-dim); cursor: pointer; font: inherit;
+}
+.detail-body .cf-filter:hover { border-color: var(--border); color: var(--accent); }
+.detail-body .cf-filter.cf-none { cursor: default; opacity: 0.35; text-align: center; }
 .panel-head .ph-t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 
 /* ---------- overlays ---------- */

@@ -33,13 +33,14 @@ import {
 } from './filter-completion.ts';
 import { initGuide } from './guide.ts';
 import {
-  hasTopLevelPredicate, quoteFilterString, toggleFilterPredicate,
+  customFieldRef, hasTopLevelPredicate, quoteFilterString, toggleFilterPredicate,
 } from './filter-actions.ts';
+import { customFieldsSection } from './heap/custom-fields.ts';
 import {
   applyDrawersState, drawersState, dock, initDrawers, drawerEl, refreshDrawerDividers,
 } from './shell/drawers.ts';
 import type {
-  AllocInfo, Domain, FilterCompletions, FromWorker, Range, TraceMeta,
+  AllocInfo, Domain, FilterCompletions, FromWorker, Range, TraceField, TraceMeta,
 } from './protocol.ts';
 
 /** A user-authored tag. Its id is its index here + 1; id 0 means untagged. */
@@ -83,6 +84,8 @@ type UIState = {
   addrMarks: { name: string; addr: string }[];
   /** Named filter source saved with the authored analysis. */
   savedFilters: SavedFilter[];
+  /** The trace's custom field catalog, from the load pass. Read-only here. */
+  fields: TraceField[];
   /** The active range selection, and the same range in the other domain. */
   sel: Selection | null;
   selMirror: Selection | null;
@@ -135,6 +138,7 @@ const UI: UIState = {
   tagCounts: {},
   names: new Map(),
   allocColors: new Map(),
+  fields: [],
   bookmarks: [],
   addrMarks: [],
   savedFilters: [],
@@ -387,6 +391,7 @@ function onLoaded(m) {
   $('progress').hidden = true;
   UI.meta = m.meta;
   UI.warnings = m.warnings;
+  UI.fields = m.fields || [];
   UI.loaded = true;
   UI.selected = null;
   UI.tags = [];
@@ -405,6 +410,7 @@ function onLoaded(m) {
   $('btn-filter').classList.remove('active');
   $('filter-panel').classList.remove('applying');
   $('filter-apply').disabled = false;
+  buildFieldCatalog();
   resetSessionSnapshot(); // new trace: the previous snapshot says nothing
   updateCropIndicator();
   sendAddrMarks();
@@ -1128,6 +1134,34 @@ function buildSavedFilters() {
   </div>`).join('');
 }
 
+/**
+ * The trace's custom field catalog, listed where expressions are written so a
+ * user can see what this trace can be filtered on without clicking an
+ * allocation first (ANL-003). Clicking a name inserts its reference into the
+ * editor; a field the language cannot address is shown, and disabled, so its
+ * absence from completion is explained rather than mysterious.
+ */
+function buildFieldCatalog() {
+  const section = $('filter-fields');
+  section.hidden = !UI.fields.length;
+  if (!UI.fields.length) return;
+  $('filter-fields-list').innerHTML = UI.fields.map((field) => {
+    const usable = field.type !== null;
+    const type = usable
+      ? `${field.type}${field.optional ? '?' : ''}`
+      : 'mixed';
+    const title = usable
+      ? `Insert ${customFieldRef(field.name)} into the expression`
+      : 'Held more than one type, or an object or array: not filterable';
+    return `<div class="filter-fields-row">
+      <button type="button" class="ff-name" data-field="${esc(field.name)}"
+        title="${esc(title)}"${usable ? '' : ' disabled'}>${esc(field.name)}</button>
+      <span class="ff-type">${esc(type)}</span>
+      <span class="ff-count">${fmtNum(field.events)}</span>
+    </div>`;
+  }).join('');
+}
+
 function saveCurrentFilter() {
   const input = $('saved-filter-name');
   const name = input.value.trim();
@@ -1235,6 +1269,22 @@ $('saved-filter-list').onchange = (event) => {
   UI.savedFilters[index].name = name;
   buildSavedFilters();
   markDirty();
+};
+// insert a catalogued field's reference at the cursor: a starting point for
+// an expression, not an applied filter — the user still has to say what about
+// it they want
+$('filter-fields-list').onclick = (event) => {
+  const button = event.target.closest('[data-field]');
+  if (!button || button.disabled) return;
+  const input = $('filter-source');
+  const ref = customFieldRef(button.dataset.field);
+  const at = input.selectionStart ?? input.value.length;
+  const end = input.selectionEnd ?? at;
+  input.value = input.value.slice(0, at) + ref + input.value.slice(end);
+  input.focus();
+  input.selectionStart = at + ref.length;
+  input.selectionEnd = input.selectionStart;
+  filterEdited();
 };
 $('saved-filter-list').onclick = (event) => {
   const set = event.target.closest('[data-saved-filter-set]');
@@ -1848,11 +1898,7 @@ function buildDetailBody(root, info) {
   if (info.stack) {
     html += `<div class="row"><span class="k">stack</span><span>${esc(info.stack)}</span></div>`;
   }
-  if (info.extra) {
-    for (const [k, v] of Object.entries(info.extra)) {
-      html += `<div class="row"><span class="k">${esc(k)}</span><span>${esc(typeof v === 'string' ? v : JSON.stringify(v))}</span></div>`;
-    }
-  }
+  html += customFieldsSection(info.extra);
   const curTags = (info.tags || [])
     .map((id) => UI.tags[id - 1]?.name)
     .filter(Boolean)
@@ -1885,6 +1931,16 @@ function buildDetailBody(root, info) {
       $('st-info').textContent = `filtering range ${info.addr} – ${info.end}`;
     }
   };
+  // one gesture, like the legend chips: write the predicate and apply it
+  for (const button of root.querySelectorAll('.cf-filter[data-predicate]')) {
+    button.onclick = async () => {
+      showPanel('filter-panel');
+      const predicate = button.dataset.predicate;
+      if (await applyFilterSource(predicate)) {
+        $('st-info').textContent = `filtering ${predicate}`;
+      }
+    };
+  }
   q('.d-name').onchange = () => {
     const v = q('.d-name').value.trim();
     if (v) UI.names.set(info.e, { name: v, id: info.id, addr: info.addr });

@@ -1,7 +1,7 @@
 ---
 id: T029
 title: Custom trace fields are a first-class surface in the UI
-status: todo
+status: done
 updated: 2026-08-01
 ---
 
@@ -78,24 +78,24 @@ The panel section, as chosen:
 
 ## Done when
 
-- [ ] The allocation panel renders custom fields as the section above, in both
+- [x] The allocation panel renders custom fields as the section above, in both
       the detail panel and pinned windows (`buildDetailBody` serves both).
-- [ ] A key that is not identifier-shaped, a value that is a string containing
+- [x] A key that is not identifier-shaped, a value that is a string containing
       `"` or `\`, and a non-scalar value each render and behave correctly; the
       generated predicate is escaped as a DSL literal.
-- [ ] Clicking a field's action sets and applies a filter matching that field
+- [x] Clicking a field's action sets and applies a filter matching that field
       and value, using the same apply path as the legend chips.
-- [ ] The Filter panel lists the trace's field catalog — name, observed type,
+- [x] The Filter panel lists the trace's field catalog — name, observed type,
       event count — and a field there can be inserted into the expression.
       A trace with no custom fields shows no empty section anywhere.
-- [ ] The predicate-writing functions are pure and covered in
+- [x] The predicate-writing functions are pure and covered in
       `src/web/test/filter-actions.test.ts`, including the escaping and
       bracket-key cases.
-- [ ] [ANL-006](../../spec/07-analysis.md#anl-006-the-allocation-panel-and-pinned-windows)
+- [x] [ANL-006](../../spec/07-analysis.md#anl-006-the-allocation-panel-and-pinned-windows)
       states the section and the click-to-filter action;
       [ANL-003](../../spec/07-analysis.md#anl-003-filter) states the catalog
       listing.
-- [ ] `node --test 'src/web/**/*.test.ts'` passes,
+- [x] `node --test 'src/web/**/*.test.ts'` passes,
       `node_modules/.bin/tsc -p tsconfig.test.json` is clean, `cargo test`
       passes, and `./build.sh` emits a `dist/` that loads.
 
@@ -114,3 +114,42 @@ Per [D001](../decisions/D001-web-changes-are-hand-smoke-tested.md) the cheap
 checks are run by an agent and the rendered result is not driven in a browser.
 `traces/` needs a trace carrying custom fields to look at; check whether one
 exists before writing one.
+
+## Result
+
+The section is as designed, with the type styling and the per-field action.
+Three things are worth recording.
+
+**The render function moved out of `main.ts`.** `customFieldsSection` is pure —
+allocation info in, HTML out — and its escaping and type rules are exactly the
+parts worth asserting, but nothing can import `main.ts`. It lives in
+`src/web/heap/custom-fields.ts` with its own test file, which is what covers
+the bracket key, the string carrying `"` and `\`, and the object and array
+cases. Without the move those three would have been claimed and not checked.
+
+**A fractional number is shown and not filterable.** JSON has one number type
+and the language has integers, so `1.5` has no literal to compare against.
+`customFieldPredicate` returns null for it and the row gets the same inert
+marker as an object. This was not in the design and is not a limitation worth
+lifting until someone has such a trace.
+
+**`--fields` was added to `gen.py` rather than a trace file being committed.**
+There was no trace with custom fields, as the ticket suspected. A flag on the
+existing generator gives a reproducible one at any size, and the field set is
+deliberately varied — string, integer, non-identifier key, sometimes-null,
+nested object — so it exercises every branch of the section and of ANL-010.
+It is off by default and output without it is byte-identical to output from
+before the flag existed, verified by generating the same seed from
+`git show HEAD:gen.py` and `cmp`. [TOOL-001](../../spec/10-tooling.md#tool-001-genpy--synthetic-trace-generator)
+records the knob.
+
+The catalog reaches the Filter panel on the `loaded` notification, since it is
+a per-trace fact the load pass settles. A field the language cannot address is
+listed and **disabled** rather than hidden: it explains why completion does not
+offer a key the user can see in the allocation panel.
+
+Verified: `node --test` (six tests new here plus four in `filter-actions`),
+`tsc`, `cargo test`, `./build.sh`, the emitted `dist/` carries the new module,
+markup and styles, and `grep -ric heap src/web/shell/` is still 0 for every
+file. Per D001 the rendered geometry and the click paths were not driven in a
+browser; `python3 gen.py --fields` produces a trace to look at.

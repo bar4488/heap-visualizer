@@ -239,6 +239,31 @@ class Generator:
 
     # -- core actions -------------------------------------------------------
 
+    # -- custom trace fields ------------------------------------------------
+
+    def _extra_alloc(self, site: Site, size: int, thr: int) -> dict:
+        """Caller-defined fields on an allocation record (--fields).
+
+        Deliberately varied in shape, because the point of the flag is to
+        exercise what the viewer does with producer data: a plain string, an
+        integer, a key that is not identifier-shaped, a sometimes-null field,
+        and a nested object that the filter language cannot address at all.
+        """
+        pool = "large" if size >= 4096 else ("small" if size < 256 else "medium")
+        extra: dict = {
+            "pool": pool,
+            "refcount": self.rng.randint(1, 8),
+            "allocator-class": "slab" if size < 256 else "bump",
+        }
+        # present on most records, null on some: an optional field
+        extra["owner"] = None if self.rng.random() < 0.2 else f"worker-{thr}"
+        if self.rng.random() < 0.15:
+            extra["debug"] = {"site": site.name, "hint": [size, thr]}
+        return extra
+
+    def _extra_free(self) -> dict:
+        return {"reason": self.rng.choice(["scope", "explicit", "shutdown"])}
+
     def _do_malloc(self, out) -> None:
         site = self._pick_site()
         size = _log_uniform(self.rng, site.size_min, site.size_max)
@@ -260,11 +285,14 @@ class Generator:
         self._note_addr(addr, size)
         self.n_malloc += 1
 
-        self._emit(out, {
+        rec = {
             "t": self.t, "op": "M", "id": aid,
             "addr": self._hexaddr(addr), "size": size,
             "thr": thr, "site": site.name,
-        })
+        }
+        if self.args.fields:
+            rec.update(self._extra_alloc(site, size, thr))
+        self._emit(out, rec)
 
     def _do_free(self, out, aid: int) -> None:
         a = self.live.pop(aid, None)
@@ -273,10 +301,13 @@ class Generator:
         self.alloc.free(a.addr, a.size)
         self._cur_live_bytes -= a.size
         self.n_free += 1
-        self._emit(out, {
+        rec = {
             "t": self.t, "op": "F", "id": aid,
             "addr": self._hexaddr(a.addr), "size": a.size, "thr": a.thr,
-        })
+        }
+        if self.args.fields:
+            rec.update(self._extra_free())
+        self._emit(out, rec)
 
     def _do_realloc(self, out) -> None:
         if not self.live:
@@ -422,6 +453,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="fraction of steps that realloc instead of malloc")
     p.add_argument("--unit", default="ns", choices=["ns", "us", "ms", "s", "tick"],
                    help="time unit written to the header")
+    p.add_argument("--fields", action="store_true",
+                   help="attach caller-defined custom fields to records "
+                        "(pool, refcount, allocator-class, owner, debug on "
+                        "allocations; reason on frees)")
     p.add_argument("--quiet", action="store_true",
                    help="suppress the stderr summary")
     return p.parse_args(argv)

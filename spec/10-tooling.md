@@ -25,7 +25,17 @@ Design decisions that matter:
   exit" picture.
 
 Knobs: `--seed --ops --threads --mean-gap --burst-prob --leak-rate
---realloc-rate --arena-base --row-bytes --unit --out`. A summary (event
+--realloc-rate --arena-base --row-bytes --unit --fields --out`.
+
+`--fields` attaches caller-defined custom fields
+([TRACE-001](02-trace-format.md#trace-001-general-rules)) to records, so the
+viewer's custom-field surfaces
+([ANL-010](07-analysis.md#anl-010-filtering-on-custom-trace-fields),
+[ANL-006](07-analysis.md#anl-006-the-allocation-panel-and-pinned-windows)) can
+be exercised. The set is deliberately varied in shape — a string, an integer, a
+key that is not identifier-shaped, a sometimes-null field, and a nested object
+no filter can address. It is **off by default**, and output without it is
+byte-identical to output from before the flag existed. A summary (event
 counts, leaks, peak live, address span) prints to stderr.
 
 ## TOOL-002: Build

@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  customFieldPredicate,
+  customFieldRef,
   hasTopLevelPredicate,
   quoteFilterString,
   toggleFilterPredicate,
@@ -66,4 +68,47 @@ test('does not treat a predicate inside a tighter-precedence branch as a root op
 
 test('quotes filter strings with the DSL JSON-subset escapes', () => {
   assert.equal(quoteFilterString('say "hi" \\ now'), '"say \\"hi\\" \\\\ now"');
+});
+
+test('a custom field is spelled with a dot only when the key allows it', () => {
+  assert.equal(customFieldRef('pool'), 'field.pool');
+  assert.equal(customFieldRef('_ref2'), 'field._ref2');
+  // a key that is not identifier-shaped needs the bracket form
+  assert.equal(customFieldRef('allocator-class'), 'field["allocator-class"]');
+  assert.equal(customFieldRef('2fast'), 'field["2fast"]');
+  assert.equal(customFieldRef(''), 'field[""]');
+  // and the key itself is escaped as a DSL literal
+  assert.equal(customFieldRef('a"b\\c'), 'field["a\\"b\\\\c"]');
+});
+
+test('a custom field value becomes a predicate matching it', () => {
+  assert.equal(customFieldPredicate('pool', 'gfx'), 'field.pool == "gfx"');
+  assert.equal(customFieldPredicate('refcount', 3), 'field.refcount == 3');
+  assert.equal(
+    customFieldPredicate('allocator-class', 'slab'),
+    'field["allocator-class"] == "slab"',
+  );
+  // a bool field is its own predicate, and its negation is the operator
+  assert.equal(customFieldPredicate('live', true), 'field.live');
+  assert.equal(customFieldPredicate('live', false), '!field.live');
+  // string values are escaped, not interpolated
+  assert.equal(
+    customFieldPredicate('note', 'say "hi"\\'),
+    'field.note == "say \\"hi\\"\\\\"',
+  );
+});
+
+test('a custom field with no addressable value offers no predicate', () => {
+  // null is missingness, and objects and arrays are not filterable at all
+  assert.equal(customFieldPredicate('maybe', null), null);
+  assert.equal(customFieldPredicate('nested', { a: 1 }), null);
+  assert.equal(customFieldPredicate('list', [1, 2]), null);
+  // the language has integers; a fractional number has no literal
+  assert.equal(customFieldPredicate('ratio', 1.5), null);
+});
+
+test('a custom field predicate toggles like any other conjunct', () => {
+  const predicate = customFieldPredicate('pool', 'gfx');
+  assert.equal(toggleFilterPredicate('size > 10', predicate), 'size > 10 && field.pool == "gfx"');
+  assert.ok(hasTopLevelPredicate('size > 10 && field.pool == "gfx"', predicate));
 });

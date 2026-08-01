@@ -121,6 +121,9 @@ async function loadTrace(buffer) {
   const meta = retJson();
   E.hp_warnings_json();
   const warnings = retJson();
+  // the custom field catalog is a per-trace fact, settled by the load pass
+  E.hp_fields_json();
+  const fields = retJson();
 
   S.loaded = true;
   S.n = n;
@@ -138,7 +141,7 @@ async function loadTrace(buffer) {
   // start at the end of the trace: "what was live at exit"
   E.hp_seek_seq(n);
   allDirty();
-  postMessage({ type: 'loaded', meta, warnings, n });
+  postMessage({ type: 'loaded', meta, warnings, n, fields });
 }
 
 function applyRowPx() {

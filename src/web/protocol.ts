@@ -191,7 +191,14 @@ export type Notification =
   | { type: 'ready' }
   | { type: 'progress'; pct: number }
   | { type: 'error'; message: string }
-  | { type: 'loaded'; meta: TraceMeta; warnings: unknown[]; n: number }
+  | {
+      type: 'loaded';
+      meta: TraceMeta;
+      warnings: unknown[];
+      n: number;
+      /** The custom trace fields this trace carries; see TraceField. */
+      fields: TraceField[];
+    }
   | {
       type: 'state';
       anchor: string | null;
