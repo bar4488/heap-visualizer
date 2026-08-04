@@ -117,6 +117,17 @@ test('relative links stay in-tab; absolute links open away', () => {
   assert.ok(ext.includes('rel="noreferrer"'));
 });
 
+test('a link straight at a .heapl downloads it (SHELL-009)', () => {
+  // The file itself, to be taken away and read — not a scenario to open, and
+  // not 20 KB of JSONL navigated onto in place of the app.
+  assert.equal(
+    inline('[d](guide/traces/format.heapl)'),
+    '<a href="guide/traces/format.heapl" download>d</a>',
+  );
+  // an autoload link mentioning a trace is still an autoload link
+  assert.ok(!inline('[s](index.html?trace=guide/traces/format.heapl&guide=1)').includes('download'));
+});
+
 // --- escaping --------------------------------------------------------------
 
 test('markup in authored prose is escaped before it reaches innerHTML', () => {

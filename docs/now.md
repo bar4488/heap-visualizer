@@ -71,8 +71,10 @@ are the rules. Both have a UI: an allocation's custom fields are their own
 typed section of the allocation panel, each with a one-click predicate, and the
 Filter panel lists the trace's whole field catalog — the panel section is
 `src/web/heap/custom-fields.ts`, pure and tested. `python3 gen.py --fields`
-makes a trace carrying custom fields; no other trace in the repository has
-any.
+makes a trace carrying custom fields, one case per value shape and catalog
+outcome the UI distinguishes ([T031](tickets/T031-gen-fields-cover-the-panel-cases.md));
+`src/web/guide/traces/format.heapl` is a small checked-in one, and no other
+trace in the repository has any.
 
 The expression is also the single state behind the filter actions. Site,
 thread, tag, and untagged legend chips toggle visible predicates and apply

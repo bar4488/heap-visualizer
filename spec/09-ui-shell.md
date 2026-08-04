@@ -146,10 +146,15 @@ section read as raw text is complete prose. The only non-prose element is a
 link naming a real element id: one form highlights that element in the running
 app, the others act on it.
 
-Content may ship **scenario traces** — small hand-written `.heapl` files, each
-demonstrating a specific case the bundled demo does not. A scenario is offered
-as an ordinary link to `?trace=…` autoload
-([TOOL-002](10-tooling.md)), so the guide has no loading path of its own.
+Content may ship **scenario traces** — small `.heapl` files, each demonstrating
+a specific case the bundled demo does not. A scenario is offered as an ordinary
+link to `?trace=…` autoload ([TOOL-002](10-tooling.md)), so the guide has no
+loading path of its own.
+
+A trace file may also be linked **directly**, to be taken away rather than
+opened: the format is documented by a readable example, and the guide must
+offer one. A direct link to a `.heapl` must download it, not navigate the tab
+onto it.
 
 **The guide must reach application state only by driving the real controls** —
 clicking the element, or setting its value and dispatching the event that

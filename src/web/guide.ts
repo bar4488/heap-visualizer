@@ -38,6 +38,7 @@ const PANEL_TOGGLE = new Map(heapPanels().map((p) => [p.id, p.toggle]));
 
 // Section files, in reading order. Each is fetched from dist/guide/.
 const SECTIONS = [
+  { file: 'the-format.md', title: 'The format' },
   { file: 'the-map.md', title: 'The map' },
   { file: 'time.md', title: 'Time' },
   { file: 'selecting.md', title: 'Selecting' },
@@ -71,7 +72,11 @@ export function inline(text: string): string {
       // A relative link is a scenario trace: `?trace=…` autoload (TOOL-002) in
       // this tab, which is how the guide loads one without a code path of its
       // own into the loader. Absolute links leave the app, so they open away.
+      // A link straight at a `.heapl` is the file itself rather than a
+      // scenario to open: mark it `download`, or the browser navigates the tab
+      // to 20 KB of raw JSONL and the reader loses the app.
       const external = /^[a-z]+:/.test(href);
+      if (!external && /\.heapl$/.test(href)) return `<a href="${href}" download>${label}</a>`;
       return `<a href="${href}"${external ? ' target="_blank" rel="noreferrer"' : ''}>${label}</a>`;
     });
 }
