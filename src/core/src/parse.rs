@@ -225,16 +225,28 @@ impl Parser {
                 break;
             }
             sc.ws();
-            let shape = match sc.peek() {
+            let head = sc.peek();
+            let Some((vlo, vhi)) = sc.skip_value() else {
+                break;
+            };
+            let shape = match head {
                 b'"' => FIELD_STRING,
                 b't' | b'f' => FIELD_BOOL,
                 b'n' => FIELD_NULL,
                 b'{' | b'[' => FIELD_OTHER,
-                _ => FIELD_INT,
+                // a number: a fraction or an exponent makes it a float, and
+                // the two are one numeric type at the catalog level (T034)
+                _ => {
+                    if bytes[vlo..vhi]
+                        .iter()
+                        .any(|c| matches!(c, b'.' | b'e' | b'E'))
+                    {
+                        FIELD_FLOAT
+                    } else {
+                        FIELD_INT
+                    }
+                }
             };
-            if sc.skip_value().is_none() {
-                break;
-            }
             let name = unescape(&bytes[lo..hi]);
             let index = match self.field_map.get(&name) {
                 Some(&index) => index,

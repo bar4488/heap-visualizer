@@ -40,7 +40,7 @@ export type TraceMeta = { [field: string]: any };
  */
 export type TraceField = {
   name: string;
-  type: 'bool' | 'int' | 'string' | null;
+  type: 'bool' | 'int' | 'float' | 'string' | null;
   /** Some event carried this key as JSON `null`, so it can be missing. */
   optional: boolean;
   /** Events of any op carrying the key — creators and frees alike. */

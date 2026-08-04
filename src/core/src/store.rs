@@ -36,17 +36,18 @@ pub fn warn_name(code: u8) -> &'static str {
 }
 
 // Observed value shapes for a custom trace field, as a bitmask. A field is
-// filterable only when exactly one of the four scalar bits is set (`null` is
-// missingness, not a type of its own, so it never disqualifies a field).
+// filterable only when it resolves to one scalar type (`null` is missingness,
+// not a type of its own, so it never disqualifies a field).
 pub const FIELD_NULL: u8 = 1 << 0;
 pub const FIELD_BOOL: u8 = 1 << 1;
 pub const FIELD_INT: u8 = 1 << 2;
 pub const FIELD_STRING: u8 = 1 << 3;
 /// An object or an array: present in the trace, displayable, not filterable.
 pub const FIELD_OTHER: u8 = 1 << 4;
-/// The scalar bits, minus `null`. `types & FIELD_SCALARS` having exactly one
-/// bit is what makes a field typed.
-pub const FIELD_SCALARS: u8 = FIELD_BOOL | FIELD_INT | FIELD_STRING;
+/// A number written with a fraction or an exponent.
+pub const FIELD_FLOAT: u8 = 1 << 5;
+/// The scalar bits, minus `null`.
+pub const FIELD_SCALARS: u8 = FIELD_BOOL | FIELD_INT | FIELD_STRING | FIELD_FLOAT;
 
 /// One caller-defined top-level field observed somewhere in the trace.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -63,9 +64,20 @@ pub struct FieldInfo {
 impl FieldInfo {
     /// The single scalar type this field can be filtered as, if there is one.
     /// `null` is ignored: it makes the field optional, not untyped.
+    ///
+    /// Integers and floats are one numeric type rather than a conflict: a
+    /// producer writing `0` on one record and `0.5` on the next has written
+    /// one number-valued field, and typing that as float loses nothing —
+    /// comparison against an integer operand stays exact (T034).
     pub fn scalar(&self) -> Option<u8> {
+        if self.types & FIELD_OTHER != 0 {
+            return None;
+        }
         let scalars = self.types & FIELD_SCALARS;
-        (scalars.count_ones() == 1 && self.types & FIELD_OTHER == 0).then_some(scalars)
+        if scalars == FIELD_INT | FIELD_FLOAT {
+            return Some(FIELD_FLOAT);
+        }
+        (scalars.count_ones() == 1).then_some(scalars)
     }
 
     /// True when the key was ever absent-as-null or holds a non-scalar.

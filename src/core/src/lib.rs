@@ -1082,6 +1082,7 @@ pub extern "C" fn hp_fields_json() {
         a.out.push_str(match f.scalar() {
             Some(FIELD_BOOL) => "\"bool\"",
             Some(FIELD_INT) => "\"int\"",
+            Some(FIELD_FLOAT) => "\"float\"",
             Some(FIELD_STRING) => "\"string\"",
             _ => "null",
         });
@@ -2321,6 +2322,106 @@ not json at all
             matches_custom(&a, r#"field.pool in {"gfx", "ui"}"#),
             vec![0, 1]
         );
+    }
+
+    /// Fractional custom fields, plus a key a producer wrote as an integer on
+    /// one record and a float on the next. Event 0 is freed at event 3.
+    const FLOATS: &str = r#"{"op":"H","v":1,"unit":"ns","row_bytes":4096}
+{"seq":0,"t":100,"op":"M","id":1,"addr":"0x1000","size":64,"ratio":0.25,"scale":2}
+{"seq":1,"t":200,"op":"M","id":2,"addr":"0x2000","size":32,"ratio":0.75,"scale":1.5}
+{"seq":2,"t":300,"op":"M","id":3,"addr":"0x3000","size":32,"ratio":1e-3}
+{"seq":3,"t":400,"op":"F","id":1,"drift":-2.5}
+"#;
+
+    #[test]
+    fn a_fractional_custom_field_is_filterable() {
+        let a = load(FLOATS);
+        // the whole point of T034: this used to answer nothing at all,
+        // because the value failed to parse as an integer and went missing
+        assert_eq!(matches_custom(&a, "field.ratio > 0.5"), vec![1]);
+        assert_eq!(matches_custom(&a, "field.ratio < 0.5"), vec![0, 2]);
+        assert_eq!(matches_custom(&a, "field.ratio == 0.25"), vec![0]);
+        assert_eq!(matches_custom(&a, "field.ratio == 1e-3"), vec![2]);
+        assert_eq!(matches_custom(&a, "field.ratio in 0.2..0.8"), vec![0, 1]);
+        assert_eq!(matches_custom(&a, "field.ratio in {0.25, 0.75}"), vec![0, 1]);
+        // and the death record's own float
+        assert_eq!(matches_custom(&a, "death.field.drift < 0"), vec![0]);
+        assert_eq!(matches_custom(&a, "abs(death.field.drift) > 2"), vec![0]);
+    }
+
+    #[test]
+    fn a_key_written_as_both_integer_and_float_is_one_numeric_field() {
+        let a = load(FLOATS);
+        let scale = field(&a, "scale");
+        assert_eq!(scale.types, FIELD_INT | FIELD_FLOAT);
+        // one number-valued field, not a multi-type diagnostic
+        assert_eq!(scale.scalar(), Some(FIELD_FLOAT));
+        assert_eq!(matches_custom(&a, "field.scale > 1.75"), vec![0]);
+        assert_eq!(matches_custom(&a, "field.scale == 2"), vec![0]);
+        assert_eq!(matches_custom(&a, "field.scale == 1.5"), vec![1]);
+        // absent from the third record, so the missing tests still apply
+        assert_eq!(matches_custom(&a, "field.scale is missing"), vec![2]);
+    }
+
+    #[test]
+    fn integer_and_float_operands_mix() {
+        let a = load(FLOATS);
+        // an integer field against a float literal, and the other way round
+        assert_eq!(matches_custom(&a, "size > 32.5"), vec![0]);
+        assert_eq!(matches_custom(&a, "size in 31.5..64.5"), vec![0, 1, 2]);
+        assert_eq!(matches_custom(&a, "field.ratio < 1"), vec![0, 1, 2]);
+        assert_eq!(matches_custom(&a, "size > 1.5KiB"), vec![] as Vec<u32>);
+        // arithmetic promotes rather than truncating
+        assert_eq!(matches_custom(&a, "size + 0.5 > 64"), vec![0]);
+    }
+
+    #[test]
+    fn a_large_integer_compares_against_a_float_exactly() {
+        // 2^53 + 1 is the smallest integer an f64 cannot hold: converting it
+        // with `as f64` rounds it down onto 2^53, and every comparison here
+        // would answer wrong. The evaluator compares the integral and
+        // fractional parts instead, so these hold.
+        let src = format!(
+            "{}\n{{\"seq\":0,\"t\":100,\"op\":\"M\",\"id\":1,\"addr\":\"0x1000\",\"size\":64,\"big\":{}}}\n",
+            r#"{"op":"H","v":1,"unit":"ns","row_bytes":4096}"#,
+            (1i128 << 53) + 1
+        );
+        let a = load(&src);
+        let two53 = (1u64 << 53) as f64;
+        assert_eq!(field(&a, "big").scalar(), Some(FIELD_INT));
+        assert_eq!(matches_custom(&a, &format!("field.big > {two53}")), vec![0]);
+        assert_eq!(
+            matches_custom(&a, &format!("field.big == {two53}")),
+            vec![] as Vec<u32>
+        );
+        assert_eq!(
+            matches_custom(&a, &format!("field.big < {two53}")),
+            vec![] as Vec<u32>
+        );
+    }
+
+    #[test]
+    fn the_guide_trace_filters_on_its_float_field() {
+        // end to end on a real generated trace rather than a fixture: the
+        // counts come from reading the file with a JSON parser (T034)
+        let src = include_str!("../../web/guide/traces/format.heapl");
+        let a = load(src);
+        assert_eq!(field(&a, "fill-ratio").scalar(), Some(FIELD_FLOAT));
+        assert_eq!(
+            matches_custom(&a, r#"field["fill-ratio"] > 0.5"#).len(),
+            30
+        );
+        assert_eq!(
+            matches_custom(&a, r#"field["fill-ratio"] in 0.2..0.8"#).len(),
+            33
+        );
+    }
+
+    #[test]
+    fn a_fractional_field_reports_its_type_to_the_panel() {
+        let a = load(FLOATS);
+        assert_eq!(field(&a, "ratio").scalar(), Some(FIELD_FLOAT));
+        assert!(!field(&a, "ratio").optional());
     }
 
     #[test]

@@ -50,9 +50,10 @@ test('keys and values are escaped for HTML and for the DSL', () => {
   ));
 });
 
-test('a fractional number is shown but not filterable', () => {
-  // JSON has one number type; the filter language has integers only
+test('a fractional number is shown and filterable (ANL-012)', () => {
+  // the language reads `1.5` as the same double the trace's own text did, so
+  // the predicate matches the record it was written from
   const html = customFieldsSection({ ratio: 1.5 });
   assert.ok(html.includes('<span class="cf-value cf-number">1.5</span>'));
-  assert.ok(!html.includes('data-predicate'));
+  assert.ok(html.includes('data-predicate="field.ratio == 1.5"'));
 });

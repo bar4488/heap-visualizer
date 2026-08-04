@@ -106,16 +106,22 @@ The load pass must record every observed key, the value shapes it was seen
 holding, and how many events carry it. Checking is against that catalog, so
 what a filter may say depends on the trace in hand:
 
-- A key seen holding exactly one of bool, integer, or string has that type,
-  and is always **optional** — an event whose record omits the key, and an
-  event whose record has it as JSON `null`, are both missing.
+- A key seen holding exactly one of bool, integer, float, or string has that
+  type, and is always **optional** — an event whose record omits the key, and
+  an event whose record has it as JSON `null`, are both missing.
+- A number written with a fraction or an exponent is a float; any other number
+  is an integer. A key seen holding **both** integers and floats is one
+  float-typed field, not a conflict: a producer writing `0` and then `0.5` has
+  written one number-valued key, and
+  [ANL-012](#anl-012-numbers-in-the-filter-language) makes comparing it
+  against either kind of operand exact.
 - A key the trace never carried must be a diagnostic naming it. It must not be
   silently false.
-- A key seen holding more than one type, or holding an object or an array,
-  must be a diagnostic saying which. Only scalars are addressable; nested
-  values remain visible in the allocation panel
-  ([ANL-006](#anl-006-the-allocation-panel-and-pinned-windows)) and are not
-  filterable.
+- A key seen holding more than one type — floats and integers excepted, per
+  above — or holding an object or an array, must be a diagnostic saying which.
+  Only scalars are addressable; nested values remain visible in the allocation
+  panel ([ANL-006](#anl-006-the-allocation-panel-and-pinned-windows)) and are
+  not filterable.
 - `death.field.<key>` on an allocation that is never freed is missing.
 
 Custom fields are otherwise ordinary operands: string methods, sets, ranges,
@@ -158,6 +164,42 @@ version persist in the heap session. An unapplied draft, compiled plan, and
 match bits do not. The persisted language version is **2**; a source stored
 under an earlier version is not restored, because it may name a field the
 current language does not have.
+
+## ANL-012: Numbers in the filter language
+
+The language has two numeric representations, and they are one type to the
+person writing a filter.
+
+An **integer** literal is decimal or `0x` hexadecimal. A **float** literal is
+decimal carrying a fraction or an exponent — `0.5`, `1e-3`, `2.5e6`. Both take
+the unit suffixes, which multiply the value: `1.5MiB` and `1572864` are the
+same operand. A decimal point is only ever a decimal point when a digit
+follows it, so `0..10` is a range between two integers.
+
+Integer and float operands must mix freely under ordering, equality, `in` a
+range, `in` a set, `contains`, and arithmetic. Where they mix:
+
+- **Comparison must be exact.** An integer operand must not be converted to a
+  double before comparing. An integer beyond 2^53 has no exact double, and
+  converting one would make `id == 9007199254740993` answer true for a
+  neighbouring allocation.
+- Arithmetic on two integers stays integral; a float operand makes the result
+  a float, with the rounding a double implies.
+- `abs` returns what it was given.
+
+Equality on a float compares the parsed doubles exactly. A value the producer
+wrote and a literal spelled the same way parse to the same double, so
+`field["fill-ratio"] == 0.986` matches the record it was written from; a value
+arrived at by arithmetic may not, and a range is the right instrument there.
+
+`NaN` is unordered: every comparison against it, including `==`, is false. It
+cannot be written as a literal, and JSON cannot carry one, so it arises only
+from arithmetic.
+
+The trace format's own numeric fields — `size`, `address`, `time`, `id` and
+the rest — are integers ([TRACE-001](02-trace-format.md#trace-001-general-rules)).
+Floats reach the language through custom trace fields
+([ANL-010](#anl-010-filtering-on-custom-trace-fields)) and through literals.
 
 ## ANL-009: Filtering by tag
 

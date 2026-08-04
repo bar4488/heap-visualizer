@@ -255,3 +255,91 @@ fn keywords_are_not_bare_field_names() {
     assert_eq!(error.message, "expected a field or method name after `.`");
     parse("field[\"missing\"]").unwrap();
 }
+
+// --- float literals --------------------------------------------------------
+
+fn float(expr: &Expr) -> &heap_visualizer_filter_dsl::FloatLiteral {
+    match &expr.kind {
+        ExprKind::Float(value) => value,
+        other => panic!("expected float literal, got {other:?}"),
+    }
+}
+
+fn integer_value(expr: &Expr) -> u128 {
+    match &expr.kind {
+        ExprKind::Integer(value) => value.value,
+        other => panic!("expected integer literal, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_fraction_or_an_exponent_makes_a_float() {
+    for (source, value) in [
+        ("0.5", 0.5),
+        ("1.25", 1.25),
+        ("1e-3", 1e-3),
+        ("2.5e6", 2.5e6),
+        ("1E3", 1e3),
+        ("1_000.5", 1000.5),
+    ] {
+        let parsed = parse(source).unwrap();
+        assert_eq!(float(&parsed).value, value, "{source}");
+    }
+    // no fraction and no exponent is still an integer
+    let parsed = parse("42").unwrap();
+    assert_eq!(integer_value(&parsed), 42);
+    let parsed = parse("0x10").unwrap();
+    assert_eq!(integer_value(&parsed), 16);
+}
+
+#[test]
+fn a_float_literal_takes_a_unit() {
+    let parsed = parse("1.5MiB").unwrap();
+    let literal = float(&parsed);
+    assert_eq!(literal.value, 1.5);
+    assert_eq!(literal.unit, Some(Unit::Mebibytes));
+    let parsed = parse("2.5ms").unwrap();
+    assert_eq!(float(&parsed).unit, Some(Unit::Milliseconds));
+    // `e` is an exponent only before digits; otherwise it is read as a unit
+    assert!(parse("2e").unwrap_err().message.contains("unknown numeric unit"));
+}
+
+#[test]
+fn the_range_operator_wins_over_a_decimal_point() {
+    // the dot is a decimal point only when a digit follows it, so a range
+    // between two integers still parses as one
+    let parsed = parse("size in 0..10").unwrap();
+    let (op, start, end) = binary(&parsed);
+    assert_eq!(op, BinaryOp::In);
+    assert_eq!(identifier(start), "size");
+    match &end.kind {
+        ExprKind::Range { start, end } => {
+            assert_eq!(integer_value(start), 0);
+            assert_eq!(integer_value(end), 10);
+        }
+        other => panic!("expected range, got {other:?}"),
+    }
+
+    // and a range between two floats parses as a range, not as `0.2.` + `.8`
+    let parsed = parse("x in 0.2..0.8").unwrap();
+    let (_, _, end) = binary(&parsed);
+    match &end.kind {
+        ExprKind::Range { start, end } => {
+            assert_eq!(float(start).value, 0.2);
+            assert_eq!(float(end).value, 0.8);
+        }
+        other => panic!("expected range, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_float_is_a_set_member() {
+    let parsed = parse("x in {0.5, 1.5}").unwrap();
+    match &binary(&parsed).2.kind {
+        ExprKind::Set(items) => {
+            assert_eq!(items.len(), 2);
+            assert_eq!(float(&items[0]).value, 0.5);
+        }
+        other => panic!("expected set, got {other:?}"),
+    }
+}

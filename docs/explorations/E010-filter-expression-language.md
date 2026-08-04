@@ -2,7 +2,7 @@
 id: E010
 title: "A filter DSL for allocations"
 status: open
-updated: 2026-07-25
+updated: 2026-08-05
 ---
 
 # A filter DSL for allocations — 2026-07-25
@@ -145,6 +145,15 @@ its member type from the other operand.
 
 All numeric values are integral. There are no floats and no implicit
 string/number or signed/unsigned conversions.
+
+> **2026-08-05.** The integral-only rule above did not survive contact with
+> real traces: a producer's `fill-ratio` is a float, and filtering on one
+> silently matched nothing. The language now has float literals and one
+> numeric type across both representations, specified by
+> [ANL-012](../../spec/07-analysis.md#anl-012-numbers-in-the-filter-language)
+> and built in [T034](../tickets/T034-the-filter-language-has-floats.md). The
+> rest of this section still holds: there are still no implicit string/number
+> conversions.
 
 Units are canonical and case-sensitive:
 

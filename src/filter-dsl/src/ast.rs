@@ -34,6 +34,18 @@ pub struct IntegerLiteral {
     pub unit: Option<Unit>,
 }
 
+/// A decimal literal carrying a fraction or an exponent — `0.5`, `1e-3`,
+/// `1.5MiB`. The value is the parsed double; the unit multiplies it later,
+/// where the trace's time unit is known.
+///
+/// This is the one literal that is not `Eq`, which is why the expression tree
+/// is `PartialEq` only.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FloatLiteral {
+    pub value: f64,
+    pub unit: Option<Unit>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UnaryOp {
     Not,
@@ -56,7 +68,7 @@ pub enum BinaryOp {
     Subtract,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Expr {
     pub kind: ExprKind,
     pub span: Span,
@@ -68,10 +80,11 @@ impl Expr {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ExprKind {
     Bool(bool),
     Integer(IntegerLiteral),
+    Float(FloatLiteral),
     String(String),
     Identifier(String),
     Unary {

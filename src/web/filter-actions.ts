@@ -69,9 +69,11 @@ export function customFieldPredicate(key: string, value: unknown): string | null
   const ref = customFieldRef(key);
   if (typeof value === 'string') return `${ref} == ${quoteFilterString(value)}`;
   if (typeof value === 'boolean') return value ? ref : `!${ref}`;
-  // JSON has one number type; the language has integers, so a fractional
-  // value has no literal to compare against
-  if (typeof value === 'number' && Number.isInteger(value)) return `${ref} == ${value}`;
+  // Numbers are exact on both sides: the language reads a fractional literal
+  // as the same double the trace's own text parsed to, so `== 0.986` matches
+  // the record it was written from (T034). Infinities and NaN cannot be
+  // written as JSON numbers, so a finite check is enough.
+  if (typeof value === 'number' && Number.isFinite(value)) return `${ref} == ${value}`;
   return null;
 }
 

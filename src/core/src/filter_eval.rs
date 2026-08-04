@@ -3,7 +3,10 @@ use heap_visualizer_filter_dsl::{
 };
 
 use crate::json::push_json_str;
-use crate::store::{Store, FIELD_BOOL, FIELD_INT, FIELD_OTHER, FIELD_SCALARS, FIELD_STRING, NONE_U16, NONE_U32};
+use crate::store::{
+    Store, FIELD_BOOL, FIELD_FLOAT, FIELD_INT, FIELD_OTHER, FIELD_SCALARS, FIELD_STRING, NONE_U16,
+    NONE_U32,
+};
 
 /// Everything checking and evaluation need besides the expression and the
 /// event: the trace, the analysis objects the web layer owns, and the custom
@@ -211,10 +214,26 @@ fn resolve_fragment(fragment: &str, keys: &[String]) -> Vec<Value> {
                     // null, objects and arrays are all missing to the
                     // evaluator; the checker has already rejected the last two
                     b'n' | b'{' | b'[' => Value::Missing,
-                    _ => core::str::from_utf8(&bytes[vlo..vhi])
-                        .ok()
-                        .and_then(|t| t.parse::<i128>().ok())
-                        .map_or(Value::Missing, Value::Int),
+                    // a number: integral text parses as an integer, and
+                    // anything with a fraction or an exponent as a float.
+                    // Parsing everything as i128 is what made a fractional
+                    // field silently missing (T034).
+                    _ => core::str::from_utf8(&bytes[vlo..vhi]).map_or(
+                        Value::Missing,
+                        |text| {
+                            if text.bytes().any(|c| matches!(c, b'.' | b'e' | b'E')) {
+                                text.parse::<f64>().map_or(Value::Missing, Value::Float)
+                            } else {
+                                text.parse::<i128>().map_or_else(
+                                    // wider than i128: keep it as the number
+                                    // it approximately is rather than dropping
+                                    // the field
+                                    |_| text.parse::<f64>().map_or(Value::Missing, Value::Float),
+                                    Value::Int,
+                                )
+                            }
+                        },
+                    ),
                 };
             }
         }
@@ -229,6 +248,7 @@ fn resolve_fragment(fragment: &str, keys: &[String]) -> Vec<Value> {
 enum Type {
     Bool,
     Int,
+    Float,
     String,
     Range,
     Set(ValueKind),
@@ -241,7 +261,14 @@ enum Type {
 enum ValueKind {
     Bool,
     Int,
+    Float,
     String,
+}
+
+impl ValueKind {
+    const fn numeric(self) -> bool {
+        matches!(self, ValueKind::Int | ValueKind::Float)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -273,9 +300,14 @@ impl CheckedType {
         match self.ty {
             Type::Bool => Some(ValueKind::Bool),
             Type::Int => Some(ValueKind::Int),
+            Type::Float => Some(ValueKind::Float),
             Type::String => Some(ValueKind::String),
             _ => None,
         }
+    }
+
+    const fn numeric(self) -> bool {
+        matches!(self.ty, Type::Int | Type::Float)
     }
 }
 
@@ -283,17 +315,109 @@ impl CheckedType {
 enum Value {
     Bool(bool),
     Int(i128),
+    Float(f64),
     String(String),
-    Range(i128, i128),
+    /// Half-open, and numeric in either representation: `0x10..0x20` and
+    /// `0.2..0.8` are both ranges.
+    Range(Num, Num),
     Set(Vec<Value>),
     Missing,
+}
+
+/// A number in the representation it was written in. Kept apart rather than
+/// widened to f64 so that comparing a large integer — an address, a
+/// nanosecond timestamp — against a float stays exact.
+#[derive(Clone, Copy, Debug)]
+enum Num {
+    Int(i128),
+    Float(f64),
+}
+
+impl Value {
+    const fn num(&self) -> Option<Num> {
+        match self {
+            Value::Int(v) => Some(Num::Int(*v)),
+            Value::Float(v) => Some(Num::Float(*v)),
+            _ => None,
+        }
+    }
+}
+
+/// Order two numbers exactly, whatever the mix of representations. `None`
+/// only for NaN, which is unordered against everything including itself.
+///
+/// The integer side is never converted with `as f64`: above 2^53 that
+/// conversion rounds, and `id == 9007199254740993` would then answer true for
+/// the allocation next to it.
+fn cmp_num(a: Num, b: Num) -> Option<core::cmp::Ordering> {
+    use core::cmp::Ordering;
+    match (a, b) {
+        (Num::Int(a), Num::Int(b)) => Some(a.cmp(&b)),
+        (Num::Float(a), Num::Float(b)) => a.partial_cmp(&b),
+        (Num::Int(a), Num::Float(b)) => cmp_int_float(a, b),
+        (Num::Float(a), Num::Int(b)) => cmp_int_float(b, a).map(Ordering::reverse),
+    }
+}
+
+/// Compare an integer against a float without rounding either one: split the
+/// float into its integral and fractional parts and compare those.
+fn cmp_int_float(a: i128, b: f64) -> Option<core::cmp::Ordering> {
+    use core::cmp::Ordering;
+    if b.is_nan() {
+        return None;
+    }
+    // beyond the integer range entirely, including the infinities
+    if b > i128::MAX as f64 {
+        return Some(Ordering::Less);
+    }
+    if b < i128::MIN as f64 {
+        return Some(Ordering::Greater);
+    }
+    let whole = b.trunc();
+    Some(match a.cmp(&(whole as i128)) {
+        Ordering::Equal => {
+            // equal integral parts: the fraction decides, and its sign
+            // follows the float's own (`-2.5` truncates towards zero)
+            let fraction = b - whole;
+            if fraction > 0.0 {
+                Ordering::Less
+            } else if fraction < 0.0 {
+                Ordering::Greater
+            } else {
+                Ordering::Equal
+            }
+        }
+        other => other,
+    })
 }
 
 const fn scalar_type(kind: ValueKind) -> Type {
     match kind {
         ValueKind::Bool => Type::Bool,
         ValueKind::Int => Type::Int,
+        ValueKind::Float => Type::Float,
         ValueKind::String => Type::String,
+    }
+}
+
+/// Whether a value of type `have` may stand where `want` is expected. Only
+/// numbers are interchangeable: an integer operand fits a float slot and the
+/// other way round, and the comparison that follows is exact.
+const fn fits(want: Type, have: Type) -> bool {
+    matches!(
+        (want, have),
+        (Type::Int | Type::Float, Type::Int | Type::Float)
+    ) || matches_exactly(want, have)
+}
+
+const fn matches_exactly(want: Type, have: Type) -> bool {
+    match (want, have) {
+        (Type::Bool, Type::Bool)
+        | (Type::String, Type::String)
+        | (Type::Range, Type::Range)
+        | (Type::Allocation, Type::Allocation) => true,
+        (Type::Set(a), Type::Set(b)) => a as u8 == b as u8,
+        _ => false,
     }
 }
 
@@ -346,6 +470,7 @@ fn custom_field_type(key: &str, expr: &Expr, ctx: &Ctx) -> Result<CheckedType, E
     match info.scalar() {
         Some(FIELD_BOOL) => Ok(CheckedType::optional(Type::Bool)),
         Some(FIELD_INT) => Ok(CheckedType::optional(Type::Int)),
+        Some(FIELD_FLOAT) => Ok(CheckedType::optional(Type::Float)),
         Some(FIELD_STRING) => Ok(CheckedType::optional(Type::String)),
         _ if info.types & FIELD_SCALARS == 0 => Err(EvalError::at(
             expr,
@@ -397,6 +522,7 @@ fn shape_list(types: u8) -> String {
     for (bit, name) in [
         (FIELD_BOOL, "bool"),
         (FIELD_INT, "integer"),
+        (FIELD_FLOAT, "float"),
         (FIELD_STRING, "string"),
         (FIELD_OTHER, "object or array"),
     ] {
@@ -411,8 +537,14 @@ fn shape_list(types: u8) -> String {
     }
 }
 
+/// Whether two operands may be compared. Identical value kinds may, and so
+/// may any two numbers — an integer field against a float literal is the
+/// ordinary case, not a type error.
 fn same_values(left: CheckedType, right: CheckedType) -> bool {
-    left.value_kind().is_some() && left.value_kind() == right.value_kind()
+    match (left.value_kind(), right.value_kind()) {
+        (Some(a), Some(b)) => a == b || (a.numeric() && b.numeric()),
+        _ => false,
+    }
 }
 
 fn check_type(expr: &Expr, ctx: &Ctx) -> Result<CheckedType, EvalError> {
@@ -423,6 +555,11 @@ fn check_type(expr: &Expr, ctx: &Ctx) -> Result<CheckedType, EvalError> {
             integer(value.value, value.unit, &ctx.store.unit)
                 .map_err(|message| EvalError::at(expr, message))?;
             required(Type::Int)
+        }
+        ExprKind::Float(value) => {
+            float(value.value, value.unit, &ctx.store.unit)
+                .map_err(|message| EvalError::at(expr, message))?;
+            required(Type::Float)
         }
         ExprKind::String(_) => required(Type::String),
         ExprKind::Identifier(name) => field_type(name, expr),
@@ -452,19 +589,23 @@ fn check_type(expr: &Expr, ctx: &Ctx) -> Result<CheckedType, EvalError> {
                 return Err(EvalError::at(expr, "cannot infer the type of an empty set"));
             };
             let first = check_type(first, ctx)?;
-            let Some(kind) = first.value_kind() else {
+            let Some(mut kind) = first.value_kind() else {
                 return Err(EvalError::at(expr, "set members must be scalar values"));
             };
             for item in &items[1..] {
-                if check_type(item, ctx)?.value_kind() != Some(kind) {
-                    return Err(EvalError::at(expr, "set members must have one type"));
+                match check_type(item, ctx)?.value_kind() {
+                    Some(other) if other == kind => {}
+                    // a set mixing integers and floats is a set of numbers;
+                    // its members keep their own representation, so
+                    // membership stays exact
+                    Some(other) if other.numeric() && kind.numeric() => kind = ValueKind::Float,
+                    _ => return Err(EvalError::at(expr, "set members must have one type")),
                 }
             }
             required(Type::Set(kind))
         }
         ExprKind::Range { start, end } => {
-            if check_type(start, ctx)?.ty == Type::Int && check_type(end, ctx)?.ty == Type::Int
-            {
+            if check_type(start, ctx)?.numeric() && check_type(end, ctx)?.numeric() {
                 required(Type::Range)
             } else {
                 Err(EvalError::at(expr, "range bounds must be numeric"))
@@ -495,8 +636,14 @@ fn check_type(expr: &Expr, ctx: &Ctx) -> Result<CheckedType, EvalError> {
         }
         ExprKind::Call { callee, arguments } => match &callee.kind {
             ExprKind::Identifier(name) if name == "abs" => {
-                if arguments.len() == 1 && check_type(&arguments[0], ctx)?.ty == Type::Int {
-                    required(Type::Int)
+                let argument = match arguments.as_slice() {
+                    [only] => check_type(only, ctx)?,
+                    _ => return Err(EvalError::at(expr, "abs requires one number")),
+                };
+                if argument.numeric() {
+                    // abs of a float is a float: the result keeps the
+                    // representation it was given
+                    required(argument.ty)
                 } else {
                     Err(EvalError::at(expr, "abs requires one number"))
                 }
@@ -581,7 +728,7 @@ fn check_type(expr: &Expr, ctx: &Ctx) -> Result<CheckedType, EvalError> {
                 | BinaryOp::Greater
                 | BinaryOp::GreaterEqual => {
                     if same_values(left_ty, right_ty)
-                        && matches!(left_ty.ty, Type::Int | Type::String)
+                        && matches!(left_ty.ty, Type::Int | Type::Float | Type::String)
                     {
                         required(Type::Bool)
                     } else {
@@ -592,16 +739,24 @@ fn check_type(expr: &Expr, ctx: &Ctx) -> Result<CheckedType, EvalError> {
                     }
                 }
                 BinaryOp::Add | BinaryOp::Subtract => {
-                    if left_ty.ty == Type::Int && right_ty.ty == Type::Int {
-                        required(Type::Int)
+                    if left_ty.numeric() && right_ty.numeric() {
+                        // exact while both sides are integers; a float
+                        // operand makes the result a float
+                        required(if left_ty.ty == Type::Float || right_ty.ty == Type::Float {
+                            Type::Float
+                        } else {
+                            Type::Int
+                        })
                     } else {
                         Err(EvalError::at(expr, "arithmetic requires numbers"))
                     }
                 }
                 BinaryOp::In => {
                     let compatible = match right_ty.ty {
-                        Type::Range => left_ty.ty == Type::Int,
-                        Type::Set(kind) => left_ty.value_kind() == Some(kind),
+                        Type::Range => left_ty.numeric(),
+                        Type::Set(kind) => left_ty
+                            .value_kind()
+                            .is_some_and(|have| have == kind || (have.numeric() && kind.numeric())),
                         _ => false,
                     };
                     if compatible {
@@ -621,7 +776,13 @@ fn check_type(expr: &Expr, ctx: &Ctx) -> Result<CheckedType, EvalError> {
                     }
                 }
                 BinaryOp::Contains => match left_ty.member_kind() {
-                    Some(kind) if right_ty.value_kind() == Some(kind) => required(Type::Bool),
+                    Some(kind)
+                        if right_ty.value_kind().is_some_and(
+                            |have| have == kind || (have.numeric() && kind.numeric()),
+                        ) =>
+                    {
+                        required(Type::Bool)
+                    }
                     Some(_) => Err(EvalError::at(
                         expr,
                         "`contains` requires a member of the set's type",
@@ -738,7 +899,9 @@ fn expression_items(expected: Option<Type>, ctx: &Ctx) -> Vec<CompletionItem> {
     ];
     let mut items: Vec<_> = descriptors
         .into_iter()
-        .filter(|(_, _, _, ty, _, _)| expected.is_none_or(|expected| expected == *ty))
+        // a numeric slot takes either representation, so an integer field is
+        // offered where a float is expected and the other way round
+        .filter(|(_, _, _, ty, _, _)| expected.is_none_or(|expected| fits(expected, *ty)))
         .map(|(label, kind, detail, _, insert, rank)| item(label, insert, kind, Some(detail), rank))
         .collect();
     if expected.is_none() {
@@ -761,7 +924,7 @@ fn expression_items(expected: Option<Type>, ctx: &Ctx) -> Vec<CompletionItem> {
         .store
         .fields
         .iter()
-        .any(|f| catalog_type(f).is_some_and(|ty| expected.is_none_or(|want| want == ty)))
+        .any(|f| catalog_type(f).is_some_and(|ty| expected.is_none_or(|want| fits(want, ty))))
     {
         items.push(item(
             "field",
@@ -779,6 +942,7 @@ fn catalog_type(info: &crate::store::FieldInfo) -> Option<Type> {
     match info.scalar()? {
         FIELD_BOOL => Some(Type::Bool),
         FIELD_INT => Some(Type::Int),
+        FIELD_FLOAT => Some(Type::Float),
         FIELD_STRING => Some(Type::String),
         _ => None,
     }
@@ -804,6 +968,7 @@ fn field_key_items(ctx: &Ctx) -> Vec<CompletionItem> {
             let detail = match f.scalar() {
                 Some(FIELD_BOOL) => "bool, optional",
                 Some(FIELD_INT) => "integer, optional",
+                Some(FIELD_FLOAT) => "float, optional",
                 _ => "string, optional",
             };
             item(&f.name, format!("{} ", f.name), "member", Some(detail), 0)
@@ -826,8 +991,8 @@ fn observed_field_values(key: &str, ctx: &Ctx, in_set: bool) -> Vec<CompletionIt
         }
         match &value {
             Value::String(text) => items.push(string_item(text, "observed value", in_set)),
-            Value::Int(number) => {
-                let label = number.to_string();
+            Value::Int(_) | Value::Float(_) => {
+                let label = number_source(&value);
                 let insert = if in_set {
                     label.clone()
                 } else {
@@ -843,10 +1008,27 @@ fn observed_field_values(key: &str, ctx: &Ctx, in_set: bool) -> Vec<CompletionIt
     items
 }
 
+/// A number as filter source. Rust's float Display is the shortest text that
+/// reads back as the same double, so an offered value round-trips: inserting
+/// it and comparing with `==` matches the record it came from.
+fn number_source(value: &Value) -> String {
+    match value {
+        Value::Int(v) => v.to_string(),
+        Value::Float(v) => {
+            let text = v.to_string();
+            // `1e20` prints without a dot or an exponent; as source that is
+            // an integer literal, which compares exactly against the float
+            // anyway, so nothing needs rewriting here
+            text
+        }
+        _ => String::new(),
+    }
+}
+
 fn operator_items(ty: CheckedType, leading_space: bool) -> Vec<CompletionItem> {
     let mut labels: Vec<(&str, Option<&str>)> = match ty.ty {
         Type::Bool => vec![("&&", None), ("||", None), ("==", None), ("!=", None)],
-        Type::Int => vec![
+        Type::Int | Type::Float => vec![
             ("+", None),
             ("-", None),
             ("==", None),
@@ -1154,6 +1336,28 @@ fn integer(value: u128, unit: Option<Unit>, time_unit: &str) -> Result<i128, Str
         .ok_or_else(|| "integer literal overflows".to_string())
 }
 
+/// A float literal in the trace's own unit. The unit multiplies the value,
+/// exactly as it does for an integer literal, so `size > 1.5MiB` reads the
+/// same as `size > 1572864`.
+fn float(value: f64, unit: Option<Unit>, time_unit: &str) -> Result<f64, String> {
+    let mul: u128 = match unit {
+        None | Some(Unit::Bytes) => 1,
+        Some(Unit::Kibibytes) => 1024,
+        Some(Unit::Mebibytes) => 1024 * 1024,
+        Some(Unit::Gibibytes) => 1024 * 1024 * 1024,
+        Some(Unit::Nanoseconds) => time_factor(time_unit, 1)?,
+        Some(Unit::Microseconds) => time_factor(time_unit, 1_000)?,
+        Some(Unit::Milliseconds) => time_factor(time_unit, 1_000_000)?,
+        Some(Unit::Seconds) => time_factor(time_unit, 1_000_000_000)?,
+    };
+    let scaled = value * mul as f64;
+    if scaled.is_finite() {
+        Ok(scaled)
+    } else {
+        Err("float literal overflows".to_string())
+    }
+}
+
 fn time_factor(unit: &str, nanos: u128) -> Result<u128, String> {
     let per_tick = match unit {
         "ns" => 1,
@@ -1185,7 +1389,10 @@ fn field(name: &str, ctx: &Ctx, e: u32, expr: &Expr) -> Result<Value, EvalError>
         "id" => Value::Int(s.id[i] as i128),
         "address" => Value::Int(s.addr[i] as i128),
         "end" => Value::Int((s.addr[i] + s.span(e)) as i128),
-        "span" => Value::Range(s.addr[i] as i128, (s.addr[i] + s.span(e)) as i128),
+        "span" => Value::Range(
+            Num::Int(s.addr[i] as i128),
+            Num::Int((s.addr[i] + s.span(e)) as i128),
+        ),
         "size" => Value::Int(s.size[i] as i128),
         "usable" => {
             let v = s.usable_at(e);
@@ -1241,11 +1448,24 @@ fn field(name: &str, ctx: &Ctx, e: u32, expr: &Expr) -> Result<Value, EvalError>
     })
 }
 
+/// Widen for arithmetic only, where a float result is already inexact.
+/// Comparison never goes through this.
+fn as_f64(n: Num) -> f64 {
+    match n {
+        Num::Int(v) => v as f64,
+        Num::Float(v) => v,
+    }
+}
+
 fn equal(a: &Value, b: &Value) -> Result<bool, String> {
+    if let (Some(a), Some(b)) = (a.num(), b.num()) {
+        // exact, across representations: `0.5 == 1/2` is not a thing the
+        // language has, but `refcount == 2.0` is, and it answers true
+        return Ok(cmp_num(a, b).is_some_and(|o| o.is_eq()));
+    }
     match (a, b) {
         (Value::Missing, _) | (_, Value::Missing) => Ok(false),
         (Value::Bool(a), Value::Bool(b)) => Ok(a == b),
-        (Value::Int(a), Value::Int(b)) => Ok(a == b),
         (Value::String(a), Value::String(b)) => Ok(a == b),
         // set equality is exact and order-insensitive: same members, both ways
         (Value::Set(a), Value::Set(b)) => Ok(contains_all(a, b) && contains_all(b, a)),
@@ -1264,19 +1484,30 @@ fn member(haystack: &[Value], needle: &Value) -> bool {
 }
 
 fn order(a: &Value, b: &Value, op: BinaryOp) -> Result<bool, String> {
+    if let (Some(a), Some(b)) = (a.num(), b.num()) {
+        // NaN is unordered: every comparison against it is false, which is
+        // what `cmp_num` returning None means here
+        let Some(ord) = cmp_num(a, b) else {
+            return Ok(false);
+        };
+        return Ok(ordered(ord, op));
+    }
     let ord = match (a, b) {
         (Value::Missing, _) | (_, Value::Missing) => return Ok(false),
-        (Value::Int(a), Value::Int(b)) => a.cmp(b),
         (Value::String(a), Value::String(b)) => a.cmp(b),
         _ => return Err("ordering operands have incompatible types".into()),
     };
-    Ok(match op {
+    Ok(ordered(ord, op))
+}
+
+fn ordered(ord: core::cmp::Ordering, op: BinaryOp) -> bool {
+    match op {
         BinaryOp::Less => ord.is_lt(),
         BinaryOp::LessEqual => ord.is_le(),
         BinaryOp::Greater => ord.is_gt(),
         BinaryOp::GreaterEqual => ord.is_ge(),
         _ => false,
-    })
+    }
 }
 
 pub fn evaluate(expr: &Expr, ctx: &Ctx, e: u32) -> Result<bool, EvalError> {
@@ -1292,6 +1523,7 @@ fn eval(expr: &Expr, ctx: &Ctx, e: u32) -> Result<Value, EvalError> {
     Ok(match &expr.kind {
         ExprKind::Bool(v) => Value::Bool(*v),
         ExprKind::Integer(v) => Value::Int(integer(v.value, v.unit, &ctx.store.unit).map_err(err)?),
+        ExprKind::Float(v) => Value::Float(float(v.value, v.unit, &ctx.store.unit).map_err(err)?),
         ExprKind::String(v) => Value::String(v.clone()),
         ExprKind::Identifier(name) => field(name, ctx, e, expr)?,
         ExprKind::Unary {
@@ -1313,8 +1545,8 @@ fn eval(expr: &Expr, ctx: &Ctx, e: u32) -> Result<Value, EvalError> {
                 .collect::<Result<_, _>>()?,
         ),
         ExprKind::Range { start, end } => {
-            match (eval(start, ctx, e)?, eval(end, ctx, e)?) {
-                (Value::Int(a), Value::Int(b)) => Value::Range(a, b),
+            match (eval(start, ctx, e)?.num(), eval(end, ctx, e)?.num()) {
+                (Some(a), Some(b)) => Value::Range(a, b),
                 _ => return Err(EvalError::at(expr, "range bounds must be numeric")),
             }
         }
@@ -1363,6 +1595,8 @@ fn eval(expr: &Expr, ctx: &Ctx, e: u32) -> Result<Value, EvalError> {
             match &callee.kind {
                 ExprKind::Identifier(name) if name == "abs" && args.len() == 1 => match args[0] {
                     Value::Int(v) => Value::Int(v.abs()),
+                    Value::Float(v) => Value::Float(v.abs()),
+                    Value::Missing => Value::Missing,
                     _ => return Err(EvalError::at(expr, "abs requires a number")),
                 },
                 ExprKind::Field { base, name } if args.len() == 1 => {
@@ -1430,14 +1664,23 @@ fn eval(expr: &Expr, ctx: &Ctx, e: u32) -> Result<Value, EvalError> {
                     | BinaryOp::LessEqual
                     | BinaryOp::Greater
                     | BinaryOp::GreaterEqual => Value::Bool(order(&a, &b, *op).map_err(err)?),
-                    BinaryOp::Add | BinaryOp::Subtract => match (a, b) {
-                        (Value::Int(x), Value::Int(y)) => {
+                    BinaryOp::Add | BinaryOp::Subtract => match (a.num(), b.num()) {
+                        (Some(Num::Int(x)), Some(Num::Int(y))) => {
                             Value::Int(if *op == BinaryOp::Add { x + y } else { x - y })
+                        }
+                        (Some(x), Some(y)) => {
+                            let (x, y) = (as_f64(x), as_f64(y));
+                            Value::Float(if *op == BinaryOp::Add { x + y } else { x - y })
                         }
                         _ => Value::Missing,
                     },
                     BinaryOp::In => Value::Bool(match b {
-                        Value::Range(lo, hi) => matches!(a, Value::Int(v) if lo <= v && v < hi),
+                        // half-open, and exact: the bound and the value are
+                        // compared in their own representations
+                        Value::Range(lo, hi) => a.num().is_some_and(|v| {
+                            cmp_num(lo, v).is_some_and(|o| o.is_le())
+                                && cmp_num(v, hi).is_some_and(|o| o.is_lt())
+                        }),
                         Value::Set(values) => member(&values, &a),
                         _ => return Err(EvalError::at(expr, "`in` requires a set or range")),
                     }),
@@ -1451,7 +1694,10 @@ fn eval(expr: &Expr, ctx: &Ctx, e: u32) -> Result<Value, EvalError> {
                         }
                     }),
                     BinaryOp::Overlaps => Value::Bool(match (a, b) {
-                        (Value::Range(a0, a1), Value::Range(b0, b1)) => a0 < b1 && b0 < a1,
+                        (Value::Range(a0, a1), Value::Range(b0, b1)) => {
+                            cmp_num(a0, b1).is_some_and(|o| o.is_lt())
+                                && cmp_num(b0, a1).is_some_and(|o| o.is_lt())
+                        }
                         _ => return Err(EvalError::at(expr, "`overlaps` requires two ranges")),
                     }),
                     BinaryOp::And | BinaryOp::Or => unreachable!(),

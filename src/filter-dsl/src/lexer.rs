@@ -1,9 +1,10 @@
-use crate::{IntegerLiteral, ParseError, Span, Unit};
+use crate::{FloatLiteral, IntegerLiteral, ParseError, Span, Unit};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum TokenKind {
     Identifier(String),
     Integer(IntegerLiteral),
+    Float(FloatLiteral),
     String(String),
     True,
     False,
@@ -36,7 +37,7 @@ pub(crate) enum TokenKind {
     Eof,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Token {
     pub kind: TokenKind,
     pub span: Span,
@@ -157,6 +158,17 @@ impl Lexer<'_> {
         });
     }
 
+    /// True when the byte `ahead` positions past the cursor is a digit.
+    fn digit_at(&self, ahead: usize) -> bool {
+        self.rest().as_bytes().get(ahead).is_some_and(u8::is_ascii_digit)
+    }
+
+    fn eat_digits(&mut self) {
+        while self.rest().as_bytes().first().is_some_and(u8::is_ascii_digit) {
+            self.offset += 1;
+        }
+    }
+
     fn integer(&mut self) -> Result<(), ParseError> {
         let start = self.offset;
         let hexadecimal = self.rest().starts_with("0x");
@@ -204,6 +216,30 @@ impl Lexer<'_> {
         }
 
         let digits_end = self.offset;
+
+        // A fraction or an exponent makes this a float. Both are decimal-only,
+        // and both are consumed before the unit suffix is read, so `1e-3` is
+        // an exponent rather than a literal in an unknown unit `e`.
+        let mut float = false;
+        if !hexadecimal {
+            // The dot is a decimal point only when a digit follows it, which
+            // is what keeps `0..8` a range whose lower bound is `0` and
+            // `0.2..0.8` a range between two floats.
+            if self.rest().starts_with('.') && self.digit_at(1) {
+                float = true;
+                self.offset += 1;
+                self.eat_digits();
+            }
+            let exponent = self.rest().as_bytes().first().is_some_and(|c| *c == b'e' || *c == b'E');
+            let signed = self.rest().as_bytes().get(1).is_some_and(|c| *c == b'+' || *c == b'-');
+            if exponent && (self.digit_at(1) || (signed && self.digit_at(2))) {
+                float = true;
+                self.offset += if signed { 2 } else { 1 };
+                self.eat_digits();
+            }
+        }
+        let number_end = self.offset;
+
         while self
             .rest()
             .as_bytes()
@@ -212,7 +248,7 @@ impl Lexer<'_> {
         {
             self.offset += 1;
         }
-        let suffix = &self.source[digits_end..self.offset];
+        let suffix = &self.source[number_end..self.offset];
         let unit = match suffix {
             "" => None,
             "B" => Some(Unit::Bytes),
@@ -226,10 +262,31 @@ impl Lexer<'_> {
             _ => {
                 return Err(ParseError::new(
                     format!("unknown numeric unit `{suffix}`"),
-                    Span::new(digits_end, self.offset),
+                    Span::new(number_end, self.offset),
                 ));
             }
         };
+
+        if float {
+            let text: String = self.source[start..number_end]
+                .chars()
+                .filter(|ch| *ch != '_')
+                .collect();
+            let value = text.parse::<f64>().map_err(|_| {
+                ParseError::new("invalid float literal", Span::new(start, number_end))
+            })?;
+            if !value.is_finite() {
+                return Err(ParseError::new(
+                    "float literal overflows",
+                    Span::new(start, number_end),
+                ));
+            }
+            self.tokens.push(Token {
+                kind: TokenKind::Float(FloatLiteral { value, unit }),
+                span: Span::new(start, self.offset),
+            });
+            return Ok(());
+        }
 
         let digits: String = self.source[digits_start..digits_end]
             .chars()

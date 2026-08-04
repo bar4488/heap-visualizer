@@ -10,7 +10,7 @@ mod error;
 mod lexer;
 mod parser;
 
-pub use ast::{BinaryOp, Expr, ExprKind, IntegerLiteral, Span, UnaryOp, Unit};
+pub use ast::{BinaryOp, Expr, ExprKind, FloatLiteral, IntegerLiteral, Span, UnaryOp, Unit};
 pub use completion::{completion_context, CompletionContext, CompletionSite, OperandKind};
 pub use error::ParseError;
 pub use parser::parse;

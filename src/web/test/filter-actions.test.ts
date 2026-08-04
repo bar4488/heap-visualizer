@@ -103,8 +103,14 @@ test('a custom field with no addressable value offers no predicate', () => {
   assert.equal(customFieldPredicate('maybe', null), null);
   assert.equal(customFieldPredicate('nested', { a: 1 }), null);
   assert.equal(customFieldPredicate('list', [1, 2]), null);
-  // the language has integers; a fractional number has no literal
-  assert.equal(customFieldPredicate('ratio', 1.5), null);
+});
+
+test('a fractional value gets the float literal that matches it (ANL-012)', () => {
+  assert.equal(customFieldPredicate('ratio', 1.5), 'field.ratio == 1.5');
+  assert.equal(customFieldPredicate('fill-ratio', 0.986), 'field["fill-ratio"] == 0.986');
+  // a small value prints in exponent form, which the language reads as a float
+  assert.equal(customFieldPredicate('drift', 1e-7), 'field.drift == 1e-7');
+  assert.equal(customFieldPredicate('drift', -2.5), 'field.drift == -2.5');
 });
 
 test('a custom field predicate toggles like any other conjunct', () => {

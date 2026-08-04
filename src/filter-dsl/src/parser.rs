@@ -256,6 +256,7 @@ impl Parser {
                 expr
             }
             TokenKind::Integer(value) => Expr::new(ExprKind::Integer(value), token.span),
+            TokenKind::Float(value) => Expr::new(ExprKind::Float(value), token.span),
             TokenKind::String(value) => Expr::new(ExprKind::String(value), token.span),
             TokenKind::True => Expr::new(ExprKind::Bool(true), token.span),
             TokenKind::False => Expr::new(ExprKind::Bool(false), token.span),
@@ -322,11 +323,12 @@ impl Parser {
         let token = self.advance();
         match token.kind {
             TokenKind::Integer(value) => Ok(Expr::new(ExprKind::Integer(value), token.span)),
+            TokenKind::Float(value) => Ok(Expr::new(ExprKind::Float(value), token.span)),
             TokenKind::String(value) => Ok(Expr::new(ExprKind::String(value), token.span)),
             TokenKind::True => Ok(Expr::new(ExprKind::Bool(true), token.span)),
             TokenKind::False => Ok(Expr::new(ExprKind::Bool(false), token.span)),
             _ => Err(ParseError::new(
-                "set members must be integer, string, or boolean constants",
+                "set members must be number, string, or boolean constants",
                 token.span,
             )),
         }

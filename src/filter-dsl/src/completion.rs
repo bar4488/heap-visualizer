@@ -8,7 +8,7 @@ pub enum OperandKind {
     RangeEnd,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum CompletionSite {
     Expression,
     Exact { expression: Expr },
@@ -20,7 +20,7 @@ pub enum CompletionSite {
     AfterIs { negated: bool },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CompletionContext {
     pub replacement: Span,
     pub prefix: String,
@@ -398,7 +398,11 @@ fn set_delimiter_context(source: &str, cursor: usize) -> Option<CompletionSite> 
     let last = meaningful.last()?;
     if matches!(
         last.kind,
-        TokenKind::String(_) | TokenKind::Integer(_) | TokenKind::True | TokenKind::False
+        TokenKind::String(_)
+            | TokenKind::Integer(_)
+            | TokenKind::Float(_)
+            | TokenKind::True
+            | TokenKind::False
     ) {
         Some(CompletionSite::SetDelimiter)
     } else {
