@@ -52,7 +52,12 @@ The Filter panel is now the E010 draft/applied expression editor and speaks
 the typed check/apply/mode worker protocol. The core exports the first
 column-backed evaluator for built-in allocation/death fields, boolean and
 numeric/string operations, sets/ranges, overlap, missing tests, and string /
-stack methods. Its attached completion list follows the complete grammar
+stack methods. **Numbers are integers and floats**, one type to the person
+writing a filter, mixing under every numeric operator and comparing exactly —
+an integer operand is never widened to a double
+([ANL-012](../spec/07-analysis.md#anl-012-numbers-in-the-filter-language),
+[T034](tickets/T034-the-filter-language-has-floats.md); E010 sketched the
+language as integral-only and carries a note saying so). Its attached completion list follows the complete grammar
 position: exact fields advance to operators, right-hand expressions are
 filtered to the required type, calls/sets/ranges progress through their
 delimiters, and live site/thread/tag values come from that same core catalog.
