@@ -1161,7 +1161,12 @@ pub fn event_rects(s: &Store, v: &mut View, cfg: &Cfg, w: u32, e: u32, scroll: f
         return "[]".to_string();
     }
     let ei = e as usize;
-    let creator = if s.op[ei] == OP_F { s.target[ei] } else { e };
+    let creator = match s.op[ei] {
+        OP_F => s.target[ei],
+        // a custom event marks no region of the map
+        OP_E => return "[]".to_string(),
+        _ => e,
+    };
     if creator == NONE_U32 {
         return "[]".to_string();
     }
@@ -1184,6 +1189,11 @@ pub fn move_link(s: &Store, v: &mut View, cfg: &Cfg, w: u32, scroll: f64) -> Str
     v.ensure_rows();
     let mut out = String::from("{");
     out.push_str(&format!("\"op\":{},\"seq\":{}", op, e));
+    if op == OP_E {
+        // nothing moved, nothing was freed: a landmark draws no link
+        out.push_str(",\"old\":[],\"new\":[]}");
+        return out;
+    }
     if op == OP_M {
         out.push_str(",\"old\":[],\"new\":[");
         out.push_str(&region_rects(s, v, cfg, w, s.addr[ei], s.span(e), scroll, 4));
@@ -1240,6 +1250,8 @@ pub fn scroll_for_event(s: &Store, v: &mut View, cfg: &Cfg, h: u32, e: u32) -> f
                 return -1.0;
             }
         }
+        // a custom event sits at no address: leave the viewport where it is
+        OP_E => return -1.0,
         _ => e,
     };
     let a = s.addr[creator as usize];

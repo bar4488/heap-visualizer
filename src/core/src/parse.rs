@@ -28,6 +28,7 @@ pub struct Parser {
     site_map: HashMap<String, u32>,
     thr_map: HashMap<i64, u16>,
     stack_map: HashMap<String, u32>,
+    label_map: HashMap<String, u32>,
     extra_map: HashMap<String, u32>,
     /// Custom field name -> index into `store.fields`.
     field_map: HashMap<String, u32>,
@@ -36,7 +37,7 @@ pub struct Parser {
 
 #[derive(Default)]
 struct Raw {
-    op: u8, // b'M' | b'F' | b'R' | b'H' | 0
+    op: u8, // b'M' | b'F' | b'R' | b'E' | b'H' | 0
     id: Option<u64>,
     old_id: Option<u64>,
     addr: Option<u64>,
@@ -75,6 +76,7 @@ impl Parser {
             site_map: HashMap::new(),
             thr_map: HashMap::new(),
             stack_map: HashMap::new(),
+            label_map: HashMap::new(),
             extra_map: HashMap::new(),
             field_map: HashMap::new(),
             seq_warned: false,
@@ -135,6 +137,7 @@ impl Parser {
         self.site_map = HashMap::new();
         self.thr_map = HashMap::new();
         self.stack_map = HashMap::new();
+        self.label_map = HashMap::new();
         self.extra_map = HashMap::new();
         self.field_map = HashMap::new();
     }
@@ -193,6 +196,16 @@ impl Parser {
         let i = self.store.stacks.len() as u32;
         self.stack_map.insert(st.clone(), i);
         self.store.stacks.push(st);
+        i
+    }
+
+    fn intern_label(&mut self, label: String) -> u32 {
+        if let Some(&i) = self.label_map.get(&label) {
+            return i;
+        }
+        let i = self.store.ev_labels.len() as u32;
+        self.label_map.insert(label.clone(), i);
+        self.store.ev_labels.push(label);
         i
     }
 
@@ -333,6 +346,7 @@ impl Parser {
             b'M' => OP_M,
             b'F' => OP_F,
             b'R' => OP_R,
+            b'E' => OP_E,
             _ => {
                 // unknown record type: forward-compat, ignore
                 return;
@@ -344,7 +358,14 @@ impl Parser {
             return;
         }
 
-        let site = match raw.site {
+        // A custom event is a label and its custom fields; `site` and `stack`
+        // describe an allocation, so they are not read off one — a site nobody
+        // ever allocated from would sit in the legend at count zero.
+        let label = match (op, raw.title.take()) {
+            (OP_E, Some(title)) => self.intern_label(title),
+            _ => NONE_U32,
+        };
+        let site = match raw.site.filter(|_| op != OP_E) {
             Some(name) => self.intern_site(name),
             None => NONE_U32,
         };
@@ -352,7 +373,7 @@ impl Parser {
             Some(v) => self.intern_thr(v),
             None => NONE_U16,
         };
-        let stack = match raw.stack {
+        let stack = match raw.stack.filter(|_| op != OP_E) {
             Some(st) => self.intern_stack(st),
             None => NONE_U32,
         };
@@ -435,6 +456,7 @@ impl Parser {
         s.thr_idx.push(thr_idx);
         s.site.push(site);
         push_lazy(&mut s.stack, e as usize, stack, NONE_U32);
+        push_lazy(&mut s.label, e as usize, label, NONE_U32);
         push_lazy(&mut s.extra, e as usize, extra, NONE_U32);
         s.target.push(target);
         if op == OP_R && (o_addr != 0 || o_size != 0) {
@@ -514,7 +536,8 @@ impl Parser {
         match op {
             OP_M => s.n_malloc += 1,
             OP_F => s.n_free += 1,
-            _ => s.n_realloc += 1,
+            OP_R => s.n_realloc += 1,
+            _ => s.n_custom += 1,
         }
 
         // ---- periodic snapshot ----
@@ -550,6 +573,7 @@ impl Default for Store {
             thr_idx: Vec::new(),
             site: Vec::new(),
             stack: Vec::new(),
+            label: Vec::new(),
             extra: Vec::new(),
             target: Vec::new(),
             old_geom: std::collections::HashMap::new(),
@@ -566,6 +590,7 @@ impl Default for Store {
             thrs: Vec::new(),
             thr_count: Vec::new(),
             stacks: Vec::new(),
+            ev_labels: Vec::new(),
             extras: Vec::new(),
             fields: Vec::new(),
             extra_fields: Vec::new(),
@@ -586,6 +611,7 @@ impl Default for Store {
             n_malloc: 0,
             n_free: 0,
             n_realloc: 0,
+            n_custom: 0,
             warnings: Vec::new(),
             warn_counts: [0; NWARN],
             overlap_index: Vec::new(),

@@ -171,13 +171,14 @@ pub extern "C" fn hp_meta_json() {
     o.clear();
     o.push('{');
     o.push_str(&format!(
-        "\"n\":{},\"tMin\":{},\"tMax\":{},\"nMalloc\":{},\"nFree\":{},\"nRealloc\":{}",
+        "\"n\":{},\"tMin\":{},\"tMax\":{},\"nMalloc\":{},\"nFree\":{},\"nRealloc\":{},\"nCustom\":{}",
         s.len(),
         s.t_min as f64,
         s.t_max as f64,
         s.n_malloc,
         s.n_free,
-        s.n_realloc
+        s.n_realloc,
+        s.n_custom
     ));
     o.push_str(&format!(
         ",\"addrMin\":\"0x{:x}\",\"addrMax\":\"0x{:x}\",\"peakLive\":{},\"totalAlloc\":{}",
@@ -356,7 +357,12 @@ pub extern "C" fn hp_center_x_for_event(e: u32) -> f64 {
         return a.cfg.x_pan;
     }
     let ei = e as usize;
-    let creator = if s.op[ei] == OP_F { s.target[ei] } else { e };
+    let creator = match s.op[ei] {
+        OP_F => s.target[ei],
+        // a custom event has no address to pan to
+        OP_E => return a.cfg.x_pan,
+        _ => e,
+    };
     if creator == NONE_U32 {
         return a.cfg.x_pan;
     }
@@ -1229,6 +1235,34 @@ fn push_event_json(o: &mut String, s: &Store, e: u32) {
         return;
     }
     let ei = e as usize;
+    // A custom event touches no allocation, so it reports none: `e` is null
+    // rather than its own index, which is what stops every consumer of this
+    // record from selecting a non-allocation. It carries a label and its
+    // custom fields instead of geometry.
+    if s.op[ei] == OP_E {
+        o.push_str(&format!(
+            "{{\"seq\":{},\"op\":{},\"t\":{},\"e\":null,\"title\":",
+            e, OP_E, s.t[ei] as f64
+        ));
+        if s.label_at(e) != NONE_U32 {
+            push_json_str(o, &s.ev_labels[s.label_at(e) as usize]);
+        } else {
+            o.push_str("null");
+        }
+        o.push_str(",\"thr\":");
+        if s.thr_idx[ei] != NONE_U16 {
+            o.push_str(&format!("{}", s.thrs[s.thr_idx[ei] as usize]));
+        } else {
+            o.push_str("null");
+        }
+        if s.extra_at(e) != NONE_U32 {
+            o.push_str(",\"extra\":{");
+            o.push_str(&s.extras[s.extra_at(e) as usize]);
+            o.push('}');
+        }
+        o.push('}');
+        return;
+    }
     // an F row carries no geometry of its own: report the allocation it kills
     let gi = if s.op[ei] == OP_F && s.target[ei] != NONE_U32 {
         s.target[ei] as usize
@@ -1305,6 +1339,11 @@ fn ensure_ev_filtered(a: &mut App) {
     let f = &a.cfg.filter;
     let mut list = Vec::new();
     for e in 0..s.len() {
+        // a custom event has no allocation to pass a filter, so it drops out
+        // of the filtered list exactly as an F of an unknown id does
+        if s.op[e as usize] == OP_E {
+            continue;
+        }
         let creator = if s.op[e as usize] == OP_F {
             s.target[e as usize]
         } else {
@@ -1459,6 +1498,96 @@ mod tests {
         assert_eq!(s.old_geom_at(3), (0x2000, 128));
         let total: u32 = s.warn_counts.iter().sum();
         assert_eq!(total, 0);
+    }
+
+    /// SAMPLE with a labelled custom event before each allocation event.
+    const SAMPLE_WITH_EVENTS: &str = r#"{"op":"H","v":1,"unit":"ns","row_bytes":4096,"title":"test"}
+{"t":100,"op":"E","title":"phase: warm up","phase":"warmup"}
+{"t":100,"op":"M","id":1,"addr":"0x1000","size":64,"thr":0,"site":"a"}
+{"t":200,"op":"M","id":2,"addr":"0x2000","size":128,"thr":1,"site":"b"}
+{"t":200,"op":"E","title":"phase: steady","phase":"steady","frame":12}
+{"t":200,"op":"F","id":1}
+{"t":300,"op":"R","id":3,"old_id":2,"addr":"0x3000","size":256}
+{"t":400,"op":"F","id":3}
+{"t":500,"op":"E"}
+"#;
+
+    #[test]
+    fn custom_events_occupy_a_seq_and_touch_no_allocation() {
+        let mut a = load(SAMPLE_WITH_EVENTS);
+        {
+            let s = &a.store;
+            assert_eq!(s.len(), 8);
+            assert_eq!(s.n_custom, 3);
+            // not counted as allocation activity, and not a warning either
+            assert_eq!((s.n_malloc, s.n_free, s.n_realloc), (2, 2, 1));
+            assert_eq!(s.warn_counts.iter().sum::<u32>(), 0);
+            // labels intern; an E without a title has none
+            assert_eq!(s.ev_labels, vec!["phase: warm up", "phase: steady"]);
+            assert_eq!(s.label_at(0), 0);
+            assert_eq!(s.label_at(1), NONE_U32);
+            assert_eq!(s.label_at(7), NONE_U32);
+            // and they leave the timelines' alloc/free marks alone
+            assert_eq!(s.green_pre[8] - s.green_pre[7], 0);
+            assert_eq!(s.red_pre[8] - s.red_pre[7], 0);
+        }
+
+        // at every playhead position the live set equals the same trace with
+        // the custom events removed, seeked past the allocation events applied
+        // so far — the whole claim that they change nothing
+        let mut plain = load(SAMPLE);
+        for applied in 0..=a.store.len() {
+            let allocs = a.store.op[..applied as usize]
+                .iter()
+                .filter(|&&op| op != OP_E)
+                .count() as u32;
+            a.view.seek(&a.store, applied);
+            plain.view.seek(&plain.store, allocs);
+            assert_eq!(a.view.live_count, plain.view.live_count, "applied {applied}");
+            assert_eq!(a.view.live_bytes, plain.view.live_bytes, "applied {applied}");
+        }
+    }
+
+    #[test]
+    fn custom_events_report_no_allocation_and_no_geometry() {
+        let mut a = load(SAMPLE_WITH_EVENTS);
+        a.view.seek(&a.store, a.store.len());
+        let mut out = String::new();
+        push_event_json(&mut out, &a.store, 3);
+        // `e` is null: nothing downstream can select a custom event as if it
+        // were an allocation
+        assert!(out.contains("\"e\":null"), "{out}");
+        assert!(out.contains("\"title\":\"phase: steady\""), "{out}");
+        assert!(out.contains("\"extra\":{\"phase\":\"steady\",\"frame\":12}"), "{out}");
+        assert!(!out.contains("addr"), "{out}");
+
+        // and no creator-walking path picks one up
+        assert_eq!(
+            render::event_rects(&a.store, &mut a.view, &a.cfg, 200, 3, 0.0),
+            "[]"
+        );
+        assert_eq!(
+            render::scroll_for_event(&a.store, &mut a.view, &a.cfg, 400, 3),
+            -1.0
+        );
+        a.view.seek(&a.store, 4); // playhead just past the custom event
+        let link = render::move_link(&a.store, &mut a.view, &a.cfg, 200, 0.0);
+        assert!(link.contains("\"old\":[],\"new\":[]"), "{link}");
+    }
+
+    #[test]
+    fn the_filtered_event_list_drops_custom_events() {
+        let mut a = load(SAMPLE_WITH_EVENTS);
+        a.cfg.filter.mode = render::FILTER_DIM;
+        a.cfg.filter.sites_set = true;
+        a.cfg.filter.sites = vec![u64::MAX];
+        a.ev_dirty = true;
+        ensure_ev_filtered(&mut a);
+        assert!(
+            a.ev_filtered.iter().all(|&e| a.store.op[e as usize] != OP_E),
+            "{:?}",
+            a.ev_filtered
+        );
     }
 
     #[test]

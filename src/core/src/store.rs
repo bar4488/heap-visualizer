@@ -7,6 +7,10 @@ pub const NONE_U16: u16 = u16::MAX;
 pub const OP_M: u8 = 0;
 pub const OP_F: u8 = 1;
 pub const OP_R: u8 = 2;
+/// A producer's own landmark record: it occupies a seq and carries a label
+/// plus custom fields, and touches no allocation state whatsoever. Every
+/// creator-walking path must skip it — it has no geometry to walk.
+pub const OP_E: u8 = 3;
 
 // Warning codes.
 pub const W_MALFORMED: u8 = 0;
@@ -114,6 +118,9 @@ pub struct Store {
     /// (unrecognized top-level keys), interned as a raw JSON object body
     /// fragment; NONE_U32 = none. Lazy column; read via `extra_at`.
     pub extra: Vec<u32>,
+    /// For E events: index into `ev_labels` of the record's `title`
+    /// (NONE_U32 = unlabelled). Lazy column; read via `label_at`.
+    pub label: Vec<u32>,
     /// For F/R events: index of the creating event (M/R) being killed.
     pub target: Vec<u32>,
     /// For R events only: old geometry (resolved from target, else record
@@ -146,6 +153,9 @@ pub struct Store {
     pub thrs: Vec<i64>,
     pub thr_count: Vec<u32>,
     pub stacks: Vec<String>,
+    /// Labels of custom (E) events. Interned like sites: a producer marking
+    /// every frame writes the same handful of strings over and over.
+    pub ev_labels: Vec<String>,
     pub extras: Vec<String>,
     /// Catalog of the caller-defined top-level fields seen anywhere in the
     /// trace, in first-observation order. Built as fragments are interned —
@@ -177,6 +187,9 @@ pub struct Store {
     pub n_malloc: u32,
     pub n_free: u32,
     pub n_realloc: u32,
+    /// Custom (E) events. Not an allocation count — kept apart from the three
+    /// above so nothing sums them into one.
+    pub n_custom: u32,
 
     pub warnings: Vec<Warning>,
     pub warn_counts: [u32; NWARN],
@@ -221,6 +234,17 @@ impl Store {
             NONE_U32
         } else {
             self.stack[e as usize]
+        }
+    }
+
+    /// Label intern index for event `e` (NONE_U32 = absent). Lazy column: only
+    /// a trace carrying custom events materializes it.
+    #[inline]
+    pub fn label_at(&self, e: u32) -> u32 {
+        if self.label.is_empty() {
+            NONE_U32
+        } else {
+            self.label[e as usize]
         }
     }
 

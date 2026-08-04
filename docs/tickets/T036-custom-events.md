@@ -1,7 +1,7 @@
 ---
 id: T036
 title: Custom E events carry a producer's own landmarks through the viewer
-status: todo
+status: doing
 updated: 2026-08-05
 ---
 
