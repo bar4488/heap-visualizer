@@ -50,6 +50,30 @@ test('keys and values are escaped for HTML and for the DSL', () => {
   ));
 });
 
+test('the freeing record contributes its own rows', () => {
+  const html = customFieldsSection({ pool: 'gfx' }, { reason: 'scope' });
+  assert.ok(html.includes('data-predicate="field.pool == &quot;gfx&quot;"'));
+  // a key only the death record carries reads through `death.field`
+  assert.ok(html.includes('data-predicate="death.field.reason == &quot;scope&quot;"'));
+  assert.equal((html.match(/cf-at/g) || []).length, 1);
+});
+
+test('a key on both records appears once, holding the death value', () => {
+  const html = customFieldsSection({ refcount: 7, pool: 'gfx' }, { refcount: 0 });
+  assert.equal((html.match(/>refcount</g) || []).length, 1);
+  assert.ok(html.includes('<span class="cf-value cf-number">0</span>'));
+  assert.ok(!html.includes('>7<'));
+  // and the predicate matches the value shown, not the creator's
+  assert.ok(html.includes('data-predicate="death.field.refcount == 0"'));
+  assert.ok(html.includes('data-predicate="field.pool == &quot;gfx&quot;"'));
+});
+
+test('death fields alone still make a section; neither makes none', () => {
+  assert.ok(customFieldsSection(undefined, { reason: 'scope' }).includes('trace fields'));
+  assert.equal(customFieldsSection(undefined, undefined), '');
+  assert.equal(customFieldsSection({}, {}), '');
+});
+
 test('a fractional number is shown and filterable (ANL-012)', () => {
   // the language reads `1.5` as the same double the trace's own text did, so
   // the predicate matches the record it was written from

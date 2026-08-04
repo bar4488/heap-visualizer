@@ -598,6 +598,11 @@ input[type="color"] {
 .detail-body .cf-row { display: contents; }
 .detail-body .cf-row .k { width: auto; }
 .detail-body .cf-value { overflow-wrap: anywhere; }
+/* which record the value came from: only the freeing one is marked */
+.detail-body .cf-at {
+  margin-left: 5px; padding: 0 3px; border: 1px solid var(--border);
+  border-radius: 3px; font-size: 9px; letter-spacing: 0.03em; opacity: 0.75;
+}
 .detail-body .cf-value.cf-string { color: var(--fg); }
 .detail-body .cf-value.cf-number { color: var(--accent); }
 .detail-body .cf-filter {

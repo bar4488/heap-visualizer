@@ -19,3 +19,8 @@ panel's trace-field list has something in it.
 
 Anything the format does not define is yours. Unknown top-level keys ride along
 on the record, show up in an allocation's panel, and can be filtered on.
+
+That holds for `free` and `realloc` records too, and they describe the same
+allocation the `malloc` did — so the panel shows both sets in one list. Where
+the two records use the same key, the freeing one wins and says so; the sample
+frees carry `refcount: 0` over the allocation's own count.

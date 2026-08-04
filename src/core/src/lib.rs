@@ -1848,6 +1848,23 @@ not json at all
         assert!(!info2.contains("\"extra\""));
     }
 
+    #[test]
+    fn death_record_extras_ride_with_the_allocation() {
+        let src = r#"{"op":"H","v":1,"unit":"ns","row_bytes":4096}
+{"seq":0,"t":100,"op":"M","id":1,"addr":"0x1000","size":64,"pool":"gfx","refs":3}
+{"seq":1,"t":200,"op":"M","id":2,"addr":"0x2000","size":32,"pool":"ui"}
+{"seq":2,"t":300,"op":"F","id":1,"refs":0,"reason":"scope"}
+"#;
+        let mut a = load(src);
+        a.view.seek(&a.store, 3);
+        let freed = render::alloc_info(&a.store, &mut a.view, &a.cfg, 200, 0x1000, 0, 0.0);
+        assert!(freed.contains("\"extra\":{\"pool\":\"gfx\",\"refs\":3}"));
+        assert!(freed.contains("\"deathExtra\":{\"refs\":0,\"reason\":\"scope\"}"));
+        // never freed: there is no second record to read
+        let live = render::alloc_info(&a.store, &mut a.view, &a.cfg, 200, 0x2000, 1, 0.0);
+        assert!(!live.contains("deathExtra"));
+    }
+
     fn field(a: &App, name: &str) -> FieldInfo {
         a.store
             .fields

@@ -307,9 +307,16 @@ class Generator:
         return extra
 
     def _extra_free(self) -> dict:
+        """Fields on the record that ends an allocation.
+
+        `refcount` is deliberately a key the allocation record also carries:
+        the panel merges the two records and the later one wins, so this is
+        the case that shows a value changing between birth and death.
+        """
         return {
             "reason": self.rng.choice(["scope", "explicit", "shutdown"]),
             "drained": self.rng.random() < 0.5,
+            "refcount": 0,
         }
 
     def _extra_realloc(self, site_name: str, size: int, thr: int, grew: bool) -> dict:

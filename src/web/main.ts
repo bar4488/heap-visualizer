@@ -1898,7 +1898,7 @@ function buildDetailBody(root, info) {
   if (info.stack) {
     html += `<div class="row"><span class="k">stack</span><span>${esc(info.stack)}</span></div>`;
   }
-  html += customFieldsSection(info.extra);
+  html += customFieldsSection(info.extra, info.deathExtra);
   const curTags = (info.tags || [])
     .map((id) => UI.tags[id - 1]?.name)
     .filter(Boolean)

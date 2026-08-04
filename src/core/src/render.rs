@@ -1084,6 +1084,15 @@ pub fn alloc_info(
         out.push_str(&s.extras[s.extra_at(e) as usize]);
         out.push('}');
     }
+    // The record that freed it describes the same allocation, so its custom
+    // fields belong in the same section — kept separate here because the two
+    // sides are addressed differently by the filter language (`field.k` vs
+    // `death.field.k`), and the panel needs to know which row is which.
+    if death != NONE_U32 && s.extra_at(death) != NONE_U32 {
+        out.push_str(",\"deathExtra\":{");
+        out.push_str(&s.extras[s.extra_at(death) as usize]);
+        out.push('}');
+    }
     // highlight rects across visible rows
     out.push_str(",\"rects\":[");
     let rects = region_rects(s, v, cfg, w, a, s.span(e), scroll, 32);

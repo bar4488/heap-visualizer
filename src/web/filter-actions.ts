@@ -53,11 +53,16 @@ export function quoteFilterString(value: string): string {
 /**
  * How a custom trace field is spelled in the filter language. Dot access is
  * sugar for an identifier-shaped key; anything else needs the bracket form.
+ *
+ * `atDeath` reads the record that freed the allocation rather than the one
+ * that created it — the same key on the two records is two operands
+ * ([ANL-010]).
  */
-export function customFieldRef(key: string): string {
+export function customFieldRef(key: string, atDeath = false): string {
+  const root = atDeath ? 'death.field' : 'field';
   return /^[A-Za-z_][A-Za-z0-9_]*$/.test(key)
-    ? `field.${key}`
-    : `field[${quoteFilterString(key)}]`;
+    ? `${root}.${key}`
+    : `${root}[${quoteFilterString(key)}]`;
 }
 
 /**
@@ -65,8 +70,12 @@ export function customFieldRef(key: string): string {
  * not something the language can address — an object, an array, or `null`,
  * which is missingness rather than a value ([ANL-010]).
  */
-export function customFieldPredicate(key: string, value: unknown): string | null {
-  const ref = customFieldRef(key);
+export function customFieldPredicate(
+  key: string,
+  value: unknown,
+  atDeath = false,
+): string | null {
+  const ref = customFieldRef(key, atDeath);
   if (typeof value === 'string') return `${ref} == ${quoteFilterString(value)}`;
   if (typeof value === 'boolean') return value ? ref : `!${ref}`;
   // Numbers are exact on both sides: the language reads a fractional literal

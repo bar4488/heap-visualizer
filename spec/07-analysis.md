@@ -245,15 +245,24 @@ panel: full info (id, range, size/usable, site, thread, birth/death, stack)
 plus the editing surface — name, tags, highlight color, focus/birth/death
 navigation.
 
-The record's **custom fields** ([TRACE-001](02-trace-format.md#trace-001-general-rules))
-are a separate, labelled section below the engine's own, so a producer's data
-is never mistaken for a field the viewer defines. Values are presented
-according to their type, and each field the filter language can address
-carries an action that writes the predicate matching this value and applies it
-— one gesture, as the legend chips are ([ANL-003](#anl-003-filter)). A field
-holding an object or an array is shown and carries no such action, because
+The **custom fields** ([TRACE-001](02-trace-format.md#trace-001-general-rules))
+of both records that describe the allocation — the one that created it and the
+`F`/`R` that freed it — are a separate, labelled section below the engine's
+own, so a producer's data is never mistaken for a field the viewer defines.
+Values are presented according to their type, and each field the filter
+language can address carries an action that writes the predicate matching this
+value and applies it — one gesture, as the legend chips are
+([ANL-003](#anl-003-filter)). A field holding an object or an array is shown
+and carries no such action, because
 [ANL-010](#anl-010-filtering-on-custom-trace-fields) cannot express it. An
-allocation carrying no custom fields shows no section.
+allocation whose records carry no custom fields shows no section.
+
+A key carried by both records appears **once, holding the death record's
+value**: the later record is the later word on the same allocation. Such a row
+must be marked as coming from the freeing record, and its predicate must read
+`death.field.<key>` — the two sides are two operands to the filter language,
+and a row must never offer a predicate that does not match the value shown
+beside it.
 
 **Pinning** (📌) freezes the current
 panel as an independent window and lets the next selection open fresh; any
