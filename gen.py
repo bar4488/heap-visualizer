@@ -64,6 +64,18 @@ SITES: list[Site] = [
 ]
 
 
+# Custom-field string values chosen to be awkward to render: markup, quotes,
+# a backslash, an em dash, non-ASCII, and the empty string. A viewer that
+# escapes correctly shows these literally.
+LABELS: list[str] = [
+    '<b>hot</b> path',
+    'name="req" & id=\'7\'',
+    'C:\\temp\\arena\\block',
+    'ünïcode — ✓ 熱い',
+    '',
+]
+
+
 def _log_uniform(rng: random.Random, lo: int, hi: int) -> int:
     """Integer drawn log-uniformly in [lo, hi] (small sizes are common)."""
     if lo >= hi:
@@ -241,13 +253,25 @@ class Generator:
 
     # -- custom trace fields ------------------------------------------------
 
-    def _extra_alloc(self, site: Site, size: int, thr: int) -> dict:
+    def _extra_alloc(self, site_name: str, size: int, thr: int) -> dict:
         """Caller-defined fields on an allocation record (--fields).
 
         Deliberately varied in shape, because the point of the flag is to
-        exercise what the viewer does with producer data: a plain string, an
-        integer, a key that is not identifier-shaped, a sometimes-null field,
-        and a nested object that the filter language cannot address at all.
+        exercise what the viewer does with producer data. One case per thing
+        the allocation panel or the field catalog treats differently:
+
+        `pool`, `refcount`      a plain string and a plain integer
+        `allocator-class`       a key that is not identifier-shaped
+        `owner`                 present on most records, JSON null on some
+        `hot`                   a boolean
+        `fill-ratio`            a float, which is not one of the three
+                                catalogued scalar types
+        `retries`               absent from most records, rather than null
+        `label`                 markup, quotes and non-ASCII, to test escaping
+        `origin`                long enough to test the panel's value column
+        `revision`              an integer on some records, a string on others
+        `debug`, `chunks`       a nested object and an array, neither of which
+                                the filter language can address
         """
         pool = "large" if size >= 4096 else ("small" if size < 256 else "medium")
         extra: dict = {
@@ -257,12 +281,46 @@ class Generator:
         }
         # present on most records, null on some: an optional field
         extra["owner"] = None if self.rng.random() < 0.2 else f"worker-{thr}"
+        extra["hot"] = self.rng.random() < 0.3
+        extra["fill-ratio"] = round(self.rng.uniform(0.05, 0.99), 3)
+        # absent, not null: the other way a field is optional
+        if self.rng.random() < 0.25:
+            extra["retries"] = self.rng.randint(1, 3)
+        if self.rng.random() < 0.2:
+            extra["label"] = self.rng.choice(LABELS)
+        if self.rng.random() < 0.1:
+            extra["origin"] = (
+                f"/build/src/runtime/{site_name}/pool/"
+                f"{pool}/allocate_aligned_with_fallback.cpp:{self.rng.randint(60, 900)}"
+            )
+        # the same key holding two types across the trace: the catalog must
+        # refuse to type it, and say so
+        if self.rng.random() < 0.3:
+            extra["revision"] = (
+                self.rng.randint(1, 40) if self.rng.random() < 0.5
+                else f"r{self.rng.randint(1, 40)}"
+            )
         if self.rng.random() < 0.15:
-            extra["debug"] = {"site": site.name, "hint": [size, thr]}
+            extra["debug"] = {"site": site_name, "hint": [size, thr]}
+        if self.rng.random() < 0.12:
+            extra["chunks"] = [self.rng.randint(1, 64) for _ in range(self.rng.randint(2, 4))]
         return extra
 
     def _extra_free(self) -> dict:
-        return {"reason": self.rng.choice(["scope", "explicit", "shutdown"])}
+        return {
+            "reason": self.rng.choice(["scope", "explicit", "shutdown"]),
+            "drained": self.rng.random() < 0.5,
+        }
+
+    def _extra_realloc(self, site_name: str, size: int, thr: int, grew: bool) -> dict:
+        """Fields on a realloc record: the allocation fields, plus how it grew.
+
+        A realloc record describes a new allocation, so the panel shows these
+        the same way it shows a malloc's.
+        """
+        extra = self._extra_alloc(site_name, size, thr)
+        extra["grew"] = grew
+        return extra
 
     def _do_malloc(self, out) -> None:
         site = self._pick_site()
@@ -291,7 +349,7 @@ class Generator:
             "thr": thr, "site": site.name,
         }
         if self.args.fields:
-            rec.update(self._extra_alloc(site, size, thr))
+            rec.update(self._extra_alloc(site.name, size, thr))
         self._emit(out, rec)
 
     def _do_free(self, out, aid: int) -> None:
@@ -336,12 +394,16 @@ class Generator:
         self._note_addr(new_addr, new_size)
         self.n_realloc += 1
 
-        self._emit(out, {
+        rec = {
             "t": self.t, "op": "R", "id": new_id, "old_id": old_id,
             "addr": self._hexaddr(new_addr), "size": new_size,
             "old_addr": self._hexaddr(old.addr), "old_size": old.size,
             "thr": old.thr, "site": old.site,
-        })
+        }
+        if self.args.fields:
+            rec.update(self._extra_realloc(old.site, new_size, old.thr,
+                                           new_size > old.size))
+        self._emit(out, rec)
 
     def _drain_due_frees(self, out) -> None:
         """Emit every scheduled free whose time has arrived."""
@@ -454,9 +516,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--unit", default="ns", choices=["ns", "us", "ms", "s", "tick"],
                    help="time unit written to the header")
     p.add_argument("--fields", action="store_true",
-                   help="attach caller-defined custom fields to records "
-                        "(pool, refcount, allocator-class, owner, debug on "
-                        "allocations; reason on frees)")
+                   help="attach caller-defined custom fields to records: one "
+                        "case per value shape and catalog outcome a viewer "
+                        "distinguishes (see Generator._extra_alloc)")
     p.add_argument("--quiet", action="store_true",
                    help="suppress the stderr summary")
     return p.parse_args(argv)
