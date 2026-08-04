@@ -38,6 +38,7 @@ skipped (forward compatibility).
 | `M`  | **Malloc** — a new allocation becomes live. |
 | `F`  | **Free** — an existing allocation ends. |
 | `R`  | **Realloc** — one allocation ends and a new one begins, atomically. |
+| `E`  | **Custom event** — a producer's own landmark; not an allocation ([TRACE-010](#trace-010-custom-event-record-e)). |
 
 ## TRACE-003: Header record `H`
 
@@ -145,3 +146,34 @@ and malformed lines are all rendered as best as possible and surfaced as
 warnings ([MODEL-005](03-core-model.md#model-005-warnings)). The only records dropped
 entirely are unparseable lines, records with no/unknown `op`, creator records
 with no `addr`, and `F` with the null id.
+
+## TRACE-010: Custom event record `E`
+
+A record a producer emits to mark a place in its own program — a phase, a
+frame, a request boundary — rather than an allocation operation.
+
+```json
+{"seq":21,"t":6804,"op":"E","title":"phase: request","phase":"request","frame":1}
+```
+
+| Field | Req | Meaning |
+|-------|-----|---------|
+| `title` | — | Human label for this event, shown wherever it is listed. |
+| `t`, `seq`, `thr` | — | As for `M`. |
+
+It **must** occupy an event index like any other record, so the playhead can
+rest on it and `seq` keeps counting stream positions. It **must not** affect
+allocation state in any way: nothing becomes live or dies, the address range
+and the size totals are unchanged, and it contributes no allocation or free
+mark to either timeline. A trace's live set at every playhead position must be
+identical to that of the same trace with its `E` records removed.
+
+Every other unrecognized top-level key is an ordinary custom field
+([TRACE-001](#trace-001-general-rules)) and is catalogued as one. `site` and
+`stack` describe an allocation and are not read off an `E` record.
+
+Because an `E` record is not an allocation, nothing that resolves an event to
+an allocation may resolve one: it is never selected, never highlighted on the
+map, never tagged, never named, and never matched by a filter
+([ANL-003](07-analysis.md#anl-003-filter)) — the filter language is over
+allocations, so the filtered event list omits `E` records entirely.

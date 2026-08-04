@@ -4,6 +4,12 @@ A trace is a `.heapl` file: JSONL, one JSON object per line, `#` for comments.
 A header line, then one line per `malloc` / `free` / `realloc`. Nothing else —
 no schema to install, no binary framing.
 
+There is a fourth record type you never have to use: `{"op":"E","title":"…"}`
+is a **custom event** — a landmark, not an allocation. It has no address and
+no size and changes nothing about the heap; it takes a place in the stream so
+that a long trace has parts you can name. Give it any fields you like; the
+Events panel lists it, and clicking it opens an Event window showing them.
+
 [Download a sample trace](guide/traces/format.heapl) — 60 operations, with a
 commented header explaining every field.
 

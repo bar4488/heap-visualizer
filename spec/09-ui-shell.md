@@ -108,6 +108,12 @@ exactly one of those.
 - **Events**: the virtualized event list, with follow and filtered-only
   toggles ([NAV-005](06-playback-navigation.md#nav-005-the-events-panel)).
 
+The **Event** window is per-event rather than a declared panel, as the
+allocation window is: it opens when a custom event is stepped onto or clicked,
+and carries no pin — there is nothing per-allocation about it to restore, and
+it is not part of the panel table
+([SHELL-003](#shell-003-panels-are-declared-as-data)).
+
 ## SHELL-007: Status and feedback conventions
 
 Every non-obvious action acknowledges itself in the status info line

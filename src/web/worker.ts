@@ -188,7 +188,9 @@ function allDirty() {
 // Detail-panel info for the allocation an event touches; null when the
 // event resolves to no creator (e.g. a free of an unknown id).
 function allocInfo(event) {
-  if (!event || event.e === undefined || !canvases.addr) return null;
+  // `e == null` covers a custom event, which is not an allocation and has no
+  // info to render
+  if (!event || event.e == null || !canvases.addr) return null;
   E.hp_alloc_info(event.e, canvases.addr.width, S.scroll);
   return retJson();
 }
@@ -589,8 +591,10 @@ onmessage = async (ev: MessageEvent<ToWorker>) => {
       if (evIdx >= 0 && canvases.addr) {
         E.hp_event_json(evIdx);
         const event = retJson();
-        // select the allocation the event touches (F selects what it frees)
-        if (event && event.e !== undefined) E.hp_set_selected(event.e);
+        // select the allocation the event touches (F selects what it frees).
+        // A custom event reports `e: null` — it touches none, so the current
+        // selection is left exactly as it was.
+        if (event && event.e != null) E.hp_set_selected(event.e);
         if (!S.locked) {
           // center the address-line on that allocation
           const y = E.hp_scroll_for_event(evIdx, canvases.addr.height);
@@ -628,7 +632,7 @@ onmessage = async (ev: MessageEvent<ToWorker>) => {
       if (m.select && evIdx >= 0) {
         E.hp_event_json(evIdx);
         const event = retJson();
-        if (event && event.e !== undefined) E.hp_set_selected(event.e);
+        if (event && event.e != null) E.hp_set_selected(event.e);
         postMessage({ type: 'stepped', event, info: allocInfo(event) });
       }
       allDirty();

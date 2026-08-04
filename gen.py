@@ -76,6 +76,18 @@ LABELS: list[str] = [
 ]
 
 
+# Landmarks for --events: what a producer would actually mark a trace with.
+# The last one is unlabelled, because a record with no `title` is legal and a
+# viewer has to show something anyway.
+PHASES: list[str | None] = [
+    "phase: startup",
+    "phase: request",
+    "phase: render",
+    "phase: teardown",
+    None,
+]
+
+
 def _log_uniform(rng: random.Random, lo: int, hi: int) -> int:
     """Integer drawn log-uniformly in [lo, hi] (small sizes are common)."""
     if lo >= hi:
@@ -188,6 +200,7 @@ class Generator:
         self._site_weights = [s.weight for s in SITES]
         # stats
         self.n_malloc = self.n_free = self.n_realloc = self.n_leak = 0
+        self.n_custom = 0
         self.peak_live_bytes = 0
         self._cur_live_bytes = 0
         self.min_addr = args.arena_base
@@ -412,6 +425,23 @@ class Generator:
                                            new_size > old.size))
         self._emit(out, rec)
 
+    def _do_custom_event(self, out) -> None:
+        """A landmark record (--events): not an allocation event at all.
+
+        It carries a `title` and the producer's own fields, and nothing the
+        viewer reads as geometry — that is the whole record type.
+        """
+        title = PHASES[self.n_custom % len(PHASES)]
+        rec: dict = {"t": self.t, "op": "E"}
+        if title is not None:
+            rec["title"] = title
+        rec["phase"] = (title or "unlabelled").removeprefix("phase: ")
+        rec["frame"] = self.n_custom
+        if self.rng.random() < 0.4:
+            rec["note"] = self.rng.choice(LABELS)
+        self.n_custom += 1
+        self._emit(out, rec)
+
     def _drain_due_frees(self, out) -> None:
         """Emit every scheduled free whose time has arrived."""
         while self.pending and self.pending[0][0] <= self.t:
@@ -425,9 +455,13 @@ class Generator:
         args = self.args
         self._emit_header(out)
 
-        for _ in range(args.ops):
+        # one landmark per --events-every operations, plus one at the start
+        every = args.events_every if args.events else 0
+        for i in range(args.ops):
             self._advance_time()
             self._drain_due_frees(out)
+            if every and i % every == 0:
+                self._do_custom_event(out)
             if self.rng.random() < args.realloc_rate:
                 self._do_realloc(out)
             else:
@@ -468,14 +502,14 @@ class Generator:
         span = self.max_addr - self.min_addr
         return (
             "heap-visualizer gen.py summary\n"
-            "  events        : %d (M=%d F=%d R=%d)\n"
+            "  events        : %d (M=%d F=%d R=%d E=%d)\n"
             "  leaked allocs : %d (%d bytes still live at end)\n"
             "  peak live     : %d bytes (%.2f MiB)\n"
             "  address span  : %s .. %s (%d bytes, %.2f MiB)\n"
             "  final t       : %d %s\n"
             % (
                 self.seq,
-                self.n_malloc, self.n_free, self.n_realloc,
+                self.n_malloc, self.n_free, self.n_realloc, self.n_custom,
                 self.n_leak, self._cur_live_bytes,
                 self.peak_live_bytes, self.peak_live_bytes / (1 << 20),
                 self._hexaddr(self.min_addr), self._hexaddr(self.max_addr),
@@ -526,6 +560,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="attach caller-defined custom fields to records: one "
                         "case per value shape and catalog outcome a viewer "
                         "distinguishes (see Generator._extra_alloc)")
+    p.add_argument("--events", action="store_true",
+                   help="emit custom `E` landmark records between operations: "
+                        "not allocations, just labels a reader can navigate by")
+    p.add_argument("--events-every", type=int, default=25, dest="events_every",
+                   help="operations between custom events, with --events")
     p.add_argument("--quiet", action="store_true",
                    help="suppress the stderr summary")
     return p.parse_args(argv)

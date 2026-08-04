@@ -1,6 +1,6 @@
 # Now
 
-_Updated: 2026-08-01._
+_Updated: 2026-08-05._
 
 **No count in this file is written by hand.** Test counts, module sizes and
 requirement totals are derivable, and the ones that used to be here had all
@@ -9,8 +9,9 @@ command instead; [context](context.md#test) lists them, and
 [T022](tickets/T022-docs-cite-commands-not-counts.md) is why.
 
 A heap allocation visualizer: a `.heapl` JSONL trace of malloc/free/realloc
-events on an address-line map with two coordinated timelines and full time
-travel, plus an analysis layer (tags, names, colors, marks) saved to `.heapa`.
+events — plus a producer's own `E` landmarks — on an address-line map with two
+coordinated timelines and full time travel, plus an analysis layer (tags,
+names, colors, marks) saved to `.heapa`.
 Rust → WASM core in a Web Worker with OffscreenCanvas; the page is fully
 client-side.
 
@@ -75,11 +76,28 @@ Custom trace fields are filterable — `field.pool`, `field["allocator-class"]`,
 are the rules. Both have a UI: an allocation's custom fields are their own
 typed section of the allocation panel, each with a one-click predicate, and the
 Filter panel lists the trace's whole field catalog — the panel section is
-`src/web/heap/custom-fields.ts`, pure and tested. `python3 gen.py --fields`
+`src/web/heap/custom-fields.ts`, pure and tested. That section covers **both records that describe an allocation** — the
+creator's fields and the freeing `F`/`R`'s, merged, the death value winning a
+shared key and its row reading `death.field.<key>`
+([ANL-006](../spec/07-analysis.md#anl-006-the-allocation-panel-and-pinned-windows),
+[T035](tickets/T035-death-record-custom-fields.md)). `python3 gen.py --fields`
 makes a trace carrying custom fields, one case per value shape and catalog
 outcome the UI distinguishes ([T031](tickets/T031-gen-fields-cover-the-panel-cases.md));
 `src/web/guide/traces/format.heapl` is a small checked-in one, and no other
 trace in the repository has any.
+
+**The trace format has a fourth record type, and it is not an allocation.**
+`{"op":"E","title":"phase: request",…}` is a producer's landmark: it takes a
+seq so the playhead can rest on it, carries a label and custom fields, and
+touches no allocation state at all
+([TRACE-010](../spec/02-trace-format.md#trace-010-custom-event-record-e),
+[T036](tickets/T036-custom-events.md)). The Events panel lists it as an `E`
+row and a click opens the Event window; the filtered list drops it, because
+the filter language is over allocations. The engine's guard is that
+`push_event_json` reports `e: null` for one — nothing downstream can select a
+non-allocation — and the native test is that the live set at every playhead
+position matches the same trace with the `E` records removed. `gen.py
+--events` emits them.
 
 The expression is also the single state behind the filter actions. Site,
 thread, tag, and untagged legend chips toggle visible predicates and apply
@@ -167,7 +185,8 @@ second domain is concrete — see
 not queued and why, with a proposed order. It binds nothing. Its candidate A
 (the custom-field and `named()` surfaces) closed on 2026-08-01; what remains is
 T009, an exploration for undo/redo, an exploration for multiple open traces,
-and two candidates it argues should stay untouched.
+and two candidates it argues should stay untouched. T035 and T036 came from
+outside that list, on 2026-08-05.
 
 **How work is written here changed on 2026-08-01.**
 [D007](decisions/D007-prose-serves-the-code.md) binds: one record per finished
@@ -185,6 +204,12 @@ friction with `PROTOCOL.md` itself goes in
   with user value, not side effects of a refactor. Neither has a ticket; each
   needs its own exploration first. The second is also a prerequisite question
   for T004. See [E007 §6](explorations/E007-web-architecture-direction.md).
+- **Custom events on the timelines and on the map, and pinnable Event
+  windows.** `E` records are listed and inspectable, and that was the whole
+  ticket ([T036](tickets/T036-custom-events.md) names both as non-goals).
+  Drawing a landmark on the two strips is a layout question of its own; pinning
+  would mean extending machinery that is keyed to creator event indexes and
+  persisted per allocation.
 - **Browser automation, a boot harness, and a module-graph check.**
   [D001](decisions/D001-web-changes-are-hand-smoke-tested.md), and
   [E009](explorations/E009-the-hand-verification-bottleneck.md) for why the

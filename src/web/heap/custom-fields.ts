@@ -32,12 +32,21 @@ function mergeFields(extra, deathExtra) {
  * carries an action writing the predicate that matches it.
  *
  * Returns '' for an allocation carrying none, so no empty section appears.
+ *
+ * `opts.actions: false` drops the per-field filter action — the Event window
+ * shows the same section for a record that is not an allocation, and the
+ * filter language has nothing to say about one.
  */
-export function customFieldsSection(extra, deathExtra = null) {
+export function customFieldsSection(
+  extra,
+  deathExtra = null,
+  opts: { actions?: boolean } = {},
+) {
   const entries = mergeFields(extra, deathExtra);
   if (!entries.length) return '';
+  const withActions = opts.actions !== false;
   const rows = entries.map(({ key, value, atDeath }) => {
-    const predicate = customFieldPredicate(key, value, atDeath);
+    const predicate = withActions ? customFieldPredicate(key, value, atDeath) : null;
     let cls = 'dim';
     let text;
     if (typeof value === 'string') {
@@ -52,10 +61,13 @@ export function customFieldsSection(extra, deathExtra = null) {
       // an object or an array: shown, and not filterable — see ANL-010
       text = JSON.stringify(value);
     }
-    const action = predicate
-      ? `<button class="cf-filter" data-predicate="${esc(predicate)}"
+    let action = '<span></span>'; // the grid's third cell, kept even when empty
+    if (withActions) {
+      action = predicate
+        ? `<button class="cf-filter" data-predicate="${esc(predicate)}"
           title="Filter to allocations where ${esc(key)} is this value">⊙</button>`
-      : '<span class="cf-filter cf-none" title="not addressable by the filter language">·</span>';
+        : '<span class="cf-filter cf-none" title="not addressable by the filter language">·</span>';
+    }
     // the badge is the whole tell that this value is the freeing record's, and
     // it is why the row's predicate reads `death.field.…`
     const source = atDeath

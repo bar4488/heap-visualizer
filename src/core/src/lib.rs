@@ -2555,11 +2555,11 @@ not json at all
         assert_eq!(field(&a, "fill-ratio").scalar(), Some(FIELD_FLOAT));
         assert_eq!(
             matches_custom(&a, r#"field["fill-ratio"] > 0.5"#).len(),
-            30
+            25
         );
         assert_eq!(
             matches_custom(&a, r#"field["fill-ratio"] in 0.2..0.8"#).len(),
-            33
+            34
         );
     }
 

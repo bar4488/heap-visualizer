@@ -17,6 +17,8 @@ import { esc, fmtNum } from '../fmt.ts';
 let d = null;
 
 const EV_ROW = 18;            // px per row
+/** The engine's op code for a custom (`E`) event. */
+const OP_EVENT = 3;
 // Browsers cap how tall an element may be, so beyond this the spacer stops
 // being 1:1 with the event count (~700 k events at EV_ROW) and scroll
 // position is index-mapped instead. Two things degrade past that point and
@@ -73,21 +75,35 @@ export function onEventsSlice(m) {
   }
   evState.seqs = m.events.map((ev) => ev.seq);
   const curSeq = d.ui.state ? d.ui.state.seq - 1 : -1;
-  $('events-rows').innerHTML = m.events.map((ev) => `
-    <div class="ev-row${ev.seq === curSeq ? ' cur' : ''}" data-seq="${ev.seq}" title="click: seek here and select the allocation">
-      <span class="ev-seq">${fmtNum(ev.seq)}</span>
-      <span class="ev-op ${['m', 'f', 'r'][ev.op]}">${['M', 'F', 'R'][ev.op]}</span>
+  $('events-rows').innerHTML = m.events.map((ev) => {
+    const cur = ev.seq === curSeq ? ' cur' : '';
+    const head = `<span class="ev-seq">${fmtNum(ev.seq)}</span>`
+      + `<span class="ev-op ${['m', 'f', 'r', 'e'][ev.op]}">${['M', 'F', 'R', 'E'][ev.op]}</span>`;
+    // a custom event has no geometry to show: its label takes the width of the
+    // address, size and site columns together (TRACE-010)
+    if (ev.op === OP_EVENT) {
+      return `
+    <div class="ev-row ev-custom${cur}" data-seq="${ev.seq}" data-custom="1" title="click: seek here and open this event">
+      ${head}<span class="ev-label">${ev.title ? esc(ev.title) : '<span class="dim">event</span>'}</span>
+    </div>`;
+    }
+    return `
+    <div class="ev-row${cur}" data-seq="${ev.seq}" title="click: seek here and select the allocation">
+      ${head}
       <span class="ev-addr">${ev.addr}</span>
       <span class="ev-size">${d.fmtAllocSize(ev.size)}</span>
       <span class="ev-site">${ev.site ? esc(ev.site) : ''}</span>
-    </div>`).join('');
+    </div>`;
+  }).join('');
   $$('.ev-row', $('events-rows')).forEach((row) => {
     row.onclick = () => {
       const seq = +row.dataset.seq;
-      if (d.ui.state && seq === d.ui.state.seq - 1) {
+      if (d.ui.state && seq === d.ui.state.seq - 1 && !row.dataset.custom) {
         // already the current event: flash exactly where it is on the map
         d.post({ type: 'flash-event', seq });
       } else {
+        // a custom event is nowhere on the map, so re-clicking it reopens its
+        // window instead of flashing
         d.post({ type: 'jump', seq: seq + 1, select: true });
       }
     };

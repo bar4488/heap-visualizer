@@ -36,6 +36,7 @@ import {
   customFieldRef, hasTopLevelPredicate, quoteFilterString, toggleFilterPredicate,
 } from './filter-actions.ts';
 import { customFieldsSection } from './heap/custom-fields.ts';
+import { eventWindowBody, eventWindowTitle } from './heap/event-window.ts';
 import {
   applyDrawersState, drawersState, dock, initDrawers, drawerEl, refreshDrawerDividers,
 } from './shell/drawers.ts';
@@ -119,7 +120,10 @@ type UIState = {
 const CAT = ['#58a6ff', '#3fb950', '#f2cc60', '#ff7b72', '#bc8cff', '#39c5cf',
   '#f778ba', '#d29922', '#7ee787', '#ffa657', '#79c0ff', '#d2a8ff'];
 const RAMP = ['#0e4429', '#006d32', '#26a641', '#39d353'];
-const OPS = ['malloc', 'free', 'realloc'];
+// index = the engine's op code; 3 is a custom (E) event, which is a landmark
+// rather than an allocation operation
+const OPS = ['malloc', 'free', 'realloc', 'event'];
+const OP_EVENT = 3;
 
 const worker = new Worker('worker.js', { type: 'module' }) as TypedWorker;
 initRpc(worker);
@@ -334,6 +338,13 @@ worker.onmessage = (ev) => {
     case 'stepped':
       if (m.event) {
         const e = m.event;
+        if (e.op === OP_EVENT) {
+          // a custom event touches no allocation: the selection stays where it
+          // was, and its own window opens instead of the Allocation panel
+          $('st-info').textContent = `event${e.title ? ` · ${e.title}` : ''} · seq ${fmtNum(e.seq)}`;
+          fillEventPanel(e);
+          break;
+        }
         // the worker already selected the allocation this event touches
         if (e.e !== undefined && e.e !== null) UI.selected = e.e;
         $('st-info').textContent =
@@ -435,7 +446,8 @@ function onLoaded(m) {
   updateHzButton();
   $('trace-title').textContent = m.meta.title || UI.fileName || '';
   $('st-trace').textContent =
-    `${UI.fileName || ''} · ${fmtNum(m.n)} events (M ${fmtNum(m.meta.nMalloc)} / F ${fmtNum(m.meta.nFree)} / R ${fmtNum(m.meta.nRealloc)})` +
+    `${UI.fileName || ''} · ${fmtNum(m.n)} events (M ${fmtNum(m.meta.nMalloc)} / F ${fmtNum(m.meta.nFree)} / R ${fmtNum(m.meta.nRealloc)}`
+    + `${m.meta.nCustom ? ` / E ${fmtNum(m.meta.nCustom)}` : ''})` +
     ` · peak ${fmtBytes(m.meta.peakLive)} · ${m.meta.addrMin}–${m.meta.addrMax}`;
 
   // warnings badge
@@ -448,6 +460,7 @@ function onLoaded(m) {
   for (const { build } of PANELS) build?.();
 
   $('detail-panel').hidden = true;
+  $('event-panel').hidden = true;
   UI.detailInfo = null;
   // pinned allocation windows reference events of the previous trace
   $$('.pinned-detail').forEach((w) => w.remove());
@@ -2042,6 +2055,20 @@ function placeLivePanel(panel, reset = false) {
     panel.style.right = 'auto';
     panel.style.bottom = 'auto';
   }
+}
+
+// The Event window: the same chrome as the Allocation panel, for a record
+// that is not an allocation (TRACE-010). It is not pinnable and not part of
+// the panel table — like the allocation window it is opened per event, and
+// unlike it there is nothing per-allocation to restore.
+function fillEventPanel(event) {
+  const panel = $('event-panel');
+  panel.querySelector('.ph-t').textContent = eventWindowTitle(event);
+  $('event-body').innerHTML = eventWindowBody(event, fmtTime);
+  const wasHidden = panel.hidden;
+  panel.hidden = false;
+  if (wasHidden && !panelHasManualPosition(panel)) placeLivePanel(panel, true);
+  raisePanel(panel);
 }
 
 function fillDetailPanel(info) {

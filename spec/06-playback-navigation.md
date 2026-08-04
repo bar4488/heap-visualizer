@@ -62,18 +62,30 @@ executes the item's own action (seek, go-to-address, select+jump, …).
 A virtualized list of every event (seq, op, addr, size, site) — the textual
 twin of the sequential strip.
 
+A custom event ([TRACE-010](02-trace-format.md#trace-010-custom-event-record-e))
+has no geometry to list, so its row shows its label in place of the address,
+size and site, and is visibly not an allocation row. Clicking it seeks there
+and opens the **Event** window — label, seq, time, thread, and the record's
+custom fields, presented as the allocation panel presents them
+([ANL-006](07-analysis.md#anl-006-the-allocation-panel-and-pinned-windows)),
+minus the per-field filter action, which would speak about allocations rather
+than about this record. The current selection is left alone: a landmark
+replaces no allocation.
+
 - Rows are fetched on demand from the engine per visible window; the scroll
   height is capped (~12 M px) and index-mapped beyond that, so billion-row
   traces still scroll. (Browsers clamp element heights; the cap is a
   workaround, and position-in-list is approximate past it by design.)
 - Click = jump+select; clicking the *current* event instead flashes exactly
   where it is on the map (rect flash + expanding ping ring — the answer to
-  "where is this 16-byte allocation?").
+  "where is this 16-byte allocation?"). A custom event is nowhere on the map,
+  so re-clicking one reopens its window instead of flashing.
 - **Follow** (default on) keeps the current event scrolled into view during
   stepping/playback.
 - **Filtered** (default off) lists only events whose allocation passes the
   active Filter — an `F` follows the allocation it frees, so an allocation's
-  birth and death both stay in the list. Rows keep their real seq; the
+  birth and death both stay in the list; a custom event has no allocation and
+  drops out. Rows keep their real seq; the
   engine owns the filtered index (count, slice, seq→row position), rebuilt
   lazily after any filter or tag change.
 - Arrow keys step the selection (along the filtered rows when the toggle is
