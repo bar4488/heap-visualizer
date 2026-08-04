@@ -189,6 +189,10 @@
     <div id="filter-completions" class="filter-completions"
       role="listbox" aria-label="Filter completions" hidden></div>
     <div id="filter-status" class="filter-status" role="status">Empty</div>
+    <details id="filter-fields" class="filter-fields" hidden>
+      <summary class="saved-filter-head"><span>trace fields</span></summary>
+      <div id="filter-fields-list" class="filter-fields-list"></div>
+    </details>
     <div class="filter-action-row">
       <span>tag matches</span>
       <span class="grow"></span>
@@ -196,10 +200,8 @@
         aria-label="Tag name for current filter matches" list="tag-names">
       <button id="filter-to-tag" type="button">Tag matches</button>
     </div>
-    <div id="filter-fields" class="filter-fields" hidden>
-      <div class="saved-filter-head"><span>trace fields</span></div>
-      <div id="filter-fields-list" class="filter-fields-list"></div>
-    </div>
+    <div class="saved-filter-head"><span>tags · recolor, rename, delete</span></div>
+    <div id="tags-list" class="tag-list"></div>
     <div class="saved-filter-head">
       <span>saved filters</span>
       <span class="grow"></span>
@@ -218,10 +220,6 @@
     </span>
   </div>
   <div class="panel-body">
-    <div class="an-section">
-      <div class="group-title">tags · recolor, rename, delete</div>
-      <div id="tags-list" class="check-group"></div>
-    </div>
     <div class="an-section">
       <div class="group-title">time marks · click = jump in time (address view stays) · ⌖ = also center the place</div>
       <div id="an-bookmarks" class="check-group"></div>

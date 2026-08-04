@@ -396,7 +396,17 @@ button.d-pin.pinned {
 }
 .saved-filter-list .empty { color: var(--fg-dim); font-size: 11px; }
 
-/* the trace's custom field catalog: what this trace can be filtered on */
+/* the trace's custom field catalog: what this trace can be filtered on.
+   A <details>, collapsed by default — it is as long as the trace has fields */
+.filter-fields > summary {
+  cursor: pointer; list-style: none; user-select: none;
+}
+.filter-fields > summary::-webkit-details-marker { display: none; }
+.filter-fields > summary::before {
+  content: '\25B8'; display: inline-block; width: 9px; color: var(--fg-dim);
+}
+.filter-fields[open] > summary::before { content: '\25BE'; }
+.filter-fields > summary:hover { color: var(--fg); }
 .filter-fields-list {
   margin-top: 5px;
   display: grid; grid-template-columns: 1fr max-content max-content;
@@ -425,20 +435,25 @@ button.d-pin.pinned {
 #analysis-panel .head-actions { display: flex; gap: 6px; align-items: center; }
 #analysis-panel .group-title { color: var(--fg-dim); font-size: 11px; margin-bottom: 3px; }
 #analysis-panel .an-section { margin-bottom: 10px; }
-#analysis-panel .an-row {
+/* an-row is the Marks panel's list row and the Filter panel's tag row: the
+   tag list moved out of #analysis-panel (T032), so these are unscoped */
+.an-row {
   display: flex; gap: 6px; align-items: center; padding: 2px 0;
   font-family: ui-monospace, monospace; font-size: 11.5px;
 }
-#analysis-panel .an-row .grow { flex: 1; min-width: 0; }
-#analysis-panel .an-row input[type="text"] {
+.an-row .grow { flex: 1; min-width: 0; }
+.an-row input[type="text"] {
   background: transparent; border-color: transparent; padding: 1px 4px; min-width: 0;
 }
-#analysis-panel .an-row input[type="text"]:hover,
-#analysis-panel .an-row input[type="text"]:focus { border-color: var(--border); background: var(--bg3); }
-#analysis-panel .an-row .pos { color: var(--fg-dim); white-space: nowrap; cursor: pointer; }
-#analysis-panel .an-row .pos:hover { color: var(--fg); }
-#analysis-panel .an-row .x { padding: 0 6px; }
-#analysis-panel .empty { color: var(--fg-dim); font-size: 11px; font-style: italic; }
+.an-row input[type="text"]:hover,
+.an-row input[type="text"]:focus { border-color: var(--border); background: var(--bg3); }
+.an-row .pos { color: var(--fg-dim); white-space: nowrap; cursor: pointer; }
+.an-row .pos:hover { color: var(--fg); }
+.an-row .x { padding: 0 6px; }
+#analysis-panel .empty, .tag-list .empty {
+  color: var(--fg-dim); font-size: 11px; font-style: italic;
+}
+.tag-list { margin-top: 5px; }
 #tags-list label { align-items: center; }
 input[type="color"] {
   width: 22px; height: 18px; padding: 0; border-radius: 3px;

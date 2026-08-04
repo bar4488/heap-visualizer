@@ -57,7 +57,8 @@ export function tagIdFor(name) {
     syncTagDatalist();
     sendTagColors();
     buildTagsSection();
-    $('btn-analysis').hidden = false;
+    // the Marks panel is not revealed here: tags live in the Filter panel
+    // (T032), and loading a trace already unhides its button
     markDirty();
   }
   return i + 1;
