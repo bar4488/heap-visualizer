@@ -5,6 +5,7 @@
 
 pub mod json;
 mod filter_eval;
+mod filter_plan;
 pub mod parse;
 pub mod render;
 pub mod state;
@@ -12,6 +13,63 @@ pub mod store;
 pub mod timeline;
 
 use std::cell::UnsafeCell;
+
+/// A counting allocator, installed only in the test build, so that "the scan
+/// allocates nothing per event" ([D008]) can be asserted rather than reviewed.
+///
+/// The counter is thread-local, so a test measuring a delta around a scan is
+/// not disturbed by the rest of the suite running in parallel. `const`
+/// initialization matters: a lazily initialized thread-local would allocate
+/// inside the allocator.
+///
+/// [D008]: ../../docs/decisions/D008-the-filter-evaluator-is-a-lowered-plan.md
+#[cfg(test)]
+mod counting_alloc {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    thread_local! {
+        static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub struct Counting;
+
+    // SAFETY: every method forwards to `System` unchanged; the counter is a
+    // thread-local `Cell` of a plain integer and allocates nothing itself.
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            bump();
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(ptr, layout) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new: usize) -> *mut u8 {
+            bump();
+            unsafe { System.realloc(ptr, layout, new) }
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            bump();
+            unsafe { System.alloc_zeroed(layout) }
+        }
+    }
+
+    fn bump() {
+        let _ = ALLOCATIONS.try_with(|c| c.set(c.get() + 1));
+    }
+
+    /// Allocations made by this thread so far.
+    pub fn count() -> usize {
+        ALLOCATIONS.try_with(Cell::get).unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+#[global_allocator]
+static COUNTING_ALLOCATOR: counting_alloc::Counting = counting_alloc::Counting;
 
 use json::push_json_str;
 use parse::Parser;
@@ -636,30 +694,22 @@ pub extern "C" fn hp_filter_apply(len: u32) {
         return;
     }
     // custom field values are resolved once per distinct interned fragment,
-    // before the scan, so the per-event loop below never parses JSON
+    // before lowering, so neither the plan nor the scan parses JSON
     let fields = filter_eval::FieldValues::resolve(&expr, &a.store);
     let ctx = ctx.with_fields(&fields);
+    // the checked tree is compiled once and the scan executes the compiled
+    // form; nothing below this line looks at a syntax node (D008)
+    let plan = match filter_plan::lower(&expr, &ctx) {
+        Ok(plan) => plan,
+        Err(err) => {
+            filter_diagnostic_json(&mut a.out, "success", &err.message, err.span.start, err.span.end);
+            ret_str(&a.out);
+            return;
+        }
+    };
     let mut bits = vec![0u64; (a.store.len() as usize).div_ceil(64)];
-    let mut matches = 0u32;
-    let mut creators = 0u32;
-    for e in 0..a.store.len() {
-        if !matches!(a.store.op[e as usize], OP_M | OP_R) {
-            continue;
-        }
-        creators += 1;
-        match filter_eval::evaluate(&expr, &ctx, e) {
-            Ok(true) => {
-                bits[e as usize / 64] |= 1 << (e % 64);
-                matches += 1;
-            }
-            Ok(false) => {}
-            Err(err) => {
-                filter_diagnostic_json(&mut a.out, "success", &err.message, err.span.start, err.span.end);
-                ret_str(&a.out);
-                return;
-            }
-        }
-    }
+    let matches = filter_plan::scan(&plan, &ctx, &mut bits);
+    let creators = plan.creator_count();
     let mode = a.cfg.filter.mode;
     a.cfg.filter = Filter::default();
     a.cfg.filter.mode = mode;
@@ -1452,6 +1502,50 @@ mod tests {
         filter_eval::Ctx::new(store, &[], &[])
     }
 
+    /// The match bits a source produces, from the **lowered plan**, asserted
+    /// equal to the tree-walking oracle's answer on the way past.
+    ///
+    /// Every filter test goes through here, so the two implementations are
+    /// compared on every expression this suite knows. That comparison is what
+    /// makes replacing one with the other safe, and it is the reason
+    /// `filter_eval::evaluate` still exists ([D008]).
+    ///
+    /// [D008]: ../../docs/decisions/D008-the-filter-evaluator-is-a-lowered-plan.md
+    fn match_bits(a: &App, labels: &[String], source: &str) -> Vec<u64> {
+        let expr = heap_visualizer_filter_dsl::parse(source)
+            .unwrap_or_else(|e| panic!("{source}: {}", e.message));
+        let base = filter_eval::Ctx::new(&a.store, labels, &a.names);
+        filter_eval::check(&expr, &base).unwrap_or_else(|e| panic!("{source}: {}", e.message));
+        let fields = filter_eval::FieldValues::resolve(&expr, &a.store);
+        let full = base.with_fields(&fields);
+        let plan = filter_plan::lower(&expr, &full)
+            .unwrap_or_else(|e| panic!("{source}: {}", e.message));
+        let mut bits = vec![0u64; (a.store.len() as usize).div_ceil(64).max(1)];
+        let matched = filter_plan::scan(&plan, &full, &mut bits);
+
+        let mut oracle = vec![0u64; bits.len()];
+        let mut counted = 0;
+        for e in 0..a.store.len() {
+            if matches!(a.store.op[e as usize], OP_M | OP_R)
+                && filter_eval::evaluate(&expr, &full, e).unwrap()
+            {
+                oracle[e as usize / 64] |= 1 << (e % 64);
+                counted += 1;
+            }
+        }
+        assert_eq!(bits, oracle, "plan and oracle disagree on `{source}`");
+        assert_eq!(matched, counted, "match count disagrees on `{source}`");
+        bits
+    }
+
+    /// The creator events a source matches, through the plan.
+    fn matching(a: &App, labels: &[String], source: &str) -> Vec<u32> {
+        let bits = match_bits(a, labels, source);
+        (0..a.store.len())
+            .filter(|&e| bits[e as usize / 64] >> (e % 64) & 1 == 1)
+            .collect()
+    }
+
     fn tags(store: &Store) -> Vec<Vec<u8>> {
         (0..store.len())
             .map(|e| store.tag_ids(e).collect())
@@ -2162,16 +2256,7 @@ not json at all
     #[test]
     fn tag_filter_matches_snapshots_only_applied_matches() {
         let mut a = load(SAMPLE);
-        let expr = heap_visualizer_filter_dsl::parse("size >= 128").unwrap();
-        let mut bits = vec![0u64; (a.store.len() as usize).div_ceil(64)];
-        for e in 0..a.store.len() {
-            if matches!(a.store.op[e as usize], OP_M | OP_R)
-                && filter_eval::evaluate(&expr, &ctx(&a, &[]), e).unwrap()
-            {
-                bits[e as usize / 64] |= 1 << (e % 64);
-            }
-        }
-        a.cfg.filter.matches = Some(bits);
+        a.cfg.filter.matches = Some(match_bits(&a, &[], "size >= 128"));
 
         assert_eq!(tag_filter_matches(&mut a, 2), 2);
         assert_eq!(tags(&a.store), vec![vec![], vec![2], vec![], vec![2], vec![]]);
@@ -2251,27 +2336,15 @@ not json at all
         let mut a = load(SAMPLE);
         a.store.add_tag(1, 1);
         let labels = vec!["a".to_string(), "b".to_string()];
-        let expr = heap_visualizer_filter_dsl::parse(r#"tags contains "a""#).unwrap();
-        let mut bits = vec![0u64; (a.store.len() as usize).div_ceil(64)];
-        for e in 0..a.store.len() {
-            if matches!(a.store.op[e as usize], OP_M | OP_R)
-                && filter_eval::evaluate(&expr, &ctx(&a, &labels), e).unwrap()
-            {
-                bits[e as usize / 64] |= 1 << (e % 64);
-            }
-        }
-        a.cfg.filter.matches = Some(bits);
+        a.cfg.filter.matches = Some(match_bits(&a, &labels, r#"tags contains "a""#));
 
         assert_eq!(tag_filter_matches(&mut a, 2), 1);
         assert_eq!(tags(&a.store)[1], vec![1, 2]);
-        assert!(filter_eval::evaluate(&expr, &ctx(&a, &labels), 1).unwrap());
-        let b = heap_visualizer_filter_dsl::parse(r#"tags contains "b""#).unwrap();
-        assert!(filter_eval::evaluate(&b, &ctx(&a, &labels), 1).unwrap());
+        assert!(matching(&a, &labels, r#"tags contains "a""#).contains(&1));
+        assert!(matching(&a, &labels, r#"tags contains "b""#).contains(&1));
         // and the whole membership set is now visible to the language
-        let both = heap_visualizer_filter_dsl::parse(r#"tags == {"b", "a"}"#).unwrap();
-        assert!(filter_eval::evaluate(&both, &ctx(&a, &labels), 1).unwrap());
-        let only_a = heap_visualizer_filter_dsl::parse(r#"tags == {"a"}"#).unwrap();
-        assert!(!filter_eval::evaluate(&only_a, &ctx(&a, &labels), 1).unwrap());
+        assert!(matching(&a, &labels, r#"tags == {"b", "a"}"#).contains(&1));
+        assert!(!matching(&a, &labels, r#"tags == {"a"}"#).contains(&1));
 
         let mut dump = String::new();
         tags_dump_json(&a.store, &mut dump);
@@ -2462,17 +2535,13 @@ not json at all
     #[test]
     fn expression_filter_evaluates_creator_columns() {
         let a = load(SAMPLE);
-        let expr = heap_visualizer_filter_dsl::parse(
-            r#"size >= 100 && site == "b" && span overlaps 0x1800..0x2800"#,
-        ).unwrap();
-        assert!(!filter_eval::evaluate(&expr, &ctx(&a, &[]), 0).unwrap());
-        assert!(filter_eval::evaluate(&expr, &ctx(&a, &[]), 1).unwrap());
+        let columns = matching(&a, &[], r#"size >= 100 && site == "b" && span overlaps 0x1800..0x2800"#);
+        assert!(!columns.contains(&0));
+        assert!(columns.contains(&1));
 
-        let methods = heap_visualizer_filter_dsl::parse(
-            r#"freed && site.starts_with("a")"#,
-        ).unwrap();
-        assert!(filter_eval::evaluate(&methods, &ctx(&a, &[]), 0).unwrap());
-        assert!(!filter_eval::evaluate(&methods, &ctx(&a, &[]), 1).unwrap());
+        let methods = matching(&a, &[], r#"freed && site.starts_with("a")"#);
+        assert!(methods.contains(&0));
+        assert!(!methods.contains(&1));
     }
 
     /// Two creators with custom fields, one of them freed by an F record that
@@ -2484,15 +2553,7 @@ not json at all
 "#;
 
     fn matches_custom(a: &App, source: &str) -> Vec<u32> {
-        let expr = heap_visualizer_filter_dsl::parse(source).unwrap();
-        let base = ctx(a, &[]);
-        filter_eval::check(&expr, &base).unwrap_or_else(|e| panic!("{source}: {}", e.message));
-        let fields = filter_eval::FieldValues::resolve(&expr, &a.store);
-        let full = base.with_fields(&fields);
-        (0..a.store.len())
-            .filter(|&e| matches!(a.store.op[e as usize], OP_M | OP_R))
-            .filter(|&e| filter_eval::evaluate(&expr, &full, e).unwrap())
-            .collect()
+        matching(a, &[], source)
     }
 
     fn custom_error(a: &App, source: &str) -> String {
@@ -2600,6 +2661,208 @@ not json at all
         assert_eq!(
             matches_custom(&a, &format!("field.big < {two53}")),
             vec![] as Vec<u32>
+        );
+    }
+
+    /// The scan itself allocates nothing, however many events it looks at.
+    ///
+    /// This is the property [D008] is about and the one the tree walk broke —
+    /// it cloned a `String` for every site and stack it read and built a `Vec`
+    /// for every tag set. Lowering moved that work to the dictionary, and this
+    /// asserts it stayed there: the predicates below are exactly the ones that
+    /// used to allocate per event.
+    ///
+    /// [D008]: ../../docs/decisions/D008-the-filter-evaluator-is-a-lowered-plan.md
+    #[test]
+    fn the_scan_allocates_nothing_per_event() {
+        let src = include_str!("../../web/guide/traces/format.heapl");
+        let mut a = load(src);
+        for e in 0..a.store.len() {
+            if matches!(a.store.op[e as usize], OP_M | OP_R) && e % 3 == 0 {
+                a.store.add_tag(e, 1);
+            }
+        }
+        let labels = vec!["hot".to_string()];
+        a.names = vec![(0, "anchor".to_string())];
+
+        for source in [
+            "size >= 64",
+            "site == \"json_node\"",
+            "site.starts_with(\"j\")",
+            "site is missing",
+            "tags contains \"hot\"",
+            "tags == {\"hot\"}",
+            "field.pool == \"gfx\"",
+            "field[\"fill-ratio\"] > 0.5",
+            "death.field.reason is not missing",
+            "freed && lifetime > 10",
+            "abs(seq - named(\"anchor\").seq) <= 5",
+            "site == \"json_node\" && size >= 64 && tags contains \"hot\"",
+        ] {
+            let expr = heap_visualizer_filter_dsl::parse(source).unwrap();
+            let base = filter_eval::Ctx::new(&a.store, &labels, &a.names);
+            filter_eval::check(&expr, &base).unwrap();
+            let fields = filter_eval::FieldValues::resolve(&expr, &a.store);
+            let full = base.with_fields(&fields);
+            let plan = filter_plan::lower(&expr, &full).unwrap();
+            let mut bits = vec![0u64; (a.store.len() as usize).div_ceil(64).max(1)];
+
+            // everything that allocates — parsing, checking, resolving custom
+            // fields, lowering, the output buffer — has happened by now
+            let before = counting_alloc::count();
+            let matched = filter_plan::scan(&plan, &full, &mut bits);
+            let after = counting_alloc::count();
+            assert_eq!(
+                after, before,
+                "`{source}` allocated {} times during the scan",
+                after - before
+            );
+            std::hint::black_box(matched);
+        }
+    }
+
+    /// Every lowered shape, checked against the tree-walking oracle on a real
+    /// trace carrying sites, threads, deaths, reallocs, custom fields of all
+    /// four scalar types, tags, and a name.
+    ///
+    /// `matching` asserts the two agree bit for bit, so this test's body is
+    /// the corpus; a shape the plan lowers differently from the oracle fails
+    /// here rather than silently changing what a filter selects (T041).
+    #[test]
+    fn the_plan_agrees_with_the_oracle_on_every_shape() {
+        let src = include_str!("../../web/guide/traces/format.heapl");
+        let mut a = load(src);
+        // three overlapping tags, and one on a block boundary so the word-wise
+        // set equality has more than one block to get right
+        for e in 0..a.store.len() {
+            if matches!(a.store.op[e as usize], OP_M | OP_R) {
+                if e % 3 == 0 {
+                    a.store.add_tag(e, 1);
+                }
+                if e % 5 == 0 {
+                    a.store.add_tag(e, 2);
+                }
+                if e == 64 || e == 65 {
+                    a.store.add_tag(e, 3);
+                }
+            }
+        }
+        a.store.assert_tag_indexes();
+        let labels = ["hot", "suspect", "edge"].map(str::to_string).to_vec();
+        let named = (0..a.store.len())
+            .find(|&e| matches!(a.store.op[e as usize], OP_M))
+            .expect("a creator");
+        a.names = vec![(named, "anchor".to_string())];
+
+        let corpus = [
+            // constants and boolean structure
+            "true",
+            "false",
+            "size >= 0 && false",
+            "size >= 0 || true",
+            "!(size > 100)",
+            "!!freed",
+            "size > 100 && size < 4096 && thread == 1",
+            "size > 4096 || site == \"json_node\" || freed",
+            "(size > 100 || thread == 0) && !freed",
+            // numeric columns against constants, every operator
+            "size == 64",
+            "size != 64",
+            "size < 512",
+            "size <= 512",
+            "size > 512",
+            "size >= 512",
+            "id > 20",
+            "address >= 0x1000",
+            "end > address",
+            "seq < 40",
+            "time >= 1000",
+            "size >= 1KiB",
+            // optional columns, and the missing tests
+            "freed",
+            "!freed",
+            "usable is missing",
+            "usable is not missing",
+            "lifetime is not missing",
+            "lifetime > 100",
+            "death.seq is missing",
+            "death.seq > 50",
+            "death.time is not missing && death.time > 500",
+            // sets and ranges
+            "seq in {1, 2, 3, 5, 8}",
+            "size in 64..4096",
+            "thread in {0, 1}",
+            "thread in {7}",
+            "span overlaps 0x0..0xffffffff",
+            "address in 0x0..0x10",
+            // dictionary columns: string, integer, and the string methods
+            "site == \"json_node\"",
+            "site != \"json_node\"",
+            "site is missing",
+            "site is not missing",
+            "site in {\"json_node\", \"temp_string\"}",
+            "site < \"m\"",
+            "site.contains(\"_\")",
+            "site.starts_with(\"c\")",
+            "site.ends_with(\"e\")",
+            "thread == 0",
+            // custom fields, all four scalar shapes, on both records
+            "field.pool == \"gfx\"",
+            "field.pool is not missing",
+            "field.refcount >= 3",
+            "field.refcount in {1, 2, 3}",
+            "field[\"fill-ratio\"] > 0.5",
+            "field[\"fill-ratio\"] in 0.2..0.8",
+            "field.hot",
+            "!field.hot",
+            "field[\"allocator-class\"].starts_with(\"s\")",
+            "death.field.reason is not missing",
+            "death.field.reason == \"scope exit\"",
+            "death.field.drained",
+            // tags: membership, exact equality, emptiness
+            "tags contains \"hot\"",
+            "tags contains \"nobody\"",
+            "tags == {}",
+            "tags != {}",
+            "tags == {\"hot\"}",
+            "tags == {\"hot\", \"suspect\"}",
+            "tags == {\"edge\"}",
+            "tags == {\"hot\", \"nobody\"}",
+            "tags contains \"hot\" && tags contains \"suspect\"",
+            "tags contains \"hot\" && size > 100",
+            // arithmetic, abs, and column-against-column
+            "end - address >= size",
+            "address + size > 0x2000",
+            "abs(seq - 30) <= 5",
+            "usable is not missing && size - usable <= 0",
+            "size >= usable",
+            // named(), resolved while lowering
+            "size >= named(\"anchor\").size",
+            "abs(seq - named(\"anchor\").seq) <= 10",
+            "address >= named(\"anchor\").address",
+            "named(\"anchor\").span overlaps 0x0..0xffffffff",
+            "site == named(\"anchor\").site",
+        ];
+
+        let mut nonempty = 0;
+        let mut proper = 0;
+        let creators = a.store.creator_count() as usize;
+        for source in corpus {
+            let hits = matching(&a, &labels, source).len();
+            nonempty += usize::from(hits > 0);
+            proper += usize::from(hits > 0 && hits < creators);
+        }
+        // a corpus where everything matched nothing would pass the equivalence
+        // assertion while testing nothing
+        assert!(
+            nonempty >= corpus.len() * 3 / 4,
+            "{nonempty} of {} expressions matched anything",
+            corpus.len()
+        );
+        assert!(
+            proper >= corpus.len() / 2,
+            "{proper} of {} expressions split the trace",
+            corpus.len()
         );
     }
 

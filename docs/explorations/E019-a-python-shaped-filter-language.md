@@ -55,6 +55,41 @@ layout allows. And E010's gate — 25 ms median over 1M creators, *in release
 WASM* — is already missed by 38 ms of **native** time, before the browser's
 penalty.
 
+> **2026-08-07, after [T041](../tickets/T041-lower-the-filter-to-a-typed-plan.md).**
+> Same harness, same machine, now against the lowered plan. The floor control
+> reads 0.30 ms in this run rather than 0.8 ms; the ratio is the comparable
+> quantity.
+>
+> | Predicate | Was | Now | × floor |
+> |---|---|---|---|
+> | `size >= 4096` | 38.0 ms | **0.40 ms** | 1.3 |
+> | `size >= 4096 && address >= 0x10000000` | 47.0 ms | 0.44 ms | 1.5 |
+> | `freed` | — | 0.43 ms | 1.4 |
+> | `site == "json_node"` | 44.3 ms | 1.02 ms | 3.4 |
+> | `site.starts_with("json")` | 55.4 ms | 1.02 ms | 3.4 |
+> | `thread in {2, 4}` | 78.2 ms | 1.02 ms | 3.4 |
+> | `field.pool == "gfx"` | 38.6 ms | 1.02 ms | 3.4 |
+> | `tags contains "hot"` | 39.9 ms | **0.04 ms** | 0.1 |
+> | `tags == {"hot"}` | — | 0.13 ms | 0.4 |
+> | `abs(seq - named("anchor").seq) <= 1000` | — | 13.26 ms | 44 |
+> | the three-clause conjunction | — | 0.30 ms | 1.0 |
+>
+> Compilation is ~1.1 ms at 1M events, nearly all of it building the creator
+> mask, and scaling is linear: at 3M creators every row is within noise of 3×.
+>
+> Three things the numbers say that the design predicted. String predicates
+> cost what equality costs, because both are decided over the dictionary —
+> `starts_with` is not a slower operation any more. `tags contains` is *below*
+> the floor, because it reads one word per 64 events instead of touching
+> events at all. And the conjunction is cheaper than any of its expensive
+> clauses alone, because the tag clause is ordered first and narrows the
+> active mask before the site clause looks at anything.
+>
+> The outlier is general arithmetic, which still walks a small lowered scalar
+> tree through `i128` and `Option` per event. It clears E010's gate with room
+> and it is the one shape that did not get a specialized leaf; T041's Result
+> names the follow-up.
+
 **This is evidence about the evaluator, not about the request.** But it decides
 the order of the work: `alloc.size` is one more AST node and one more string
 comparison per access *per event* than `size`, so on today's evaluator the

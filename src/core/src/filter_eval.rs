@@ -96,12 +96,37 @@ impl FieldValues {
 
     /// Distinct fragments resolved, for the test that guards the "once per
     /// fragment, not once per event" property this type exists for.
+    #[cfg(test)]
     pub fn rows(&self) -> usize {
         self.values.len()
     }
 
+    /// Where `key` sits in the resolved rows, for a plan that wants to read it
+    /// by index rather than by name once per event.
+    pub(crate) fn key_index(&self, key: &str) -> Option<usize> {
+        self.keys.iter().position(|k| k == key)
+    }
+
+    /// The value of the key at `index` in the fragment interned at `fragment`.
+    pub(crate) fn at(&self, index: usize, fragment: u32) -> Value {
+        self.at_ref(index, fragment).cloned().unwrap_or(Value::Missing)
+    }
+
+    /// The same, borrowed — the scan paths that read a custom value per event
+    /// must not clone a String to do it.
+    pub(crate) fn at_ref(&self, index: usize, fragment: u32) -> Option<&Value> {
+        if fragment == NONE_U32 {
+            return None;
+        }
+        match self.values.get(fragment as usize)?.get(index)? {
+            Value::Missing => None,
+            value => Some(value),
+        }
+    }
+
     /// The value of `key` in the fragment interned at `fragment`, which is
     /// `NONE_U32` for an event carrying no custom fields at all.
+    #[cfg(test)]
     fn get(&self, key: &str, fragment: u32) -> Value {
         if fragment == NONE_U32 {
             return Value::Missing;
@@ -120,7 +145,7 @@ impl FieldValues {
 /// Which event's fragment a custom field reads: the allocation's own, or the
 /// one on the event that freed it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum FieldRoot {
+pub(crate) enum FieldRoot {
     Alloc,
     Death,
 }
@@ -128,7 +153,7 @@ enum FieldRoot {
 /// Recognize `field.k`, `field["k"]`, `death.field.k` and `death.field["k"]`.
 /// Everything else — including `death.seq` and a string method call — is not a
 /// custom field reference and is handled by the caller.
-fn custom_field(expr: &Expr) -> Option<(FieldRoot, &str)> {
+pub(crate) fn custom_field(expr: &Expr) -> Option<(FieldRoot, &str)> {
     let (base, key) = match &expr.kind {
         ExprKind::Field { base, name } => (base, name.as_str()),
         ExprKind::Index { base, key } => (base, key.as_str()),
@@ -312,13 +337,15 @@ impl CheckedType {
 }
 
 #[derive(Clone, Debug)]
-enum Value {
+pub(crate) enum Value {
     Bool(bool),
     Int(i128),
     Float(f64),
     String(String),
     /// Half-open, and numeric in either representation: `0x10..0x20` and
     /// `0.2..0.8` are both ranges.
+    /// Read by the test oracle; the plan lowers a range to its two bounds.
+    #[cfg_attr(not(test), allow(dead_code))]
     Range(Num, Num),
     Set(Vec<Value>),
     Missing,
@@ -328,13 +355,13 @@ enum Value {
 /// widened to f64 so that comparing a large integer — an address, a
 /// nanosecond timestamp — against a float stays exact.
 #[derive(Clone, Copy, Debug)]
-enum Num {
+pub(crate) enum Num {
     Int(i128),
     Float(f64),
 }
 
 impl Value {
-    const fn num(&self) -> Option<Num> {
+    pub(crate) const fn num(&self) -> Option<Num> {
         match self {
             Value::Int(v) => Some(Num::Int(*v)),
             Value::Float(v) => Some(Num::Float(*v)),
@@ -349,7 +376,7 @@ impl Value {
 /// The integer side is never converted with `as f64`: above 2^53 that
 /// conversion rounds, and `id == 9007199254740993` would then answer true for
 /// the allocation next to it.
-fn cmp_num(a: Num, b: Num) -> Option<core::cmp::Ordering> {
+pub(crate) fn cmp_num(a: Num, b: Num) -> Option<core::cmp::Ordering> {
     use core::cmp::Ordering;
     match (a, b) {
         (Num::Int(a), Num::Int(b)) => Some(a.cmp(&b)),
@@ -428,7 +455,7 @@ pub struct EvalError {
 }
 
 impl EvalError {
-    fn at(expr: &Expr, message: impl Into<String>) -> Self {
+    pub(crate) fn at(expr: &Expr, message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
             span: expr.span,
@@ -504,7 +531,7 @@ fn named_argument<'a>(arguments: &'a [Expr], expr: &Expr) -> Result<&'a str, Eva
 /// Resolve `named("x")` against the names the web layer pushed in. Zero and
 /// several are both errors: the reference names one allocation, and a filter
 /// that silently picked one of two would be wrong in a way nothing reports.
-fn named_event(arguments: &[Expr], expr: &Expr, ctx: &Ctx) -> Result<u32, EvalError> {
+pub(crate) fn named_event(arguments: &[Expr], expr: &Expr, ctx: &Ctx) -> Result<u32, EvalError> {
     let name = named_argument(arguments, expr)?;
     ctx.named(name).map_err(|count| {
         EvalError::at(
@@ -1319,7 +1346,7 @@ pub fn push_completions_json(out: &mut String, source: &str, cursor: usize, ctx:
     out.push('}');
 }
 
-fn integer(value: u128, unit: Option<Unit>, time_unit: &str) -> Result<i128, String> {
+pub(crate) fn integer(value: u128, unit: Option<Unit>, time_unit: &str) -> Result<i128, String> {
     let mul: u128 = match unit {
         None | Some(Unit::Bytes) => 1,
         Some(Unit::Kibibytes) => 1024,
@@ -1339,7 +1366,7 @@ fn integer(value: u128, unit: Option<Unit>, time_unit: &str) -> Result<i128, Str
 /// A float literal in the trace's own unit. The unit multiplies the value,
 /// exactly as it does for an integer literal, so `size > 1.5MiB` reads the
 /// same as `size > 1572864`.
-fn float(value: f64, unit: Option<Unit>, time_unit: &str) -> Result<f64, String> {
+pub(crate) fn float(value: f64, unit: Option<Unit>, time_unit: &str) -> Result<f64, String> {
     let mul: u128 = match unit {
         None | Some(Unit::Bytes) => 1,
         Some(Unit::Kibibytes) => 1024,
@@ -1372,7 +1399,7 @@ fn time_factor(unit: &str, nanos: u128) -> Result<u128, String> {
 /// The extras fragment a custom field reads for creator event `e`: its own,
 /// or the one on the event that freed it. `NONE_U32` when there is no such
 /// event, or it carried no custom fields — both are missing.
-fn custom_fragment(root: FieldRoot, s: &Store, e: u32) -> u32 {
+pub(crate) fn custom_fragment(root: FieldRoot, s: &Store, e: u32) -> u32 {
     match root {
         FieldRoot::Alloc => s.extra_at(e),
         FieldRoot::Death => match s.death[e as usize] {
@@ -1382,7 +1409,7 @@ fn custom_fragment(root: FieldRoot, s: &Store, e: u32) -> u32 {
     }
 }
 
-fn field(name: &str, ctx: &Ctx, e: u32, expr: &Expr) -> Result<Value, EvalError> {
+pub(crate) fn field_value(name: &str, ctx: &Ctx, e: u32, expr: &Expr) -> Result<Value, EvalError> {
     let s = ctx.store;
     let i = e as usize;
     Ok(match name {
@@ -1450,6 +1477,7 @@ fn field(name: &str, ctx: &Ctx, e: u32, expr: &Expr) -> Result<Value, EvalError>
 
 /// Widen for arithmetic only, where a float result is already inexact.
 /// Comparison never goes through this.
+#[cfg(test)]
 fn as_f64(n: Num) -> f64 {
     match n {
         Num::Int(v) => v as f64,
@@ -1483,6 +1511,7 @@ fn member(haystack: &[Value], needle: &Value) -> bool {
         .any(|value| equal(value, needle).unwrap_or(false))
 }
 
+#[cfg(test)]
 fn order(a: &Value, b: &Value, op: BinaryOp) -> Result<bool, String> {
     if let (Some(a), Some(b)) = (a.num(), b.num()) {
         // NaN is unordered: every comparison against it is false, which is
@@ -1500,7 +1529,7 @@ fn order(a: &Value, b: &Value, op: BinaryOp) -> Result<bool, String> {
     Ok(ordered(ord, op))
 }
 
-fn ordered(ord: core::cmp::Ordering, op: BinaryOp) -> bool {
+pub(crate) fn ordered(ord: core::cmp::Ordering, op: BinaryOp) -> bool {
     match op {
         BinaryOp::Less => ord.is_lt(),
         BinaryOp::LessEqual => ord.is_le(),
@@ -1510,6 +1539,13 @@ fn ordered(ord: core::cmp::Ordering, op: BinaryOp) -> bool {
     }
 }
 
+/// The tree-walking evaluator, kept as the **test oracle** for the lowered
+/// plan and called from nowhere else. [D008] is why: an Apply executes a
+/// compiled plan, and what makes that safe to believe is a second
+/// implementation the tests can compare it against, expression by expression.
+///
+/// [D008]: ../../../docs/decisions/D008-the-filter-evaluator-is-a-lowered-plan.md
+#[cfg(test)]
 pub fn evaluate(expr: &Expr, ctx: &Ctx, e: u32) -> Result<bool, EvalError> {
     match eval(expr, ctx, e)? {
         Value::Bool(v) => Ok(v),
@@ -1518,6 +1554,7 @@ pub fn evaluate(expr: &Expr, ctx: &Ctx, e: u32) -> Result<bool, EvalError> {
     }
 }
 
+#[cfg(test)]
 fn eval(expr: &Expr, ctx: &Ctx, e: u32) -> Result<Value, EvalError> {
     let err = |m: String| EvalError::at(expr, m);
     Ok(match &expr.kind {
@@ -1525,7 +1562,7 @@ fn eval(expr: &Expr, ctx: &Ctx, e: u32) -> Result<Value, EvalError> {
         ExprKind::Integer(v) => Value::Int(integer(v.value, v.unit, &ctx.store.unit).map_err(err)?),
         ExprKind::Float(v) => Value::Float(float(v.value, v.unit, &ctx.store.unit).map_err(err)?),
         ExprKind::String(v) => Value::String(v.clone()),
-        ExprKind::Identifier(name) => field(name, ctx, e, expr)?,
+        ExprKind::Identifier(name) => field_value(name, ctx, e, expr)?,
         ExprKind::Unary {
             op: UnaryOp::Not,
             expr: inner,
@@ -1556,7 +1593,7 @@ fn eval(expr: &Expr, ctx: &Ctx, e: u32) -> Result<Value, EvalError> {
             } else if let ExprKind::Call { callee, arguments } = &base.kind {
                 if matches!(&callee.kind, ExprKind::Identifier(f) if f == "named") {
                     let target = named_event(arguments, base, ctx)?;
-                    field(name, ctx, target, expr)?
+                    field_value(name, ctx, target, expr)?
                 } else {
                     return Err(EvalError::at(expr, "field access is not valid here"));
                 }

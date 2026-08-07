@@ -30,7 +30,11 @@ client-side.
 ## State
 
 **Rust core (`src/core/`) — healthy; filter syntax is a separate
-crate and evaluation is integrated.** Tag membership has one owner
+crate, and filter evaluation is a compiled plan rather than an interpreter.**
+`src/core/src/filter_plan.rs` lowers the checked tree to `Pred` over the
+store's columns and executes it a 64-event block at a time; `filter_eval` keeps
+checking, completion, and — under `#[cfg(test)]` — the tree walk, which now
+exists only as the oracle every filter test is compared against. Tag membership has one owner
 (`Store::tag_members`) and four derived indexes beside it, so no tag path's
 cost depends on which id a tag happened to get
 ([D009](decisions/D009-tag-membership-has-one-owner-and-derived-indexes.md),
@@ -181,16 +185,28 @@ enumeration that put `tags contains` out of reach of T041's 2×-of-floor bar.
 measurement and doubles as the acceptance harness.
 
 **Grounding it found that the evaluator never got the execution model E010
-specified.** `filter_eval::eval` walks the AST once per event; measured against
-a direct column scan it is **45× above its floor**, and E010's 25 ms WASM gate
-over 1M creators is missed by 38 ms of *native* time.
+specified** — `filter_eval::eval` walked the AST once per event, 45× above its
+floor. [T041](tickets/T041-lower-the-filter-to-a-typed-plan.md) fixed that and
+is done: an Apply now compiles to `filter_plan::Pred` and scans 64 events at a
+time, and `size >= 4096` over 1M creators went **38.0 ms → 0.40 ms** native.
 [D008](decisions/D008-the-filter-evaluator-is-a-lowered-plan.md) is the rule
-that follows and [E019-bench](explorations/E019-bench/filter_cost.rs) is the
-reproduction. This is why the work is ordered
-[T041](tickets/T041-lower-the-filter-to-a-typed-plan.md) →
-[T042](tickets/T042-the-filter-language-is-python-shaped.md) →
-[T043](tickets/T043-filter-syntax-highlighting.md): namespacing costs a string
-comparison per event on a tree walk and nothing at all on a plan.
+that keeps it there — a new operator extends the plan, it does not add a case
+to a tree walk — and
+[E019](explorations/E019-a-python-shaped-filter-language.md#measurement) has
+the whole table.
+
+**One check is outstanding and is a person's**: E010's gates are stated in
+release WASM and T041 measured native, because driving a browser is what
+[D001](decisions/D001-web-changes-are-hand-smoke-tested.md) says an agent must
+not do. The margin is 60× on the common shapes, so this is a confirmation
+rather than a risk.
+
+Next is [T042](tickets/T042-the-filter-language-is-python-shaped.md), then
+[T043](tickets/T043-filter-syntax-highlighting.md). T042 was ordered after the
+lowering because namespacing costs a string comparison per event on a tree walk
+and nothing at all on a plan. [T045](tickets/T045-lower-integer-arithmetic-to-a-narrow-path.md)
+came out of T041's measurements — general integer arithmetic is the one shape
+with no specialized leaf — and nothing waits on it.
 
 The rest of the backlog is T009, T030, and the blocked T004.
 
