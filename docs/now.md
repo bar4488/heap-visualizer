@@ -1,6 +1,6 @@
 # Now
 
-_Updated: 2026-08-05._
+_Updated: 2026-08-07._
 
 **No count in this file is written by hand.** Test counts, module sizes and
 requirement totals are derivable, and the ones that used to be here had all
@@ -159,9 +159,27 @@ survivable, a stale `dist/` is the new way to be confused.
 
 ## Next
 
-**Nothing is in flight**, and the working tree is clean. The backlog is T009,
-T030, and the blocked T004 — the queue below is generated from
-`rg '^status: doing$' docs/tickets`, which currently returns nothing.
+**The filter language is being redesigned, and the evaluator with it.**
+[E019](explorations/E019-a-python-shaped-filter-language.md) is the design: a
+Python-shaped surface (`and`/`or`/`not`, `in` for every membership, `range()`,
+`is None`, chained comparison) over three namespaces — `alloc`, `malloc`,
+`free` — replacing the flat global field list. Requested on 2026-08-07; the
+three conflicts Python cannot express were decided by the user the same day and
+E019 records which.
+
+**Grounding it found that the evaluator never got the execution model E010
+specified.** `filter_eval::eval` walks the AST once per event; measured against
+a direct column scan it is **45× above its floor**, and E010's 25 ms WASM gate
+over 1M creators is missed by 38 ms of *native* time.
+[D008](decisions/D008-the-filter-evaluator-is-a-lowered-plan.md) is the rule
+that follows and [E019-bench](explorations/E019-bench/filter_cost.rs) is the
+reproduction. This is why the work is ordered
+[T041](tickets/T041-lower-the-filter-to-a-typed-plan.md) →
+[T042](tickets/T042-the-filter-language-is-python-shaped.md) →
+[T043](tickets/T043-filter-syntax-highlighting.md): namespacing costs a string
+comparison per event on a tree walk and nothing at all on a plan.
+
+The rest of the backlog is T009, T030, and the blocked T004.
 
 **[T009](tickets/T009-type-the-deps-contracts.md) is next, and is not urgent.**
 It types the `init*(deps)` contracts in `analysis.ts`, `session.ts` and

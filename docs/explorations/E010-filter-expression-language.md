@@ -7,6 +7,15 @@ updated: 2026-08-05
 
 # A filter DSL for allocations — 2026-07-25
 
+> **2026-08-07.** The surface below — `&&`, `contains`, `..`, `overlaps`,
+> `is missing`, and the flat global field list — is superseded by
+> [E019](E019-a-python-shaped-filter-language.md), which reshapes it around
+> Python spelling and the `alloc`/`malloc`/`free` namespaces. E019 also records
+> that the Compilation section's execution model was never built: the evaluator
+> walks the AST per event, 45× above its floor, and misses the gates this file
+> sets. Those gates are still the gates, and everything here about types,
+> missing-value propagation, persistence, and editor states still holds.
+
 The filter will use one small, allocation-specific DSL. The language choice is
 settled for this exploration; this document defines the intended surface and
 execution model closely enough to measure and, after a decision and spec
