@@ -60,9 +60,10 @@ counts, leaks, peak live, address span) prints to stderr.
   "`web/` is served as-is"), traded for checked contracts across the
   main-thread/worker boundary. The reasoning, and what would reverse it, is
   [D004](../docs/decisions/D004-typescript-is-the-language-for-web.md).
-- `build-docker.sh` / `build-wasm-docker.sh` — build (and export) a Rust
-  image with the wasm target preinstalled, then build the wasm inside it: a
-  reproducible path that needs no local Rust toolchain.
+- **There is one build path.** `build.sh` against a local toolchain, with
+  `rustup target add wasm32-unknown-unknown`. A container path must not be
+  reintroduced without a decision record saying why the second way to build is
+  worth maintaining.
 - Serve: `./serve.py` over `dist/` (any static server works;
   `?trace=demo.heapl` autoloads).
 

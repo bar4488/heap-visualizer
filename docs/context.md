@@ -17,9 +17,7 @@ live under `src/`, build products under `dist/`, and nothing crosses. The web
 layer is TypeScript; `tsc` emits browser ES modules with source maps, and
 refuses to emit at all if anything fails to type-check.
 
-Needs the wasm target: `rustup target add wasm32-unknown-unknown`. No local
-Rust toolchain? `./build-docker.sh` builds and exports a builder image with the
-target preinstalled; `./build-wasm-docker.sh` then builds the wasm inside it.
+Needs the wasm target: `rustup target add wasm32-unknown-unknown`.
 
 ## Run
 
