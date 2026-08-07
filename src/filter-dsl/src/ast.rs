@@ -62,8 +62,6 @@ pub enum BinaryOp {
     Greater,
     GreaterEqual,
     In,
-    Overlaps,
-    Contains,
     Add,
     Subtract,
 }
@@ -109,11 +107,14 @@ pub enum ExprKind {
         arguments: Vec<Expr>,
     },
     Set(Vec<Expr>),
+    /// `range(lo, hi)`, half-open. Written as a call and parsed into its own
+    /// node, the way Python's `range` is a builtin rather than a literal.
     Range {
         start: Box<Expr>,
         end: Box<Expr>,
     },
-    IsMissing {
+    /// `x is None` / `x is not None`.
+    IsNone {
         expr: Box<Expr>,
         negated: bool,
     },

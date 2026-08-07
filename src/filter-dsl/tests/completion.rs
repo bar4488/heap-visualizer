@@ -46,30 +46,19 @@ fn member_context_carries_the_receiver() {
     };
     assert!(matches!(receiver.kind, ExprKind::Identifier(ref name) if name == "site"));
 
-    let got = context("size > 0 && death.", 18);
+    let got = context("size > 0 and free.", 18);
     let CompletionSite::Member { receiver } = got.site else {
         panic!("member context");
     };
-    assert!(matches!(receiver.kind, ExprKind::Identifier(ref name) if name == "death"));
+    assert!(matches!(receiver.kind, ExprKind::Identifier(ref name) if name == "free"));
 }
 
 #[test]
 fn operands_carry_the_left_expression_and_operator() {
     for (source, cursor, expected, operator) in [
         ("site == ", 8, "site", OperandKind::Binary(BinaryOp::Equal)),
-        ("size > 0 && tags == {", 21, "tags", OperandKind::SetMember),
-        (
-            "tags contains ",
-            14,
-            "tags",
-            OperandKind::Binary(BinaryOp::Contains),
-        ),
-        (
-            "span overlaps ",
-            14,
-            "span",
-            OperandKind::Binary(BinaryOp::Overlaps),
-        ),
+        ("size > 0 and tags == {", 22, "tags", OperandKind::SetMember),
+        ("size in ", 8, "size", OperandKind::Binary(BinaryOp::In)),
         ("size + ", 7, "size", OperandKind::Binary(BinaryOp::Add)),
         (
             "size == si",
@@ -150,18 +139,17 @@ fn call_arguments_and_set_delimiters_are_distinct() {
             ..
         }
     ));
-    let source = "span overlaps 0x1000..";
-    assert!(matches!(
-        context(source, source.len()).site,
-        CompletionSite::Operand {
-            kind: OperandKind::RangeEnd,
-            ..
-        }
-    ));
+    // a range is a call now, so its second bound is an ordinary call argument
+    let source = "address in range(0x1000, ";
+    let CompletionSite::CallArgument { callee, index } = context(source, source.len()).site else {
+        panic!("call argument context for the second bound");
+    };
+    assert!(matches!(callee.kind, ExprKind::Identifier(ref name) if name == "range"));
+    assert_eq!(index, 1);
 }
 
 #[test]
-fn missing_keywords_have_their_own_context() {
+fn none_keywords_have_their_own_context() {
     assert!(matches!(
         context("site is ", 8).site,
         CompletionSite::AfterIs { negated: false }

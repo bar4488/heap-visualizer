@@ -9,11 +9,13 @@ pub(crate) enum TokenKind {
     True,
     False,
     In,
-    Overlaps,
-    Contains,
     Is,
     Not,
-    Missing,
+    And,
+    Or,
+    None,
+    /// Removed spellings, lexed only so the parser can name what replaced
+    /// them instead of reporting an unexpected character.
     AndAnd,
     OrOr,
     Bang,
@@ -144,12 +146,13 @@ impl Lexer<'_> {
             "true" => TokenKind::True,
             "false" => TokenKind::False,
             "in" => TokenKind::In,
-            "overlaps" => TokenKind::Overlaps,
-            // also a string method name; `postfix` accepts it after `.`
-            "contains" => TokenKind::Contains,
             "is" => TokenKind::Is,
             "not" => TokenKind::Not,
-            "missing" => TokenKind::Missing,
+            "and" => TokenKind::And,
+            "or" => TokenKind::Or,
+            "None" => TokenKind::None,
+            // `overlaps`, `contains` and `len` are ordinary identifiers: the
+            // first two are method names now, and the third a function
             _ => TokenKind::Identifier(text.to_owned()),
         };
         self.tokens.push(Token {

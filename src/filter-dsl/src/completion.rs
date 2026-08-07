@@ -5,7 +5,6 @@ use crate::{parse, BinaryOp, Expr, Span, MAX_SOURCE_BYTES};
 pub enum OperandKind {
     Binary(BinaryOp),
     SetMember,
-    RangeEnd,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -53,7 +52,7 @@ pub fn completion_context(source: &str, cursor: usize) -> Option<CompletionConte
     let before = &source[..replacement.start];
     let trimmed = before.trim_end();
 
-    if trimmed.ends_with('.') && !trimmed.ends_with("..") {
+    if trimmed.ends_with('.') {
         return receiver_before_dot(source, trimmed.len() - 1).map(|receiver| CompletionContext {
             replacement,
             prefix,
@@ -247,11 +246,8 @@ fn operand_context(source: &str, value_start: usize) -> Option<CompletionSite> {
                 | TokenKind::Greater
                 | TokenKind::GreaterEqual
                 | TokenKind::In
-                | TokenKind::Overlaps
-                | TokenKind::Contains
                 | TokenKind::Plus
                 | TokenKind::Minus
-                | TokenKind::DotDot
         )
     })?;
     let after = &meaningful[op + 1..];
@@ -284,11 +280,8 @@ fn operand_context(source: &str, value_start: usize) -> Option<CompletionSite> {
         TokenKind::LessEqual => OperandKind::Binary(BinaryOp::LessEqual),
         TokenKind::Greater => OperandKind::Binary(BinaryOp::Greater),
         TokenKind::GreaterEqual => OperandKind::Binary(BinaryOp::GreaterEqual),
-        TokenKind::Overlaps => OperandKind::Binary(BinaryOp::Overlaps),
-        TokenKind::Contains => OperandKind::Binary(BinaryOp::Contains),
         TokenKind::Plus => OperandKind::Binary(BinaryOp::Add),
         TokenKind::Minus => OperandKind::Binary(BinaryOp::Subtract),
-        TokenKind::DotDot => OperandKind::RangeEnd,
         TokenKind::In => OperandKind::Binary(BinaryOp::In),
         _ => return None,
     };
@@ -308,8 +301,9 @@ fn operand_site(
         .rposition(|token| {
             matches!(
                 token.kind,
-                TokenKind::AndAnd
-                    | TokenKind::OrOr
+                TokenKind::And
+                    | TokenKind::Or
+                    | TokenKind::Not
                     | TokenKind::EqualEqual
                     | TokenKind::BangEqual
                     | TokenKind::Less
@@ -317,11 +311,8 @@ fn operand_site(
                     | TokenKind::Greater
                     | TokenKind::GreaterEqual
                     | TokenKind::In
-                    | TokenKind::Overlaps
-                    | TokenKind::Contains
                     | TokenKind::Plus
                     | TokenKind::Minus
-                    | TokenKind::DotDot
                     | TokenKind::LeftParen
                     | TokenKind::LeftBrace
                     | TokenKind::Comma
@@ -360,17 +351,23 @@ fn call_argument_context(source: &str, value_start: usize) -> Option<CompletionS
         .rposition(|token| {
             matches!(
                 token.kind,
-                TokenKind::AndAnd
-                    | TokenKind::OrOr
+                TokenKind::And
+                    | TokenKind::Or
+                    | TokenKind::Not
                     | TokenKind::EqualEqual
                     | TokenKind::BangEqual
                     | TokenKind::Less
                     | TokenKind::LessEqual
                     | TokenKind::Greater
                     | TokenKind::GreaterEqual
+                    // `in` matters here now that `x in range(lo, hi)` is the
+                    // ordinary form: without it the callee reads back as the
+                    // whole `x in range` rather than as `range`
+                    | TokenKind::In
                     | TokenKind::Plus
                     | TokenKind::Minus
                     | TokenKind::Comma
+                    | TokenKind::LeftBrace
                     | TokenKind::LeftParen
             )
         })
