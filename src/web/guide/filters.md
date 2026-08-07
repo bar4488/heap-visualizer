@@ -1,11 +1,11 @@
 # Filters
 
-One expression over allocations, in [Filter](#show:filter-panel). **dim others**
-keeps the surrounding heap visible; **hide others** removes it.
+One expression over allocations, written in [Filter](#show:filter-panel). **dim
+others** keeps the surrounding heap visible; **hide others** removes it.
 
-The subject is always the creator allocation, and the language does not depend on
-the playhead: `freed` and `lifetime` describe the whole trace. There is no
-`live_now` field, because it would invalidate the match set on every seek.
+The subject is always the creator allocation. The language ignores the
+playhead: `freed` and `lifetime` describe the whole trace. A `live_now` field
+would invalidate the match set on every seek, so there isn't one.
 
 ## Fields
 
@@ -16,24 +16,24 @@ the playhead: `freed` and `lifetime` describe the whole trace. There is no
 - `seq`, `time` — the birth event.
 - `freed`, `lifetime`, `death.seq`, `death.time` — the matching death, absent
   when there is none.
-- `site`, `thread`, `tag`, `name` — each can be missing. Missing is its own
-  state: `site is missing`, not `site == ""`.
+- `site`, `thread`, `tag`, `name` — each can be missing, and missing is its own
+  state: write `site is missing`, not `site == ""`.
 - `id`, `stack`.
 
 ## Grammar
 
-- No comparison chaining: `0 <= size && size < 4096`.
+- Comparisons do not chain. Write `0 <= size && size < 4096`.
 - `!` takes a boolean.
 - Sizes accept units — `4KiB`. Addresses accept `_` separators —
   `0x7f00_0000`.
-- Ctrl or Cmd with Space opens completions from the same catalog that checks the
-  expression, so it only offers what the evaluator implements.
+- Ctrl or Cmd with Space opens completions. They come from the same catalog
+  that checks the expression, so they only offer what the evaluator implements.
 
 ## Applying
 
 Typing checks the expression and changes nothing. **Apply** compiles and scans.
-A diagnostic leaves the previous filter active. An empty applied source turns
-filtering off, same as **Clear**.
+On a diagnostic the previous filter stays active. Applying an empty source
+turns filtering off, same as **Clear**.
 
 Against [sites.heapl](index.html?trace=guide/traces/sites.heapl&guide=1) — 16
 allocations:
@@ -46,8 +46,7 @@ allocations:
 
 [Apply](#do:filter-apply) after setting one, or [Clear](#do:filter-clear).
 
-Other ways the expression gets written for you, all of them editing the same one
-source:
+Three things write the expression for you, all editing that same source:
 
 - Legend chips toggle their own predicate as a top-level conjunct and apply.
   Shift-click uses a disjunction. String values are escaped, and an existing
