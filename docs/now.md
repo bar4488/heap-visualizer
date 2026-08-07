@@ -30,7 +30,13 @@ client-side.
 ## State
 
 **Rust core (`src/core/`) — healthy; filter syntax is a separate
-crate and evaluation is integrated.** The engine has clean module boundaries
+crate and evaluation is integrated.** Tag membership has one owner
+(`Store::tag_members`) and four derived indexes beside it, so no tag path's
+cost depends on which id a tag happened to get
+([D009](decisions/D009-tag-membership-has-one-owner-and-derived-indexes.md),
+[T044](tickets/T044-tag-scans-track-tags-in-use.md)); the rule to keep is that
+those indexes are written only by the four mutation methods and checked by
+`Store::assert_tag_indexes`. The engine has clean module boundaries
 and its native tests assert
 real invariants: snapshot seek ≡ forward replay, pick prefers the newest
 overlap, anchor stability across reflow. Every performance and soundness
@@ -166,6 +172,13 @@ Python-shaped surface (`and`/`or`/`not`, `in` for every membership, `range()`,
 `free` — replacing the flat global field list. Requested on 2026-08-07; the
 three conflicts Python cannot express were decided by the user the same day and
 E019 records which.
+
+**[T041](tickets/T041-lower-the-filter-to-a-typed-plan.md) is next**, and its
+tag prerequisite is done:
+[T044](tickets/T044-tag-scans-track-tags-in-use.md) removed the `O(H)`
+enumeration that put `tags contains` out of reach of T041's 2×-of-floor bar.
+[E020](explorations/E020-tags-cost-tracks-the-highest-tag-id.md) is the
+measurement and doubles as the acceptance harness.
 
 **Grounding it found that the evaluator never got the execution model E010
 specified.** `filter_eval::eval` walks the AST once per event; measured against

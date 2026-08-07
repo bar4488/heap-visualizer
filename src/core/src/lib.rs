@@ -1006,18 +1006,10 @@ pub extern "C" fn hp_tag_counts_json() {
 }
 
 fn tag_counts_json(s: &Store, o: &mut String) {
-    let mut counts = [0u32; 256];
-    for e in 0..s.len() {
-        if s.op[e as usize] == OP_M || s.op[e as usize] == OP_R {
-            if !s.has_tags(e) {
-                counts[0] += 1;
-            } else {
-                for tag in s.tag_ids(e) {
-                    counts[tag as usize] += 1;
-                }
-            }
-        }
-    }
+    // Read, not a scan: the counts are maintained by the tag mutation methods
+    // (D009). This used to walk every event against every tag id, and ran on
+    // every tag click — 289 ms at 1M events, per E020.
+    let counts = s.tag_counts();
     o.clear();
     o.push('[');
     let mut first = true;
@@ -2187,6 +2179,71 @@ not json at all
         let mut no_filter = load(SAMPLE);
         assert_eq!(tag_filter_matches(&mut no_filter, 1), 0);
         assert!(tags(&no_filter.store).iter().all(Vec::is_empty));
+    }
+
+    /// D009: every derived tag index is rebuildable from `tag_members` and
+    /// agrees with it after every mutation shape, including the ones that
+    /// touch a whole trace. An index that disagrees hides tags silently.
+    #[test]
+    fn derived_tag_indexes_agree_with_membership() {
+        let mut a = load(SAMPLE);
+        let creators: Vec<u32> = (0..a.store.len())
+            .filter(|&e| matches!(a.store.op[e as usize], OP_M | OP_R))
+            .collect();
+        a.store.assert_tag_indexes();
+
+        // overlapping memberships, including a deliberately high id — the
+        // case E020 measured at 206x
+        for (i, &e) in creators.iter().enumerate() {
+            a.store.add_tag(e, 1 + (i % 3) as u8);
+            a.store.assert_tag_indexes();
+        }
+        a.store.add_tag(creators[0], 255);
+        a.store.add_tag(creators[0], 7);
+        a.store.assert_tag_indexes();
+
+        // idempotent add, and a no-op remove of a tag never held
+        a.store.add_tag(creators[0], 255);
+        a.store.remove_tag(creators[0], 9);
+        a.store.assert_tag_indexes();
+
+        // removal, including the last membership on an event
+        a.store.remove_tag(creators[0], 255);
+        a.store.assert_tag_indexes();
+        a.store.clear_event_tags(creators[0]);
+        a.store.assert_tag_indexes();
+        assert!(!a.store.has_tags(creators[0]));
+
+        // rename and delete-with-compaction, the whole-trace paths
+        assert!(hp_retag_on(&mut a, 2, 4) > 0);
+        a.store.assert_tag_indexes();
+        hp_retag_on(&mut a, 3, 0);
+        a.store.assert_tag_indexes();
+
+        // counts are the maintained array, not a scan
+        let counts = a.store.tag_counts();
+        let tagged: u32 = creators.iter().filter(|&&e| a.store.has_tags(e)).count() as u32;
+        assert_eq!(counts[0], creators.len() as u32 - tagged);
+        for tag in 1..=255u8 {
+            let want = creators.iter().filter(|&&e| a.store.has_tag(e, tag)).count();
+            assert_eq!(counts[tag as usize] as usize, want, "count for tag {tag}");
+        }
+
+        a.store.clear_tags();
+        a.store.assert_tag_indexes();
+        assert_eq!(a.store.tag_counts()[0], creators.len() as u32);
+    }
+
+    /// `hp_retag` against a local app rather than the global one.
+    fn hp_retag_on(a: &mut App, from: u8, to: u8) -> u32 {
+        let events: Vec<u32> = (0..a.store.len()).filter(|&e| a.store.has_tag(e, from)).collect();
+        for &e in &events {
+            a.store.remove_tag(e, from);
+            if to != 0 {
+                a.store.add_tag(e, to);
+            }
+        }
+        events.len() as u32
     }
 
     #[test]

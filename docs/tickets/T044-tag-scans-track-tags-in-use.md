@@ -1,7 +1,7 @@
 ---
 id: T044
 title: Tag scans track the tags in use, not the highest tag id
-status: todo
+status: done
 updated: 2026-08-07
 ---
 
@@ -18,29 +18,36 @@ except in the numbers.
 
 ## Done when
 
-- [ ] `has_tags` is `O(1)`; `first_tag` and `tag_ids` scan at most the tags
+- [x] `has_tags` is `O(1)`; `first_tag` and `tag_ids` scan at most the tags
       present in the event's 64-event block.
-- [ ] Tag counts are maintained incrementally. `tag_counts_json` serializes
+- [x] Tag counts are maintained incrementally. `tag_counts_json` serializes
       256 entries and scans no events.
-- [ ] `tag_free_idx` is not rebuilt by scanning: the free side is maintained
+- [x] `tag_free_idx` is not rebuilt by scanning: the free side is maintained
       through `death` at mutation time.
-- [ ] `tag_members` is written only by `add_tag`, `remove_tag`,
+- [x] `tag_members` is written only by `add_tag`, `remove_tag`,
       `clear_event_tags`, `clear_tags`, and `Store::assert_tag_indexes`
       rebuilds every derived index from it and compares
       ([D009](../decisions/D009-tag-membership-has-one-owner-and-derived-indexes.md)).
       A native test tags, untags, renames, deletes and clears, asserting after
       each.
-- [ ] [E020-bench](../explorations/E020-bench/tag_cost.rs) reruns and every
+- [x] [E020-bench](../explorations/E020-bench/tag_cost.rs) reruns and every
       column is flat across `H`: the `U=1 H=255` row is within 2× of the
       `U=1 H=1` row, where it is 206× today. Reported in the commit body
       against the before-table in
       [E020](../explorations/E020-tags-cost-tracks-the-highest-tag-id.md#evidence).
-- [ ] `cargo test` on both crates, `node --test 'src/web/**/*.test.ts'`, and
+- [x] `cargo test` on both crates, `node --test 'src/web/**/*.test.ts'`, and
       `node_modules/.bin/tsc -p tsconfig.test.json` pass.
-- [ ] `./build.sh` emits, and the emitted `dist/` is diffed across the change
+- [x] `./build.sh` emits, and the emitted `dist/` is diffed across the change
       ([D001](../decisions/D001-web-changes-are-hand-smoke-tested.md)) — the
       web layer is untouched, so the bundle should be identical apart from the
       wasm blob.
+
+## Result
+
+The `U=1 H=255` row is now within 1.25× of `U=1 H=1` on every column, against
+206× before. Enumeration on round-robin tagging is unchanged, as E020 said it
+would be — `k = U` there, and `tag_ids` is ~13% slower than the old scan at
+`U=32` scattered.
 
 ## Context
 

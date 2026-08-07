@@ -131,13 +131,39 @@ pub struct Store {
     /// Sparse bitset per tag id, indexed by creator event. Inner vectors are
     /// allocated only for tags that are actually used, so overlapping tags
     /// cost one bit per event per used tag rather than 255 bits per event.
+    ///
+    /// **The sole authority on membership** ([D009]). Everything below is a
+    /// derived index: faster to ask, never a different answer, written only by
+    /// the four mutation methods, and checked by `assert_tag_indexes`.
+    ///
+    /// [D009]: ../../../docs/decisions/D009-tag-membership-has-one-owner-and-derived-indexes.md
     pub tag_members: Vec<Vec<u64>>,
+    /// Derived: union of every tag bitset, so `has_tags` is one bit test
+    /// instead of a scan over `tag_members`.
+    pub(crate) tag_any: Vec<u64>,
+    /// Derived: per 64-event block, a 256-bit mask of the tags holding any
+    /// member in that block. Enumerating one event's tags scans the tags
+    /// present near it rather than every id ever used — the whole point of
+    /// [E020], where one tag at id 255 measured 206× the same tag at id 1.
+    ///
+    /// [E020]: ../../../docs/explorations/E020-tags-cost-tracks-the-highest-tag-id.md
+    pub(crate) tag_block: Vec<[u64; 4]>,
+    /// Derived: `tag_any` projected through `death` onto the freeing event, so
+    /// the free-side lane index never scans to find out who died tagged.
+    pub(crate) tag_free_any: Vec<u64>,
+    /// Derived: tagged creators per tag id. **Index 0 is creators carrying at
+    /// least one tag**, which is what makes it maintainable in `O(1)`;
+    /// `tag_counts` turns it into the untagged count callers want. Maintained
+    /// on mutation, so the refresh after a tag click reads 256 integers
+    /// instead of rescanning the trace.
+    pub(crate) tag_count: [u32; 256],
     /// Number of creator events currently tagged — lets per-frame consumers
     /// (the timeline tag lanes) skip tag work for untagged traces.
     pub tagged: u32,
     /// Sorted event indexes feeding the timeline tag lanes: creators with a
     /// tag, and F/R events whose target is tagged. Rebuilt lazily via
-    /// `ensure_tag_index` after any tag mutation.
+    /// `ensure_tag_index` after any tag mutation — O(events / 64) over the two
+    /// derived bitsets, not a scan over every tag.
     pub(crate) tag_alloc_idx: Vec<u32>,
     pub(crate) tag_free_idx: Vec<u32>,
     pub(crate) tag_idx_dirty: bool,
@@ -286,18 +312,65 @@ impl Store {
 
     #[inline]
     pub fn has_tags(&self, e: u32) -> bool {
-        self.tag_ids(e).next().is_some()
+        self.tag_any
+            .get(e as usize / 64)
+            .is_some_and(|w| w & (1 << (e % 64)) != 0)
     }
 
+    /// Every tag on `e`, ascending. Scans the tags present in `e`'s 64-event
+    /// block rather than every id in `tag_members`: clustered tagging — what
+    /// tagging a range or a filter match set produces — puts one tag in a
+    /// block, and the worst case is the number of tags in use.
     pub fn tag_ids(&self, e: u32) -> impl Iterator<Item = u8> + '_ {
-        (1..self.tag_members.len())
-            .filter(move |&tag| self.has_tag(e, tag as u8))
-            .map(|tag| tag as u8)
+        let mask = self.block_mask(e);
+        BlockTags { mask, word: 0 }.filter(move |&tag| self.has_tag(e, tag))
     }
 
     #[inline]
     pub fn first_tag(&self, e: u32) -> u8 {
         self.tag_ids(e).next().unwrap_or(0)
+    }
+
+    /// The tag ids present anywhere in `e`'s block; zeroed when `e` is out of
+    /// range or nothing has been tagged.
+    #[inline]
+    fn block_mask(&self, e: u32) -> [u64; 4] {
+        self.tag_block
+            .get(e as usize / 64)
+            .copied()
+            .unwrap_or([0; 4])
+    }
+
+    #[inline]
+    fn is_creator(&self, e: u32) -> bool {
+        matches!(self.op.get(e as usize), Some(&OP_M) | Some(&OP_R))
+    }
+
+    /// Total creator events, from the prefix sum the parser already built.
+    #[inline]
+    pub fn creator_count(&self) -> u32 {
+        self.green_pre.last().copied().unwrap_or(0)
+    }
+
+    /// Tagged creators per tag id, with index 0 flipped to the **untagged**
+    /// creator count callers expect. Maintained incrementally, so this is a
+    /// read rather than a scan.
+    #[inline]
+    pub fn tag_counts(&self) -> [u32; 256] {
+        let mut c = self.tag_count;
+        c[0] = self.creator_count().saturating_sub(c[0]);
+        c
+    }
+
+    /// Grow the derived bitsets to cover every event. Called before the first
+    /// membership is recorded; a trace with no tags allocates none of this.
+    fn ensure_tag_capacity(&mut self) {
+        let words = (self.len() as usize).div_ceil(64);
+        if self.tag_any.len() < words {
+            self.tag_any.resize(words, 0);
+            self.tag_free_any.resize(words, 0);
+            self.tag_block.resize(words, [0; 4]);
+        }
     }
 
     /// Add one membership without disturbing the allocation's other tags.
@@ -309,8 +382,13 @@ impl Store {
         if self.has_tag(e, tag) {
             return;
         }
+        self.ensure_tag_capacity();
         if !self.has_tags(e) {
             self.tagged += 1;
+            self.set_any(e, true);
+            if self.is_creator(e) {
+                self.tag_count[0] += 1;
+            }
         }
         if self.tag_members.len() <= tag as usize {
             self.tag_members.resize_with(tag as usize + 1, Vec::new);
@@ -319,6 +397,10 @@ impl Store {
         let bits = &mut self.tag_members[tag as usize];
         bits.resize(words, 0);
         bits[e as usize / 64] |= 1 << (e % 64);
+        self.tag_block[e as usize / 64][tag as usize / 64] |= 1 << (tag % 64);
+        if self.is_creator(e) {
+            self.tag_count[tag as usize] += 1;
+        }
         self.tag_idx_dirty = true;
     }
 
@@ -326,10 +408,23 @@ impl Store {
         if !self.has_tag(e, tag) || tag == 0 {
             return;
         }
+        let block = e as usize / 64;
         let bits = &mut self.tag_members[tag as usize];
-        bits[e as usize / 64] &= !(1 << (e % 64));
-        if !self.has_tags(e) {
+        bits[block] &= !(1 << (e % 64));
+        // The block keeps advertising `tag` only while some event in it still
+        // holds one — one word read, not a scan.
+        if bits[block] == 0 {
+            self.tag_block[block][tag as usize / 64] &= !(1 << (tag % 64));
+        }
+        if self.is_creator(e) {
+            self.tag_count[tag as usize] -= 1;
+        }
+        if !self.has_any_tag_now(e) {
             self.tagged -= 1;
+            self.set_any(e, false);
+            if self.is_creator(e) {
+                self.tag_count[0] -= 1;
+            }
         }
         self.tag_idx_dirty = true;
     }
@@ -338,46 +433,145 @@ impl Store {
         if !self.has_tags(e) {
             return;
         }
-        for bits in self.tag_members.iter_mut().skip(1) {
-            let word = e as usize / 64;
-            if word < bits.len() {
-                bits[word] &= !(1 << (e % 64));
+        let block = e as usize / 64;
+        for tag in self.tag_ids(e).collect::<Vec<u8>>() {
+            let bits = &mut self.tag_members[tag as usize];
+            bits[block] &= !(1 << (e % 64));
+            if bits[block] == 0 {
+                self.tag_block[block][tag as usize / 64] &= !(1 << (tag % 64));
+            }
+            if self.is_creator(e) {
+                self.tag_count[tag as usize] -= 1;
             }
         }
         self.tagged -= 1;
+        self.set_any(e, false);
+        if self.is_creator(e) {
+            self.tag_count[0] -= 1;
+        }
         self.tag_idx_dirty = true;
     }
 
     /// Remove every tag assignment.
     pub fn clear_tags(&mut self) {
         self.tag_members.clear();
+        self.tag_any.clear();
+        self.tag_block.clear();
+        self.tag_free_any.clear();
+        self.tag_count = [0; 256];
         self.tagged = 0;
         self.tag_idx_dirty = true;
     }
 
-    /// Rebuild `tag_alloc_idx` / `tag_free_idx` if tags changed since the
-    /// last build. O(n), but only after a tag mutation — the per-column
-    /// timeline reads are binary searches over the result.
+    /// Does `e` still hold any tag, read from the block mask? Used after a
+    /// removal has already updated `tag_members` and the block.
+    #[inline]
+    fn has_any_tag_now(&self, e: u32) -> bool {
+        let mask = self.block_mask(e);
+        BlockTags { mask, word: 0 }.any(|tag| self.has_tag(e, tag))
+    }
+
+    /// Set or clear `e` in the union bitset, and the event that frees `e` in
+    /// the free-side bitset — which is what spares the lane rebuild a scan.
+    fn set_any(&mut self, e: u32, on: bool) {
+        let (w, bit) = (e as usize / 64, 1u64 << (e % 64));
+        if on {
+            self.tag_any[w] |= bit;
+        } else {
+            self.tag_any[w] &= !bit;
+        }
+        let d = self.death.get(e as usize).copied().unwrap_or(NONE_U32);
+        if d != NONE_U32 {
+            let (dw, dbit) = (d as usize / 64, 1u64 << (d % 64));
+            if on {
+                self.tag_free_any[dw] |= dbit;
+            } else {
+                self.tag_free_any[dw] &= !dbit;
+            }
+        }
+    }
+
+    /// Rebuild `tag_alloc_idx` / `tag_free_idx` if tags changed since the last
+    /// build. O(events / 64) over the two derived bitsets — the tag lanes read
+    /// the result with a binary search per column.
     pub fn ensure_tag_index(&mut self) {
         if !self.tag_idx_dirty {
             return;
         }
         self.tag_alloc_idx.clear();
         self.tag_free_idx.clear();
-        for e in 0..self.len() {
-            let ei = e as usize;
-            let op = self.op[ei];
-            if (op == OP_M || op == OP_R) && self.has_tags(e) {
-                self.tag_alloc_idx.push(e);
-            }
-            if op == OP_F || op == OP_R {
-                let tgt = self.target[ei];
-                if tgt != NONE_U32 && self.has_tags(tgt) {
-                    self.tag_free_idx.push(e);
+        for w in 0..self.tag_any.len() {
+            let mut bits = self.tag_any[w];
+            while bits != 0 {
+                let e = (w * 64) as u32 + bits.trailing_zeros();
+                if self.is_creator(e) {
+                    self.tag_alloc_idx.push(e);
                 }
+                bits &= bits - 1;
+            }
+            let mut bits = self.tag_free_any[w];
+            while bits != 0 {
+                self.tag_free_idx.push((w * 64) as u32 + bits.trailing_zeros());
+                bits &= bits - 1;
             }
         }
         self.tag_idx_dirty = false;
+    }
+
+    /// Rebuild every derived tag index from `tag_members` and compare.
+    /// [D009] makes this part of the contract rather than a test helper: an
+    /// index that silently disagrees hides tags rather than slowing anything
+    /// down, which is worse than the cost it removes.
+    ///
+    /// [D009]: ../../../docs/decisions/D009-tag-membership-has-one-owner-and-derived-indexes.md
+    #[cfg(any(test, debug_assertions))]
+    pub fn assert_tag_indexes(&self) {
+        let words = (self.len() as usize).div_ceil(64);
+        let (mut any, mut free_any) = (vec![0u64; words], vec![0u64; words]);
+        let mut block = vec![[0u64; 4]; words];
+        let mut count = [0u32; 256];
+        let mut tagged = 0u32;
+        for e in 0..self.len() {
+            let mut some = false;
+            for tag in 1..self.tag_members.len() {
+                let bits = &self.tag_members[tag];
+                if bits.get(e as usize / 64).is_some_and(|w| w & (1 << (e % 64)) != 0) {
+                    some = true;
+                    block[e as usize / 64][tag / 64] |= 1 << (tag % 64);
+                    if self.is_creator(e) {
+                        count[tag] += 1;
+                    }
+                }
+            }
+            if some {
+                tagged += 1;
+                any[e as usize / 64] |= 1 << (e % 64);
+                if self.is_creator(e) {
+                    count[0] += 1;
+                }
+                let d = self.death[e as usize];
+                if d != NONE_U32 {
+                    free_any[d as usize / 64] |= 1 << (d % 64);
+                }
+            }
+        }
+        let trim = |v: &Vec<u64>| {
+            let mut v = v.clone();
+            v.truncate(words);
+            v.resize(words, 0);
+            v
+        };
+        assert_eq!(trim(&self.tag_any), any, "tag_any disagrees with tag_members");
+        assert_eq!(
+            trim(&self.tag_free_any),
+            free_any,
+            "tag_free_any disagrees with tag_members"
+        );
+        let mut have = self.tag_block.clone();
+        have.resize(words, [0; 4]);
+        assert_eq!(have, block, "tag_block disagrees with tag_members");
+        assert_eq!(self.tag_count, count, "tag_count disagrees with tag_members");
+        assert_eq!(self.tagged, tagged, "tagged disagrees with tag_members");
     }
 
     /// Timestamp of the playhead "after `applied` events".
@@ -397,5 +591,29 @@ impl Store {
     /// First event index with t >= tt.
     pub fn lower_bound_t(&self, tt: u64) -> u32 {
         self.t.partition_point(|&x| x < tt) as u32
+    }
+}
+
+/// Ascending tag ids in a 256-bit block mask.
+struct BlockTags {
+    mask: [u64; 4],
+    word: usize,
+}
+
+impl Iterator for BlockTags {
+    type Item = u8;
+
+    fn next(&mut self) -> Option<u8> {
+        while self.word < 4 {
+            let w = self.mask[self.word];
+            if w == 0 {
+                self.word += 1;
+                continue;
+            }
+            let bit = w.trailing_zeros();
+            self.mask[self.word] &= w - 1;
+            return Some((self.word * 64 + bit as usize) as u8);
+        }
+        None
     }
 }
