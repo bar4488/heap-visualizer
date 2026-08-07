@@ -2,7 +2,7 @@
 id: E017
 title: Friction with the workflow protocol
 status: open
-updated: 2026-08-01
+updated: 2026-08-07
 ---
 
 # E017: Friction With the Workflow Protocol
@@ -82,3 +82,42 @@ flagged it to the user instead. Two other v8 additions I did comply with
 without difficulty: minimizing hard-coded mutable values in prose (I removed a
 "46 tests" count from a `Result` after writing it), and committing each
 coherent piece as it completed.
+
+### 2026-08-07 — the protocol asks for prose but never says how it should read
+
+The user asked for the in-app guide to be rewritten because it "reads like an
+AI wrote it", then cut the README four more times in the same session: prose
+under the command fences, the Layout section, the guide's feature list, the
+architecture paragraph. Every cut was prose the protocol had asked for and no
+rule in it objected to.
+
+Two failures the protocol has no name for, both visible in
+`b9f6546`, `3673f0d` and `095e46d`:
+
+**Register.** The guide defined things by contrast ("it is not a panel"),
+emphasized with negation stacks ("Nothing else — no schema to install, no
+binary framing"), used appositive fragments as sentences ("The textual twin of
+the events strip.") and asked rhetorical questions in place of statements.
+`PROTOCOL.md` constrains voice only in `The spec` — `must`/`must not`/`may`,
+no "ideally" — which is about precision in requirements, not about how the
+rest of the repository's prose reads.
+
+**Redundant explanation.** `One fact, one owner` governs mutable facts, and by
+its letter none of what I cut violated it: the README's Layout section, the
+paragraph re-reading the three build commands, and the guide-section list were
+all accurate. They restated what an adjacent command, the spec, or the in-app
+guide already said. A wrong fact has an owner; a redundant explanation does
+not, so nothing flagged it and it accumulated until a person read the file.
+
+Expected `Adding a rule`'s bar to be the hard part here, and it is not — the
+user reporting a repeated failure is two instances by the protocol's own
+clause. The gap is that the protocol has no sample of prose it wants. Every
+rule in it is abstract, so "write directly" has nothing to imitate, and the
+thing that actually corrected the register was a person reading the output and
+pushing back five times.
+
+[D007](../decisions/D007-prose-serves-the-code.md) is the nearest local rule
+and it is about volume — how much prose a ticket justifies — not about how a
+sentence reads or whether it duplicates its neighbor. I proposed a D008 for
+register, with before/after pairs taken from those three commits. Recording the
+friction first; the decision is a separate call and has not been made.
