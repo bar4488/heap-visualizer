@@ -1,7 +1,7 @@
 ---
 id: T039
 title: The README's build and test sections are commands
-status: doing
+status: done
 updated: 2026-08-07
 ---
 
@@ -18,10 +18,10 @@ comments and without redundant explanations."
 
 ## Done when
 
-- [ ] No `#` comment inside a `README.md` code fence.
-- [ ] The README type-check command is `node_modules/.bin/tsc`, not `npx tsc`
+- [x] No `#` comment inside a `README.md` code fence.
+- [x] The README type-check command is `node_modules/.bin/tsc`, not `npx tsc`
       ([T021](T021-live-docs-drop-npx-tsc.md)).
-- [ ] Every command in the README runs from a clean checkout.
+- [x] Every command in the README runs from a clean checkout.
 
 ## Non-goals
 
