@@ -45,10 +45,10 @@ and its native tests assert
 real invariants: snapshot seek ≡ forward replay, pick prefers the newest
 overlap, anchor stability across reflow. Every performance and soundness
 finding from the 2026-07-24 review is fixed. `src/filter-dsl/` is
-dependency-free; its tests cover the E010 grammar, source-spanned AST,
-parser limits, and incomplete cursor contexts. The core links it to semantic
-checking, contextual completion, and a column-backed evaluator for the first
-set of built-in fields and operations.
+dependency-free and owns the grammar alone; its tests cover the Python-shaped
+syntax, source-spanned AST, parser limits, incomplete cursor contexts, and the
+lossy lexer that feeds highlighting. It builds twice: as an rlib the core
+links, and as `dist/filter_lexer.wasm` for the editor.
 
 **Web layer (`src/web/`) — all TypeScript now, split on the
 shell/domain seam, no other internal structure yet.** `main.ts` was one flat
@@ -59,36 +59,40 @@ other module takes as `deps.ui`.
 check: `grep -ric heap src/web/shell/` reports 0 for every file.
 `src/web/heap/` — analysis, the panel table, the events panel — and the
 `src/web/session.ts` boundary module hold the rest.
-The Filter panel is now the E010 draft/applied expression editor and speaks
-the typed check/apply/mode worker protocol. The core exports the first
-column-backed evaluator for built-in allocation/death fields, boolean and
-numeric/string operations, sets/ranges, overlap, missing tests, and string /
-stack methods. **Numbers are integers and floats**, one type to the person
+The Filter panel is the draft/applied expression editor, speaks the typed
+check/apply/mode worker protocol, and **highlights as you type** from a second
+wasm module built from `src/filter-dsl/` and loaded on the main thread
+([T043](tickets/T043-filter-syntax-highlighting.md)).
+
+**The filter language is Python.** `and`/`or`/`not`, `in` for every membership,
+`range(lo, hi)`, `is None`, chained comparison, `len()`, `startswith` —
+[ANL-003](../spec/07-analysis.md#anl-003-filter) is the rule and
+[E019](explorations/E019-a-python-shaped-filter-language.md) the design. Every
+field hangs off one of three objects: `alloc` is the allocation, `malloc` the
+record that created it, `free` the record that ended it — so `malloc.site`,
+`free.fields.reason`, `alloc.tags`, and `named("x").alloc.address`. There are
+no bare field names; each removed spelling is a diagnostic naming what replaced
+it, and the persisted filter language is version 3, so an older source is read
+back as no filter rather than restored broken.
+`filter_eval::resolve_path` is the single owner of what a path names, and the
+checker, the plan, the oracle and the completion catalog all call it.
+**Numbers are integers and floats**, one type to the person
 writing a filter, mixing under every numeric operator and comparing exactly —
 an integer operand is never widened to a double
 ([ANL-012](../spec/07-analysis.md#anl-012-numbers-in-the-filter-language),
-[T034](tickets/T034-the-filter-language-has-floats.md); E010 sketched the
-language as integral-only and carries a note saying so). Its attached completion list follows the complete grammar
-position: exact fields advance to operators, right-hand expressions are
-filtered to the required type, calls/sets/ranges progress through their
-delimiters, and live site/thread/tag values come from that same core catalog.
-Tag candidates update on create, rename, delete, and restore, including escaped
-labels. Allocations can carry overlapping tags, and the language says so: the
-field is the set-typed `tags`, `tags == {"a", "aa"}` is exact set equality,
-`tags contains "a"` is membership, `tags == {}` is untagged, and filter-to-tag
-adds its snapshot without removing the tags that selected it.
-**The E010 language is now complete on the two surfaces that were missing.**
-Custom trace fields are filterable — `field.pool`, `field["allocator-class"]`,
-`death.field.reason` — checked against a catalog the load pass builds, and
-`named("x")` resolves one allocation by its user-given name at check time.
-[ANL-010](../spec/07-analysis.md#anl-010-filtering-on-custom-trace-fields) and
-[ANL-011](../spec/07-analysis.md#anl-011-filtering-relative-to-a-named-allocation)
-are the rules. Both have a UI: an allocation's custom fields are their own
+[T034](tickets/T034-the-filter-language-has-floats.md)). Completion follows the
+objects: a slot offers only the namespaces holding a field of the wanted type,
+and each object offers only its own fields. Custom trace fields are filterable
+through `malloc.fields.<key>` and `free.fields.<key>`, checked against a
+catalog the load pass builds
+([ANL-010](../spec/07-analysis.md#anl-010-filtering-on-custom-trace-fields),
+[ANL-011](../spec/07-analysis.md#anl-011-filtering-relative-to-a-named-allocation)).
+Both have a UI: an allocation's custom fields are their own
 typed section of the allocation panel, each with a one-click predicate, and the
 Filter panel lists the trace's whole field catalog — the panel section is
 `src/web/heap/custom-fields.ts`, pure and tested. That section covers **both records that describe an allocation** — the
 creator's fields and the freeing `F`/`R`'s, merged, the death value winning a
-shared key and its row reading `death.field.<key>`
+shared key and its row reading `free.fields.<key>`
 ([ANL-006](../spec/07-analysis.md#anl-006-the-allocation-panel-and-pinned-windows),
 [T035](tickets/T035-death-record-custom-fields.md)). `python3 gen.py --fields`
 makes a trace carrying custom fields, one case per value shape and catalog
@@ -169,71 +173,33 @@ survivable, a stale `dist/` is the new way to be confused.
 
 ## Next
 
-**The filter language is being redesigned, and the evaluator with it.**
-[E019](explorations/E019-a-python-shaped-filter-language.md) is the design: a
-Python-shaped surface (`and`/`or`/`not`, `in` for every membership, `range()`,
-`is None`, chained comparison) over three namespaces — `alloc`, `malloc`,
-`free` — replacing the flat global field list. Requested on 2026-08-07; the
-three conflicts Python cannot express were decided by the user the same day and
-E019 records which.
+**The filter language is Python-shaped and the redesign is done.** E019's three
+tickets all closed: [T041](tickets/T041-lower-the-filter-to-a-typed-plan.md)
+lowered the evaluator, [T042](tickets/T042-the-filter-language-is-python-shaped.md)
+cut the surface over, and [T043](tickets/T043-filter-syntax-highlighting.md)
+gave the editor highlighting.
 
-**[T041](tickets/T041-lower-the-filter-to-a-typed-plan.md) is next**, and its
-tag prerequisite is done:
-[T044](tickets/T044-tag-scans-track-tags-in-use.md) removed the `O(H)`
-enumeration that put `tags contains` out of reach of T041's 2×-of-floor bar.
-[E020](explorations/E020-tags-cost-tracks-the-highest-tag-id.md) is the
-measurement and doubles as the acceptance harness.
+**Nothing is in flight.** The backlog is
+[T045](tickets/T045-lower-integer-arithmetic-to-a-narrow-path.md) and
+[T046](tickets/T046-negative-numbers-are-writable.md) — both came out of that
+work, neither is urgent — plus T009, T030, and the blocked T004.
 
-**Grounding it found that the evaluator never got the execution model E010
-specified** — `filter_eval::eval` walked the AST once per event, 45× above its
-floor. [T041](tickets/T041-lower-the-filter-to-a-typed-plan.md) fixed that and
-is done: an Apply now compiles to `filter_plan::Pred` and scans 64 events at a
-time, and `size >= 4096` over 1M creators went **38.0 ms → 0.40 ms** native.
-[D008](decisions/D008-the-filter-evaluator-is-a-lowered-plan.md) is the rule
-that keeps it there — a new operator extends the plan, it does not add a case
-to a tree walk — and
-[E019](explorations/E019-a-python-shaped-filter-language.md#measurement) has
-the whole table.
-
-**One check is outstanding and is a person's**: E010's gates are stated in
-release WASM and T041 measured native, because driving a browser is what
+**Two checks are outstanding and both are a person's**, because
 [D001](decisions/D001-web-changes-are-hand-smoke-tested.md) says an agent must
-not do. The margin is 60× on the common shapes, so this is a confirmation
-rather than a risk.
+not drive a browser. E010's performance gates are stated in release WASM and
+T041 measured native, where the margin is 60×. And the filter editor's
+highlight overlay has to sit exactly under the textarea's own text at every
+zoom and wrap point; if the module fails to load the panel falls back to plain
+text, so the failure mode is visible rather than silent.
 
-Next is [T042](tickets/T042-the-filter-language-is-python-shaped.md), then
-[T043](tickets/T043-filter-syntax-highlighting.md). T042 was ordered after the
-lowering because namespacing costs a string comparison per event on a tree walk
-and nothing at all on a plan. [T045](tickets/T045-lower-integer-arithmetic-to-a-narrow-path.md)
-came out of T041's measurements — general integer arithmetic is the one shape
-with no specialized leaf — and nothing waits on it.
+**[T046](tickets/T046-negative-numbers-are-writable.md) is worth knowing about
+before writing a filter**: the language has no unary minus, in any version of
+the grammar, so a negative custom field value gets a one-click predicate that
+will not compile. `0 - 5` is the workaround.
 
-The rest of the backlog is T009, T030, and the blocked T004.
-
-**[T009](tickets/T009-type-the-deps-contracts.md) is next, and is not urgent.**
-It types the `init*(deps)` contracts in `analysis.ts`, `session.ts` and
-`events-panel.ts` — today a comment above each `init*` and a `let d = null`
-under it, and the largest single cause under each of the two type-checking
-flags still off ([D005](decisions/D005-strictness-is-per-flag.md), which
-carries the measured counts). Its `updated` is 2026-07-25 and the web layer has
-moved since; re-ground it before starting.
-
-**[T030](tickets/T030-v8-frontmatter-conformance.md) is small and mechanical.**
-`PROTOCOL.md` moved from version 6 to version 8 on 2026-08-01 and its new
-frontmatter table leaves this file and D001–D006 non-conformant. The trap is in
-the ticket: on a decision, `created` is not a rename of `updated`, and at least
-one of the six carries an amendment date rather than a creation date.
-
-**[T004](tickets/T004-shell-host.md) is blocked and must stay blocked** until a
-second domain is concrete — see
-[D002](decisions/D002-shell-split-before-host.md).
-
-[E016](explorations/E016-what-to-build-next.md) is the standing list of what is
-not queued and why, with a proposed order. It binds nothing. Its candidate A
-(the custom-field and `named()` surfaces) closed on 2026-08-01; what remains is
-T009, an exploration for undo/redo, an exploration for multiple open traces,
-and two candidates it argues should stay untouched. T035 and T036 came from
-outside that list, on 2026-08-05.
+[E016](explorations/E016-what-to-build-next.md) is still the standing list of
+what is not queued and why. What remains on it is T009, an exploration for
+undo/redo, and an exploration for multiple open traces.
 
 **How work is written here changed on 2026-08-01.**
 [D007](decisions/D007-prose-serves-the-code.md) binds: one record per finished
