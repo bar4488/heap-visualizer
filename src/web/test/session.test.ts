@@ -39,7 +39,7 @@ function buildFixture() {
   input('ev-filtered', { checked: true });
   input('show-sizes', { checked: false });
   input('show-addrs', { checked: true });
-  input('filter-source', { value: 'size >= 1KiB && size <= 1MiB' });
+  input('filter-source', { value: 'alloc.size >= 1KiB and alloc.size <= 1MiB' });
 
   // filter panel: presentation mode is separate from the expression
   const fp = doc.getElementById('filter-panel');
@@ -100,8 +100,8 @@ function makeUI() {
     state: { seq: 4321, n: 100000 },
     xview: { zoom: 2.5, pan: 0.25 },
     crop: { lo: 100, hi: 900 },
-    filterDraft: 'size >= 1KiB && size <= 1MiB',
-    filterApplied: 'size >= 1KiB && size <= 1MiB',
+    filterDraft: 'alloc.size >= 1KiB and alloc.size <= 1MiB',
+    filterApplied: 'alloc.size >= 1KiB and alloc.size <= 1MiB',
     filterMode: 2,
     marksDirty: false,
     drawers: drawersState,
@@ -133,8 +133,8 @@ test('buildSession captures every field the format promises', () => {
   assert.deepEqual(h.xview, { zoom: 2.5, pan: 0.25 });
   assert.deepEqual(h.crop, { lo: 100, hi: 900 });
   assert.equal(h.playhead, 4321);
-  assert.equal(h.filter.languageVersion, 2);
-  assert.equal(h.filter.source, 'size >= 1KiB && size <= 1MiB');
+  assert.equal(h.filter.languageVersion, 3);
+  assert.equal(h.filter.source, 'alloc.size >= 1KiB and alloc.size <= 1MiB');
   assert.equal(h.filter.mode, 2);
   assert.deepEqual(Object.keys(s.windows).sort(), [...PANEL_IDS].sort());
   assert.equal(s.windows['warnings-panel'].hidden, true);
@@ -235,11 +235,13 @@ test('applySession ignores a filter with an unknown language version', () => {
   assert.equal(ui.filterApplied, '');
 });
 
-// a version-1 source can say `tag == "x"`, which no longer checks (T016)
-test('applySession ignores a filter written in language version 1', () => {
+// an older source is read back as no filter rather than restored broken: a
+// version-1 source says `tag == "x"` (T016), and a version-2 one is written in
+// the pre-Python surface (T042)
+test('applySession ignores a filter written in an older language version', () => {
   const s = buildSession();
-  s.heap.filter.languageVersion = 1;
-  s.heap.filter.source = 'tag == "hot"';
+  s.heap.filter.languageVersion = 2;
+  s.heap.filter.source = 'size >= 1KiB && tags contains "hot"';
   ui.filterApplied = '';
   applySession(s);
   assert.equal(ui.filterApplied, '');

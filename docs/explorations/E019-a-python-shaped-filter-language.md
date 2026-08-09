@@ -132,6 +132,24 @@ free      the record that ended it, or None
 | `field["allocator-class"]` | `malloc.fields["allocator-class"]` | per catalog |
 | `death.field.reason` | `free.fields.reason` | per catalog |
 
+> **2026-08-09, during [T042](../tickets/T042-the-filter-language-is-python-shaped.md).**
+> Two things this file got wrong, both settled in the build.
+>
+> **`named()` is regular, not short.** The examples above and below show
+> `named("x").address` and `named("x").seq`, carried over from E010 without
+> being reconsidered. But a named allocation is the same kind of thing as the
+> subject, so it exposes the same three objects:
+> `named("x").alloc.address`, `named("x").malloc.seq`. Longer, and the only
+> spelling — regularity is what the ticket is for, and a second flat surface on
+> `named()` would be exactly the thing being removed.
+>
+> **Tag values lost their completion trigger.** `"suspect" in alloc.tags` puts
+> the value before the set, so at the point of typing it there is no left
+> operand to infer tag names from; `tags contains "` used to complete them.
+> `alloc.tags == {"` still does, and the legend chips write the predicate
+> directly, so this is a smaller loss than it looks — but it is a real cost of
+> Python's operand order and it was not predicted here.
+
 Everything reachable is reached through one of the three. The only remaining
 globals are the two functions, `abs()` and `named()`, plus `len()` and
 `range()` proposed below.
@@ -331,6 +349,10 @@ ships without it.
   the gates.
 - [T042](../tickets/T042-the-filter-language-is-python-shaped.md) — the
   surface cutover: Python spelling and the three namespaces.
+- [T046](../tickets/T046-negative-numbers-are-writable.md) — a defect T042
+  surfaced without causing: the language has no unary minus, so the
+  custom-field panel offers a one-click predicate for a negative value that
+  cannot compile.
 - [T043](../tickets/T043-filter-syntax-highlighting.md) — the editor overlay
   and the main-thread lexer.
 

@@ -11,7 +11,7 @@ fn context(source: &str, cursor: usize) -> heap_visualizer_filter_dsl::Completio
 fn expression_and_operator_slots_are_distinct() {
     assert!(matches!(context("", 0).site, CompletionSite::Expression));
     assert!(matches!(
-        context("size && ", 8).site,
+        context("size and ", 9).site,
         CompletionSite::Expression
     ));
 

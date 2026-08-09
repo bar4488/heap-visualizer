@@ -913,13 +913,13 @@ function buildLegend() {
   let html = '';
   if (mode === 1) {
     UI.meta.sites.forEach((s, i) => {
-      const predicate = `site == ${quoteFilterString(s.name)}`;
+      const predicate = `malloc.site == ${quoteFilterString(s.name)}`;
       html += `<button class="chip filter-chip${hasTopLevelPredicate(UI.filterApplied, predicate) ? ' active' : ''}"
         data-filter-predicate="${esc(predicate)}"><span class="swatch" style="background:${CAT[i % 12]}"></span>${esc(s.name)}</button>`;
     });
   } else if (mode === 2) {
     UI.meta.thrs.forEach((t, i) => {
-      const predicate = `thread == ${t.thr}`;
+      const predicate = `malloc.thread == ${t.thr}`;
       html += `<button class="chip filter-chip${hasTopLevelPredicate(UI.filterApplied, predicate) ? ' active' : ''}"
         data-filter-predicate="${predicate}"><span class="swatch" style="background:${CAT[(i + 5) % 12]}"></span>thr ${t.thr}</button>`;
     });
@@ -929,12 +929,12 @@ function buildLegend() {
     html = `<span class="chip">young <span class="ramp" style="background:linear-gradient(90deg,#7ee787,#39c5cf,#1f4fa8)"></span> old (log age vs oldest live)</span>`;
   } else if (mode === 5) {
     html = UI.tags.map((t, i) => {
-      const predicate = `tags contains ${quoteFilterString(t.name)}`;
+      const predicate = `${quoteFilterString(t.name)} in alloc.tags`;
       return `<button class="chip filter-chip${hasTopLevelPredicate(UI.filterApplied, predicate) ? ' active' : ''}"
         data-filter-predicate="${esc(predicate)}"><span class="swatch" style="background:${t.color}"></span>${esc(t.name)} · ${fmtNum(UI.tagCounts[i + 1] || 0)}</button>`;
     }).join('');
     // untagged is the empty membership set, not a missing value
-    const untagged = 'tags == {}';
+    const untagged = 'alloc.tags == {}';
     html += `<button class="chip filter-chip${hasTopLevelPredicate(UI.filterApplied, untagged) ? ' active' : ''}"
       data-filter-predicate="${untagged}"><span class="swatch" style="background:#39414a"></span>untagged · ${fmtNum(UI.tagCounts[0] || 0)}</button>`;
     if (!UI.tags.length) {
@@ -952,7 +952,7 @@ $('legend').onclick = (event) => {
   const source = toggleFilterPredicate(
     UI.filterDraft,
     chip.dataset.filterPredicate,
-    event.shiftKey ? '||' : '&&',
+    event.shiftKey ? 'or' : 'and',
   );
   void applyFilterSource(source);
 };
@@ -1939,7 +1939,9 @@ function buildDetailBody(root, info) {
   if (dd) dd.onclick = () => worker.postMessage({ type: 'jump', seq: info.deathSeq + 1 });
   q('.d-range').onclick = async () => {
     showPanel('filter-panel');
-    const applied = await applyFilterSource(`span overlaps ${info.addr}..${info.end}`);
+    const applied = await applyFilterSource(
+      `alloc.span.overlaps(range(${info.addr}, ${info.end}))`,
+    );
     if (applied) {
       $('st-info').textContent = `filtering range ${info.addr} – ${info.end}`;
     }

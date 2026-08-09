@@ -1,9 +1,11 @@
-export type FilterJoin = '&&' | '||';
+export type FilterJoin = 'and' | 'or';
 
 type TopLevelSource = {
   operands: string[];
   operators: FilterJoin[];
 };
+
+const WORD = /[A-Za-z0-9_]/;
 
 function splitTopLevel(source: string, splitOn?: FilterJoin): TopLevelSource {
   const operands: string[] = [];
@@ -27,13 +29,15 @@ function splitTopLevel(source: string, splitOn?: FilterJoin): TopLevelSource {
     }
     if (ch === '(' || ch === '[' || ch === '{') depth++;
     else if (ch === ')' || ch === ']' || ch === '}') depth = Math.max(0, depth - 1);
-    else if (depth === 0) {
-      const op = source.slice(i, i + 2);
-      if ((op === '&&' || op === '||') && (!splitOn || op === splitOn)) {
+    else if (depth === 0 && !WORD.test(source[i - 1] ?? ' ')) {
+      // the operators are words now, so a match has to be a whole one:
+      // `android == 1` does not begin with the `and` operator
+      const op = source.startsWith('and', i) ? 'and' : source.startsWith('or', i) ? 'or' : null;
+      if (op && !WORD.test(source[i + op.length] ?? ' ') && (!splitOn || op === splitOn)) {
         operands.push(source.slice(start, i).trim());
         operators.push(op);
-        start = i + 2;
-        i++;
+        start = i + op.length;
+        i += op.length - 1;
       }
     }
   }
@@ -43,7 +47,7 @@ function splitTopLevel(source: string, splitOn?: FilterJoin): TopLevelSource {
 
 function splitLogicalRoot(source: string): TopLevelSource {
   const operators = splitTopLevel(source).operators;
-  return splitTopLevel(source, operators.includes('||') ? '||' : '&&');
+  return splitTopLevel(source, operators.includes('or') ? 'or' : 'and');
 }
 
 export function quoteFilterString(value: string): string {
@@ -56,10 +60,10 @@ export function quoteFilterString(value: string): string {
  *
  * `atDeath` reads the record that freed the allocation rather than the one
  * that created it — the same key on the two records is two operands
- * ([ANL-010]).
+ * ([ANL-010]), and each hangs off the object for its own record.
  */
 export function customFieldRef(key: string, atDeath = false): string {
-  const root = atDeath ? 'death.field' : 'field';
+  const root = atDeath ? 'free.fields' : 'malloc.fields';
   return /^[A-Za-z_][A-Za-z0-9_]*$/.test(key)
     ? `${root}.${key}`
     : `${root}[${quoteFilterString(key)}]`;
@@ -77,7 +81,7 @@ export function customFieldPredicate(
 ): string | null {
   const ref = customFieldRef(key, atDeath);
   if (typeof value === 'string') return `${ref} == ${quoteFilterString(value)}`;
-  if (typeof value === 'boolean') return value ? ref : `!${ref}`;
+  if (typeof value === 'boolean') return value ? ref : `not ${ref}`;
   // Numbers are exact on both sides: the language reads a fractional literal
   // as the same double the trace's own text parsed to, so `== 0.986` matches
   // the record it was written from (T034). Infinities and NaN cannot be
@@ -93,7 +97,7 @@ export function hasTopLevelPredicate(source: string, predicate: string): boolean
 export function toggleFilterPredicate(
   source: string,
   predicate: string,
-  join: FilterJoin = '&&',
+  join: FilterJoin = 'and',
 ): string {
   const trimmed = source.trim();
   const target = predicate.trim();
@@ -117,7 +121,7 @@ export function toggleFilterPredicate(
     return result;
   }
 
-  const base = join === '&&' && split.operators[0] === '||'
+  const base = join === 'and' && split.operators[0] === 'or'
     ? `(${trimmed})`
     : trimmed;
   return `${base} ${join} ${target}`;

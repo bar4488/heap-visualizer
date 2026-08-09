@@ -41,11 +41,34 @@ membership and compacts higher tag ids down).
 ## ANL-003: Filter
 
 The Filter panel is one multiline allocation-expression editor plus **dim
-others** (default) / **hide others** presentation mode. The expression surface
-and semantics are the allocation DSL sketched by
-[E010](../docs/explorations/E010-filter-expression-language.md): there are no
-checkbox predicates, quick filters, or hidden conjunctions with another
-representation.
+others** (default) / **hide others** presentation mode. There are no checkbox
+predicates, quick filters, or hidden conjunctions with another representation.
+
+**The expression must read as Python.** `and`, `or`, `not`, `in`, `is None`,
+chained comparison, `len()` and `range(lo, hi)` all carry their Python
+meanings, and there is exactly one spelling of each: `&&`, `||`, `!`,
+`contains`, `overlaps` as an operator, `..`, and `is missing` must each be a
+diagnostic naming what replaced it, not an accepted alias. `not` binds looser
+than a comparison and tighter than `and`, as it does in Python.
+
+Python's semantics are followed except where three-valued logic requires
+otherwise: an operation on a missing value is false rather than an error, per
+the missing rule below.
+
+**Every field is reached through one of three objects.** `alloc` is the
+allocation — `id`, `address`, `end`, `span`, `size`, `usable`, `tags`,
+`freed`, `lifetime`. `malloc` is the record that created it — `seq`, `time`,
+`site`, `thread`, `stack`. `free` is the record that ended it — `seq`, `time`,
+both missing when it was never freed. There are no bare field names and no
+aliases; a bare name that used to be one must be a diagnostic naming its
+object.
+
+`named("x")` yields an allocation exposing those same three objects, so
+`named("x").alloc.address` is how one of its fields is read.
+
+The surface is otherwise the allocation DSL sketched by
+[E010](../docs/explorations/E010-filter-expression-language.md) and reshaped by
+[E019](../docs/explorations/E019-a-python-shaped-filter-language.md).
 
 The visible draft and the last successfully applied source are separate.
 Typing performs a debounced check but never changes visibility; **Apply**
@@ -86,19 +109,20 @@ and the Events panel's filtered index
 ([NAV-005](06-playback-navigation.md#nav-005-the-events-panel)) all consume
 those same match bits. The allocation panel's **match range** action replaces
 the expression with visible source of the form
-`span overlaps 0x1000..0x1800` and applies it immediately; it does not mutate
-separate filter state.
+`alloc.span.overlaps(range(0x1000, 0x1800))` and applies it immediately; it
+does not mutate separate filter state.
 
-A missing test (`is missing`, `is not missing`) applies only to an optional
-field. On a required one the answer would be constant, so it is a diagnostic
-instead.
+A missing test (`is None`, `is not None`) applies only to an optional field. On
+a required one the answer would be constant, so it is a diagnostic instead.
 
 ## ANL-010: Filtering on custom trace fields
 
 The unrecognized top-level keys a producer attaches to records
 ([TRACE-001](02-trace-format.md#trace-001-general-rules)) are filterable.
-`field.<key>` and `field["<key>"]` read the allocation's own record;
-`death.field.<key>` and `death.field["<key>"]` read the record that freed it.
+`malloc.fields.<key>` and `malloc.fields["<key>"]` read the record that
+created the allocation; `free.fields.<key>` and `free.fields["<key>"]` read the
+record that freed it. `alloc` carries none — an allocation is not a record —
+and `alloc.fields` must be a diagnostic saying so.
 Bracket and dot access are the same field; the brackets exist for keys that
 are not identifier-shaped.
 
@@ -122,12 +146,12 @@ what a filter may say depends on the trace in hand:
   Only scalars are addressable; nested values remain visible in the allocation
   panel ([ANL-006](#anl-006-the-allocation-panel-and-pinned-windows)) and are
   not filterable.
-- `death.field.<key>` on an allocation that is never freed is missing.
+- `free.fields.<key>` on an allocation that is never freed is missing.
 
 Custom fields are otherwise ordinary operands: string methods, sets, ranges,
 ordering, and the missing tests all apply per their own rules. Completion
-offers `field.`, the catalogued keys under it, and the values each key was
-observed holding — but never a key that failed to type, per the rule above
+offers `fields.` under the two record objects, the catalogued keys under it,
+and the values each key was observed holding — but never a key that failed to type, per the rule above
 that completion advertises nothing the evaluator rejects.
 
 Resolution must not be per event. Records with identical custom keys share one
@@ -138,12 +162,15 @@ copy.
 
 `named("<name>")` refers to the one allocation carrying that name
 ([ANL-001](#anl-001-the-analysis-objects)), so a filter can be written relative
-to a specific allocation: `address >= named("request root").address`,
-`abs(seq - named("request root").seq) <= 10`.
+to a specific allocation: `alloc.address >= named("request root").alloc.address`,
+`abs(malloc.seq - named("request root").malloc.seq) <= 10`.
 
 - It is a **reference, not a value**. Reading a field of it —
-  `named("x").size` — yields that field's ordinary type. The bare reference
-  compared to anything must be a diagnostic.
+  `named("x").alloc.size` — yields that field's ordinary type. The bare
+  reference compared to anything must be a diagnostic.
+- It exposes the same three objects the subject does, so a field is reached the
+  same way whoever it is about ([ANL-003](#anl-003-filter)). There is no
+  shorter flat spelling.
 - The argument is a string constant. It is resolved while the expression is
   checked, not while it is evaluated.
 - Zero allocations with the name, and more than one, must both be diagnostics
@@ -189,7 +216,7 @@ range, `in` a set, `contains`, and arithmetic. Where they mix:
 
 Equality on a float compares the parsed doubles exactly. A value the producer
 wrote and a literal spelled the same way parse to the same double, so
-`field["fill-ratio"] == 0.986` matches the record it was written from; a value
+`malloc.fields["fill-ratio"] == 0.986` matches the record it was written from; a value
 arrived at by arithmetic may not, and a range is the right instrument there.
 
 `NaN` is unordered: every comparison against it, including `==`, is false. It
@@ -203,24 +230,24 @@ Floats reach the language through custom trace fields
 
 ## ANL-009: Filtering by tag
 
-An allocation's memberships are one set-typed filter field, `tags`, whose
-members are the current tag names. It is never missing: an untagged allocation
+An allocation's memberships are one set-typed filter field, `alloc.tags`,
+whose members are the current tag names. It is never missing: an untagged allocation
 has the empty set.
 
-- `tags == {"a", "aa"}` must be true only when the memberships are exactly
-  those names. Set equality is order-insensitive and ignores repeated members
-  in the literal, and `!=` is its negation.
-- `tags contains "a"` must be true when `a` is one of the memberships.
-  `contains` is a binary operator requiring a set on the left and one member of
-  that set's type on the right; on any other operands it is a diagnostic. It is
-  distinct from the `string.contains(…)` method, which still takes a `.`.
-- `tags == {}` must match every untagged allocation and nothing else.
-- `tags == "a"` and `tags is missing` must be diagnostics, not silently true or
+- `alloc.tags == {"a", "aa"}` must be true only when the memberships are
+  exactly those names. Set equality is order-insensitive and ignores repeated
+  members in the literal, and `!=` is its negation.
+- `"a" in alloc.tags` must be true when `a` is one of the memberships. It is
+  the same `in` that tests a set, a substring, and a range: one operator for
+  every membership, resolved by the type of its right operand.
+- `len(alloc.tags)` is how many memberships it carries.
+- `alloc.tags == {}` must match every untagged allocation and nothing else.
+- `alloc.tags == "a"` and `alloc.tags is None` must be diagnostics, not silently true or
   false. There is no scalar `tag` field, and no operation on `tags` may mean
   "any one membership satisfies this" other than `contains`.
 
-The tag legend chip writes `tags contains "<name>"` and the untagged chip
-writes `tags == {}` ([ANL-003](#anl-003-filter)).
+The tag legend chip writes `"<name>" in alloc.tags` and the untagged chip
+writes `alloc.tags == {}` ([ANL-003](#anl-003-filter)).
 
 ## ANL-004: Crop
 
@@ -260,7 +287,7 @@ allocation whose records carry no custom fields shows no section.
 A key carried by both records appears **once, holding the death record's
 value**: the later record is the later word on the same allocation. Such a row
 must be marked as coming from the freeing record, and its predicate must read
-`death.field.<key>` — the two sides are two operands to the filter language,
+`free.fields.<key>` — the two sides are two operands to the filter language,
 and a row must never offer a predicate that does not match the value shown
 beside it.
 

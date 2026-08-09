@@ -39,10 +39,15 @@ export function sessionKey() {
 export const HEAP_SESSION_VERSION = 2;
 
 // the filter language a persisted source is written in, bumped when a source
-// written by an older build would no longer check. Version 2 renamed the
-// scalar `tag` field to the set-typed `tags` (T016), so a version-1 source is
-// read back as no filter rather than restored broken.
-export const FILTER_LANGUAGE_VERSION = 2;
+// written by an older build would no longer check, so an old source is read
+// back as no filter rather than restored broken.
+//
+// Version 2 renamed the scalar `tag` field to the set-typed `tags` (T016).
+// Version 3 is the Python-shaped surface (T042): `and`/`or`/`not`, `in` for
+// every membership, `range(lo, hi)`, `is None`, and every field reached
+// through `alloc`, `malloc` or `free`. Nothing written before it checks, and
+// there is no translator — E019 says why.
+export const FILTER_LANGUAGE_VERSION = 3;
 
 export function buildSession() {
   const windows = {};

@@ -145,7 +145,7 @@ fn binary_operators_are_left_associative() {
 
 #[test]
 fn field_index_call_and_method_are_source_spanned() {
-    let source = "named(\"root\").field[\"allocator-class\"].starts_with(\"s\")";
+    let source = "named(\"root\").malloc.fields[\"allocator-class\"].startswith(\"s\")";
     let expr = parse(source).unwrap();
     assert_eq!(expr.span, Span::new(0, source.len()));
     let ExprKind::Call { callee, arguments } = &expr.kind else {
@@ -155,7 +155,7 @@ fn field_index_call_and_method_are_source_spanned() {
     let ExprKind::Field { name, .. } = &callee.kind else {
         panic!("expected method field");
     };
-    assert_eq!(name, "starts_with");
+    assert_eq!(name, "startswith");
 }
 
 #[test]

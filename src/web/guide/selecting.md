@@ -31,7 +31,7 @@ Actions on the panel:
 - **⌖ focus** — flash exactly where it is on the map.
 - **go to birth**, **go to death** — move the playhead to just after either
   event.
-- **match range** — replace the filter with `span overlaps <addr>..<end>` and
+- **match range** — replace the filter with `alloc.span.overlaps(range(<addr>, <end>))` and
   apply it.
 - **name** — free text; shows in the map label, tooltip, and search.
 - **tags** — comma-separated memberships, applied with **set**.
