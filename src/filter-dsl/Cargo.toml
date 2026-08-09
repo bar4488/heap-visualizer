@@ -5,5 +5,14 @@ edition = "2021"
 
 [lib]
 name = "heap_visualizer_filter_dsl"
+# rlib for the core, which links this crate directly; cdylib for the standalone
+# highlighting module the browser's main thread loads (T043).
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = true

@@ -19,6 +19,12 @@ refuses to emit at all if anything fails to type-check.
 
 Needs the wasm target: `rustup target add wasm32-unknown-unknown`.
 
+**`./build.sh` emits two wasm modules.** `heap_visualizer_core.wasm` is the
+engine, loaded by the worker. `filter_lexer.wasm` is `src/filter-dsl/` on its
+own, loaded by the main thread so the filter editor can highlight
+synchronously as you type — the grammar has one owner and the editor does not
+wait on a message port ([T043](tickets/T043-filter-syntax-highlighting.md)).
+
 ## Run
 
 ```sh
@@ -39,7 +45,7 @@ python3 gen.py --seed 2 --ops 200000 --threads 8 --out dist/big.heapl
 
 ```sh
 cargo test --manifest-path src/core/Cargo.toml        # the engine and filter evaluation, native, no wasm
-cargo test --manifest-path src/filter-dsl/Cargo.toml  # the DSL parser and completion contexts, native
+cargo test --manifest-path src/filter-dsl/Cargo.toml  # the DSL parser, completion contexts, and highlighting, native
 node --test 'src/web/**/*.test.ts'                    # the web suite, no npm, no browser
 node_modules/.bin/tsc -p tsconfig.test.json           # type-check everything, emit nothing
 ```

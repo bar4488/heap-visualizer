@@ -36,6 +36,9 @@ pub(crate) enum TokenKind {
     RightBrace,
     LeftBracket,
     RightBracket,
+    /// A byte that cannot begin a token. Only `lex_lossy` produces this; the
+    /// parser's `lex` reports it as an error instead.
+    Invalid,
     Eof,
 }
 
@@ -43,6 +46,38 @@ pub(crate) enum TokenKind {
 pub(crate) struct Token {
     pub kind: TokenKind,
     pub span: Span,
+}
+
+/// Lex as much as possible, never failing: an unlexable byte becomes an
+/// `Invalid` token and the scan continues past it.
+///
+/// This exists for highlighting, which runs on every keystroke over source
+/// that is usually half-written. It shares the whole token definition with
+/// `lex` so the two can never disagree about what a word is.
+pub(crate) fn lex_lossy(source: &str) -> Vec<Token> {
+    let mut lexer = Lexer {
+        source,
+        offset: 0,
+        tokens: Vec::new(),
+    };
+    while lexer.offset < source.len() {
+        lexer.skip_whitespace();
+        if lexer.offset == source.len() {
+            break;
+        }
+        let start = lexer.offset;
+        if lexer.token().is_err() {
+            // step over exactly one character, so a bad byte costs one token
+            // and never loops
+            let width = lexer.rest().chars().next().map_or(1, char::len_utf8);
+            lexer.offset = start + width;
+            lexer.tokens.push(Token {
+                kind: TokenKind::Invalid,
+                span: Span::new(start, lexer.offset),
+            });
+        }
+    }
+    lexer.tokens
 }
 
 pub(crate) fn lex(source: &str) -> Result<Vec<Token>, ParseError> {

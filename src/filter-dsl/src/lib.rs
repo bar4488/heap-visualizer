@@ -7,11 +7,15 @@
 mod ast;
 mod completion;
 mod error;
+mod highlight;
 mod lexer;
 mod parser;
+#[cfg(target_arch = "wasm32")]
+mod wasm;
 
 pub use ast::{BinaryOp, Expr, ExprKind, FloatLiteral, IntegerLiteral, Span, UnaryOp, Unit};
 pub use completion::{completion_context, CompletionContext, CompletionSite, OperandKind};
+pub use highlight::{highlight, Class, Highlight};
 pub use error::ParseError;
 pub use parser::parse;
 

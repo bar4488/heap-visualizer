@@ -8,6 +8,8 @@
   --green: #3fb950;
   --red: #f85149;
   --accent: #58a6ff;
+  /* literals in the filter editor (T043) */
+  --literal: #d2a8ff;
 }
 
 * { box-sizing: border-box; }
@@ -343,13 +345,46 @@ button.d-pin.pinned {
 .filter-row { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
 .filter-row .grow { flex: 1; }
 .filter-shortcut { color: var(--fg-dim); font-size: 10px; }
-.filter-editor textarea {
-  box-sizing: border-box; width: 100%; min-height: 8em; resize: vertical;
-  padding: 7px 8px; background: var(--bg); color: var(--fg);
-  border: 1px solid var(--border); border-radius: 4px;
+/* The textarea and the highlight layer must agree on every metric that moves
+   a glyph: font, padding, border, wrapping, tab size. They are stacked, so any
+   disagreement shows up as colour sliding off the text under it. */
+.filter-input { position: relative; }
+.filter-editor textarea,
+.filter-highlight {
+  box-sizing: border-box; width: 100%; min-height: 8em;
+  padding: 7px 8px; margin: 0;
+  border: 1px solid transparent; border-radius: 4px;
   font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre-wrap; overflow-wrap: break-word; tab-size: 4;
+}
+.filter-editor textarea {
+  position: relative; resize: vertical;
+  background: transparent; border-color: var(--border);
+  /* the text itself is drawn by the layer behind; the caret and the selection
+     are the textarea's own and stay visible */
+  color: transparent; caret-color: var(--fg);
+}
+.filter-editor textarea::selection { background: var(--accent); color: transparent; }
+.filter-highlight {
+  position: absolute; inset: 0; overflow: hidden;
+  background: var(--bg); color: var(--fg); pointer-events: none;
 }
 .filter-editor textarea:focus { border-color: var(--accent); outline: none; }
+
+/* No highlighter (the module failed to load): the textarea draws its own text
+   again, so the editor degrades to plain and never to invisible. */
+.filter-editor.unhighlighted textarea { color: var(--fg); background: var(--bg); }
+.filter-editor.unhighlighted textarea::selection { color: var(--fg); }
+.filter-editor.unhighlighted .filter-highlight { display: none; }
+
+.hl-keyword { color: var(--accent); }
+.hl-field { color: var(--fg); }
+.hl-function { color: var(--green); }
+.hl-string { color: var(--literal); }
+.hl-number { color: var(--literal); }
+.hl-operator { color: var(--fg-dim); }
+.hl-bracket { color: var(--fg-dim); }
+.hl-invalid { color: var(--red); text-decoration: underline wavy; }
 .filter-completions {
   max-height: 176px; overflow-y: auto; margin-top: 3px;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 4px;

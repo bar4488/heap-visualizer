@@ -24,6 +24,12 @@ rm -rf dist/shell dist/heap
 if (( ! web_only )); then
   cargo build --release --target wasm32-unknown-unknown --manifest-path src/core/Cargo.toml
   cp src/core/target/wasm32-unknown-unknown/release/heap_visualizer_core.wasm dist/
+  # The filter lexer ships a second time, standalone, for the main thread: the
+  # editor highlights on every keystroke and the engine is behind a message
+  # port. It is small because the crate has no dependencies (T043).
+  cargo build --release --target wasm32-unknown-unknown --manifest-path src/filter-dsl/Cargo.toml
+  cp src/filter-dsl/target/wasm32-unknown-unknown/release/heap_visualizer_filter_dsl.wasm \
+    dist/filter_lexer.wasm
 fi
 
 # TypeScript -> browser ES modules. tsc is configured with noEmitOnError, so a
@@ -53,6 +59,6 @@ if [[ ! -f dist/demo.heapl ]]; then
   python3 gen.py --seed 1 --ops 50000 --threads 4 --out dist/demo.heapl
 fi
 
-ls -la dist/heap_visualizer_core.wasm
+ls -la dist/heap_visualizer_core.wasm dist/filter_lexer.wasm
 
 echo "serve with: ./serve.py   (http.server sends no Cache-Control, so browsers cache stale js)"

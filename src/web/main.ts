@@ -32,6 +32,7 @@ import {
   applyFilterCompletion, utf8Offset,
 } from './filter-completion.ts';
 import { initGuide } from './guide.ts';
+import { loadHighlighter, paintHighlight } from './highlight.ts';
 import {
   customFieldRef, hasTopLevelPredicate, quoteFilterString, toggleFilterPredicate,
 } from './filter-actions.ts';
@@ -1073,9 +1074,24 @@ function scheduleFilterCheck(explicit = false) {
   }, explicit ? 0 : 180);
 }
 
+/**
+ * Repaint the layer behind the textarea, and keep it scrolled with it.
+ *
+ * Highlighting is presentation only: it never gates checking or Apply, and a
+ * draft that will not lex still shows its text.
+ */
+function paintFilterSource() {
+  const input = $('filter-source');
+  const overlay = $('filter-highlight');
+  paintHighlight(overlay, input.value);
+  overlay.scrollTop = input.scrollTop;
+  overlay.scrollLeft = input.scrollLeft;
+}
+
 function filterEdited() {
   const input = $('filter-source');
   UI.filterDraft = input.value;
+  paintFilterSource();
   if (!UI.filterDraft.trim()) {
     setFilterStatus(UI.filterApplied ? 'Edited; applied filter is still active' : 'Empty');
   } else if (UI.filterDraft === UI.filterApplied) {
@@ -1092,6 +1108,7 @@ async function applyFilterSource(source = $('filter-source').value) {
   const generation = ++filterApplyGeneration;
   UI.filterDraft = source;
   $('filter-source').value = source;
+  paintFilterSource();
   clearTimeout(filterCheckTimer);
   ++filterCheckGeneration;
   cancelLatest('filter-check');
@@ -1112,6 +1129,7 @@ async function applyFilterSource(source = $('filter-source').value) {
     if (UI.filterDraft === source) {
       UI.filterDraft = UI.filterApplied;
       $('filter-source').value = UI.filterApplied;
+      paintFilterSource();
       setFilterStatus(UI.filterApplied ? 'Applied' : 'Empty', UI.filterApplied ? 'applied' : '');
     } else {
       setFilterStatus('Edited; applied filter is still active');
@@ -1214,6 +1232,21 @@ function tagFilterMatches() {
 }
 
 $('filter-source').oninput = filterEdited;
+// the overlay is a separate box, so it has to follow the textarea's scroll or
+// the colours slide off the text as soon as the draft is taller than the box
+$('filter-source').onscroll = () => {
+  const input = $('filter-source');
+  $('filter-highlight').scrollTop = input.scrollTop;
+  $('filter-highlight').scrollLeft = input.scrollLeft;
+};
+
+// Highlighting is presentation, so it loads in the background and its failure
+// only costs colour: the panel falls back to the textarea drawing its own
+// text (T043).
+void loadHighlighter().then((ready) => {
+  $('filter-panel').classList.toggle('unhighlighted', !ready);
+  if (ready) paintFilterSource();
+});
 $('filter-source').onkeydown = (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
     e.preventDefault();

@@ -96,6 +96,13 @@ lists saved filters and can set and apply one again, rename it, or delete it.
 Saving an existing name overwrites its source. A saved filter is source text,
 not a compiled plan or a live match set.
 
+**The editor highlights as you type.** Fields, keywords, literals, calls and
+brackets are coloured, and a spelling the language removed is marked as a
+mistake before Apply is pressed. Highlighting is presentation only: it never
+gates checking or applying, it comes from the same lexer that parses the
+expression rather than a second one, and source it cannot lex still shows its
+text.
+
 The focused editor offers contextual completion from the same core catalog
 that checks the expression: executable fields, type-valid operators and
 members, and observed site/thread/tag values. The attached list opens while
