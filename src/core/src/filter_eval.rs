@@ -142,30 +142,134 @@ impl FieldValues {
     }
 }
 
-/// Which event's fragment a custom field reads: the allocation's own, or the
-/// one on the event that freed it.
+/// Which event's fragment a custom field reads: the allocation's own creator
+/// record, or the record that freed it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FieldRoot {
     Alloc,
     Death,
 }
 
-/// Recognize `field.k`, `field["k"]`, `death.field.k` and `death.field["k"]`.
-/// Everything else — including `death.seq` and a string method call — is not a
-/// custom field reference and is handled by the caller.
-pub(crate) fn custom_field(expr: &Expr) -> Option<(FieldRoot, &str)> {
-    let (base, key) = match &expr.kind {
+/// One of the three objects every field hangs off.
+///
+/// `alloc` is the allocation — what it is and how long it lived. `malloc` is
+/// the record that created it, `free` the record that ended it. Nothing is
+/// reachable except through one of them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Ns {
+    Alloc,
+    Malloc,
+    Free,
+}
+
+impl Ns {
+    pub(crate) fn parse(name: &str) -> Option<Self> {
+        Some(match name {
+            "alloc" => Ns::Alloc,
+            "malloc" => Ns::Malloc,
+            "free" => Ns::Free,
+            _ => return None,
+        })
+    }
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Ns::Alloc => "alloc",
+            Ns::Malloc => "malloc",
+            Ns::Free => "free",
+        }
+    }
+
+    /// Which record's custom fields `<ns>.fields` reads. `alloc` has none:
+    /// custom fields belong to records, and an allocation is not one.
+    const fn field_root(self) -> Option<FieldRoot> {
+        match self {
+            Ns::Alloc => None,
+            Ns::Malloc => Some(FieldRoot::Alloc),
+            Ns::Free => Some(FieldRoot::Death),
+        }
+    }
+}
+
+/// What a field path names, once the namespace and any `named()` subject in
+/// front of it have been peeled off.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Leaf<'a> {
+    /// A built-in field, as `alloc.size` or `malloc.seq`.
+    Builtin { ns: Ns, name: &'a str },
+    /// A custom trace field, as `malloc.fields.pool` or `free.fields["k"]`.
+    Custom { root: FieldRoot, key: &'a str },
+}
+
+/// A resolved field reference: what it names, and whose.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Path<'a> {
+    /// The `named("x")` call this path hangs off, if any. `None` is the
+    /// allocation being tested.
+    pub subject: Option<&'a Expr>,
+    pub leaf: Leaf<'a>,
+}
+
+/// The namespace an expression is, plus the `named()` call in front of it.
+///
+/// `alloc` on its own, and `named("x").alloc` — a named allocation exposes the
+/// same three objects the subject does, so every path reads the same whoever
+/// it is about.
+fn ns_of(expr: &Expr) -> Option<(Ns, Option<&Expr>)> {
+    match &expr.kind {
+        ExprKind::Identifier(name) => Ns::parse(name).map(|ns| (ns, None)),
+        ExprKind::Field { base, name } if is_named_call(base) => {
+            Ns::parse(name).map(|ns| (ns, Some(&**base)))
+        }
+        _ => None,
+    }
+}
+
+/// Recognize every field path the language has. Everything else — a method
+/// call, a literal, arithmetic — is not one, and the caller handles it.
+///
+/// The shapes are `<ns>.<name>`, `<ns>.fields.<key>`, `<ns>.fields["<key>"]`,
+/// and each of those behind `named("x").`.
+pub(crate) fn resolve_path(expr: &Expr) -> Option<Path<'_>> {
+    let (base, name) = match &expr.kind {
         ExprKind::Field { base, name } => (base, name.as_str()),
         ExprKind::Index { base, key } => (base, key.as_str()),
         _ => return None,
     };
-    match &base.kind {
-        ExprKind::Identifier(root) if root == "field" => Some((FieldRoot::Alloc, key)),
-        ExprKind::Field { base: inner, name } if name == "field" => {
-            matches!(&inner.kind, ExprKind::Identifier(root) if root == "death")
-                .then_some((FieldRoot::Death, key))
-        }
-        _ => None,
+    // `<ns>.<name>` — an index is never a built-in, so only a Field reaches it
+    if let Some((ns, subject)) = ns_of(base) {
+        return matches!(expr.kind, ExprKind::Field { .. }).then_some(Path {
+            subject,
+            leaf: Leaf::Builtin { ns, name },
+        });
+    }
+    // `<ns>.fields.<key>` and `<ns>.fields["<key>"]`
+    let ExprKind::Field {
+        base: inner,
+        name: fields,
+    } = &base.kind
+    else {
+        return None;
+    };
+    if fields != "fields" {
+        return None;
+    }
+    let (ns, subject) = ns_of(inner)?;
+    Some(Path {
+        subject,
+        leaf: Leaf::Custom {
+            root: ns.field_root()?,
+            key: name,
+        },
+    })
+}
+
+/// The custom field an expression names, for the passes that only care about
+/// those — collecting keys to resolve, and reading one during evaluation.
+pub(crate) fn custom_field(expr: &Expr) -> Option<(FieldRoot, &str)> {
+    match resolve_path(expr)?.leaf {
+        Leaf::Custom { root, key } => Some((root, key)),
+        Leaf::Builtin { .. } => None,
     }
 }
 
@@ -175,16 +279,55 @@ fn is_named_call(expr: &Expr) -> bool {
         if matches!(&callee.kind, ExprKind::Identifier(name) if name == "named"))
 }
 
-/// True for `field` / `death.field` with no key on it yet — a reference the
-/// user has started and not finished.
+/// True for `<ns>.fields` with no key on it yet — a reference the user has
+/// started and not finished.
 fn is_field_root(expr: &Expr) -> bool {
-    match &expr.kind {
-        ExprKind::Identifier(name) => name == "field",
-        ExprKind::Field { base, name } => {
-            name == "field" && matches!(&base.kind, ExprKind::Identifier(r) if r == "death")
-        }
-        _ => false,
+    matches!(&expr.kind, ExprKind::Field { base, name }
+        if name == "fields" && ns_of(base).is_some_and(|(ns, _)| ns.field_root().is_some()))
+}
+
+/// Every built-in field of one object: the completion catalog, and the same
+/// list `field_type` accepts.
+fn ns_fields(ns: Ns) -> &'static [(&'static str, &'static str, Type)] {
+    match ns {
+        Ns::Alloc => &[
+            ("address", "address", Type::Int),
+            ("end", "address", Type::Int),
+            ("freed", "bool", Type::Bool),
+            ("id", "integer", Type::Int),
+            ("lifetime", "time, optional", Type::Int),
+            ("size", "bytes", Type::Int),
+            ("span", "address range", Type::Range),
+            ("tags", "string set", Type::Set(ValueKind::String)),
+            ("usable", "bytes, optional", Type::Int),
+        ],
+        Ns::Malloc => &[
+            ("seq", "integer", Type::Int),
+            ("site", "string, optional", Type::String),
+            ("stack", "string", Type::String),
+            ("thread", "integer, optional", Type::Int),
+            ("time", "time", Type::Int),
+        ],
+        Ns::Free => &[
+            ("seq", "integer, optional", Type::Int),
+            ("time", "time, optional", Type::Int),
+        ],
     }
+}
+
+/// The fields of one object, as completion items.
+fn ns_field_items(ns: Ns, expected: Option<Type>, ctx: &Ctx) -> Vec<CompletionItem> {
+    let mut items: Vec<_> = ns_fields(ns)
+        .iter()
+        .filter(|(_, _, ty)| expected.is_none_or(|want| fits(want, *ty)))
+        .map(|(label, detail, _)| item(label, &format!("{label} "), "member", Some(detail), 0))
+        .collect();
+    // `fields.` only where the trace actually carries one, so completion never
+    // advertises a surface the checker will reject (ANL-003)
+    if ns.field_root().is_some() && expected.is_none() && !field_key_items(ctx).is_empty() {
+        items.push(item("fields", "fields.", "member", Some("trace fields"), 1));
+    }
+    items
 }
 
 fn collect_keys(expr: &Expr, out: &mut Vec<String>) {
@@ -195,7 +338,7 @@ fn collect_keys(expr: &Expr, out: &mut Vec<String>) {
     }
     let mut visit = |child: &Expr| collect_keys(child, out);
     match &expr.kind {
-        ExprKind::Unary { expr, .. } | ExprKind::IsMissing { expr, .. } => visit(expr),
+        ExprKind::Unary { expr, .. } | ExprKind::IsNone { expr, .. } => visit(expr),
         ExprKind::Binary { left, right, .. } | ExprKind::Range { start: left, end: right } => {
             visit(left);
             visit(right);
@@ -418,14 +561,6 @@ fn cmp_int_float(a: i128, b: f64) -> Option<core::cmp::Ordering> {
     })
 }
 
-const fn scalar_type(kind: ValueKind) -> Type {
-    match kind {
-        ValueKind::Bool => Type::Bool,
-        ValueKind::Int => Type::Int,
-        ValueKind::Float => Type::Float,
-        ValueKind::String => Type::String,
-    }
-}
 
 /// Whether a value of type `have` may stand where `want` is expected. Only
 /// numbers are interchangeable: an integer operand fits a float slot and the
@@ -463,24 +598,67 @@ impl EvalError {
     }
 }
 
-fn field_type(name: &str, expr: &Expr) -> Result<CheckedType, EvalError> {
-    Ok(match name {
-        "id" | "address" | "end" | "size" | "seq" | "time" => CheckedType::required(Type::Int),
-        "usable" | "thread" | "lifetime" => CheckedType::optional(Type::Int),
-        "span" => CheckedType::required(Type::Range),
-        "site" => CheckedType::optional(Type::String),
+/// The type of one built-in field, by the object it hangs off.
+///
+/// This table is the language's field list. `alloc` is the allocation,
+/// `malloc` and `free` the two records that bound it — so `site` and `thread`
+/// live on `malloc`, which is the record that actually carries them, and an
+/// `F` record carries neither.
+fn field_type(ns: Ns, name: &str, expr: &Expr) -> Result<CheckedType, EvalError> {
+    let ty = match (ns, name) {
+        (Ns::Alloc, "id" | "address" | "end" | "size") => CheckedType::required(Type::Int),
+        (Ns::Alloc, "span") => CheckedType::required(Type::Range),
+        (Ns::Alloc, "usable" | "lifetime") => CheckedType::optional(Type::Int),
         // memberships are a set, empty rather than missing when untagged
-        "tags" => CheckedType::required(Type::Set(ValueKind::String)),
-        "stack" => CheckedType::required(Type::String),
-        "freed" => CheckedType::required(Type::Bool),
-        // a started custom field reference, not a field of its own
-        "field" => {
+        (Ns::Alloc, "tags") => CheckedType::required(Type::Set(ValueKind::String)),
+        (Ns::Alloc, "freed") => CheckedType::required(Type::Bool),
+        (Ns::Malloc, "seq" | "time") => CheckedType::required(Type::Int),
+        (Ns::Malloc, "site") => CheckedType::optional(Type::String),
+        (Ns::Malloc, "thread") => CheckedType::optional(Type::Int),
+        (Ns::Malloc, "stack") => CheckedType::required(Type::String),
+        (Ns::Free, "seq" | "time") => CheckedType::optional(Type::Int),
+        (_, "fields") => {
             return Err(EvalError::at(
                 expr,
-                "`field` needs a key, as `field.pool` or `field[\"pool\"]`",
+                match ns.field_root() {
+                    Some(_) => format!(
+                        "`{ns}.fields` needs a key, as `{ns}.fields.pool`",
+                        ns = ns.label()
+                    ),
+                    // an allocation is not a record, so it carries none
+                    None => "custom fields are on `malloc` and `free`, not on `alloc`".to_string(),
+                },
             ))
         }
-        _ => return Err(EvalError::at(expr, format!("unknown field `{name}`"))),
+        _ => {
+            return Err(EvalError::at(
+                expr,
+                match moved_field(name) {
+                    Some(home) if home != ns => format!(
+                        "`{}` is on `{}`, not on `{}`",
+                        name,
+                        home.label(),
+                        ns.label()
+                    ),
+                    _ => format!("`{}` has no field `{name}`", ns.label()),
+                },
+            ))
+        }
+    };
+    Ok(ty)
+}
+
+/// The object a field actually lives on, for the diagnostic when it was asked
+/// for on the wrong one — `alloc.site` is the mistake worth naming, because
+/// the site is a property of the allocation to a reader and a property of the
+/// record to the format.
+fn moved_field(name: &str) -> Option<Ns> {
+    Some(match name {
+        "id" | "address" | "end" | "span" | "size" | "usable" | "lifetime" | "tags" | "freed" => {
+            Ns::Alloc
+        }
+        "site" | "thread" | "stack" => Ns::Malloc,
+        _ => return None,
     })
 }
 
@@ -574,6 +752,30 @@ fn same_values(left: CheckedType, right: CheckedType) -> bool {
     }
 }
 
+/// A short rendering of a method receiver, so the `contains` diagnostic can
+/// name the expression the writer already typed.
+fn source_hint(expr: &Expr) -> String {
+    match resolve_path(expr).map(|path| path.leaf) {
+        Some(Leaf::Builtin { ns, name }) => format!("{}.{name}", ns.label()),
+        Some(Leaf::Custom { key, .. }) => key.to_string(),
+        None => "the string".to_string(),
+    }
+}
+
+/// The type of a resolved path. A `named()` subject is checked here too, so
+/// an unresolvable name reports itself rather than arriving as a type error.
+fn path_type(path: Path, expr: &Expr, ctx: &Ctx) -> Result<CheckedType, EvalError> {
+    if let Some(subject) = path.subject {
+        // `?` rather than `is_ok_and`: the name's own diagnostic is the useful
+        // one, not "field access is not valid"
+        check_type(subject, ctx)?;
+    }
+    match path.leaf {
+        Leaf::Builtin { ns, name } => field_type(ns, name, expr),
+        Leaf::Custom { key, .. } => custom_field_type(key, expr, ctx),
+    }
+}
+
 fn check_type(expr: &Expr, ctx: &Ctx) -> Result<CheckedType, EvalError> {
     let required = |ty| Ok(CheckedType::required(ty));
     match &expr.kind {
@@ -589,7 +791,25 @@ fn check_type(expr: &Expr, ctx: &Ctx) -> Result<CheckedType, EvalError> {
             required(Type::Float)
         }
         ExprKind::String(_) => required(Type::String),
-        ExprKind::Identifier(name) => field_type(name, expr),
+        ExprKind::Identifier(name) => Err(EvalError::at(
+            expr,
+            match Ns::parse(name) {
+                Some(ns) => format!(
+                    "`{ns}` needs a field, as `{ns}.{example}`",
+                    ns = ns.label(),
+                    example = match ns {
+                        Ns::Alloc => "size",
+                        Ns::Malloc => "site",
+                        Ns::Free => "seq",
+                    }
+                ),
+                // the old flat spelling, which is the mistake worth naming
+                None => match moved_field(name) {
+                    Some(home) => format!("write `{}.{name}`", home.label()),
+                    None => format!("unknown field `{name}`"),
+                },
+            },
+        )),
         ExprKind::Unary {
             op: UnaryOp::Not,
             expr: inner,
@@ -601,14 +821,14 @@ fn check_type(expr: &Expr, ctx: &Ctx) -> Result<CheckedType, EvalError> {
                 Err(EvalError::at(expr, "`!` requires bool"))
             }
         }
-        ExprKind::IsMissing { expr: inner, .. } => {
-            // only an optional value can be missing; on anything else the test
+        ExprKind::IsNone { expr: inner, .. } => {
+            // only an optional value can be None; on anything else the test
             // is a constant, which is a mistake worth reporting rather than
             // silently answering false — `tags` is a set, empty when untagged
             if check_type(inner, ctx)?.optional {
                 required(Type::Bool)
             } else {
-                Err(EvalError::at(expr, "`is missing` requires an optional field"))
+                Err(EvalError::at(expr, "`is None` requires an optional field"))
             }
         }
         ExprKind::Set(items) => {
@@ -639,29 +859,44 @@ fn check_type(expr: &Expr, ctx: &Ctx) -> Result<CheckedType, EvalError> {
             }
         }
         ExprKind::Field { base, name } => {
-            if let Some((_, key)) = custom_field(expr) {
-                custom_field_type(key, expr, ctx)
-            } else if is_named_call(base) {
-                // `?` rather than `is_ok_and`: an unresolvable name must
-                // surface its own diagnostic, not "field access is not valid"
-                check_type(base, ctx)?;
-                // the fields of a named allocation are the ordinary fields
-                field_type(name, expr)
-            } else if matches!(&base.kind, ExprKind::Identifier(root) if root == "death") {
-                match name.as_str() {
-                    "seq" | "time" => Ok(CheckedType::optional(Type::Int)),
-                    // `death.field` alone is a started reference, not a typo
-                    "field" => Err(EvalError::at(
-                        expr,
-                        "`death.field` needs a key, as `death.field.reason`",
-                    )),
-                    _ => Err(EvalError::at(expr, format!("unknown death field `{name}`"))),
+            let Some(path) = resolve_path(expr) else {
+                // the name's own diagnostic first: `named(malloc.site).seq`
+                // is wrong about the argument, not about the namespace
+                if is_named_call(base) {
+                    check_type(base, ctx)?;
                 }
-            } else {
-                Err(EvalError::at(expr, "field access is not valid here"))
-            }
+                // an unfinished or misspelled path: say which part is wrong
+                return Err(EvalError::at(
+                    expr,
+                    match ns_of(base) {
+                        Some((ns, _)) => format!("`{}` has no field `{name}`", ns.label()),
+                        // `alloc.fields.x`: the namespace is real, but an
+                        // allocation is not a record and carries no fields
+                        None if matches!(&base.kind, ExprKind::Field { base: inner, name }
+                            if name == "fields" && ns_of(inner).is_some()) =>
+                        {
+                            "custom fields are on `malloc` and `free`, not on `alloc`".to_string()
+                        }
+                        None if is_named_call(base) => format!(
+                            "a named allocation exposes `alloc`, `malloc` and `free`, as `named(\"x\").alloc.{name}`"
+                        ),
+                        None => "field access is not valid here".to_string(),
+                    },
+                ));
+            };
+            path_type(path, expr, ctx)
         }
         ExprKind::Call { callee, arguments } => match &callee.kind {
+            ExprKind::Identifier(name) if name == "len" => {
+                let [argument] = arguments.as_slice() else {
+                    return Err(EvalError::at(expr, "len takes one set"));
+                };
+                return if check_type(argument, ctx)?.member_kind().is_some() {
+                    Ok(CheckedType::required(Type::Int))
+                } else {
+                    Err(EvalError::at(expr, "len takes a set, as `len(alloc.tags)`"))
+                };
+            }
             ExprKind::Identifier(name) if name == "abs" => {
                 let argument = match arguments.as_slice() {
                     [only] => check_type(only, ctx)?,
@@ -675,22 +910,42 @@ fn check_type(expr: &Expr, ctx: &Ctx) -> Result<CheckedType, EvalError> {
                     Err(EvalError::at(expr, "abs requires one number"))
                 }
             }
+            // a method: the two string tests, or `overlaps` on a range
             ExprKind::Field { base, name } => {
-                if arguments.len() != 1
-                    || check_type(base, ctx)?.ty != Type::String
-                    || check_type(&arguments[0], ctx)?.ty != Type::String
-                {
-                    return Err(EvalError::at(
-                        expr,
-                        format!("`{name}` requires one string argument"),
-                    ));
-                }
+                let [argument] = arguments.as_slice() else {
+                    return Err(EvalError::at(expr, format!("`{name}` takes one argument")));
+                };
                 match name.as_str() {
-                    "contains" | "starts_with" | "ends_with" => required(Type::Bool),
-                    _ => Err(EvalError::at(
+                    "startswith" | "endswith" => {
+                        if check_type(base, ctx)?.ty != Type::String
+                            || check_type(argument, ctx)?.ty != Type::String
+                        {
+                            return Err(EvalError::at(
+                                expr,
+                                format!("`{name}` requires one string argument"),
+                            ));
+                        }
+                        required(Type::Bool)
+                    }
+                    "overlaps" => {
+                        if check_type(base, ctx)?.ty != Type::Range
+                            || check_type(argument, ctx)?.ty != Type::Range
+                        {
+                            return Err(EvalError::at(
+                                expr,
+                                "`overlaps` compares two ranges, as `alloc.span.overlaps(range(lo, hi))`",
+                            ));
+                        }
+                        required(Type::Bool)
+                    }
+                    // the spellings this language deliberately does not have
+                    "contains" => Err(EvalError::at(
                         expr,
-                        format!("unknown string method `{name}`"),
+                        format!("write `x in {}`", source_hint(base)),
                     )),
+                    "starts_with" => Err(EvalError::at(expr, "write `startswith`")),
+                    "ends_with" => Err(EvalError::at(expr, "write `endswith`")),
+                    _ => Err(EvalError::at(expr, format!("unknown method `{name}`"))),
                 }
             }
             ExprKind::Identifier(name) if name == "named" => {
@@ -701,11 +956,11 @@ fn check_type(expr: &Expr, ctx: &Ctx) -> Result<CheckedType, EvalError> {
             }
             _ => Err(EvalError::at(expr, "unknown function")),
         },
-        ExprKind::Index { .. } => match custom_field(expr) {
-            Some((_, key)) => custom_field_type(key, expr, ctx),
+        ExprKind::Index { .. } => match resolve_path(expr) {
+            Some(path) => path_type(path, expr, ctx),
             None => Err(EvalError::at(
                 expr,
-                "only `field[...]` and `death.field[...]` take a key",
+                "only `malloc.fields[...]` and `free.fields[...]` take a key",
             )),
         },
         ExprKind::Binary { op, left, right } => {
@@ -779,11 +1034,14 @@ fn check_type(expr: &Expr, ctx: &Ctx) -> Result<CheckedType, EvalError> {
                     }
                 }
                 BinaryOp::In => {
+                    // one operator for every membership: a set, a substring of
+                    // a string or a stack, and a half-open range
                     let compatible = match right_ty.ty {
                         Type::Range => left_ty.numeric(),
                         Type::Set(kind) => left_ty
                             .value_kind()
                             .is_some_and(|have| have == kind || (have.numeric() && kind.numeric())),
+                        Type::String => left_ty.ty == Type::String,
                         _ => false,
                     };
                     if compatible {
@@ -791,31 +1049,11 @@ fn check_type(expr: &Expr, ctx: &Ctx) -> Result<CheckedType, EvalError> {
                     } else {
                         Err(EvalError::at(
                             expr,
-                            "`in` requires a compatible set or range",
+                            "`in` requires a set, a string, or a range on the right",
                         ))
                     }
                 }
-                BinaryOp::Overlaps => {
-                    if left_ty.ty == Type::Range && right_ty.ty == Type::Range {
-                        required(Type::Bool)
-                    } else {
-                        Err(EvalError::at(expr, "`overlaps` requires two ranges"))
-                    }
-                }
-                BinaryOp::Contains => match left_ty.member_kind() {
-                    Some(kind)
-                        if right_ty.value_kind().is_some_and(
-                            |have| have == kind || (have.numeric() && kind.numeric()),
-                        ) =>
-                    {
-                        required(Type::Bool)
-                    }
-                    Some(_) => Err(EvalError::at(
-                        expr,
-                        "`contains` requires a member of the set's type",
-                    )),
-                    None => Err(EvalError::at(expr, "`contains` requires a set on the left")),
-                },
+
             }
         }
     }
@@ -869,70 +1107,41 @@ fn string_item(label: &str, detail: &'static str, in_set: bool) -> CompletionIte
     }
 }
 
+/// What can start an expression: the three objects, the functions, and the
+/// two boolean constants.
+///
+/// A namespace is offered only when it holds a field of the wanted type, so
+/// `alloc.` does not appear where a string belongs.
 fn expression_items(expected: Option<Type>, ctx: &Ctx) -> Vec<CompletionItem> {
-    let descriptors = [
-        ("abs", "function", "number -> number", Type::Int, "abs(", 2),
-        ("address", "field", "address", Type::Int, "address ", 2),
-        ("end", "field", "address", Type::Int, "end ", 2),
-        ("false", "value", "bool", Type::Bool, "false ", 1),
-        ("freed", "field", "bool", Type::Bool, "freed ", 2),
-        ("id", "field", "integer", Type::Int, "id ", 2),
-        (
-            "lifetime",
-            "field",
-            "time, optional",
-            Type::Int,
-            "lifetime ",
-            2,
-        ),
-        ("seq", "field", "integer", Type::Int, "seq ", 2),
-        (
-            "site",
-            "field",
-            "string, optional",
-            Type::String,
-            "site ",
-            2,
-        ),
-        ("size", "field", "bytes", Type::Int, "size ", 2),
-        ("span", "field", "address range", Type::Range, "span ", 2),
-        ("stack", "field", "string", Type::String, "stack ", 2),
-        (
-            "tags",
-            "field",
-            "string set",
-            Type::Set(ValueKind::String),
-            "tags ",
-            2,
-        ),
-        (
-            "thread",
-            "field",
-            "integer, optional",
-            Type::Int,
-            "thread ",
-            2,
-        ),
-        ("time", "field", "time", Type::Int, "time ", 2),
-        ("true", "value", "bool", Type::Bool, "true ", 1),
-        (
-            "usable",
-            "field",
-            "bytes, optional",
-            Type::Int,
-            "usable ",
-            2,
-        ),
-    ];
-    let mut items: Vec<_> = descriptors
-        .into_iter()
-        // a numeric slot takes either representation, so an integer field is
-        // offered where a float is expected and the other way round
-        .filter(|(_, _, _, ty, _, _)| expected.is_none_or(|expected| fits(expected, *ty)))
-        .map(|(label, kind, detail, _, insert, rank)| item(label, insert, kind, Some(detail), rank))
-        .collect();
-    if expected.is_none() {
-        items.push(item("death", "death.", "field", Some("event namespace"), 2));
+    let mut items = Vec::new();
+    for ns in [Ns::Alloc, Ns::Malloc, Ns::Free] {
+        let fits_here = ns_fields(ns)
+            .iter()
+            .any(|(_, _, ty)| expected.is_none_or(|want| fits(want, *ty)))
+            || (expected.is_none()
+                && ns.field_root().is_some()
+                && !field_key_items(ctx).is_empty());
+        if fits_here {
+            items.push(item(
+                ns.label(),
+                &format!("{}.", ns.label()),
+                "field",
+                Some(match ns {
+                    Ns::Alloc => "the allocation",
+                    Ns::Malloc => "the record that created it",
+                    Ns::Free => "the record that freed it",
+                }),
+                2,
+            ));
+        }
+    }
+    if expected.is_none_or(|want| fits(want, Type::Bool)) {
+        items.push(item("false", "false ", "value", Some("bool"), 1));
+        items.push(item("true", "true ", "value", Some("bool"), 1));
+    }
+    if expected.is_none_or(|want| fits(want, Type::Int)) {
+        items.push(item("abs", "abs(", "function", Some("number -> number"), 2));
+        items.push(item("len", "len(", "function", Some("set -> integer"), 2));
     }
     // `named(...)` reads a field, so it fits wherever that field's type does
     if !ctx.names.is_empty() {
@@ -941,23 +1150,6 @@ fn expression_items(expected: Option<Type>, ctx: &Ctx) -> Vec<CompletionItem> {
             "named(\"",
             "function",
             Some("one named allocation"),
-            2,
-        ));
-    }
-    // `field.` is offered only when this trace actually carries a filterable
-    // custom field of the wanted type — ANL-003 forbids advertising a surface
-    // the evaluator will reject
-    if ctx
-        .store
-        .fields
-        .iter()
-        .any(|f| catalog_type(f).is_some_and(|ty| expected.is_none_or(|want| fits(want, ty))))
-    {
-        items.push(item(
-            "field",
-            "field.",
-            "field",
-            Some("trace fields"),
             2,
         ));
     }
@@ -1054,7 +1246,7 @@ fn number_source(value: &Value) -> String {
 
 fn operator_items(ty: CheckedType, leading_space: bool) -> Vec<CompletionItem> {
     let mut labels: Vec<(&str, Option<&str>)> = match ty.ty {
-        Type::Bool => vec![("&&", None), ("||", None), ("==", None), ("!=", None)],
+        Type::Bool => vec![("and", None), ("or", None), ("==", None), ("!=", None)],
         Type::Int | Type::Float => vec![
             ("+", None),
             ("-", None),
@@ -1064,7 +1256,7 @@ fn operator_items(ty: CheckedType, leading_space: bool) -> Vec<CompletionItem> {
             ("<=", None),
             (">", None),
             (">=", None),
-            ("in", Some("set or half-open range")),
+            ("in", Some("set or range()")),
         ],
         Type::String => vec![
             ("==", None),
@@ -1075,18 +1267,20 @@ fn operator_items(ty: CheckedType, leading_space: bool) -> Vec<CompletionItem> {
             (">=", None),
             ("in", Some("set")),
         ],
-        Type::Range => vec![("overlaps", Some("half-open range"))],
+        // `overlaps` is a method, so a range advances through its `.`
+        Type::Range => vec![(".", Some("overlaps"))],
+        // and membership reads `"x" in alloc.tags`, so the set side offers
+        // only the two whole-set comparisons
         Type::Set(_) => vec![
             ("==", Some("the whole set")),
             ("!=", Some("the whole set")),
-            ("contains", Some("one member")),
         ],
         // a reference is not a value: the only thing to do with it is read a
         // field, and that is a member completion rather than an operator
         Type::Allocation => Vec::new(),
     };
     if ty.optional {
-        labels.push(("is", Some("missing test")));
+        labels.push(("is", Some("None test")));
     }
     labels
         .into_iter()
@@ -1097,64 +1291,65 @@ fn operator_items(ty: CheckedType, leading_space: bool) -> Vec<CompletionItem> {
         .collect()
 }
 
+/// What can follow a `.`.
 fn member_items(receiver: &Expr, ctx: &Ctx) -> Vec<CompletionItem> {
-    if matches!(&receiver.kind, ExprKind::Identifier(name) if name == "death") {
-        let mut items = vec![
-            item("seq", "seq ", "member", Some("integer, optional"), 0),
-            item("time", "time ", "member", Some("time, optional"), 0),
-        ];
-        if !field_key_items(ctx).is_empty() {
-            items.push(item(
-                "field",
-                "field.",
-                "member",
-                Some("fields on the freeing event"),
-                1,
-            ));
-        }
-        return items;
+    // `alloc.`, `malloc.`, `free.` — and the same behind a `named()`
+    if let Some((ns, _)) = ns_of(receiver) {
+        return ns_field_items(ns, None, ctx);
     }
-    // `field.` and `death.field.`
+    // `malloc.fields.` / `free.fields.`
     if is_field_root(receiver) {
         return field_key_items(ctx);
     }
+    // `named("x").` exposes the same three objects the subject does
     if check_type(receiver, ctx).is_ok_and(|ty| ty.ty == Type::Allocation) {
         return expression_items(None, ctx)
             .into_iter()
-            .filter(|c| c.kind == "field" && !matches!(c.label.as_str(), "death" | "field"))
-            .map(|c| item(&c.label, c.insert.trim_end(), "member", c.detail, 0))
+            .filter(|candidate| candidate.kind == "field")
+            .map(|candidate| {
+                item(
+                    &candidate.label,
+                    &candidate.insert,
+                    "member",
+                    candidate.detail,
+                    0,
+                )
+            })
             .collect();
     }
-    if check_type(receiver, ctx).is_ok_and(|ty| ty.ty == Type::String) {
-        return vec![
-            item("contains", "contains(", "member", Some("string -> bool"), 0),
+    match check_type(receiver, ctx).map(|ty| ty.ty) {
+        Ok(Type::String) => vec![
+            item("endswith", "endswith(", "member", Some("string -> bool"), 0),
             item(
-                "ends_with",
-                "ends_with(",
+                "startswith",
+                "startswith(",
                 "member",
                 Some("string -> bool"),
                 0,
             ),
-            item(
-                "starts_with",
-                "starts_with(",
-                "member",
-                Some("string -> bool"),
-                0,
-            ),
-        ];
+        ],
+        Ok(Type::Range) => vec![item(
+            "overlaps",
+            "overlaps(range(",
+            "member",
+            Some("range -> bool"),
+            0,
+        )],
+        _ => Vec::new(),
     }
-    Vec::new()
 }
 
+
 fn observed_items(subject: &Expr, ctx: &Ctx, in_set: bool) -> Vec<CompletionItem> {
-    if let Some((_, key)) = custom_field(subject) {
-        return observed_field_values(key, ctx, in_set);
-    }
-    let ExprKind::Identifier(name) = &subject.kind else {
+    let Some(path) = resolve_path(subject) else {
         return Vec::new();
     };
-    match name.as_str() {
+    let name = match path.leaf {
+        Leaf::Custom { key, .. } => return observed_field_values(key, ctx, in_set),
+        Leaf::Builtin { ns: Ns::Malloc | Ns::Alloc, name } => name,
+        Leaf::Builtin { .. } => return Vec::new(),
+    };
+    match name {
         "site" => ctx
             .store
             .sites
@@ -1195,17 +1390,29 @@ fn operand_items(left: &Expr, kind: OperandKind, ctx: &Ctx) -> Vec<CompletionIte
             }
             items
         }
-        OperandKind::RangeEnd => expression_items(Some(Type::Int), ctx),
         // a set-typed left operand compares only to a set literal
         OperandKind::Binary(BinaryOp::Equal | BinaryOp::NotEqual)
             if left_ty.is_some_and(|ty| ty.member_kind().is_some()) =>
         {
             vec![item("{", "{", "operator", Some("constant set"), 0)]
         }
+        // `in` takes a set, a range, or — for a string left operand — the
+        // string or stack to look inside
         OperandKind::Binary(BinaryOp::In) => {
             let mut items = vec![item("{", "{", "operator", Some("constant set"), 0)];
-            if left_ty.is_some_and(|ty| ty.ty == Type::Int) {
-                items.extend(expression_items(Some(Type::Int), ctx));
+            match left_ty.map(|ty| ty.ty) {
+                Some(Type::Int | Type::Float) => {
+                    items.push(item(
+                        "range(",
+                        "range(",
+                        "function",
+                        Some("half-open range"),
+                        0,
+                    ));
+                    items.extend(expression_items(Some(Type::Int), ctx));
+                }
+                Some(Type::String) => items.extend(expression_items(Some(Type::String), ctx)),
+                _ => {}
             }
             items
         }
@@ -1218,8 +1425,6 @@ fn operand_items(left: &Expr, kind: OperandKind, ctx: &Ctx) -> Vec<CompletionIte
                 | BinaryOp::Greater
                 | BinaryOp::GreaterEqual => left_ty.map(|ty| ty.ty),
                 BinaryOp::Add | BinaryOp::Subtract => Some(Type::Int),
-                BinaryOp::Overlaps => Some(Type::Range),
-                BinaryOp::Contains => left_ty.and_then(CheckedType::member_kind).map(scalar_type),
                 BinaryOp::And | BinaryOp::Or => Some(Type::Bool),
                 BinaryOp::In => unreachable!(),
             };
@@ -1243,10 +1448,23 @@ fn call_argument_items(callee: &Expr, ctx: &Ctx) -> Vec<CompletionItem> {
         }
         ExprKind::Identifier(name) if name == "abs" => expression_items(Some(Type::Int), ctx),
         ExprKind::Field { base, name }
-            if matches!(name.as_str(), "contains" | "starts_with" | "ends_with")
+            if matches!(name.as_str(), "startswith" | "endswith")
                 && check_type(base, ctx).is_ok_and(|ty| ty.ty == Type::String) =>
         {
             expression_items(Some(Type::String), ctx)
+        }
+        // `overlaps` takes a range, and `range(` is the only way to write one
+        ExprKind::Field { base, name }
+            if name == "overlaps"
+                && check_type(base, ctx).is_ok_and(|ty| ty.ty == Type::Range) =>
+        {
+            vec![item(
+                "range",
+                "range(",
+                "function",
+                Some("half-open range"),
+                0,
+            )]
         }
         _ => Vec::new(),
     }
@@ -1261,15 +1479,13 @@ pub fn push_completions_json(out: &mut String, source: &str, cursor: usize, ctx:
     let mut items = match &context.site {
         CompletionSite::Expression => expression_items(None, ctx),
         CompletionSite::Exact { expression } => {
-            if matches!(&expression.kind, ExprKind::Identifier(name) if name == "death")
-                || is_field_root(expression)
-            {
+            if ns_of(expression).is_some() || is_field_root(expression) {
                 replacement = Span::new(context.replacement.end, context.replacement.end);
                 prefix.clear();
                 let detail = if is_field_root(expression) {
                     "trace field keys"
                 } else {
-                    "death members"
+                    "fields of this object"
                 };
                 vec![item(".", ".", "operator", Some(detail), 0)]
             } else if let Ok(ty) = check_type(expression, ctx) {
@@ -1297,11 +1513,11 @@ pub fn push_completions_json(out: &mut String, source: &str, cursor: usize, ctx:
         ],
         CompletionSite::AfterIs { negated } => {
             if *negated {
-                vec![item("missing", "missing ", "operator", None, 0)]
+                vec![item("None", "None ", "operator", None, 0)]
             } else {
                 vec![
-                    item("missing", "missing ", "operator", None, 0),
-                    item("not", "not ", "operator", Some("follow with missing"), 0),
+                    item("None", "None ", "operator", None, 0),
+                    item("not", "not ", "operator", Some("follow with None"), 0),
                 ]
             }
         }
@@ -1409,69 +1625,58 @@ pub(crate) fn custom_fragment(root: FieldRoot, s: &Store, e: u32) -> u32 {
     }
 }
 
-pub(crate) fn field_value(name: &str, ctx: &Ctx, e: u32, expr: &Expr) -> Result<Value, EvalError> {
+pub(crate) fn field_value(
+    ns: Ns,
+    name: &str,
+    ctx: &Ctx,
+    e: u32,
+    expr: &Expr,
+) -> Result<Value, EvalError> {
     let s = ctx.store;
     let i = e as usize;
-    Ok(match name {
-        "id" => Value::Int(s.id[i] as i128),
-        "address" => Value::Int(s.addr[i] as i128),
-        "end" => Value::Int((s.addr[i] + s.span(e)) as i128),
-        "span" => Value::Range(
+    let death = |value: fn(&Store, u32, usize) -> Value| match s.death[i] {
+        NONE_U32 => Value::Missing,
+        d => value(s, d, i),
+    };
+    Ok(match (ns, name) {
+        (Ns::Alloc, "id") => Value::Int(s.id[i] as i128),
+        (Ns::Alloc, "address") => Value::Int(s.addr[i] as i128),
+        (Ns::Alloc, "end") => Value::Int((s.addr[i] + s.span(e)) as i128),
+        (Ns::Alloc, "span") => Value::Range(
             Num::Int(s.addr[i] as i128),
             Num::Int((s.addr[i] + s.span(e)) as i128),
         ),
-        "size" => Value::Int(s.size[i] as i128),
-        "usable" => {
-            let v = s.usable_at(e);
-            if v == 0 {
-                Value::Missing
-            } else {
-                Value::Int(v as i128)
-            }
-        }
-        "seq" => Value::Int(e as i128),
-        "time" => Value::Int(s.t[i] as i128),
-        "site" => {
-            let id = s.site[i];
-            if id == NONE_U32 {
-                Value::Missing
-            } else {
-                Value::String(s.sites[id as usize].clone())
-            }
-        }
-        "thread" => {
-            let id = s.thr_idx[i];
-            if id == NONE_U16 {
-                Value::Missing
-            } else {
-                Value::Int(s.thrs[id as usize] as i128)
-            }
-        }
-        "stack" => {
-            let id = s.stack_at(e);
-            if id == NONE_U32 {
-                Value::Missing
-            } else {
-                Value::String(s.stacks[id as usize].clone())
-            }
-        }
+        (Ns::Alloc, "size") => Value::Int(s.size[i] as i128),
+        (Ns::Alloc, "usable") => match s.usable_at(e) {
+            0 => Value::Missing,
+            v => Value::Int(v as i128),
+        },
         // every membership, in tag-id order; empty for an untagged allocation
-        "tags" => Value::Set(
+        (Ns::Alloc, "tags") => Value::Set(
             s.tag_ids(e)
                 .filter_map(|id| ctx.labels.get(id as usize - 1).cloned())
                 .map(Value::String)
                 .collect(),
         ),
-        "freed" => Value::Bool(s.death[i] != NONE_U32),
-        "lifetime" => {
-            let d = s.death[i];
-            if d == NONE_U32 {
-                Value::Missing
-            } else {
-                Value::Int((s.t[d as usize] - s.t[i]) as i128)
-            }
-        }
-        _ => return Err(EvalError::at(expr, format!("unknown field `{name}`"))),
+        (Ns::Alloc, "freed") => Value::Bool(s.death[i] != NONE_U32),
+        (Ns::Alloc, "lifetime") => death(|s, d, i| Value::Int((s.t[d as usize] - s.t[i]) as i128)),
+        (Ns::Malloc, "seq") => Value::Int(e as i128),
+        (Ns::Malloc, "time") => Value::Int(s.t[i] as i128),
+        (Ns::Malloc, "site") => match s.site[i] {
+            NONE_U32 => Value::Missing,
+            id => Value::String(s.sites[id as usize].clone()),
+        },
+        (Ns::Malloc, "thread") => match s.thr_idx[i] {
+            NONE_U16 => Value::Missing,
+            id => Value::Int(s.thrs[id as usize] as i128),
+        },
+        (Ns::Malloc, "stack") => match s.stack_at(e) {
+            NONE_U32 => Value::Missing,
+            id => Value::String(s.stacks[id as usize].clone()),
+        },
+        (Ns::Free, "seq") => death(|_, d, _| Value::Int(d as i128)),
+        (Ns::Free, "time") => death(|s, d, _| Value::Int(s.t[d as usize] as i128)),
+        _ => return Err(EvalError::at(expr, format!("`{}` has no field `{name}`", ns.label()))),
     })
 }
 
@@ -1562,16 +1767,18 @@ fn eval(expr: &Expr, ctx: &Ctx, e: u32) -> Result<Value, EvalError> {
         ExprKind::Integer(v) => Value::Int(integer(v.value, v.unit, &ctx.store.unit).map_err(err)?),
         ExprKind::Float(v) => Value::Float(float(v.value, v.unit, &ctx.store.unit).map_err(err)?),
         ExprKind::String(v) => Value::String(v.clone()),
-        ExprKind::Identifier(name) => field_value(name, ctx, e, expr)?,
+        ExprKind::Identifier(name) => {
+            return Err(EvalError::at(expr, format!("`{name}` is not a value")))
+        }
         ExprKind::Unary {
             op: UnaryOp::Not,
             expr: inner,
         } => match eval(inner, ctx, e)? {
             Value::Bool(v) => Value::Bool(!v),
             Value::Missing => Value::Bool(false),
-            _ => return Err(EvalError::at(expr, "`!` requires bool")),
+            _ => return Err(EvalError::at(expr, "`not` requires bool")),
         },
-        ExprKind::IsMissing {
+        ExprKind::IsNone {
             expr: inner,
             negated,
         } => Value::Bool(matches!(eval(inner, ctx, e)?, Value::Missing) ^ *negated),
@@ -1587,41 +1794,22 @@ fn eval(expr: &Expr, ctx: &Ctx, e: u32) -> Result<Value, EvalError> {
                 _ => return Err(EvalError::at(expr, "range bounds must be numeric")),
             }
         }
-        ExprKind::Field { base, name } => {
-            if let Some((root, key)) = custom_field(expr) {
-                ctx.fields.get(key, custom_fragment(root, ctx.store, e))
-            } else if let ExprKind::Call { callee, arguments } = &base.kind {
-                if matches!(&callee.kind, ExprKind::Identifier(f) if f == "named") {
-                    let target = named_event(arguments, base, ctx)?;
-                    field_value(name, ctx, target, expr)?
-                } else {
-                    return Err(EvalError::at(expr, "field access is not valid here"));
-                }
-            } else if let ExprKind::Identifier(root) = &base.kind {
-                if root == "death" {
-                    let d = ctx.store.death[e as usize];
-                    if d == NONE_U32 {
-                        Value::Missing
-                    } else {
-                        match name.as_str() {
-                            "seq" => Value::Int(d as i128),
-                            "time" => Value::Int(ctx.store.t[d as usize] as i128),
-                            _ => {
-                                return Err(EvalError::at(
-                                    expr,
-                                    format!("unknown death field `{name}`"),
-                                ))
-                            }
-                        }
-                    }
-                } else {
-                    return Err(EvalError::at(
-                        expr,
-                        format!("unknown field `{root}.{name}`"),
-                    ));
-                }
-            } else {
+        ExprKind::Field { .. } | ExprKind::Index { .. } => {
+            let Some(path) = resolve_path(expr) else {
                 return Err(EvalError::at(expr, "field access is not valid here"));
+            };
+            let subject = match path.subject {
+                Some(call) => match &call.kind {
+                    ExprKind::Call { arguments, .. } => named_event(arguments, call, ctx)?,
+                    _ => return Err(EvalError::at(expr, "expected a named allocation")),
+                },
+                None => e,
+            };
+            match path.leaf {
+                Leaf::Builtin { ns, name } => field_value(ns, name, ctx, subject, expr)?,
+                Leaf::Custom { root, key } => {
+                    ctx.fields.get(key, custom_fragment(root, ctx.store, subject))
+                }
             }
         }
         ExprKind::Call { callee, arguments } => {
@@ -1630,6 +1818,11 @@ fn eval(expr: &Expr, ctx: &Ctx, e: u32) -> Result<Value, EvalError> {
                 .map(|x| eval(x, ctx, e))
                 .collect::<Result<Vec<_>, _>>()?;
             match &callee.kind {
+                ExprKind::Identifier(name) if name == "len" && args.len() == 1 => match &args[0] {
+                    Value::Set(values) => Value::Int(values.len() as i128),
+                    Value::Missing => Value::Missing,
+                    _ => return Err(EvalError::at(expr, "len takes a set")),
+                },
                 ExprKind::Identifier(name) if name == "abs" && args.len() == 1 => match args[0] {
                     Value::Int(v) => Value::Int(v.abs()),
                     Value::Float(v) => Value::Float(v.abs()),
@@ -1637,24 +1830,24 @@ fn eval(expr: &Expr, ctx: &Ctx, e: u32) -> Result<Value, EvalError> {
                     _ => return Err(EvalError::at(expr, "abs requires a number")),
                 },
                 ExprKind::Field { base, name } if args.len() == 1 => {
-                    let hay = eval(base, ctx, e)?;
-                    match (&hay, &args[0]) {
-                        (Value::Missing, _) | (_, Value::Missing) => Value::Bool(false),
-                        (Value::String(a), Value::String(b)) => Value::Bool(match name.as_str() {
-                            "contains" => a.contains(b),
-                            "starts_with" => a.starts_with(b),
-                            "ends_with" => a.ends_with(b),
-                            _ => {
-                                return Err(EvalError::at(
-                                    expr,
-                                    format!("unknown string method `{name}`"),
-                                ))
-                            }
-                        }),
+                    let receiver = eval(base, ctx, e)?;
+                    match (&receiver, &args[0], name.as_str()) {
+                        (Value::Missing, _, _) | (_, Value::Missing, _) => Value::Bool(false),
+                        (Value::String(a), Value::String(b), "startswith") => {
+                            Value::Bool(a.starts_with(b))
+                        }
+                        (Value::String(a), Value::String(b), "endswith") => {
+                            Value::Bool(a.ends_with(b))
+                        }
+                        // half-open, so each must begin before the other ends
+                        (Value::Range(a0, a1), Value::Range(b0, b1), "overlaps") => Value::Bool(
+                            cmp_num(*a0, *b1).is_some_and(|o| o.is_lt())
+                                && cmp_num(*b0, *a1).is_some_and(|o| o.is_lt()),
+                        ),
                         _ => {
                             return Err(EvalError::at(
                                 expr,
-                                format!("`{name}` requires string operands"),
+                                format!("`{name}` does not apply to these operands"),
                             ))
                         }
                     }
@@ -1662,21 +1855,12 @@ fn eval(expr: &Expr, ctx: &Ctx, e: u32) -> Result<Value, EvalError> {
                 ExprKind::Identifier(name) if name == "named" => {
                     return Err(EvalError::at(
                         expr,
-                        "`named(...)` is an allocation; read a field of it, as `named(\"x\").address`",
+                        "`named(...)` is an allocation; read a field of it, as `named(\"x\").alloc.address`",
                     ))
                 }
                 _ => return Err(EvalError::at(expr, "unknown function")),
             }
         }
-        ExprKind::Index { .. } => match custom_field(expr) {
-            Some((root, key)) => ctx.fields.get(key, custom_fragment(root, ctx.store, e)),
-            None => {
-                return Err(EvalError::at(
-                    expr,
-                    "only `field[...]` and `death.field[...]` take a key",
-                ))
-            }
-        },
         ExprKind::Binary { op, left, right } => {
             if *op == BinaryOp::And || *op == BinaryOp::Or {
                 let a = evaluate(left, ctx, e)?;
@@ -1719,23 +1903,24 @@ fn eval(expr: &Expr, ctx: &Ctx, e: u32) -> Result<Value, EvalError> {
                                 && cmp_num(v, hi).is_some_and(|o| o.is_lt())
                         }),
                         Value::Set(values) => member(&values, &a),
-                        _ => return Err(EvalError::at(expr, "`in` requires a set or range")),
-                    }),
-                    BinaryOp::Contains => Value::Bool(match a {
-                        Value::Set(values) => member(&values, &b),
+                        // the substring test, which `in` also spells
+                        Value::String(hay) => match &a {
+                            Value::String(needle) => hay.contains(needle.as_str()),
+                            Value::Missing => false,
+                            _ => {
+                                return Err(EvalError::at(
+                                    expr,
+                                    "`in` requires a string on the left",
+                                ))
+                            }
+                        },
+                        Value::Missing => false,
                         _ => {
                             return Err(EvalError::at(
                                 expr,
-                                "`contains` requires a set on the left",
+                                "`in` requires a set, a string, or a range",
                             ))
                         }
-                    }),
-                    BinaryOp::Overlaps => Value::Bool(match (a, b) {
-                        (Value::Range(a0, a1), Value::Range(b0, b1)) => {
-                            cmp_num(a0, b1).is_some_and(|o| o.is_lt())
-                                && cmp_num(b0, a1).is_some_and(|o| o.is_lt())
-                        }
-                        _ => return Err(EvalError::at(expr, "`overlaps` requires two ranges")),
                     }),
                     BinaryOp::And | BinaryOp::Or => unreachable!(),
                 }

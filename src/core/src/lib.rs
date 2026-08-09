@@ -2256,7 +2256,7 @@ not json at all
     #[test]
     fn tag_filter_matches_snapshots_only_applied_matches() {
         let mut a = load(SAMPLE);
-        a.cfg.filter.matches = Some(match_bits(&a, &[], "size >= 128"));
+        a.cfg.filter.matches = Some(match_bits(&a, &[], "alloc.size >= 128"));
 
         assert_eq!(tag_filter_matches(&mut a, 2), 2);
         assert_eq!(tags(&a.store), vec![vec![], vec![2], vec![], vec![2], vec![]]);
@@ -2336,15 +2336,15 @@ not json at all
         let mut a = load(SAMPLE);
         a.store.add_tag(1, 1);
         let labels = vec!["a".to_string(), "b".to_string()];
-        a.cfg.filter.matches = Some(match_bits(&a, &labels, r#"tags contains "a""#));
+        a.cfg.filter.matches = Some(match_bits(&a, &labels, r#""a" in alloc.tags"#));
 
         assert_eq!(tag_filter_matches(&mut a, 2), 1);
         assert_eq!(tags(&a.store)[1], vec![1, 2]);
-        assert!(matching(&a, &labels, r#"tags contains "a""#).contains(&1));
-        assert!(matching(&a, &labels, r#"tags contains "b""#).contains(&1));
+        assert!(matching(&a, &labels, r#""a" in alloc.tags"#).contains(&1));
+        assert!(matching(&a, &labels, r#""b" in alloc.tags"#).contains(&1));
         // and the whole membership set is now visible to the language
-        assert!(matching(&a, &labels, r#"tags == {"b", "a"}"#).contains(&1));
-        assert!(!matching(&a, &labels, r#"tags == {"a"}"#).contains(&1));
+        assert!(matching(&a, &labels, r#"alloc.tags == {"b", "a"}"#).contains(&1));
+        assert!(!matching(&a, &labels, r#"alloc.tags == {"a"}"#).contains(&1));
 
         let mut dump = String::new();
         tags_dump_json(&a.store, &mut dump);
@@ -2535,11 +2535,11 @@ not json at all
     #[test]
     fn expression_filter_evaluates_creator_columns() {
         let a = load(SAMPLE);
-        let columns = matching(&a, &[], r#"size >= 100 && site == "b" && span overlaps 0x1800..0x2800"#);
+        let columns = matching(&a, &[], r#"alloc.size >= 100 and malloc.site == "b" and alloc.span.overlaps(range(0x1800, 0x2800))"#);
         assert!(!columns.contains(&0));
         assert!(columns.contains(&1));
 
-        let methods = matching(&a, &[], r#"freed && site.starts_with("a")"#);
+        let methods = matching(&a, &[], r#"alloc.freed and malloc.site.startswith("a")"#);
         assert!(methods.contains(&0));
         assert!(!methods.contains(&1));
     }
@@ -2564,26 +2564,26 @@ not json at all
     #[test]
     fn custom_fields_filter_in_all_four_spellings() {
         let a = load(CUSTOM);
-        assert_eq!(matches_custom(&a, r#"field.pool == "gfx""#), vec![0]);
+        assert_eq!(matches_custom(&a, r#"malloc.fields.pool == "gfx""#), vec![0]);
         assert_eq!(
-            matches_custom(&a, r#"field["allocator-class"] == "bump""#),
+            matches_custom(&a, r#"malloc.fields["allocator-class"] == "bump""#),
             vec![1]
         );
-        assert_eq!(matches_custom(&a, "field.refcount >= 5"), vec![1]);
-        assert_eq!(matches_custom(&a, "field.live"), vec![0]);
+        assert_eq!(matches_custom(&a, "malloc.fields.refcount >= 5"), vec![1]);
+        assert_eq!(matches_custom(&a, "malloc.fields.live"), vec![0]);
         // the death event's own fields, read through the allocation
         assert_eq!(
-            matches_custom(&a, r#"death.field.reason == "shutdown""#),
+            matches_custom(&a, r#"free.fields.reason == "shutdown""#),
             vec![0]
         );
         assert_eq!(
-            matches_custom(&a, r#"death.field["reason"] == "shutdown""#),
+            matches_custom(&a, r#"free.fields["reason"] == "shutdown""#),
             vec![0]
         );
         // string methods and sets reach custom fields like any other string
-        assert_eq!(matches_custom(&a, r#"field.pool.starts_with("g")"#), vec![0]);
+        assert_eq!(matches_custom(&a, r#"malloc.fields.pool.startswith("g")"#), vec![0]);
         assert_eq!(
-            matches_custom(&a, r#"field.pool in {"gfx", "ui"}"#),
+            matches_custom(&a, r#"malloc.fields.pool in {"gfx", "ui"}"#),
             vec![0, 1]
         );
     }
@@ -2602,15 +2602,15 @@ not json at all
         let a = load(FLOATS);
         // the whole point of T034: this used to answer nothing at all,
         // because the value failed to parse as an integer and went missing
-        assert_eq!(matches_custom(&a, "field.ratio > 0.5"), vec![1]);
-        assert_eq!(matches_custom(&a, "field.ratio < 0.5"), vec![0, 2]);
-        assert_eq!(matches_custom(&a, "field.ratio == 0.25"), vec![0]);
-        assert_eq!(matches_custom(&a, "field.ratio == 1e-3"), vec![2]);
-        assert_eq!(matches_custom(&a, "field.ratio in 0.2..0.8"), vec![0, 1]);
-        assert_eq!(matches_custom(&a, "field.ratio in {0.25, 0.75}"), vec![0, 1]);
+        assert_eq!(matches_custom(&a, "malloc.fields.ratio > 0.5"), vec![1]);
+        assert_eq!(matches_custom(&a, "malloc.fields.ratio < 0.5"), vec![0, 2]);
+        assert_eq!(matches_custom(&a, "malloc.fields.ratio == 0.25"), vec![0]);
+        assert_eq!(matches_custom(&a, "malloc.fields.ratio == 1e-3"), vec![2]);
+        assert_eq!(matches_custom(&a, "malloc.fields.ratio in range(0.2, 0.8)"), vec![0, 1]);
+        assert_eq!(matches_custom(&a, "malloc.fields.ratio in {0.25, 0.75}"), vec![0, 1]);
         // and the death record's own float
-        assert_eq!(matches_custom(&a, "death.field.drift < 0"), vec![0]);
-        assert_eq!(matches_custom(&a, "abs(death.field.drift) > 2"), vec![0]);
+        assert_eq!(matches_custom(&a, "free.fields.drift < 0"), vec![0]);
+        assert_eq!(matches_custom(&a, "abs(free.fields.drift) > 2"), vec![0]);
     }
 
     #[test]
@@ -2620,23 +2620,23 @@ not json at all
         assert_eq!(scale.types, FIELD_INT | FIELD_FLOAT);
         // one number-valued field, not a multi-type diagnostic
         assert_eq!(scale.scalar(), Some(FIELD_FLOAT));
-        assert_eq!(matches_custom(&a, "field.scale > 1.75"), vec![0]);
-        assert_eq!(matches_custom(&a, "field.scale == 2"), vec![0]);
-        assert_eq!(matches_custom(&a, "field.scale == 1.5"), vec![1]);
+        assert_eq!(matches_custom(&a, "malloc.fields.scale > 1.75"), vec![0]);
+        assert_eq!(matches_custom(&a, "malloc.fields.scale == 2"), vec![0]);
+        assert_eq!(matches_custom(&a, "malloc.fields.scale == 1.5"), vec![1]);
         // absent from the third record, so the missing tests still apply
-        assert_eq!(matches_custom(&a, "field.scale is missing"), vec![2]);
+        assert_eq!(matches_custom(&a, "malloc.fields.scale is None"), vec![2]);
     }
 
     #[test]
     fn integer_and_float_operands_mix() {
         let a = load(FLOATS);
         // an integer field against a float literal, and the other way round
-        assert_eq!(matches_custom(&a, "size > 32.5"), vec![0]);
-        assert_eq!(matches_custom(&a, "size in 31.5..64.5"), vec![0, 1, 2]);
-        assert_eq!(matches_custom(&a, "field.ratio < 1"), vec![0, 1, 2]);
-        assert_eq!(matches_custom(&a, "size > 1.5KiB"), vec![] as Vec<u32>);
+        assert_eq!(matches_custom(&a, "alloc.size > 32.5"), vec![0]);
+        assert_eq!(matches_custom(&a, "alloc.size in range(31.5, 64.5)"), vec![0, 1, 2]);
+        assert_eq!(matches_custom(&a, "malloc.fields.ratio < 1"), vec![0, 1, 2]);
+        assert_eq!(matches_custom(&a, "alloc.size > 1.5KiB"), vec![] as Vec<u32>);
         // arithmetic promotes rather than truncating
-        assert_eq!(matches_custom(&a, "size + 0.5 > 64"), vec![0]);
+        assert_eq!(matches_custom(&a, "alloc.size + 0.5 > 64"), vec![0]);
     }
 
     #[test]
@@ -2653,13 +2653,13 @@ not json at all
         let a = load(&src);
         let two53 = (1u64 << 53) as f64;
         assert_eq!(field(&a, "big").scalar(), Some(FIELD_INT));
-        assert_eq!(matches_custom(&a, &format!("field.big > {two53}")), vec![0]);
+        assert_eq!(matches_custom(&a, &format!("malloc.fields.big > {two53}")), vec![0]);
         assert_eq!(
-            matches_custom(&a, &format!("field.big == {two53}")),
+            matches_custom(&a, &format!("malloc.fields.big == {two53}")),
             vec![] as Vec<u32>
         );
         assert_eq!(
-            matches_custom(&a, &format!("field.big < {two53}")),
+            matches_custom(&a, &format!("malloc.fields.big < {two53}")),
             vec![] as Vec<u32>
         );
     }
@@ -2686,18 +2686,18 @@ not json at all
         a.names = vec![(0, "anchor".to_string())];
 
         for source in [
-            "size >= 64",
-            "site == \"json_node\"",
-            "site.starts_with(\"j\")",
-            "site is missing",
-            "tags contains \"hot\"",
-            "tags == {\"hot\"}",
-            "field.pool == \"gfx\"",
-            "field[\"fill-ratio\"] > 0.5",
-            "death.field.reason is not missing",
-            "freed && lifetime > 10",
-            "abs(seq - named(\"anchor\").seq) <= 5",
-            "site == \"json_node\" && size >= 64 && tags contains \"hot\"",
+            "alloc.size >= 64",
+            "malloc.site == \"json_node\"",
+            "malloc.site.startswith(\"j\")",
+            "malloc.site is None",
+            "\"hot\" in alloc.tags",
+            "alloc.tags == {\"hot\"}",
+            "malloc.fields.pool == \"gfx\"",
+            "malloc.fields[\"fill-ratio\"] > 0.5",
+            "free.fields.reason is not None",
+            "alloc.freed and alloc.lifetime > 10",
+            "abs(malloc.seq - named(\"anchor\").malloc.seq) <= 5",
+            "malloc.site == \"json_node\" and alloc.size >= 64 and \"hot\" in alloc.tags",
         ] {
             let expr = heap_visualizer_filter_dsl::parse(source).unwrap();
             let base = filter_eval::Ctx::new(&a.store, &labels, &a.names);
@@ -2758,90 +2758,90 @@ not json at all
             // constants and boolean structure
             "true",
             "false",
-            "size >= 0 && false",
-            "size >= 0 || true",
-            "!(size > 100)",
-            "!!freed",
-            "size > 100 && size < 4096 && thread == 1",
-            "size > 4096 || site == \"json_node\" || freed",
-            "(size > 100 || thread == 0) && !freed",
+            "alloc.size >= 0 and false",
+            "alloc.size >= 0 or true",
+            "not (alloc.size > 100)",
+            "not not alloc.freed",
+            "alloc.size > 100 and alloc.size < 4096 and malloc.thread == 1",
+            "alloc.size > 4096 or malloc.site == \"json_node\" or alloc.freed",
+            "(alloc.size > 100 or malloc.thread == 0) and not alloc.freed",
             // numeric columns against constants, every operator
-            "size == 64",
-            "size != 64",
-            "size < 512",
-            "size <= 512",
-            "size > 512",
-            "size >= 512",
-            "id > 20",
-            "address >= 0x1000",
-            "end > address",
-            "seq < 40",
-            "time >= 1000",
-            "size >= 1KiB",
+            "alloc.size == 64",
+            "alloc.size != 64",
+            "alloc.size < 512",
+            "alloc.size <= 512",
+            "alloc.size > 512",
+            "alloc.size >= 512",
+            "alloc.id > 20",
+            "alloc.address >= 0x1000",
+            "alloc.end > alloc.address",
+            "malloc.seq < 40",
+            "malloc.time >= 1000",
+            "alloc.size >= 1KiB",
             // optional columns, and the missing tests
-            "freed",
-            "!freed",
-            "usable is missing",
-            "usable is not missing",
-            "lifetime is not missing",
-            "lifetime > 100",
-            "death.seq is missing",
-            "death.seq > 50",
-            "death.time is not missing && death.time > 500",
+            "alloc.freed",
+            "not alloc.freed",
+            "alloc.usable is None",
+            "alloc.usable is not None",
+            "alloc.lifetime is not None",
+            "alloc.lifetime > 100",
+            "free.seq is None",
+            "free.seq > 50",
+            "free.time is not None and free.time > 500",
             // sets and ranges
-            "seq in {1, 2, 3, 5, 8}",
-            "size in 64..4096",
-            "thread in {0, 1}",
-            "thread in {7}",
-            "span overlaps 0x0..0xffffffff",
-            "address in 0x0..0x10",
+            "malloc.seq in {1, 2, 3, 5, 8}",
+            "alloc.size in range(64, 4096)",
+            "malloc.thread in {0, 1}",
+            "malloc.thread in {7}",
+            "alloc.span.overlaps(range(0x0, 0xffffffff))",
+            "alloc.address in range(0x0, 0x10)",
             // dictionary columns: string, integer, and the string methods
-            "site == \"json_node\"",
-            "site != \"json_node\"",
-            "site is missing",
-            "site is not missing",
-            "site in {\"json_node\", \"temp_string\"}",
-            "site < \"m\"",
-            "site.contains(\"_\")",
-            "site.starts_with(\"c\")",
-            "site.ends_with(\"e\")",
-            "thread == 0",
+            "malloc.site == \"json_node\"",
+            "malloc.site != \"json_node\"",
+            "malloc.site is None",
+            "malloc.site is not None",
+            "malloc.site in {\"json_node\", \"temp_string\"}",
+            "malloc.site < \"m\"",
+            "\"_\" in malloc.site",
+            "malloc.site.startswith(\"c\")",
+            "malloc.site.endswith(\"e\")",
+            "malloc.thread == 0",
             // custom fields, all four scalar shapes, on both records
-            "field.pool == \"gfx\"",
-            "field.pool is not missing",
-            "field.refcount >= 3",
-            "field.refcount in {1, 2, 3}",
-            "field[\"fill-ratio\"] > 0.5",
-            "field[\"fill-ratio\"] in 0.2..0.8",
-            "field.hot",
-            "!field.hot",
-            "field[\"allocator-class\"].starts_with(\"s\")",
-            "death.field.reason is not missing",
-            "death.field.reason == \"scope exit\"",
-            "death.field.drained",
+            "malloc.fields.pool == \"gfx\"",
+            "malloc.fields.pool is not None",
+            "malloc.fields.refcount >= 3",
+            "malloc.fields.refcount in {1, 2, 3}",
+            "malloc.fields[\"fill-ratio\"] > 0.5",
+            "malloc.fields[\"fill-ratio\"] in range(0.2, 0.8)",
+            "malloc.fields.hot",
+            "not malloc.fields.hot",
+            "malloc.fields[\"allocator-class\"].startswith(\"s\")",
+            "free.fields.reason is not None",
+            "free.fields.reason == \"scope exit\"",
+            "free.fields.drained",
             // tags: membership, exact equality, emptiness
-            "tags contains \"hot\"",
-            "tags contains \"nobody\"",
-            "tags == {}",
-            "tags != {}",
-            "tags == {\"hot\"}",
-            "tags == {\"hot\", \"suspect\"}",
-            "tags == {\"edge\"}",
-            "tags == {\"hot\", \"nobody\"}",
-            "tags contains \"hot\" && tags contains \"suspect\"",
-            "tags contains \"hot\" && size > 100",
+            "\"hot\" in alloc.tags",
+            "\"nobody\" in alloc.tags",
+            "alloc.tags == {}",
+            "alloc.tags != {}",
+            "alloc.tags == {\"hot\"}",
+            "alloc.tags == {\"hot\", \"suspect\"}",
+            "alloc.tags == {\"edge\"}",
+            "alloc.tags == {\"hot\", \"nobody\"}",
+            "\"hot\" in alloc.tags and \"suspect\" in alloc.tags",
+            "\"hot\" in alloc.tags and alloc.size > 100",
             // arithmetic, abs, and column-against-column
-            "end - address >= size",
-            "address + size > 0x2000",
-            "abs(seq - 30) <= 5",
-            "usable is not missing && size - usable <= 0",
-            "size >= usable",
+            "alloc.end - alloc.address >= alloc.size",
+            "alloc.address + alloc.size > 0x2000",
+            "abs(malloc.seq - 30) <= 5",
+            "alloc.usable is not None and alloc.size - alloc.usable <= 0",
+            "alloc.size >= alloc.usable",
             // named(), resolved while lowering
-            "size >= named(\"anchor\").size",
-            "abs(seq - named(\"anchor\").seq) <= 10",
-            "address >= named(\"anchor\").address",
-            "named(\"anchor\").span overlaps 0x0..0xffffffff",
-            "site == named(\"anchor\").site",
+            "alloc.size >= named(\"anchor\").alloc.size",
+            "abs(malloc.seq - named(\"anchor\").malloc.seq) <= 10",
+            "alloc.address >= named(\"anchor\").alloc.address",
+            "named(\"anchor\").alloc.span.overlaps(range(0x0, 0xffffffff))",
+            "malloc.site == named(\"anchor\").malloc.site",
         ];
 
         let mut nonempty = 0;
@@ -2874,11 +2874,11 @@ not json at all
         let a = load(src);
         assert_eq!(field(&a, "fill-ratio").scalar(), Some(FIELD_FLOAT));
         assert_eq!(
-            matches_custom(&a, r#"field["fill-ratio"] > 0.5"#).len(),
+            matches_custom(&a, r#"malloc.fields["fill-ratio"] > 0.5"#).len(),
             25
         );
         assert_eq!(
-            matches_custom(&a, r#"field["fill-ratio"] in 0.2..0.8"#).len(),
+            matches_custom(&a, r#"malloc.fields["fill-ratio"] in range(0.2, 0.8)"#).len(),
             34
         );
     }
@@ -2895,18 +2895,18 @@ not json at all
         let a = load(CUSTOM);
         // event 1 is never freed, so its death fields are missing, and a
         // comparison against a missing value is false rather than an error
-        assert_eq!(matches_custom(&a, "death.field.reason is missing"), vec![1]);
+        assert_eq!(matches_custom(&a, "free.fields.reason is None"), vec![1]);
         assert_eq!(
-            matches_custom(&a, r#"death.field.reason != "shutdown""#),
+            matches_custom(&a, r#"free.fields.reason != "shutdown""#),
             vec![] as Vec<u32>
         );
         // a key no event carries at all is a diagnostic, not a silent false
         assert_eq!(
-            custom_error(&a, r#"field.nope == "x""#),
+            custom_error(&a, r#"malloc.fields.nope == "x""#),
             "no trace field `nope` in this trace"
         );
         assert_eq!(
-            custom_error(&a, r#"death.field["nope"] == "x""#),
+            custom_error(&a, r#"free.fields["nope"] == "x""#),
             "no trace field `nope` in this trace"
         );
     }
@@ -2918,32 +2918,37 @@ not json at all
 {"seq":1,"t":200,"op":"M","id":2,"addr":"0x2000","size":32,"mixed":"x","maybe":7}
 "#);
         assert_eq!(
-            custom_error(&a, "field.mixed == 3"),
+            custom_error(&a, "malloc.fields.mixed == 3"),
             "`mixed` holds integer and string in this trace, so it has no single type to filter on"
         );
         assert_eq!(
-            custom_error(&a, "field.nested == 3"),
+            custom_error(&a, "malloc.fields.nested == 3"),
             "`nested` holds an object or an array, which cannot be filtered"
         );
         // a null observation makes the field optional, not untypable
-        assert_eq!(matches_custom(&a, "field.maybe == 7"), vec![1]);
-        assert_eq!(matches_custom(&a, "field.maybe is missing"), vec![0]);
+        assert_eq!(matches_custom(&a, "malloc.fields.maybe == 7"), vec![1]);
+        assert_eq!(matches_custom(&a, "malloc.fields.maybe is None"), vec![0]);
     }
 
     #[test]
     fn a_started_field_reference_says_what_is_missing() {
         let a = load(CUSTOM);
         assert_eq!(
-            custom_error(&a, "field"),
-            "`field` needs a key, as `field.pool` or `field[\"pool\"]`"
+            custom_error(&a, "malloc.fields"),
+            "`malloc.fields` needs a key, as `malloc.fields.pool`"
+        );
+        // an allocation is not a record, so it carries none
+        assert_eq!(
+            custom_error(&a, "alloc.fields.pool"),
+            "custom fields are on `malloc` and `free`, not on `alloc`"
         );
         assert_eq!(
-            custom_error(&a, "death.field"),
-            "`death.field` needs a key, as `death.field.reason`"
+            custom_error(&a, "free.fields"),
+            "`free.fields` needs a key, as `free.fields.pool`"
         );
         assert_eq!(
             custom_error(&a, r#"site["x"] == "a""#),
-            "only `field[...]` and `death.field[...]` take a key"
+            "only `malloc.fields[...]` and `free.fields[...]` take a key"
         );
     }
 
@@ -2962,10 +2967,10 @@ not json at all
         let a = load(&src);
         // two distinct fragments behind two hundred events
         assert_eq!(a.store.extras.len(), 2);
-        let expr = heap_visualizer_filter_dsl::parse(r#"field.pool == "gfx""#).unwrap();
+        let expr = heap_visualizer_filter_dsl::parse(r#"malloc.fields.pool == "gfx""#).unwrap();
         let fields = filter_eval::FieldValues::resolve(&expr, &a.store);
         assert_eq!(fields.rows(), 2);
-        assert_eq!(matches_custom(&a, r#"field.pool == "gfx""#).len(), 100);
+        assert_eq!(matches_custom(&a, r#"malloc.fields.pool == "gfx""#).len(), 100);
     }
 
     #[test]
@@ -2981,19 +2986,20 @@ not json at all
             );
             out
         };
-        assert!(complete("").contains("\"label\":\"field\""));
-        let keys = complete("field.");
+        assert!(complete("").contains("\"label\":\"malloc\""));
+        assert!(complete("malloc.").contains("\"label\":\"fields\""));
+        let keys = complete("malloc.fields.");
         assert!(keys.contains("\"label\":\"pool\""));
         assert!(keys.contains("\"label\":\"refcount\""));
         // a key needing brackets is not completable after a `.`
         assert!(!keys.contains("allocator-class"));
         // the values the key was seen holding, like site and thread
-        let values = complete("field.pool == ");
+        let values = complete("malloc.fields.pool == ");
         assert!(values.contains("\"gfx\""));
         assert!(values.contains("\"ui\""));
-        // fields of the freeing event hang off `death.`
-        assert!(complete("death.").contains("\"label\":\"field\""));
-        assert!(complete("death.field.").contains("\"label\":\"reason\""));
+        // fields of the freeing record hang off `free.`
+        assert!(complete("free.").contains("\"label\":\"fields\""));
+        assert!(complete("free.fields.").contains("\"label\":\"reason\""));
     }
 
     #[test]
@@ -3003,7 +3009,7 @@ not json at all
 {"seq":1,"t":200,"op":"M","id":2,"addr":"0x2000","size":32,"mixed":"x"}
 "#);
         let mut out = String::new();
-        filter_eval::push_completions_json(&mut out, "field.", 6, &ctx(&a, &[]));
+        filter_eval::push_completions_json(&mut out, "malloc.fields.", 6, &ctx(&a, &[]));
         assert!(!out.contains("mixed"));
         assert!(!out.contains("nested"));
         // and with nothing filterable in the trace, `field` is not offered
@@ -3017,7 +3023,7 @@ not json at all
         let mut a = load(SAMPLE);
         a.names = vec![(0, "request root".into())];
         let near = heap_visualizer_filter_dsl::parse(
-            r#"abs(seq - named("request root").seq) <= 1"#,
+            r#"abs(malloc.seq - named("request root").malloc.seq) <= 1"#,
         ).unwrap();
         let c = ctx(&a, &[]);
         assert!(filter_eval::check(&near, &c).is_ok());
@@ -3028,7 +3034,7 @@ not json at all
 
         // a field read through the reference is that field's ordinary type
         let addr = heap_visualizer_filter_dsl::parse(
-            r#"address >= named("request root").address"#,
+            r#"alloc.address >= named("request root").alloc.address"#,
         ).unwrap();
         assert!(filter_eval::check(&addr, &c).is_ok());
         assert!(filter_eval::evaluate(&addr, &c, 0).unwrap());
@@ -3038,7 +3044,7 @@ not json at all
     fn named_requires_exactly_one_match() {
         let mut a = load(SAMPLE);
         let parse = |s: &str| heap_visualizer_filter_dsl::parse(s).unwrap();
-        let expr = parse(r#"named("ghost").seq == 0"#);
+        let expr = parse(r#"named("ghost").malloc.seq == 0"#);
 
         // nothing named at all
         assert_eq!(
@@ -3077,7 +3083,7 @@ not json at all
         );
         // the argument is a constant, resolved while checking
         assert_eq!(
-            filter_eval::check(&parse("named(site).seq == 0"), &c).unwrap_err().message,
+            filter_eval::check(&parse("named(malloc.site).seq == 0"), &c).unwrap_err().message,
             "named requires one string constant, as `named(\"request root\")`"
         );
     }
@@ -3086,7 +3092,7 @@ not json at all
     fn a_rename_invalidates_a_filter_that_used_the_old_name() {
         let mut a = load(SAMPLE);
         a.names = vec![(0, "before".into())];
-        let expr = heap_visualizer_filter_dsl::parse(r#"named("before").seq == 0"#).unwrap();
+        let expr = heap_visualizer_filter_dsl::parse(r#"named("before").malloc.seq == 0"#).unwrap();
         assert!(filter_eval::check(&expr, &ctx(&a, &[])).is_ok());
         // the web layer pushes the new map; the same source stops checking
         a.names = vec![(0, "after".into())];
@@ -3124,10 +3130,13 @@ not json at all
         a.names = vec![(0, "request root".into())];
         assert!(complete(&a, "").contains("\"label\":\"named\""));
         assert!(complete(&a, "named(").contains("request root"));
-        // and its members are the ordinary allocation fields
+        // a named allocation exposes the same three objects the subject does
         let members = complete(&a, r#"named("request root")."#);
-        assert!(members.contains("\"label\":\"address\""));
-        assert!(members.contains("\"label\":\"size\""));
+        assert!(members.contains("\"label\":\"alloc\""));
+        assert!(members.contains("\"label\":\"malloc\""));
+        let fields = complete(&a, r#"named("request root").alloc."#);
+        assert!(fields.contains("\"label\":\"address\""));
+        assert!(fields.contains("\"label\":\"size\""));
     }
 
     #[test]
@@ -3143,78 +3152,84 @@ not json at all
         };
 
         // exact set equality, order-insensitive
-        assert!(matches(r#"tags == {"a", "b"}"#, 0));
-        assert!(matches(r#"tags == {"b", "a"}"#, 0));
-        assert!(!matches(r#"tags == {"b"}"#, 0));
-        assert!(matches(r#"tags == {"b"}"#, 1));
-        assert!(matches(r#"tags != {"a"}"#, 1));
+        assert!(matches(r#"alloc.tags == {"a", "b"}"#, 0));
+        assert!(matches(r#"alloc.tags == {"b", "a"}"#, 0));
+        assert!(!matches(r#"alloc.tags == {"b"}"#, 0));
+        assert!(matches(r#"alloc.tags == {"b"}"#, 1));
+        assert!(matches(r#"alloc.tags != {"a"}"#, 1));
 
         // membership
-        assert!(matches(r#"tags contains "b""#, 0));
-        assert!(matches(r#"tags contains "b""#, 1));
-        assert!(!matches(r#"tags contains "a""#, 1));
+        assert!(matches(r#""b" in alloc.tags"#, 0));
+        assert!(matches(r#""b" in alloc.tags"#, 1));
+        assert!(!matches(r#""a" in alloc.tags"#, 1));
 
         // untagged is the empty set, not a missing value
-        assert!(matches("tags == {}", 3));
-        assert!(!matches("tags != {}", 3));
-        assert!(!matches("tags == {}", 0));
-        assert!(!matches(r#"tags contains "a""#, 3));
+        assert!(matches("alloc.tags == {}", 3));
+        assert!(!matches("alloc.tags != {}", 3));
+        assert!(!matches("alloc.tags == {}", 0));
+        assert!(!matches(r#""a" in alloc.tags"#, 3));
     }
 
     #[test]
     fn filter_check_rejects_semantic_errors_before_scanning() {
         let valid = heap_visualizer_filter_dsl::parse(
-            r#"size >= 100 && site.starts_with("a")"#,
+            r#"alloc.size >= 100 and malloc.site.startswith("a")"#,
         ).unwrap();
         let store = Store { unit: "ns".into(), ..Store::default() };
         assert!(filter_eval::check(&valid, &store_ctx(&store)).is_ok());
 
         let wrong_method = heap_visualizer_filter_dsl::parse(
-            r#"size.starts_with("1")"#,
+            r#"alloc.size.startswith("1")"#,
         ).unwrap();
         assert_eq!(
             filter_eval::check(&wrong_method, &store_ctx(&store)).unwrap_err().message,
-            "`starts_with` requires one string argument"
+            "`startswith` requires one string argument"
         );
 
-        let not_boolean = heap_visualizer_filter_dsl::parse("size + 1").unwrap();
+        let not_boolean = heap_visualizer_filter_dsl::parse("alloc.size + 1").unwrap();
         assert_eq!(
             filter_eval::check(&not_boolean, &store_ctx(&store)).unwrap_err().message,
             "filter expression must produce bool"
         );
 
-        let empty_set = heap_visualizer_filter_dsl::parse("site in {}").unwrap();
+        let empty_set = heap_visualizer_filter_dsl::parse("malloc.site in {}").unwrap();
         assert!(filter_eval::check(&empty_set, &store_ctx(&store)).is_ok());
 
-        // `tags` is a set: it compares to a set, tests one member with
-        // `contains`, and is never missing
+        // `alloc.tags` is a set: it compares to a set, tests one member with
+        // `in`, and is never missing
         let parse = |source: &str| heap_visualizer_filter_dsl::parse(source).unwrap();
-        assert!(filter_eval::check(&parse(r#"tags == {"a", "b"}"#), &store_ctx(&store)).is_ok());
-        assert!(filter_eval::check(&parse("tags == {}"), &store_ctx(&store)).is_ok());
-        assert!(filter_eval::check(&parse(r#"tags contains "a""#), &store_ctx(&store)).is_ok());
+        assert!(filter_eval::check(&parse(r#"alloc.tags == {"a", "b"}"#), &store_ctx(&store)).is_ok());
+        assert!(filter_eval::check(&parse("alloc.tags == {}"), &store_ctx(&store)).is_ok());
+        assert!(filter_eval::check(&parse(r#""a" in alloc.tags"#), &store_ctx(&store)).is_ok());
         assert_eq!(
             filter_eval::check(&parse(r#"tag == "a""#), &store_ctx(&store)).unwrap_err().message,
             "unknown field `tag`"
         );
+        // and the old flat spelling says where the field went
         assert_eq!(
-            filter_eval::check(&parse(r#"tags == "a""#), &store_ctx(&store)).unwrap_err().message,
+            filter_eval::check(&parse("size >= 1"), &store_ctx(&store)).unwrap_err().message,
+            "write `alloc.size`"
+        );
+        assert_eq!(
+            filter_eval::check(&parse(r#"alloc.tags == "a""#), &store_ctx(&store)).unwrap_err().message,
             "a set compares to a set; use `contains` to test one member"
         );
         assert_eq!(
-            filter_eval::check(&parse("tags contains 1"), &store_ctx(&store)).unwrap_err().message,
-            "`contains` requires a member of the set's type"
+            filter_eval::check(&parse("1 in alloc.tags"), &store_ctx(&store)).unwrap_err().message,
+            "`in` requires a set, a string, or a range on the right"
+        );
+        // `contains` is gone; the diagnostic names the Python spelling
+        assert_eq!(
+            filter_eval::check(&parse(r#"malloc.site.contains("a")"#), &store_ctx(&store)).unwrap_err().message,
+            "write `x in malloc.site`"
         );
         assert_eq!(
-            filter_eval::check(&parse(r#"site contains "a""#), &store_ctx(&store)).unwrap_err().message,
-            "`contains` requires a set on the left"
-        );
-        assert_eq!(
-            filter_eval::check(&parse("tags is missing"), &store_ctx(&store)).unwrap_err().message,
-            "`is missing` requires an optional field"
+            filter_eval::check(&parse("alloc.tags is None"), &store_ctx(&store)).unwrap_err().message,
+            "`is None` requires an optional field"
         );
 
         let tick_store = Store { unit: "tick".into(), ..Store::default() };
-        let time_unit = heap_visualizer_filter_dsl::parse("time > 1ms").unwrap();
+        let time_unit = heap_visualizer_filter_dsl::parse("malloc.time > 1ms").unwrap();
         assert_eq!(
             filter_eval::check(&time_unit, &store_ctx(&tick_store)).unwrap_err().message,
             "time literals are unavailable for a tick trace"
@@ -3227,28 +3242,30 @@ not json at all
         a.tag_labels = vec!["suspect".into(), "quoted \"tag\"".into()];
 
         let mut out = String::new();
-        filter_eval::push_completions_json(&mut out, "span ", 5, &ctx(&a, &a.tag_labels));
+        let span = "alloc.span.";
+        filter_eval::push_completions_json(&mut out, span, span.len(), &ctx(&a, &a.tag_labels));
         assert!(out.contains("\"label\":\"overlaps\""));
         assert!(!out.contains("\"label\":\"contains\""));
 
         out.clear();
-        filter_eval::push_completions_json(&mut out, "site == \"", 9, &ctx(&a, &a.tag_labels));
+        let site = "malloc.site == \"";
+        filter_eval::push_completions_json(&mut out, site, site.len(), &ctx(&a, &a.tag_labels));
         assert!(out.contains("\"label\":\"a\""));
         assert!(out.contains("\"insertText\":\"\\\"a\\\" \""));
 
         out.clear();
-        let source = "tags contains \"q";
+        let source = "alloc.tags == {\"q";
         filter_eval::push_completions_json(
             &mut out, source, source.len(), &ctx(&a, &a.tag_labels),
         );
         assert!(out.contains("\"label\":\"quoted \\\"tag\\\"\""));
-        assert!(out.contains("\"insertText\":\"\\\"quoted \\\\\\\"tag\\\\\\\"\\\" \""));
+        assert!(out.contains("\"insertText\":\"\\\"quoted \\\\\\\"tag\\\\\\\"\\\"\""));
 
         out.clear();
         filter_eval::push_completions_json(&mut out, "", 0, &ctx(&a, &a.tag_labels));
-        assert!(out.contains("\"label\":\"size\""));
+        assert!(out.contains("\"label\":\"alloc\""));
         assert!(!out.contains("\"label\":\"named\""));
-        assert!(!out.contains("\"label\":\"field\""));
+        assert!(!out.contains("\"label\":\"fields\""));
     }
 
     #[test]
@@ -3263,59 +3280,66 @@ not json at all
             out
         };
 
-        let out = complete("span");
-        assert!(out.contains("\"start\":4,\"end\":4"));
-        assert!(out.contains("\"label\":\"overlaps\""));
-        assert!(out.contains("\"insertText\":\" overlaps \""));
-        assert!(!out.contains("\"label\":\"span\""));
+        // a namespace on its own advances to its `.`
+        let out = complete("alloc");
+        assert!(out.contains("\"start\":5,\"end\":5"));
+        assert!(out.contains("\"label\":\".\""));
 
-        let out = complete("size == ");
-        for numeric in ["abs", "address", "id", "size", "thread"] {
+        // and the `.` offers that object's fields, and only those
+        let out = complete("malloc.");
+        for field in ["site", "thread", "stack", "seq", "time"] {
+            assert!(out.contains(&format!("\"label\":\"{field}\"")), "{out}");
+        }
+        for elsewhere in ["size", "tags", "freed", "lifetime"] {
+            assert!(!out.contains(&format!("\"label\":\"{elsewhere}\"")), "{out}");
+        }
+
+        // `overlaps` is a method on a range, not an operator
+        let out = complete("alloc.span.");
+        assert!(out.contains("\"label\":\"overlaps\""));
+        assert!(out.contains("\"insertText\":\"overlaps(range(\""));
+
+        let out = complete("alloc.size == ");
+        for numeric in ["abs", "len", "alloc", "malloc", "free"] {
             assert!(out.contains(&format!("\"label\":\"{numeric}\"")), "{out}");
         }
-        for incompatible in ["false", "freed", "site", "span", "tags", "true"] {
+        for incompatible in ["false", "true"] {
             assert!(!out.contains(&format!("\"label\":\"{incompatible}\"")), "{out}");
         }
 
-        let out = complete("tags");
-        assert!(out.contains("\"label\":\"==\""));
-        assert!(out.contains("\"insertText\":\" == \""));
-        assert!(out.contains("\"label\":\"contains\""));
-        assert!(!out.contains("\"label\":\"tags\""));
+        // a finished path advances to its operators
+        let out = complete("alloc.tags ");
+        assert!(out.contains("\"label\":\"==\""), "{out}");
+        assert!(out.contains("\"insertText\":\"== \""));
         // a set is not optional and does not order
         assert!(!out.contains("\"label\":\"is\""));
         assert!(!out.contains("\"label\":\"<\""));
 
         // the whole set compares only to a set literal
-        let out = complete("tags == ");
+        let out = complete("alloc.tags == ");
         assert!(out.contains("\"label\":\"{\""), "{out}");
-        for incompatible in ["parser", "suspect", "site", "tags"] {
+        for incompatible in ["parser", "suspect", "malloc"] {
             assert!(!out.contains(&format!("\"label\":\"{incompatible}\"")), "{out}");
         }
 
-        let out = complete("tags contains ");
-        for string in ["parser", "suspect", "site", "stack"] {
-            assert!(out.contains(&format!("\"label\":\"{string}\"")), "{out}");
-        }
-        for incompatible in ["false", "freed", "size", "span", "tags", "true"] {
-            assert!(!out.contains(&format!("\"label\":\"{incompatible}\"")), "{out}");
-        }
-        assert!(out.contains("\"insertText\":\"\\\"suspect\\\" \""));
+        // `in` over a string takes the objects holding a string, and `alloc`
+        // holds none — site and stack are both on the creating record
+        let out = complete("\"x\" in ");
+        assert!(out.contains("\"label\":\"malloc\""), "{out}");
+        assert!(!out.contains("\"label\":\"alloc\""), "{out}");
 
-        let out = complete("tags == {");
+        let out = complete("alloc.tags == {");
         assert!(out.contains("\"label\":\"suspect\""));
         assert!(out.contains("\"insertText\":\"\\\"suspect\\\"\""));
         assert!(!out.contains("\"label\":\"site\""));
 
         let out = complete("abs(");
-        assert!(out.contains("\"label\":\"size\""));
-        assert!(!out.contains("\"label\":\"site\""));
+        assert!(out.contains("\"label\":\"alloc\""));
 
-        let out = complete("span overlaps ");
-        assert!(out.contains("\"label\":\"span\""));
-        assert!(!out.contains("\"label\":\"size\""));
+        let out = complete("alloc.span.overlaps(");
+        assert!(out.contains("\"label\":\"range\"") || out.contains("\"label\":\"alloc\""), "{out}");
 
-        let out = complete("tags == {\"suspect\"");
+        let out = complete("alloc.tags == {\"suspect\"");
         assert!(out.contains("\"label\":\",\""));
         assert!(out.contains("\"label\":\"}\""));
     }
@@ -3333,7 +3357,8 @@ not json at all
         let mut store = Store::default();
         store.sites = (0..60).map(|index| format!("site-{index:02}")).collect();
         let mut out = String::new();
-        filter_eval::push_completions_json(&mut out, "site == \"", 9, &store_ctx(&store));
+        let site = "malloc.site == \"";
+        filter_eval::push_completions_json(&mut out, site, site.len(), &store_ctx(&store));
         assert_eq!(out.matches("\"kind\":\"value\"").count(), 50);
         assert!(out.contains("\"hasMore\":true"));
         assert!(out.contains("\"label\":\"site-00\""));

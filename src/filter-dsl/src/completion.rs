@@ -199,38 +199,63 @@ fn after_is(source: &str) -> Option<bool> {
     }
 }
 
+/// The expression a `.` hangs off, parsed back out of the source in front of
+/// it.
+///
+/// A receiver used to be one token — `site`, `stack` — and is now a chain:
+/// `malloc.fields`, `named("x").alloc`, `malloc.fields["k"]`. This walks back
+/// over that chain, stepping over a bracketed or parenthesised group as a
+/// unit, and stops at the first token that cannot continue one.
 fn receiver_before_dot(source: &str, dot: usize) -> Option<Expr> {
     let tokens = lex(&source[..dot]).ok()?;
     let meaningful: Vec<_> = tokens
         .iter()
         .filter(|token| !matches!(token.kind, TokenKind::Eof))
         .collect();
-    let last = meaningful.last()?;
-    // A receiver is one token — `site`, `stack` — except when it is a call:
-    // `named("x").` ends in `)`, so walk back to the matching `(` and take
-    // the callee in front of it.
-    let start = if matches!(last.kind, TokenKind::RightParen) {
-        let mut depth = 0usize;
-        let mut open = None;
-        for (index, token) in meaningful.iter().enumerate().rev() {
-            match token.kind {
-                TokenKind::RightParen => depth += 1,
-                TokenKind::LeftParen => {
-                    depth -= 1;
-                    if depth == 0 {
-                        open = Some(index);
-                        break;
+    let mut end = meaningful.len();
+    let mut start = None;
+    while end > 0 {
+        match &meaningful[end - 1].kind {
+            // a call or an index: step over the whole group, then keep going,
+            // because whatever it hangs off precedes it directly
+            TokenKind::RightParen | TokenKind::RightBracket => {
+                let closing = meaningful[end - 1].kind.clone();
+                let opening = match closing {
+                    TokenKind::RightParen => TokenKind::LeftParen,
+                    _ => TokenKind::LeftBracket,
+                };
+                let mut depth = 0usize;
+                loop {
+                    if end == 0 {
+                        return None;
+                    }
+                    end -= 1;
+                    if meaningful[end].kind == closing {
+                        depth += 1;
+                    } else if meaningful[end].kind == opening {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
                     }
                 }
-                _ => {}
+                start = Some(meaningful[end].span.start);
+                continue;
             }
+            TokenKind::Identifier(_) => {
+                end -= 1;
+                start = Some(meaningful[end].span.start);
+            }
+            _ => break,
         }
-        let open = open?;
-        meaningful.get(open.checked_sub(1)?)?.span.start
-    } else {
-        last.span.start
-    };
-    parse(&source[start..dot]).ok()
+        // a chain continues only through a `.`
+        if end > 0 && matches!(meaningful[end - 1].kind, TokenKind::Dot) {
+            end -= 1;
+        } else {
+            break;
+        }
+    }
+    parse(source[start?..dot].trim()).ok()
 }
 
 fn operand_context(source: &str, value_start: usize) -> Option<CompletionSite> {

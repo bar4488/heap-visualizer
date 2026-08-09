@@ -31,8 +31,8 @@
 use heap_visualizer_filter_dsl::{BinaryOp, Expr, ExprKind, UnaryOp};
 
 use crate::filter_eval::{
-    cmp_num, custom_field, custom_fragment, field_value, float, integer, named_event, ordered,
-    Ctx, EvalError, FieldRoot, FieldValues, Num, Value,
+    cmp_num, custom_fragment, field_value, float, integer, named_event, ordered, resolve_path, Ctx,
+    EvalError, FieldRoot, FieldValues, Leaf, Ns, Num, Path, Value,
 };
 use crate::store::{Store, NONE_U16, NONE_U32, OP_M, OP_R};
 
@@ -231,6 +231,8 @@ enum Scalar {
     Const(Num),
     Col(NumCol),
     Dict(DictCol),
+    /// `len(alloc.tags)` — how many tags this allocation carries.
+    TagLen,
     Add(Box<(Scalar, Scalar)>),
     Sub(Box<(Scalar, Scalar)>),
     Abs(Box<Scalar>),
@@ -243,6 +245,7 @@ impl Scalar {
             Scalar::Const(v) => Some(*v),
             Scalar::Col(col) => col.get(s, e).map(Num::Int),
             Scalar::Dict(col) => col.num_at(s, fv, e),
+            Scalar::TagLen => Some(Num::Int(s.tag_ids(e).count() as i128)),
             Scalar::Add(pair) => arith(&pair.0, &pair.1, s, fv, e, false),
             Scalar::Sub(pair) => arith(&pair.0, &pair.1, s, fv, e, true),
             Scalar::Abs(inner) => match inner.get(s, fv, e)? {
@@ -257,6 +260,7 @@ impl Scalar {
             Scalar::Const(_) => 0,
             Scalar::Col(_) => 1,
             Scalar::Dict(_) => 2,
+            Scalar::TagLen => 3,
             Scalar::Abs(inner) => 2 + inner.cost(),
             Scalar::Add(pair) | Scalar::Sub(pair) => 2 + pair.0.cost() + pair.1.cost(),
         }
@@ -393,16 +397,27 @@ fn pred(expr: &Expr, ctx: &Ctx) -> Result<Pred, EvalError> {
             op: UnaryOp::Not,
             expr: inner,
         } => Ok(not(pred(inner, ctx)?)),
-        ExprKind::IsMissing {
+        ExprKind::IsNone {
             expr: inner,
             negated,
         } => presence(inner, ctx, *negated),
-        ExprKind::Identifier(name) if name == "freed" => Ok(Pred::Present {
-            col: NumCol::DeathSeq,
-            want: true,
-        }),
         ExprKind::Binary { op, left, right } => binary(expr, *op, left, right, ctx),
-        ExprKind::Call { .. } => string_method(expr, ctx),
+        ExprKind::Call { .. } => method(expr, ctx),
+        // `alloc.freed` is the presence of a death record
+        ExprKind::Field { .. }
+            if matches!(
+                own_leaf(expr),
+                Some(Leaf::Builtin {
+                    ns: Ns::Alloc,
+                    name: "freed"
+                })
+            ) =>
+        {
+            Ok(Pred::Present {
+                col: NumCol::DeathSeq,
+                want: true,
+            })
+        }
         _ => {
             if let Some(Value::Bool(v)) = constant(expr, ctx)? {
                 return Ok(Pred::Const(v));
@@ -445,20 +460,7 @@ fn binary(
             flatten(op, left, right, ctx, &mut parts)?;
             Ok(join(op, parts))
         }
-        BinaryOp::Overlaps => {
-            // half-open [a,b) and [c,d) overlap exactly when a < d and c < b
-            let (a, b) = range_bounds(left, ctx)?;
-            let (c, d) = range_bounds(right, ctx)?;
-            Ok(join(
-                BinaryOp::And,
-                vec![
-                    compare(a, BinaryOp::Less, d, ctx, expr)?,
-                    compare(c, BinaryOp::Less, b, ctx, expr)?,
-                ],
-            ))
-        }
         BinaryOp::In => membership(expr, left, right, ctx),
-        BinaryOp::Contains => contains(expr, left, right, ctx),
         BinaryOp::Equal | BinaryOp::NotEqual => equality(expr, op, left, right, ctx),
         BinaryOp::Less | BinaryOp::LessEqual | BinaryOp::Greater | BinaryOp::GreaterEqual => {
             compare(operand(left, ctx)?, op, operand(right, ctx)?, ctx, expr)
@@ -568,24 +570,6 @@ fn maybe_not(p: Pred, negated: bool) -> Pred {
     }
 }
 
-fn contains(expr: &Expr, left: &Expr, right: &Expr, ctx: &Ctx) -> Result<Pred, EvalError> {
-    if is_tags(left) {
-        let Some(Value::String(label)) = constant(right, ctx)? else {
-            return Err(EvalError::at(expr, "`contains` requires a constant member"));
-        };
-        return Ok(match tag_id(&label, ctx) {
-            Some(tag) => Pred::TagWord(tag),
-            None => Pred::Const(false),
-        });
-    }
-    match (constant(left, ctx)?, constant(right, ctx)?) {
-        (Some(Value::Set(items)), Some(needle)) => {
-            Ok(Pred::Const(items.iter().any(|v| value_eq(v, &needle))))
-        }
-        _ => Err(EvalError::at(expr, "`contains` requires a set on the left")),
-    }
-}
-
 fn membership(expr: &Expr, left: &Expr, right: &Expr, ctx: &Ctx) -> Result<Pred, EvalError> {
     if let ExprKind::Range { start, end } = &right.kind {
         // half-open, so membership is exactly two comparisons
@@ -609,8 +593,39 @@ fn membership(expr: &Expr, left: &Expr, right: &Expr, ctx: &Ctx) -> Result<Pred,
             ],
         ));
     }
+    // `"x" in alloc.tags` — a set-typed field, not a literal
+    if is_tags(right) {
+        let Some(Value::String(label)) = constant(left, ctx)? else {
+            return Err(EvalError::at(expr, "`in alloc.tags` requires a constant tag"));
+        };
+        return Ok(match tag_id(&label, ctx) {
+            Some(tag) => Pred::TagWord(tag),
+            None => Pred::Const(false),
+        });
+    }
+    // `"x" in malloc.site` / `in malloc.stack` — the substring test, which is
+    // `contains` under Python's spelling and reads right-to-left
+    if let Some(col) = dict_col(right, ctx)? {
+        if is_string_dict(col) {
+            return Ok(match constant(left, ctx)? {
+                Some(Value::String(needle)) => dict_pred(col, ctx, |value| match value {
+                    Value::String(v) => v.contains(&needle),
+                    _ => false,
+                }),
+                Some(Value::Missing) => Pred::Const(false),
+                _ => match dict_col(left, ctx)? {
+                    Some(left) => Pred::DictStrOp {
+                        left: col,
+                        right: left,
+                        op: StrOp::Contains,
+                    },
+                    None => return Err(EvalError::at(expr, "`in` requires a string on the left")),
+                },
+            });
+        }
+    }
     let Some(Value::Set(members)) = constant(right, ctx)? else {
-        return Err(EvalError::at(expr, "`in` requires a constant set or range"));
+        return Err(EvalError::at(expr, "`in` requires a set, a string, or a range"));
     };
     if let Some(col) = dict_col(left, ctx)? {
         return Ok(dict_pred(col, ctx, |value| {
@@ -631,9 +646,9 @@ fn membership(expr: &Expr, left: &Expr, right: &Expr, ctx: &Ctx) -> Result<Pred,
     })
 }
 
-/// A string method — `contains`, `starts_with`, `ends_with` — or a `named()`
-/// call that turned out to be constant.
-fn string_method(expr: &Expr, ctx: &Ctx) -> Result<Pred, EvalError> {
+/// A method call: the two string tests, `overlaps`, or `len()` and `named()`
+/// calls that turned out constant.
+fn method(expr: &Expr, ctx: &Ctx) -> Result<Pred, EvalError> {
     let ExprKind::Call { callee, arguments } = &expr.kind else {
         return Err(EvalError::at(expr, "filter expression must produce bool"));
     };
@@ -643,11 +658,26 @@ fn string_method(expr: &Expr, ctx: &Ctx) -> Result<Pred, EvalError> {
             _ => Err(EvalError::at(expr, "filter expression must produce bool")),
         };
     };
+    // `a.overlaps(b)`: half-open ranges overlap when each begins before the
+    // other ends, which is two comparisons and no new node
+    if name == "overlaps" {
+        let [argument] = arguments.as_slice() else {
+            return Err(EvalError::at(expr, "`overlaps` takes one range"));
+        };
+        let (a, b) = range_bounds(base, ctx)?;
+        let (c, d) = range_bounds(argument, ctx)?;
+        return Ok(join(
+            BinaryOp::And,
+            vec![
+                compare(a, BinaryOp::Less, d, ctx, expr)?,
+                compare(c, BinaryOp::Less, b, ctx, expr)?,
+            ],
+        ));
+    }
     let op = match name.as_str() {
-        "contains" => StrOp::Contains,
-        "starts_with" => StrOp::StartsWith,
-        "ends_with" => StrOp::EndsWith,
-        _ => return Err(EvalError::at(expr, format!("unknown string method `{name}`"))),
+        "startswith" => StrOp::StartsWith,
+        "endswith" => StrOp::EndsWith,
+        _ => return Err(EvalError::at(expr, format!("unknown method `{name}`"))),
     };
     let [argument] = arguments.as_slice() else {
         return Err(EvalError::at(expr, format!("`{name}` requires one string")));
@@ -835,6 +865,13 @@ fn scalar(expr: &Expr, ctx: &Ctx) -> Result<Scalar, EvalError> {
         {
             Ok(Scalar::Abs(Box::new(scalar(&arguments[0], ctx)?)))
         }
+        ExprKind::Call { callee, arguments }
+            if matches!(&callee.kind, ExprKind::Identifier(n) if n == "len")
+                && arguments.len() == 1
+                && is_tags(&arguments[0]) =>
+        {
+            Ok(Scalar::TagLen)
+        }
         _ => Err(EvalError::at(expr, "arithmetic requires numbers")),
     }
 }
@@ -843,91 +880,95 @@ fn scalar(expr: &Expr, ctx: &Ctx) -> Result<Scalar, EvalError> {
 fn range_bounds(expr: &Expr, ctx: &Ctx) -> Result<(Operand, Operand), EvalError> {
     match &expr.kind {
         ExprKind::Range { start, end } => Ok((operand(start, ctx)?, operand(end, ctx)?)),
-        // `span` is the allocation's half-open rendered range
-        ExprKind::Identifier(name) if name == "span" => Ok((
-            Operand::NumColumn(NumCol::Addr),
-            Operand::NumColumn(NumCol::End),
-        )),
-        ExprKind::Field { base, name } if name == "span" && is_named_call(base) => {
-            let e = named_target(base, ctx)?;
-            Ok((
-                Operand::Const(Value::Int(ctx.store.addr[e as usize] as i128)),
-                Operand::Const(Value::Int(
-                    (ctx.store.addr[e as usize] + ctx.store.span(e)) as i128,
-                )),
-            ))
-        }
-        _ => Err(EvalError::at(expr, "`overlaps` requires two ranges")),
+        _ => match resolve_path(expr) {
+            // `alloc.span` is the allocation's half-open rendered range
+            Some(Path {
+                subject: None,
+                leaf: Leaf::Builtin {
+                    ns: Ns::Alloc,
+                    name: "span",
+                },
+            }) => Ok((
+                Operand::NumColumn(NumCol::Addr),
+                Operand::NumColumn(NumCol::End),
+            )),
+            // and a named allocation's is two constants
+            Some(Path {
+                subject: Some(subject),
+                leaf: Leaf::Builtin {
+                    ns: Ns::Alloc,
+                    name: "span",
+                },
+            }) => {
+                let e = named_target(subject, ctx)?;
+                Ok((
+                    Operand::Const(Value::Int(ctx.store.addr[e as usize] as i128)),
+                    Operand::Const(Value::Int(
+                        (ctx.store.addr[e as usize] + ctx.store.span(e)) as i128,
+                    )),
+                ))
+            }
+            _ => Err(EvalError::at(expr, "`overlaps` requires two ranges")),
+        },
     }
 }
 
 // ------------------------------------------------------- resolving the names
 
-/// The numeric column an expression names, if it is one.
+/// The numeric column a path names, if it names one of ours.
+///
+/// A path with a `named()` subject is not a column: it is fixed for the whole
+/// scan and `constant` folds it, so this returns `None` for it.
 fn num_col(expr: &Expr) -> Result<Option<NumCol>, EvalError> {
-    // a field of a named allocation is a constant, not a column
-    if let ExprKind::Field { base, .. } = &expr.kind {
-        if is_named_call(base) {
-            return Ok(None);
-        }
-    }
-    if custom_field(expr).is_some() {
+    let Some(Leaf::Builtin { ns, name }) = own_leaf(expr) else {
         return Ok(None);
-    }
-    Ok(match &expr.kind {
-        ExprKind::Identifier(name) => match name.as_str() {
-            "id" => Some(NumCol::Id),
-            "address" => Some(NumCol::Addr),
-            "end" => Some(NumCol::End),
-            "size" => Some(NumCol::Size),
-            "seq" => Some(NumCol::Seq),
-            "time" => Some(NumCol::Time),
-            "usable" => Some(NumCol::Usable),
-            "lifetime" => Some(NumCol::Lifetime),
-            _ => None,
-        },
-        ExprKind::Field { base, name }
-            if matches!(&base.kind, ExprKind::Identifier(r) if r == "death") =>
-        {
-            match name.as_str() {
-                "seq" => Some(NumCol::DeathSeq),
-                "time" => Some(NumCol::DeathTime),
-                _ => None,
-            }
-        }
+    };
+    Ok(match (ns, name) {
+        (Ns::Alloc, "id") => Some(NumCol::Id),
+        (Ns::Alloc, "address") => Some(NumCol::Addr),
+        (Ns::Alloc, "end") => Some(NumCol::End),
+        (Ns::Alloc, "size") => Some(NumCol::Size),
+        (Ns::Alloc, "usable") => Some(NumCol::Usable),
+        (Ns::Alloc, "lifetime") => Some(NumCol::Lifetime),
+        (Ns::Malloc, "seq") => Some(NumCol::Seq),
+        (Ns::Malloc, "time") => Some(NumCol::Time),
+        (Ns::Free, "seq") => Some(NumCol::DeathSeq),
+        (Ns::Free, "time") => Some(NumCol::DeathTime),
         _ => None,
     })
 }
 
-/// The dictionary column an expression names, if it is one.
+/// The dictionary column a path names, if it names one of ours.
 fn dict_col(expr: &Expr, ctx: &Ctx) -> Result<Option<DictCol>, EvalError> {
-    if let Some((root, key)) = custom_field(expr) {
-        let Some(index) = ctx.fields.key_index(key) else {
-            // the expression named a key, so `FieldValues::resolve` collected
-            // it; not finding it means the two disagree
-            return Err(EvalError::at(expr, format!("unresolved trace field `{key}`")));
-        };
-        return Ok(Some(DictCol::Field { root, key: index }));
-    }
-    if let ExprKind::Field { base, .. } = &expr.kind {
-        if is_named_call(base) {
-            return Ok(None);
-        }
-    }
-    Ok(match &expr.kind {
-        ExprKind::Identifier(name) => match name.as_str() {
-            "site" => Some(DictCol::Site),
-            "thread" => Some(DictCol::Thread),
-            "stack" => Some(DictCol::Stack),
+    match own_leaf(expr) {
+        Some(Leaf::Builtin { ns, name }) => Ok(match (ns, name) {
+            (Ns::Malloc, "site") => Some(DictCol::Site),
+            (Ns::Malloc, "thread") => Some(DictCol::Thread),
+            (Ns::Malloc, "stack") => Some(DictCol::Stack),
             _ => None,
-        },
-        _ => None,
-    })
+        }),
+        Some(Leaf::Custom { root, key }) => {
+            let Some(index) = ctx.fields.key_index(key) else {
+                // the expression named the key, so `FieldValues::resolve`
+                // collected it; not finding it means the two disagree
+                return Err(EvalError::at(expr, format!("unresolved trace field `{key}`")));
+            };
+            Ok(Some(DictCol::Field { root, key: index }))
+        }
+        None => Ok(None),
+    }
 }
 
-fn is_named_call(expr: &Expr) -> bool {
-    matches!(&expr.kind, ExprKind::Call { callee, .. }
-        if matches!(&callee.kind, ExprKind::Identifier(name) if name == "named"))
+/// The leaf of a path about *this* allocation. A path behind `named()` is
+/// deliberately not one.
+fn own_leaf(expr: &Expr) -> Option<Leaf<'_>> {
+    match resolve_path(expr)? {
+        Path {
+            subject: None,
+            leaf,
+        } => Some(leaf),
+        _ => None,
+    }
 }
 
 fn named_target(expr: &Expr, ctx: &Ctx) -> Result<u32, EvalError> {
@@ -938,7 +979,13 @@ fn named_target(expr: &Expr, ctx: &Ctx) -> Result<u32, EvalError> {
 }
 
 fn is_tags(expr: &Expr) -> bool {
-    matches!(&expr.kind, ExprKind::Identifier(name) if name == "tags")
+    matches!(
+        own_leaf(expr),
+        Some(Leaf::Builtin {
+            ns: Ns::Alloc,
+            name: "tags"
+        })
+    )
 }
 
 fn tag_id(label: &str, ctx: &Ctx) -> Option<u8> {
@@ -991,11 +1038,25 @@ fn constant(expr: &Expr, ctx: &Ctx) -> Result<Option<Value>, EvalError> {
             }
             Value::Set(members)
         }
-        ExprKind::Field { base, name } if is_named_call(base) => {
-            let target = named_target(base, ctx)?;
-            field_value(name, ctx, target, expr)?
-        }
-        ExprKind::Index { .. } if custom_field(expr).is_some() => return Ok(None),
+        ExprKind::Field { .. } | ExprKind::Index { .. } => match resolve_path(expr) {
+            // a named allocation is fixed for the whole scan, so every field
+            // of it is a constant by the time the plan runs
+            Some(Path {
+                subject: Some(subject),
+                leaf,
+            }) => {
+                let target = named_target(subject, ctx)?;
+                match leaf {
+                    Leaf::Builtin { ns, name } => field_value(ns, name, ctx, target, expr)?,
+                    Leaf::Custom { root, key } => {
+                        let fields = FieldValues::resolve(expr, ctx.store);
+                        let index = fields.key_index(key).unwrap_or(usize::MAX);
+                        fields.at(index, custom_fragment(root, ctx.store, target))
+                    }
+                }
+            }
+            _ => return Ok(None),
+        },
         ExprKind::Binary {
             op: op @ (BinaryOp::Add | BinaryOp::Subtract),
             left,
