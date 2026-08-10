@@ -1,6 +1,6 @@
 # Now
 
-_Updated: 2026-08-07._
+_Updated: 2026-08-10._
 
 **No count in this file is written by hand.** Test counts, module sizes and
 requirement totals are derivable, and the ones that used to be here had all
@@ -120,14 +120,30 @@ ride in `.heapa` marks; and **Tag matches** snapshots the applied creator set
 into an ordinary tag. Pure source rewrites and marks parsing are covered by
 the web suite, while the core match snapshot has a native invariant test.
 
-**Verification — three suites, a type-checker, and a person.** `cargo test`
+**There is one server-side surface now, and the viewer is still client-side.**
+`src/server/` is a stdlib Python process that serves `dist/` and four routes
+beside it: the toolbar's **Request…** form posts to it, requests append to a
+JSONL file, and `/admin` reviews them behind `HEAP_ADMIN_TOKEN`
+([spec/11](../spec/11-feature-requests.md),
+[D010](decisions/D010-feature-requests-are-server-side.md)). No trace or
+analysis data reaches it, and the app works with it absent — `./serve.py`
+answers the POST with 501, which the form reports as *served without the
+request service* rather than as a rejection. `docker compose up` runs the two
+together; the image carries no toolchain and bind-mounts an already-built
+`dist/`, so [TOOL-002](../spec/10-tooling.md#tool-002-build)'s one build path
+is intact and [T038](tickets/T038-drop-the-docker-build.md) is not being
+reversed.
+
+**Verification — four suites, a type-checker, and a person.** `cargo test`
 covers the engine and the filter parser/completion contexts;
 `node --test 'src/web/**/*.test.ts'` covers the pure functions, the panel
 table, the guide's markdown renderer, and both persisted round-trips, with no
 npm and no browser. `tsc` covers
 what those do not reach: the worker protocol
 (`src/web/protocol.ts`, imported by both sides), the persisted shapes, and the
-panel records — a message name one side does not know fails the build. How
+panel records — a message name one side does not know fails the build.
+`python3 -m unittest discover -s src/server` covers the request service against
+a real socket. How
 strict that check is is a named list of flags rather than `strict: true`, most
 on and two off, per [D005](decisions/D005-strictness-is-per-flag.md).
 
@@ -178,6 +194,12 @@ tickets all closed: [T041](tickets/T041-lower-the-filter-to-a-typed-plan.md)
 lowered the evaluator, [T042](tickets/T042-the-filter-language-is-python-shaped.md)
 cut the surface over, and [T043](tickets/T043-filter-syntax-highlighting.md)
 gave the editor highlighting.
+
+**Asking for a feature works end to end** ([T047](tickets/T047-ask-for-a-feature.md)):
+button → service → `/admin`. What a person has to look at is the form's own
+layout and the send path in a browser — the outcomes are unit-tested and the
+routes were driven with `curl` against the container, but no automated check
+presses the button (D001).
 
 **Nothing is in flight.** The backlog is
 [T045](tickets/T045-lower-integer-arithmetic-to-a-narrow-path.md) and

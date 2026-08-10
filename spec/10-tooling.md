@@ -114,6 +114,11 @@ message protocol between the main thread and the worker, the two persisted
 shapes, and the panel table. A message name that exists on one side and not the
 other fails the build.
 
+`python3 -m unittest discover -s src/server` runs the feature-request service's
+suite ([11-feature-requests](11-feature-requests.md)), stdlib `unittest` against
+the real handler over a loopback socket rather than a stub of it: the routing,
+the status codes and the token check are the feature. It needs no `dist/`.
+
 Rendering, pointer interaction and the real worker round trip are still
 verified by hand — against `dist/`, after a build — and there is no fixed
 script.

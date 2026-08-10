@@ -32,6 +32,23 @@ wait on a message port ([T043](tickets/T043-filter-syntax-highlighting.md)).
 # http://localhost:8630?trace=demo.heapl    # autoloads a trace
 ```
 
+To serve the same tree **with the feature-request service** beside it
+([spec/11](../spec/11-feature-requests.md),
+[D010](decisions/D010-feature-requests-are-server-side.md)):
+
+```sh
+./build.sh                                       # the image builds nothing
+HEAP_ADMIN_TOKEN=… docker compose up             # HEAP_PORT=8641 to move it
+# http://localhost:8630        the app
+# http://localhost:8630/admin  the requests, behind that token
+```
+
+`dist/` is bind-mounted read-only, so `./build.sh web` is still the edit loop —
+no image rebuild. Requests land on the `requests` volume; an unset
+`HEAP_ADMIN_TOKEN` makes the review routes 503 rather than open. Run the
+service without Docker the same way: `HEAP_ADMIN_TOKEN=… python3
+src/server/app.py`.
+
 `build.sh` generates `dist/demo.heapl` when it is missing. For a different
 trace:
 
@@ -48,6 +65,7 @@ cargo test --manifest-path src/core/Cargo.toml        # the engine and filter ev
 cargo test --manifest-path src/filter-dsl/Cargo.toml  # the DSL parser, completion contexts, and highlighting, native
 node --test 'src/web/**/*.test.ts'                    # the web suite, no npm, no browser
 node_modules/.bin/tsc -p tsconfig.test.json           # type-check everything, emit nothing
+python3 -m unittest discover -s src/server            # the request service, over a real socket
 ```
 
 **Counts are not written down anywhere here.** Each command prints its own, and
@@ -129,6 +147,7 @@ risk only an eye can retire, name it in the ticket and in
 | `src/web/main.ts` | Trace/worker/toolbar wiring plus the three coordinated views. Owns `UIState`, the shared state every other module takes as `deps.ui`. |
 | `src/web/worker.ts` | Worker side of the protocol; owns the WASM instance and OffscreenCanvas. |
 | `dist/` | The served tree. Generated; not in git. |
+| `src/server/` | The feature-request service: `store.py` (the JSONL), `app.py` (static tree + API), `admin.html` (the review panel). Stdlib only, and it never sees trace data. |
 | `gen.py` | Synthetic `.heapl` trace generator. |
 
 **No module imports `UI`.** Modules receive what they need via `init*(deps)`.
