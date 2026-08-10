@@ -1,0 +1,28 @@
+# Serve the built site with the feature-request service beside it, on one
+# origin (spec 11, D010).
+#
+#   ./build.sh                       # dist/ is built here, never in the image
+#   HEAP_ADMIN_TOKEN=… docker compose up
+#   http://localhost:8630            # the app
+#   http://localhost:8630/admin      # the requests that came in
+#
+# dist/ is mounted read-only rather than copied: it is a build product, and
+# rebuilding the web layer must not mean rebuilding an image. The service exits
+# naming ./build.sh when it is not there.
+
+services:
+  web:
+    build: .
+    ports:
+      - "${HEAP_PORT:-8630}:8630"
+    volumes:
+      - ./dist:/app/dist:ro
+      - requests:/data
+    environment:
+      # No default. An unset token makes the review panel serve nothing
+      # (REQ-004) rather than serve everything.
+      HEAP_ADMIN_TOKEN: "${HEAP_ADMIN_TOKEN:-}"
+    restart: unless-stopped
+
+volumes:
+  requests:

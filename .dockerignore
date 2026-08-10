@@ -1,1 +1,5 @@
+# The image carries the request service and nothing else — no toolchain, no
+# sources, and not dist/, which compose bind-mounts (Dockerfile, D010).
 *
+!src/server
+src/server/__pycache__

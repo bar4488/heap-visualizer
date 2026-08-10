@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>heap-visualizer — feature requests</title>
+<style>
+  /* Deliberately its own small stylesheet rather than the app's: this page is
+     served by the request service, not out of dist/, and it must keep working
+     when the static tree is not there. */
+  :root { color-scheme: dark; }
+  body { margin: 0; font: 13px/1.5 ui-sans-serif, system-ui, sans-serif;
+         background: #0d1117; color: #c9d1d9; }
+  header { display: flex; gap: 10px; align-items: center; padding: 10px 14px;
+           border-bottom: 1px solid #30363d; }
+  h1 { font-size: 14px; margin: 0; font-weight: 600; }
+  input, select, button { font: inherit; background: #161b22; color: #c9d1d9;
+           border: 1px solid #30363d; border-radius: 5px; padding: 4px 7px; }
+  button { cursor: pointer; }
+  main { padding: 14px; display: grid; gap: 10px; max-width: 900px; }
+  .req { border: 1px solid #30363d; border-radius: 6px; padding: 10px 12px;
+         background: #0f141a; }
+  .req .meta { display: flex; gap: 10px; align-items: center; color: #8b949e;
+         font-size: 12px; margin-bottom: 6px; }
+  .req .text { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .req .contact { color: #8b949e; font-size: 12px; margin-top: 6px; }
+  .id { font-family: ui-monospace, monospace; }
+  .st-new { color: #58a6ff; } .st-planned { color: #d29922; }
+  .st-done { color: #3fb950; } .st-declined { color: #8b949e; }
+  #note { color: #f85149; padding: 0 14px; }
+  .empty { color: #8b949e; }
+</style>
+</head>
+<body>
+<header>
+  <h1>feature requests</h1>
+  <input id="token" type="password" placeholder="admin token" size="24">
+  <button id="reload">Load</button>
+  <span id="count" class="empty"></span>
+</header>
+<p id="note" hidden></p>
+<main id="list"></main>
+<script>
+// The token lives in sessionStorage so a reload does not re-ask, and dies with
+// the tab. It is sent as a bearer header on every data request (REQ-004).
+const $ = (id) => document.getElementById(id);
+const KEY = 'heap-admin-token';
+$('token').value = sessionStorage.getItem(KEY) || '';
+
+function note(msg) {
+  $('note').hidden = !msg;
+  $('note').textContent = msg || '';
+}
+
+async function api(path, opts = {}) {
+  const token = $('token').value.trim();
+  sessionStorage.setItem(KEY, token);
+  const res = await fetch(path, {
+    ...opts,
+    headers: { ...(opts.headers || {}), 'Authorization': `Bearer ${token}`,
+               'Content-Type': 'application/json' },
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+  return body;
+}
+
+const STATUSES = ['new', 'planned', 'done', 'declined'];
+
+function render(requests) {
+  $('count').textContent = requests.length ? `${requests.length} total` : '';
+  $('list').replaceChildren(...(requests.length ? requests.map(row)
+    : [Object.assign(document.createElement('p'), {
+        className: 'empty', textContent: 'Nothing has been asked for yet.' })]));
+}
+
+function row(r) {
+  const el = document.createElement('div');
+  el.className = 'req';
+
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  const when = document.createElement('span');
+  when.textContent = new Date(r.at).toLocaleString();
+  const id = document.createElement('span');
+  id.className = 'id';
+  id.textContent = r.id;
+  const sel = document.createElement('select');
+  sel.className = `st-${r.status}`;
+  for (const s of STATUSES) {
+    const o = document.createElement('option');
+    o.value = o.textContent = s;
+    o.selected = s === r.status;
+    sel.append(o);
+  }
+  sel.onchange = async () => {
+    try {
+      await api(`/api/requests/${encodeURIComponent(r.id)}/status`,
+                { method: 'POST', body: JSON.stringify({ status: sel.value }) });
+      note('');
+      sel.className = `st-${sel.value}`;
+    } catch (e) {
+      note(String(e.message));
+      sel.value = r.status;
+    }
+  };
+  meta.append(when, id, sel);
+
+  // textContent throughout: a request is text a stranger typed, and this page
+  // is the one place it is displayed.
+  const text = document.createElement('div');
+  text.className = 'text';
+  text.textContent = r.text;
+  el.append(meta, text);
+
+  if (r.contact) {
+    const c = document.createElement('div');
+    c.className = 'contact';
+    c.textContent = `contact: ${r.contact}`;
+    el.append(c);
+  }
+  return el;
+}
+
+async function load() {
+  try {
+    const { requests } = await api('/api/requests');
+    note('');
+    render(requests);
+  } catch (e) {
+    note(String(e.message));
+  }
+}
+
+$('reload').onclick = load;
+$('token').addEventListener('keydown', (e) => { if (e.key === 'Enter') load(); });
+if ($('token').value) load();
+</script>
+</body>
+</html>
