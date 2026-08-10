@@ -19,9 +19,16 @@ services:
       - ./dist:/app/dist:ro
       - requests:/data
     environment:
-      # No default. An unset token makes the review panel serve nothing
-      # (REQ-004) rather than serve everything.
-      HEAP_ADMIN_TOKEN: "${HEAP_ADMIN_TOKEN:-}"
+      # `docker compose up` with nothing set is meant to work, so the default
+      # is here — in the deploy config, where it is one line to override and
+      # one line to read (T048). It is deliberately *not* in app.py: an unset
+      # token there still means the review routes serve nothing (REQ-004),
+      # which is what keeps a hand-run process from being open.
+      #
+      # It is a known string. Publishing this port on it publishes the
+      # requests; set HEAP_ADMIN_TOKEN before doing that, and the service says
+      # so on every start.
+      HEAP_ADMIN_TOKEN: "${HEAP_ADMIN_TOKEN:-admin}"
     restart: unless-stopped
 
 volumes:

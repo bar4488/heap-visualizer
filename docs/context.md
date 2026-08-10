@@ -38,16 +38,20 @@ To serve the same tree **with the feature-request service** beside it
 
 ```sh
 ./build.sh                                       # the image builds nothing
+docker compose up                                # token defaults to `admin`
 HEAP_ADMIN_TOKEN=… docker compose up             # HEAP_PORT=8641 to move it
 # http://localhost:8630        the app
 # http://localhost:8630/admin  the requests, behind that token
 ```
 
 `dist/` is bind-mounted read-only, so `./build.sh web` is still the edit loop —
-no image rebuild. Requests land on the `requests` volume; an unset
-`HEAP_ADMIN_TOKEN` makes the review routes 503 rather than open. Run the
-service without Docker the same way: `HEAP_ADMIN_TOKEN=… python3
-src/server/app.py`.
+no image rebuild. Requests land on the `requests` volume, so **`docker compose
+down -v` deletes every request that came in** — plain `down` does not.
+
+The token defaults to `admin` in `docker-compose.yml` alone (T048), and the
+service warns on every start that it is running on it. The service itself has
+no default: `python3 src/server/app.py` with nothing set serves the review
+routes 503 rather than open, which is the rule a hand-run process keeps.
 
 `build.sh` generates `dist/demo.heapl` when it is missing. For a different
 trace:

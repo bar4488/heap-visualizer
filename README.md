@@ -22,8 +22,9 @@ npm install
 ```sh
 ./serve.py                                    # the site, client-side only
 
-HEAP_ADMIN_TOKEN=… docker compose up          # the site plus the feature-request
+docker compose up                             # the site plus the feature-request
                                               # service; /admin reviews what came in
+HEAP_ADMIN_TOKEN=…  docker compose up         # /admin defaults to the token `admin`
 ```
 
 ## Test

@@ -29,6 +29,21 @@ PORT = int(os.environ.get('PORT', '8630'))
 
 MAX_BODY = 64 * 1024
 
+# What docker-compose.yml supplies when the environment does not (T048). It is
+# not a fallback in here — an unset token still fails closed — only the string
+# this recognizes as "nobody has chosen one yet", so every start can say so.
+DEFAULT_ADMIN_TOKEN = 'admin'
+
+
+def token_warning(token):
+    """The line printed at startup, or None when the token was actually chosen."""
+    if not token:
+        return 'warning: HEAP_ADMIN_TOKEN unset — the review panel will serve nothing'
+    if token == DEFAULT_ADMIN_TOKEN:
+        return ('warning: running on the default admin token — anyone who reaches '
+                'this port can read the requests. Set HEAP_ADMIN_TOKEN.')
+    return None
+
 
 class Handler(http.server.SimpleHTTPRequestHandler):
     """Static files from dist/, plus the API. Unknown paths stay static."""
@@ -133,8 +148,9 @@ def main():
     # `isdir` would be true on exactly the tree that was never built.
     if not os.path.isfile(os.path.join(DIST, 'index.html')):
         sys.exit(f'error: no built site at {DIST} — run ./build.sh first')
-    if not ADMIN_TOKEN:
-        sys.stderr.write('warning: HEAP_ADMIN_TOKEN unset — /admin will serve nothing\n')
+    warning = token_warning(ADMIN_TOKEN)
+    if warning:
+        sys.stderr.write(warning + '\n')
     server = http.server.ThreadingHTTPServer(('', PORT), Handler)
     sys.stderr.write(f'serving {DIST} and the request API on :{PORT}\n')
     server.serve_forever()

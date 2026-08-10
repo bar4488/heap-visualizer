@@ -1,6 +1,6 @@
 # Now
 
-_Updated: 2026-08-10._
+_Updated: 2026-08-11._
 
 **No count in this file is written by hand.** Test counts, module sizes and
 requirement totals are derivable, and the ones that used to be here had all
@@ -123,7 +123,11 @@ the web suite, while the core match snapshot has a native invariant test.
 **There is one server-side surface now, and the viewer is still client-side.**
 `src/server/` is a stdlib Python process that serves `dist/` and four routes
 beside it: the toolbar's **Request…** form posts to it, requests append to a
-JSONL file, and `/admin` reviews them behind `HEAP_ADMIN_TOKEN`
+JSONL file, and `/admin` reviews them behind `HEAP_ADMIN_TOKEN` — which
+`docker-compose.yml` defaults to `admin` so a bare `docker compose up` works,
+warning on every start that it is running on a known string
+([T048](tickets/T048-a-default-admin-token.md)). The service itself keeps no
+default and serves nothing when the variable is unset
 ([spec/11](../spec/11-feature-requests.md),
 [D010](decisions/D010-feature-requests-are-server-side.md)). No trace or
 analysis data reaches it, and the app works with it absent — `./serve.py`

@@ -5,3 +5,5 @@ images/*.tar
 *.heapl
 !src/web/guide/traces/*.heapl
 node_modules/
+__pycache__/
+data/

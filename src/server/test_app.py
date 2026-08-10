@@ -150,6 +150,21 @@ class ServiceTest(unittest.TestCase):
         self.assertEqual(code, 503)
         self.assertIn('HEAP_ADMIN_TOKEN', body['error'])
 
+    def test_the_default_token_is_a_real_token_that_warns(self):
+        # compose supplies it so `docker compose up` works bare (T048); the
+        # service treats it as a token like any other, and says so every start.
+        app.ADMIN_TOKEN = app.DEFAULT_ADMIN_TOKEN
+        self.post('sent to a default-token deployment')
+        code, _ = call(self.port, '/api/requests', token=app.DEFAULT_ADMIN_TOKEN)
+        self.assertEqual(code, 200)
+        code, _ = call(self.port, '/api/requests', token='wrong')
+        self.assertEqual(code, 401)
+        self.assertIn('HEAP_ADMIN_TOKEN', app.token_warning(app.DEFAULT_ADMIN_TOKEN))
+
+    def test_a_chosen_token_warns_about_nothing(self):
+        self.assertIsNone(app.token_warning('something-nobody-guesses'))
+        self.assertIn('unset', app.token_warning(''))
+
     def test_the_panel_page_itself_needs_no_token(self):
         req = urllib.request.Request(f'http://127.0.0.1:{self.port}/admin')
         with urllib.request.urlopen(req) as res:

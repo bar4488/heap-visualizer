@@ -75,4 +75,8 @@ time, and current status — with a control on each row that sets its status.
 - When no token is configured, the data routes must fail closed (503, saying so)
   rather than serve the requests unauthenticated. A misconfigured deployment
   must not be an open one.
+- The **deployment configuration** may supply a default token so that starting
+  the stack with an empty environment works. The service must not: a default
+  compiled into the service would remove the rule above. A service started on
+  the default token must say so on every start, naming the variable to set.
 - The submit route stays unauthenticated: it is the whole point of the feature.
