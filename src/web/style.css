@@ -411,6 +411,19 @@ button.d-pin.pinned {
 }
 .filter-status.invalid { color: var(--red); }
 .filter-status.applied { color: var(--green); }
+/* the request form reuses .filter-status for its one line of feedback */
+.filter-status.bad { color: var(--red); }
+
+/* ---------- request panel ---------- */
+
+#request-panel { width: 340px; }
+.request-hint { color: var(--fg-dim); margin-bottom: 7px; }
+#request-text {
+  width: 100%; box-sizing: border-box; resize: vertical;
+  font: 12px/1.5 ui-sans-serif, system-ui, sans-serif;
+  margin-bottom: 8px;
+}
+#request-contact { flex: 1; min-width: 0; }
 .filter-editor.applying { opacity: 0.72; }
 .filter-action-row, .saved-filter-head, .saved-filter-row {
   display: flex; align-items: center; gap: 6px;

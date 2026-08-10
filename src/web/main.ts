@@ -32,6 +32,7 @@ import {
   applyFilterCompletion, utf8Offset,
 } from './filter-completion.ts';
 import { initGuide } from './guide.ts';
+import { initRequest } from './request.ts';
 import { loadHighlighter, paintHighlight } from './highlight.ts';
 import {
   customFieldRef, hasTopLevelPredicate, quoteFilterString, toggleFilterPredicate,
@@ -1505,6 +1506,11 @@ initSession({
 // The guide drawer takes no deps: it reaches the app only by driving the real
 // controls wired above (spec SHELL-009), so there is nothing to hand it.
 initGuide();
+
+// Neither does the request form: it talks to the service beside the site and
+// to nothing in here (spec REQ-001, D010). No trace state reaches it, which is
+// the point.
+initRequest();
 
 function clearSelection() {
   UI.sel = null;

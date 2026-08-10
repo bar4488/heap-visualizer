@@ -14,6 +14,7 @@
   <input type="file" id="file-input" accept=".heapl,.jsonl,.json,.txt" hidden>
   <button id="btn-demo" title="Load the bundled demo trace">Demo</button>
   <button id="btn-guide" title="Guide: what the views show and how to drive them">Guide</button>
+  <button id="btn-request" title="Ask for a feature">Request…</button>
   <span id="trace-title" class="title"></span>
 
   <span class="sep"></span>
@@ -287,6 +288,25 @@
     <div id="events-spacer"></div>
     <div id="events-sel-band" hidden title="the current time/events selection"></div>
     <div id="events-rows"></div>
+  </div>
+</div>
+
+<!-- Not in the panel table (heap/panels.ts): it is not heap-shaped and there is
+     nothing per-trace to restore. It is still a .panel, so it drags and docks
+     like the rest, and its title is written here rather than by the table. -->
+<div id="request-panel" class="panel" hidden>
+  <div class="panel-head"><span class="ph-t">Request a feature</span> <button class="panel-close" data-close="request-panel">×</button></div>
+  <div class="panel-body">
+    <div class="request-hint">What would make this more useful? Only what you type here is sent.</div>
+    <textarea id="request-text" rows="6" placeholder="e.g. let me open two traces side by side"
+      aria-describedby="request-status"></textarea>
+    <div class="filter-row">
+      <input id="request-contact" type="text" placeholder="contact (optional)"
+        aria-label="How to reach you (optional)">
+      <span class="grow"></span>
+      <button id="request-send" type="button" title="Send the request (ctrl/⌘ enter)">Send</button>
+    </div>
+    <div id="request-status" class="filter-status" role="status"></div>
   </div>
 </div>
 
