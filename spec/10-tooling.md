@@ -63,9 +63,14 @@ counts, leaks, peak live, address span) prints to stderr.
 - **There is one build path.** `build.sh` against a local toolchain, with
   `rustup target add wasm32-unknown-unknown`. A container path must not be
   reintroduced without a decision record saying why the second way to build is
-  worth maintaining.
+  worth maintaining. **`docker-compose.yml` is not one**: its image carries no
+  toolchain and copies an already-built `dist/` in, so a tree that was never
+  built produces a container that fails saying so, not a second way to compile
+  ([D010](../docs/decisions/D010-feature-requests-are-server-side.md)).
 - Serve: `./serve.py` over `dist/` (any static server works;
-  `?trace=demo.heapl` autoloads).
+  `?trace=demo.heapl` autoloads), or `docker compose up` to serve the same tree
+  with the feature-request service beside it
+  ([11-feature-requests](11-feature-requests.md)).
 
 ## TOOL-003: Tests
 

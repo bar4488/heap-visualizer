@@ -48,5 +48,6 @@ Finding everything that touches one: `rg 'MAP-003' .`
 | [08-architecture](08-architecture.md) | `ARCH-` | The three-layer runtime: WASM core, worker, DOM; ABI and protocol | `src/core/src/lib.rs`, `src/web/worker.ts` |
 | [09-ui-shell](09-ui-shell.md) | `SHELL-` | Toolbar, floating/dockable panels, events panel, allocation windows, shortcuts | `src/web/main.ts`, `src/web/index.html` |
 | [10-tooling](10-tooling.md) | `TOOL-` | Trace generator, build pipeline, tests | `gen.py`, `build*.sh`, `src/core` tests |
+| [11-feature-requests](11-feature-requests.md) | `REQ-` | The one server-side surface: the request form, its store, and the review panel | `src/server/app.py`, `src/web/request.ts` |
 
 Reading order for newcomers: 01 → 02 → 03 → 04 → 05, then the rest as needed.
