@@ -123,7 +123,9 @@ the web suite, while the core match snapshot has a native invariant test.
 **There is one server-side surface now, and the viewer is still client-side.**
 `src/server/` is a stdlib Python process that serves `dist/` and four routes
 beside it: the toolbar's **Request…** form posts to it, requests append to a
-JSONL file, and `/admin` reviews them behind `HEAP_ADMIN_TOKEN` — which
+JSONL file, and `/admin` reviews them — set a status, or delete, which appends a
+tombstone and hides the request without erasing its line
+([T049](tickets/T049-delete-a-request.md)) — behind `HEAP_ADMIN_TOKEN` — which
 `docker-compose.yml` defaults to `admin` so a bare `docker compose up` works,
 warning on every start that it is running on a known string
 ([T048](tickets/T048-a-default-admin-token.md)). The service itself keeps no

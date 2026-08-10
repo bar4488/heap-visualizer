@@ -4,11 +4,13 @@ Two line shapes, both carrying a `type`:
 
     {"type": "request", "id": …, "at": …, "text": …, "contact": …}
     {"type": "status",  "id": …, "at": …, "status": …}
+    {"type": "delete",  "id": …, "at": …}
 
-Nothing rewrites a line. A status change appends, so the file is the history
-as well as the state, and the reader folds the last status naming each request
-over it. That is also why a half-written trailing line is skipped rather than
-fatal: the writer may be mid-append while the panel reads.
+Nothing rewrites a line — a status change appends, and so does a delete (T049),
+which is why deleting hides a request rather than erasing its text. The file is
+the history as well as the state, and the reader folds the later lines naming
+each request over it. That is also why a half-written trailing line is skipped
+rather than fatal: the writer may be mid-append while the panel reads.
 
 Stdlib only, like everything else that runs here (D010).
 """
@@ -80,14 +82,28 @@ def set_status(path, req_id, status):
     return True
 
 
+def delete_request(path, req_id):
+    """Append a tombstone. Returns False when no such (live) request exists.
+
+    The request's own line stays where it is: this hides it from every reader
+    below, it does not erase the text. Rotating the file is the only thing that
+    does (T049).
+    """
+    if not any(r['id'] == req_id for r in load_requests(path)):
+        return False
+    _append(path, {'type': 'delete', 'id': req_id, 'at': _now()})
+    return True
+
+
 def load_requests(path):
-    """Every request, newest first, each folded with its current status.
+    """Every live request, newest first, each folded with its current status.
 
     A line that does not parse, or names a type this does not know, is skipped:
     the panel stays readable while the file's tail is being written.
     """
     requests = []
     statuses = {}
+    deleted = set()
     try:
         with open(path, encoding='utf-8') as f:
             for line in f:
@@ -104,8 +120,14 @@ def load_requests(path):
                     requests.append(obj)
                 elif obj.get('type') == 'status' and obj.get('status') in STATUSES:
                     statuses[obj['id']] = obj['status']
+                elif obj.get('type') == 'delete':
+                    # a tombstone is final: a status line arriving after one
+                    # does not resurrect the request, which is why this is a
+                    # set rather than another last-line-wins fold
+                    deleted.add(obj['id'])
     except FileNotFoundError:
         return []
-    out = [dict(r, status=statuses.get(r['id'], 'new')) for r in requests]
+    out = [dict(r, status=statuses.get(r['id'], 'new'))
+           for r in requests if r['id'] not in deleted]
     out.reverse()
     return out

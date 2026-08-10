@@ -19,7 +19,7 @@ import json
 import os
 import sys
 
-from store import Rejected, append_request, load_requests, set_status
+from store import Rejected, append_request, delete_request, load_requests, set_status
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DIST = os.environ.get('HEAP_DIST') or os.path.join(HERE, '..', '..', 'dist')
@@ -130,6 +130,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         except Rejected as e:
             return self._json(400, {'error': str(e)})
         return self._json(404, {'error': 'no such route'})
+
+    def do_DELETE(self):
+        path = self.path.split('?')[0]
+        if not path.startswith('/api/requests/'):
+            return self._json(404, {'error': 'no such route'})
+        if not self._authorized():
+            return
+        req_id = path[len('/api/requests/'):]
+        if not delete_request(REQUESTS_PATH, req_id):
+            return self._json(404, {'error': 'no such request'})
+        return self._json(200, {'ok': True})
 
     def _send_admin(self):
         """The panel itself carries no request data, so it needs no token."""

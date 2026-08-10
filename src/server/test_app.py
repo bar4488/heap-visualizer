@@ -121,6 +121,42 @@ class ServiceTest(unittest.TestCase):
     def test_an_absent_store_reads_as_empty(self):
         self.assertEqual(store.load_requests(os.path.join(self.dir.name, 'nope.jsonl')), [])
 
+    def test_delete_hides_a_request_without_erasing_its_line(self):
+        _, body = self.post('a request that gets deleted')
+        rid = body['id']
+        code, _ = call(self.port, f'/api/requests/{rid}', 'DELETE', token=TOKEN)
+        self.assertEqual(code, 200)
+
+        _, body = call(self.port, '/api/requests', token=TOKEN)
+        self.assertEqual(body['requests'], [])
+        # the point of the tombstone: nothing was rewritten, so the text is
+        # still on disk until the file is rotated (REQ-002)
+        with open(self.path) as f:
+            self.assertIn('a request that gets deleted', f.read())
+
+    def test_a_tombstone_is_final(self):
+        _, body = self.post('deleted, then a status arrives')
+        rid = body['id']
+        call(self.port, f'/api/requests/{rid}', 'DELETE', token=TOKEN)
+        code, _ = call(self.port, f'/api/requests/{rid}/status', 'POST',
+                       {'status': 'done'}, token=TOKEN)
+        self.assertEqual(code, 404)
+        # even a status line written straight into the file must not resurrect it
+        store._append(self.path, {'type': 'status', 'id': rid, 'at': 'x', 'status': 'done'})
+        self.assertEqual(store.load_requests(self.path), [])
+
+    def test_delete_needs_the_token_and_a_real_id(self):
+        _, body = self.post('protected from a stranger')
+        rid = body['id']
+        code, _ = call(self.port, f'/api/requests/{rid}', 'DELETE')
+        self.assertEqual(code, 401)
+        code, _ = call(self.port, '/api/requests/nosuchid', 'DELETE', token=TOKEN)
+        self.assertEqual(code, 404)
+        # deleting twice is the second case, not a second delete
+        call(self.port, f'/api/requests/{rid}', 'DELETE', token=TOKEN)
+        code, _ = call(self.port, f'/api/requests/{rid}', 'DELETE', token=TOKEN)
+        self.assertEqual(code, 404)
+
     def test_an_unknown_id_is_404_and_a_bad_status_is_400(self):
         _, body = self.post('something')
         rid = body['id']

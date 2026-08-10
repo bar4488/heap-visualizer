@@ -33,13 +33,21 @@ carrying a `type`:
   permanent, `at` is an ISO-8601 UTC timestamp, `contact` may be empty.
 - `{"type":"status","id":…,"at":…,"status":…}` — a later decision about the
   request with that `id`.
+- `{"type":"delete","id":…,"at":…}` — a tombstone: the request with that `id`
+  is no longer listed by anything.
 
 Rules:
 
-- **Lines are only ever appended.** A status change appends; nothing rewrites or
-  deletes a line, so the file is the history as well as the state.
+- **Lines are only ever appended.** A status change appends, and so does a
+  delete; nothing rewrites or removes a line, so the file is the history as
+  well as the state. **Deleting therefore hides a request, it does not erase
+  it**: the request's own line, and its text, stay in the file until the file
+  is rotated, and any surface offering the action must say so.
+- A tombstone is final. A `status` line naming a tombstoned request must not
+  bring it back.
 - A request's current status is the last `status` line naming it, or `new` when
   there is none. The permitted values are `new`, `planned`, `done`, `declined`.
+  A tombstoned request has no status, because it is not read back at all.
 - A line that does not parse, or names an unknown `type`, must be skipped rather
   than abort the read — a half-written last line must not make the panel
   unreadable.
@@ -55,19 +63,24 @@ One process serves the static tree and the API from the same origin.
 | `POST /api/requests` | none | Body `{text, contact?}`. Appends a request; responds with its `id`. |
 | `GET /api/requests` | token | Every request, newest first, each with its folded status. |
 | `POST /api/requests/{id}/status` | token | Body `{status}`. Appends a status line. |
+| `DELETE /api/requests/{id}` | token | Appends a tombstone; the request stops being listed. |
 | `GET /admin` | none | The review page itself. It carries no request data. |
 | anything else | none | A file from the built static tree. |
 
 - `text` must be rejected when it is empty after trimming or longer than 4000
   characters, with 400 and a reason the form can display. Both bounds exist so
   the open write path cannot be used to fill a disk one request at a time.
-- A status for an unknown `id` must be 404, and an unpermitted status value 400.
+- A status or a delete for an unknown or already-tombstoned `id` must be 404,
+  and an unpermitted status value 400.
 - Every response must be JSON, including errors.
 
 ## REQ-004: The review panel
 
 `GET /admin` serves a page listing the requests newest-first — text, contact,
-time, and current status — with a control on each row that sets its status.
+time, and current status — with controls on each row that set its status and
+delete it. The delete control must confirm first, and must say that the line
+stays in the file ([REQ-002](#req-002-the-request-store)) rather than let
+"delete" be read as an erase.
 
 - **The panel is protected by a shared token** taken from the environment. The
   page asks for it, sends it on every data request, and the data routes must
