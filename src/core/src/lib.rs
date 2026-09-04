@@ -5,6 +5,7 @@
 
 mod filter_eval;
 mod filter_plan;
+pub mod analysis;
 pub mod json;
 pub mod parse;
 pub mod render;
