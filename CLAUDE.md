@@ -1,1 +1,1 @@
-@PROTOCOL.md
+@AGENTS.md
