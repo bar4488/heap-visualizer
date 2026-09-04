@@ -16,7 +16,7 @@ import { showTooltip, hideTooltip, positionTooltipNearMouse } from './shell/tool
 import { heapPanels } from './heap/panels.ts';
 import {
   initAnalysis, markDirty, tagIdFor, syncTagDatalist, buildMarksPanel,
-  buildTagsSection, buildNamesSection, sendAddrMarks, gotoAddr, addAddrMark,
+  buildTagsSection, sendAddrMarks, gotoAddr, addAddrMark,
   renderAddrMarkLines, setAddrMarkYs, addBookmark, updateMarkers,
   requestAllocInfo, buildMarks, applyMarks, loadCanonicalAnalysis,
   commitCanonicalAnalysis, commitTagMembers, replaceAllocationTags, seedStandaloneAnalysis,
@@ -190,8 +190,13 @@ void initLocalServerMode($('st-server'), $('btn-connect'), async (config, status
   useServerAnalysis(config, status.session.trace.id);
   $('btn-open').hidden = true;
   $('btn-demo').hidden = true;
-  if (renderedServerTraceId === status.session.trace.id
-      || pendingServerTraceId === status.session.trace.id) return;
+  if (renderedServerTraceId === status.session.trace.id) {
+    void loadCanonicalAnalysis().catch((error) => {
+      $('st-info').textContent = `analysis load failed: ${(error as Error).message}`;
+    });
+    return;
+  }
+  if (pendingServerTraceId === status.session.trace.id) return;
   const controller = new AbortController();
   serverTraceController = controller;
   try {
@@ -555,11 +560,16 @@ function onLoaded(m) {
   // would run applySession twice back-to-back (double seeks, double
   // filter/layout messages, pinned windows torn down and rebuilt) — prefer
   // the marks blob when there is one, and fall back to the session alone
-  if (!restoreMarksAutosave()) restoreSession();
-  const loadAnalysis = renderedServerTraceId ? loadCanonicalAnalysis : seedStandaloneAnalysis;
-  void loadAnalysis().catch((error) => {
-    $('st-info').textContent = `analysis load failed: ${(error as Error).message}`;
-  });
+  if (renderedServerTraceId) {
+    void loadCanonicalAnalysis().then(restoreSession).catch((error) => {
+      $('st-info').textContent = `analysis load failed: ${(error as Error).message}`;
+    });
+  } else {
+    if (!restoreMarksAutosave()) restoreSession();
+    void seedStandaloneAnalysis().catch((error) => {
+      $('st-info').textContent = `analysis load failed: ${(error as Error).message}`;
+    });
+  }
 }
 
 function onState(m) {
@@ -2112,10 +2122,12 @@ function buildDetailBody(root, info) {
     // replace elements while the user is mid-gesture on them
     const sw = $('an-names').querySelector(`input[data-ncolor="${info.e}"]`);
     if (sw) sw.value = v;
-    void commitCanonicalAnalysis({ type: 'setAllocationColor', creator: info.e, color: v });
   };
   // the full names-list rebuild waits for the committed value
-  q('.d-color').onchange = () => buildNamesSection();
+  q('.d-color').onchange = () => {
+    const color = q('.d-color').value;
+    void commitCanonicalAnalysis({ type: 'setAllocationColor', creator: info.e, color });
+  };
   q('.d-color-clear').onclick = () => {
     void commitCanonicalAnalysis({ type: 'setAllocationColor', creator: info.e, color: null });
   };

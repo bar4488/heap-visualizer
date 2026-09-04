@@ -72,6 +72,10 @@ cargo run --manifest-path src/local-server/Cargo.toml -- trace.heapl
 # paste the connection string it prints into Connect… on any compatible UI
 ```
 
+Canonical analysis is stored by trace digest under
+`$XDG_DATA_HOME/heap-visualizer` (or `~/.local/share/heap-visualizer`). Override
+that location with `--data-dir PATH`.
+
 The connection badge is in the status bar. Chromium asks for its Apps on
 device / Local Network Access permission on first contact. The binary knows no
 hosted URL: its connection string contains only `http://127.0.0.1:8631` and the
@@ -96,6 +100,14 @@ curl -H "Authorization: Bearer $CAPABILITY" \
   -H 'Content-Type: application/json' \
   --data '{"traceId":"sha256:…","source":"alloc.size >= 4096","from":0,"count":100}' \
   'http://127.0.0.1:8631/api/v1/query'
+
+curl -H "Authorization: Bearer $CAPABILITY" \
+  'http://127.0.0.1:8631/api/v1/analysis'
+
+curl -H "Authorization: Bearer $CAPABILITY" \
+  -H 'Content-Type: application/json' \
+  --data '{"traceId":"sha256:…","expectedRevision":0,"change":{"type":"setAllocationName","creator":42,"name":"request root"}}' \
+  'http://127.0.0.1:8631/api/v1/analysis/changes'
 ```
 
 ## Test

@@ -503,6 +503,8 @@ fn persist_analysis(path: &Path, document: &heap_visualizer_core::analysis::Docu
     serde_json::to_writer(&mut temporary, document)?;
     temporary.as_file().sync_all()?;
     temporary.persist(path).map_err(|error| error.error)?;
+    #[cfg(unix)]
+    File::open(parent)?.sync_all()?;
     Ok(())
 }
 
@@ -1038,6 +1040,31 @@ mod tests {
             .await.unwrap();
         assert_eq!(stale.status(), StatusCode::CONFLICT);
 
+        let named = router(reloaded.clone())
+            .oneshot(analysis_change(&id, 1, serde_json::json!({
+                "type": "setAllocationName", "creator": 1, "name": "owner"
+            })))
+            .await.unwrap();
+        assert_eq!(named.status(), StatusCode::OK);
+        let tagged = router(reloaded.clone())
+            .oneshot(analysis_change(&id, 2, serde_json::json!({
+                "type": "setAllocationTag", "creator": 1, "tagId": "leak", "present": true
+            })))
+            .await.unwrap();
+        assert_eq!(tagged.status(), StatusCode::OK);
+
+        let query_body = serde_json::json!({
+            "traceId": id, "source": "named(\"owner\").malloc.seq == 1 and \"Leak\" in alloc.tags", "from": 0, "count": 10
+        }).to_string();
+        let query_response = router(reloaded.clone()).oneshot(Request::builder()
+            .method(Method::POST).uri("/api/v1/query")
+            .header(header::HOST, "127.0.0.1:8631")
+            .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+            .body(Body::from(query_body)).unwrap()).await.unwrap();
+        let query_body = query_response.into_body().collect().await.unwrap().to_bytes();
+        let query_body: serde_json::Value = serde_json::from_slice(&query_body).unwrap();
+        assert_eq!(query_body["items"][0]["creator"], 1);
+
         let snapshot = router(reloaded)
             .oneshot(Request::builder()
                 .uri("/api/v1/analysis")
@@ -1047,7 +1074,7 @@ mod tests {
             .await.unwrap();
         let body = snapshot.into_body().collect().await.unwrap().to_bytes();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(body["document"]["revision"], 1);
+        assert_eq!(body["document"]["revision"], 3);
         assert_eq!(body["document"]["tags"]["leak"]["name"], "Leak");
     }
 

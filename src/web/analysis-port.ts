@@ -17,6 +17,12 @@ export function useServerAnalysis(config: LocalServerConfig | null, traceId?: st
   server = config && traceId ? { config, traceId } : null;
 }
 
+export function isServerAnalysis() { return server !== null; }
+
+async function readWorkerAnalysis(): Promise<AnalysisDocument> {
+  return (await request('analysis-get')).document as AnalysisDocument;
+}
+
 function serverInit(config: LocalServerConfig, method = 'GET', body?: unknown): RequestInit & { targetAddressSpace: 'loopback' } {
   return {
     method,
@@ -32,7 +38,7 @@ function serverInit(config: LocalServerConfig, method = 'GET', body?: unknown): 
 
 export async function readAnalysis(): Promise<AnalysisDocument> {
   if (!server) {
-    return (await request('analysis-get')).document as AnalysisDocument;
+    return readWorkerAnalysis();
   }
   const response = await fetch(`${server.config.baseURL}/api/v1/analysis`, serverInit(server.config));
   if (!response.ok) throw new Error(`analysis read failed: ${response.status}`);
@@ -49,7 +55,7 @@ export async function changeAnalysis(document: AnalysisDocument, change: unknown
       change,
     });
     if (!result.ok) throw new Error(result.error === 'conflict' ? 'analysis revision changed' : result.message);
-    return readAnalysis();
+    return readWorkerAnalysis();
   }
   const response = await fetch(
     `${server.config.baseURL}/api/v1/analysis/changes`,
@@ -60,7 +66,18 @@ export async function changeAnalysis(document: AnalysisDocument, change: unknown
     }),
   );
   if (!response.ok) throw new Error(response.status === 409 ? 'analysis revision changed' : `analysis change failed: ${response.status}`);
-  return readAnalysis();
+  const committed = await response.json();
+  if (committed.traceId !== server.traceId || committed.revision !== document.revision + 1) {
+    throw new Error('analysis change returned an unexpected revision');
+  }
+  const installed = await request('analysis-change', {
+    expectedRevision: document.revision,
+    change: committed.change,
+  });
+  if (!installed.ok || installed.revision !== committed.revision) {
+    throw new Error(installed.message || 'committed analysis delta was rejected by browser core');
+  }
+  return readWorkerAnalysis();
 }
 
 export async function replaceStandaloneAnalysis(document: AnalysisDocument): Promise<AnalysisDocument> {

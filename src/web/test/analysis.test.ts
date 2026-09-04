@@ -8,6 +8,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import { installDom, El } from './dom-stub.ts';
 
@@ -208,6 +209,20 @@ test('tag mutations mirror the live completion catalog', async () => {
     posted.filter((message) => message.type === 'tag-labels').at(-1),
     { type: 'tag-labels', labels: ['restored'] },
   );
+});
+
+test('the shared canonical fixture projects without a second evaluator', async () => {
+  const fixture = JSON.parse(readFileSync(
+    new URL('../../../test/fixtures/analysis-changes.json', import.meta.url), 'utf8',
+  ));
+  analysisDocument = fixture.expected;
+  await analysis.loadCanonicalAnalysis();
+  assert.equal(ui.names.get(2).name, 'owner');
+  assert.equal(ui.allocColors.get(2), '#abcdef');
+  assert.deepEqual(ui.tags.map((tag) => tag.name), ['Leak']);
+  assert.equal(ui.bookmarks[0].id, 'b1');
+  assert.equal(ui.addrMarks[0].addr, '0xa');
+  assert.equal(ui.savedFilters[0].source, 'alloc.size > 10');
 });
 
 test('buildMarks -> applyMarks -> buildMarks is a fixed point', async () => {

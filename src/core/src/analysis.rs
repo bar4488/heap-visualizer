@@ -64,7 +64,7 @@ pub struct AddressMark { pub name: String, pub addr: String }
 pub struct SavedFilter { pub name: String, pub source: String }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
+#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
 pub enum Change {
     SetAllocationName { creator: u32, name: Option<String> },
     SetAllocationColor { creator: u32, color: Option<String> },
@@ -221,6 +221,20 @@ mod tests {
 
     fn apply(document: &mut Document, change: Change) -> Result<Change, ApplyError> {
         document.apply(document.revision, 10, change, |creator| creator == 2)
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Fixture { event_count: u32, creators: BTreeSet<u32>, changes: Vec<Change>, expected: Document }
+
+    #[test]
+    fn shared_wire_fixture_reaches_one_canonical_result() {
+        let fixture: Fixture = serde_json::from_str(include_str!("../../../test/fixtures/analysis-changes.json")).unwrap();
+        let mut document = Document::default();
+        for change in fixture.changes {
+            document.apply(document.revision, fixture.event_count, change, |event| fixture.creators.contains(&event)).unwrap();
+        }
+        assert_eq!(document, fixture.expected);
     }
 
     #[test]

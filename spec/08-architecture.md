@@ -201,3 +201,21 @@ it to the worker and connected mode routes it to HTTP. TypeScript may project a
 returned canonical document into UI and render messages, but neither the web
 adapter nor local-server routes may independently normalize or apply analysis
 changes. See [D011](../docs/decisions/D011-analysis-changes-have-one-core-implementation.md).
+
+The canonical analysis document must carry `version` and monotonic `revision`,
+and must key tag definitions, bookmarks, address marks, and saved filters by
+stable string ids. Allocation analysis is keyed by creator event and may carry
+a name, color, and stable tag-id membership. The core must validate and
+normalize every change before mutation, reject unknown allocation/tag
+references, cap tags at 255, and atomically remove all membership when deleting
+a tag.
+
+`GET /api/v1/analysis` must return the active `traceId` and canonical document.
+`POST /api/v1/analysis/changes` must accept that trace identity, an expected
+revision, and one core change; stale identities or revisions conflict. A
+successful response contains only the canonical committed change and new
+revision. The server must persist the resulting document under its data
+directory, keyed by trace digest, with an atomic durable replacement before it
+acknowledges the change. A failed write must leave the prior document and engine
+projection active. The session response must advertise the current analysis
+revision.

@@ -16,7 +16,7 @@ import { showPanel } from '../shell/panels.ts';
 import { esc, fmtNum } from '../fmt.ts';
 import { request } from '../rpc.ts';
 import { buildSession, applySession } from '../session.ts';
-import { changeAnalysis, persistentId, readAnalysis, replaceStandaloneAnalysis, type AnalysisDocument } from '../analysis-port.ts';
+import { changeAnalysis, isServerAnalysis, persistentId, readAnalysis, replaceStandaloneAnalysis, type AnalysisDocument } from '../analysis-port.ts';
 
 let d = null;
 let canonical: AnalysisDocument | null = null;
@@ -71,7 +71,15 @@ export async function seedStandaloneAnalysis() {
 export function commitCanonicalAnalysis(change) {
   const run = async () => {
     if (!canonical) canonical = await readAnalysis();
-    canonical = await changeAnalysis(canonical, change);
+    try {
+      canonical = await changeAnalysis(canonical, change);
+    } catch (error) {
+      if ((error as Error).message === 'analysis revision changed') {
+        canonical = await readAnalysis();
+        projectCanonicalAnalysis();
+      }
+      throw error;
+    }
     projectCanonicalAnalysis();
     markDirty();
     return canonical;
@@ -387,6 +395,10 @@ export async function saveMarks() {
 // `quiet` suppresses the "not a marks file" message: the autosave restore
 // path calls this with whatever localStorage holds and expects a silent no.
 export function applyMarks(obj, quiet?) {
+  if (isServerAnalysis()) {
+    if (!quiet) $('st-trace').textContent = 'disconnect before importing a local analysis file';
+    return;
+  }
   if (!obj || obj.heapVisualizerAnalysis !== 1) {
     if (!quiet) $('st-trace').textContent = 'not a heap-visualizer marks file';
     return;
@@ -456,6 +468,9 @@ export function applyMarks(obj, quiet?) {
       `marks loaded: ${d.ui.tags.length} tags, ${d.ui.names.size} names, ${d.ui.bookmarks.length} time marks, ${d.ui.addrMarks.length} addr marks`;
   }
   d.ui.marksDirty = false;
+  if (!quiet) void seedStandaloneAnalysis().catch((error) => {
+    $('st-info').textContent = `analysis import failed: ${(error as Error).message}`;
+  });
 }
 
 // ---------------------------------------------------------------------------

@@ -1,0 +1,22 @@
+{
+  "eventCount": 10,
+  "creators": [2],
+  "changes": [
+    { "type": "putTag", "id": "leak", "name": " Leak ", "color": "#AABBCC" },
+    { "type": "setAllocationName", "creator": 2, "name": " owner " },
+    { "type": "setAllocationColor", "creator": 2, "color": "#ABCDEF" },
+    { "type": "setAllocationTag", "creator": 2, "tagId": "leak", "present": true },
+    { "type": "putBookmark", "id": "b1", "name": " stop ", "seq": 10, "t": 4.0 },
+    { "type": "putAddressMark", "id": "a1", "name": " ptr ", "addr": "0X000A" },
+    { "type": "putSavedFilter", "id": "f1", "name": " big ", "source": "alloc.size > 10" }
+  ],
+  "expected": {
+    "version": 1,
+    "revision": 7,
+    "allocations": { "2": { "name": "owner", "color": "#abcdef", "tags": ["leak"] } },
+    "tags": { "leak": { "name": "Leak", "color": "#aabbcc" } },
+    "bookmarks": { "b1": { "name": "stop", "seq": 10, "t": 4.0 } },
+    "addressMarks": { "a1": { "name": "ptr", "addr": "0xa" } },
+    "savedFilters": { "f1": { "name": "big", "source": "alloc.size > 10" } }
+  }
+}
