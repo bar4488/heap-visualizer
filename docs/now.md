@@ -223,10 +223,10 @@ layout and the send path in a browser — the outcomes are unit-tested and the
 routes were driven with `curl` against the container, but no automated check
 presses the button (D001).
 
-**Connect… changes to Disconnect while a tab retains a local-server
-capability;** disconnect discards only that tab's capability and a late request
-cannot reconnect it. The next E021 deliverable is the native engine and bounded
-read API, but it has no ticket until selected and grounded. The older backlog is
+**T054 is in flight:** the local server starts with one trace, identifies it,
+and a connected browser loads it automatically into the local renderer. It is
+the first slice of E021's complete data API; rendering remains in the browser.
+The older backlog is
 [T045](tickets/T045-lower-integer-arithmetic-to-a-narrow-path.md) and
 [T046](tickets/T046-negative-numbers-are-writable.md) — both came out of that
 work, neither is urgent — plus T009, T030, and the blocked T004.
@@ -284,4 +284,5 @@ friction with `PROTOCOL.md` itself goes in
 
 <!-- generated:begin -->
 ## Doing
+- [T054](tickets/T054-server-starts-with-one-trace.md) — the server starts with one trace
 <!-- generated:end -->
