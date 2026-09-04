@@ -1,4 +1,9 @@
-use std::sync::Arc;
+use std::{
+    fs::File,
+    io::{self, Read, Write},
+    path::Path,
+    sync::Arc,
+};
 
 use axum::{
     body::Body,
@@ -9,6 +14,8 @@ use axum::{
     Router,
 };
 use serde::Serialize;
+use sha2::{Digest, Sha256};
+use tokio_util::io::ReaderStream;
 use url::Url;
 
 const REQUEST_PRIVATE_NETWORK: HeaderName =
@@ -20,14 +27,57 @@ const ALLOW_PRIVATE_NETWORK: HeaderName =
 pub struct ServerState {
     token: Arc<str>,
     port: u16,
+    trace: TraceFile,
 }
 
 impl ServerState {
-    pub fn new(token: String, port: u16) -> Self {
+    pub fn new(token: String, port: u16, trace: TraceFile) -> Self {
         Self {
             token: token.into(),
             port,
+            trace,
         }
+    }
+}
+
+#[derive(Clone)]
+pub struct TraceFile {
+    snapshot: Arc<tempfile::NamedTempFile>,
+    id: Arc<str>,
+    name: Arc<str>,
+    len: u64,
+}
+
+impl TraceFile {
+    pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
+        let path = path.as_ref().canonicalize()?;
+        let mut file = File::open(&path)?;
+        let mut snapshot = tempfile::NamedTempFile::new()?;
+        let mut hash = Sha256::new();
+        let mut chunk = vec![0_u8; 8 << 20];
+        let mut len = 0_u64;
+        loop {
+            let read = file.read(&mut chunk)?;
+            if read == 0 {
+                break;
+            }
+            hash.update(&chunk[..read]);
+            snapshot.write_all(&chunk[..read])?;
+            len += read as u64;
+        }
+        snapshot.as_file().sync_all()?;
+        let id = format!("sha256:{:x}", hash.finalize());
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("trace.heapl")
+            .to_owned();
+        Ok(Self {
+            snapshot: Arc::new(snapshot),
+            id: id.into(),
+            name: name.into(),
+            len,
+        })
     }
 }
 
@@ -37,6 +87,16 @@ struct SessionResponse<'a> {
     api_version: u8,
     mode: &'a str,
     server_version: &'a str,
+    trace: TraceResponse<'a>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TraceResponse<'a> {
+    id: &'a str,
+    name: &'a str,
+    bytes: u64,
+    url: &'a str,
 }
 
 #[derive(Serialize)]
@@ -47,6 +107,7 @@ struct ErrorResponse<'a> {
 pub fn router(state: ServerState) -> Router {
     Router::new()
         .route("/api/v1/session", get(session).options(preflight))
+        .route("/api/v1/trace", get(trace).options(preflight))
         .fallback(not_found)
         .with_state(state)
 }
@@ -108,9 +169,91 @@ async fn session(State(state): State<ServerState>, headers: HeaderMap) -> Respon
             api_version: 1,
             mode: "local",
             server_version: env!("CARGO_PKG_VERSION"),
+            trace: TraceResponse {
+                id: &state.trace.id,
+                name: &state.trace.name,
+                bytes: state.trace.len,
+                url: "/api/v1/trace",
+            },
         },
         origin,
     )
+}
+
+async fn trace(State(state): State<ServerState>, headers: HeaderMap) -> Response {
+    let origin = match authorize(&headers, &state) {
+        Ok(origin) => origin,
+        Err(error) => return error.response(),
+    };
+    let file = match tokio::fs::File::open(state.trace.snapshot.path()).await {
+        Ok(file) => file,
+        Err(_) => {
+            return json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &ErrorResponse {
+                    error: "active trace is no longer readable",
+                },
+                origin,
+            )
+        }
+    };
+    let mut response = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/x-ndjson")
+        .header(header::CONTENT_LENGTH, state.trace.len)
+        .header(header::CACHE_CONTROL, "private, immutable")
+        .header(header::ETAG, format!("\"{}\"", state.trace.id))
+        .body(Body::from_stream(ReaderStream::new(file)))
+        .expect("trace response headers are valid");
+    add_cors(response.headers_mut(), origin);
+    response
+}
+
+struct RequestError {
+    status: StatusCode,
+    error: &'static str,
+    origin: Option<HeaderValue>,
+}
+
+impl RequestError {
+    fn response(self) -> Response {
+        json(
+            self.status,
+            &ErrorResponse { error: self.error },
+            self.origin,
+        )
+    }
+}
+
+fn authorize(
+    headers: &HeaderMap,
+    state: &ServerState,
+) -> Result<Option<HeaderValue>, RequestError> {
+    if !host_allowed(headers, state.port) {
+        return Err(RequestError {
+            status: StatusCode::BAD_REQUEST,
+            error: "invalid Host",
+            origin: None,
+        });
+    }
+    let origin = browser_origin(headers).map_err(|()| RequestError {
+        status: StatusCode::FORBIDDEN,
+        error: "origin is not allowed",
+        origin: None,
+    })?;
+    let expected = format!("Bearer {}", state.token);
+    if headers
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        != Some(&expected)
+    {
+        return Err(RequestError {
+            status: StatusCode::UNAUTHORIZED,
+            error: "bad or missing capability",
+            origin,
+        });
+    }
+    Ok(origin)
 }
 
 async fn preflight(State(state): State<ServerState>, headers: HeaderMap) -> Response {
@@ -226,15 +369,15 @@ fn json<T: Serialize>(status: StatusCode, value: &T, origin: Option<HeaderValue>
         .header(header::CACHE_CONTROL, "no-store")
         .body(Body::from(body))
         .expect("static response headers are valid");
-    if let Some(origin) = origin {
-        response
-            .headers_mut()
-            .insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
-        response
-            .headers_mut()
-            .insert(header::VARY, HeaderValue::from_static("Origin"));
-    }
+    add_cors(response.headers_mut(), origin);
     response
+}
+
+fn add_cors(headers: &mut HeaderMap, origin: Option<HeaderValue>) {
+    if let Some(origin) = origin {
+        headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+        headers.insert(header::VARY, HeaderValue::from_static("Origin"));
+    }
 }
 
 #[cfg(test)]
@@ -248,7 +391,11 @@ mod tests {
     const ORIGIN: &str = "https://viewer.example";
 
     fn app() -> Router {
-        router(ServerState::new(TOKEN.into(), 8631))
+        let trace = TraceFile::open(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../web/guide/traces/format.heapl"),
+        )
+        .unwrap();
+        router(ServerState::new(TOKEN.into(), 8631, trace))
     }
 
     fn request(method: Method) -> axum::http::request::Builder {
@@ -256,6 +403,18 @@ mod tests {
             .method(method)
             .uri("/api/v1/session")
             .header(header::HOST, "127.0.0.1:8631")
+    }
+
+    #[test]
+    fn active_trace_is_an_immutable_snapshot_of_the_supplied_file() {
+        let source = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(source.path(), b"original trace\n").unwrap();
+        let trace = TraceFile::open(source.path()).unwrap();
+        std::fs::write(source.path(), b"changed trace\n").unwrap();
+        assert_eq!(
+            std::fs::read(trace.snapshot.path()).unwrap(),
+            b"original trace\n"
+        );
     }
 
     #[tokio::test]
@@ -275,10 +434,39 @@ mod tests {
             .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
             .is_none());
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&body).unwrap()["apiVersion"],
-            1
-        );
+        let body = serde_json::from_slice::<serde_json::Value>(&body).unwrap();
+        assert_eq!(body["apiVersion"], 1);
+        assert_eq!(body["trace"]["name"], "format.heapl");
+        assert_eq!(body["trace"]["url"], "/api/v1/trace");
+        assert!(body["trace"]["id"].as_str().unwrap().starts_with("sha256:"));
+    }
+
+    #[tokio::test]
+    async fn trace_bytes_are_authenticated_and_immutable() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/v1/trace")
+                    .header(header::HOST, "127.0.0.1:8631")
+                    .header(header::ORIGIN, ORIGIN)
+                    .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers()[header::ETAG]
+            .to_str()
+            .unwrap()
+            .starts_with("\"sha256:"));
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let expected = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../web/guide/traces/format.heapl"),
+        )
+        .unwrap();
+        assert_eq!(body.as_ref(), expected);
     }
 
     #[tokio::test]

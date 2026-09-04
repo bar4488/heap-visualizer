@@ -130,6 +130,13 @@ const OP_EVENT = 3;
 
 const worker = new Worker('worker.js', { type: 'module' }) as TypedWorker;
 initRpc(worker);
+let resolveWorkerReady: () => void;
+const workerReady = new Promise<void>((resolve) => { resolveWorkerReady = resolve; });
+let renderedServerTraceId: string | null = null;
+let pendingServerTraceId: string | null = null;
+let serverLoadGeneration = 0;
+let serverTraceController: AbortController | null = null;
+let serverStreaming = false;
 
 const UI: UIState = {
   meta: null,
@@ -161,7 +168,69 @@ const UI: UIState = {
   xview: { zoom: 1, pan: 0 },
 };
 
-void initLocalServerMode($('st-server'), $('btn-connect'));
+void initLocalServerMode($('st-server'), $('btn-connect'), async (config, status) => {
+  const mine = ++serverLoadGeneration;
+  serverTraceController?.abort();
+  serverTraceController = null;
+  if (status.state === 'standalone') {
+    if (serverStreaming) {
+      serverStreaming = false;
+      pendingServerTraceId = null;
+      worker.postMessage({ type: 'load-cancel' });
+    }
+    $('btn-open').hidden = false;
+    $('btn-demo').hidden = false;
+    return;
+  }
+  if (!config || status.state !== 'connected') return;
+  $('btn-open').hidden = true;
+  $('btn-demo').hidden = true;
+  if (renderedServerTraceId === status.session.trace.id
+      || pendingServerTraceId === status.session.trace.id) return;
+  const controller = new AbortController();
+  serverTraceController = controller;
+  try {
+    const init: RequestInit & { targetAddressSpace?: 'loopback' } = {
+      headers: { Authorization: `Bearer ${config.token}` },
+      cache: 'no-store',
+      signal: controller.signal,
+      targetAddressSpace: 'loopback',
+    };
+    const response = await fetch(`${config.baseURL}${status.session.trace.url}`, init);
+    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    await workerReady;
+    if (mine !== serverLoadGeneration) return;
+    if (!response.body) throw new Error('trace response has no body');
+    UI.fileName = status.session.trace.name;
+    renderedServerTraceId = null;
+    pendingServerTraceId = status.session.trace.id;
+    serverStreaming = true;
+    $('progress').hidden = false;
+    $('progress-pct').textContent = '0%';
+    worker.postMessage({ type: 'load-begin', total: status.session.trace.bytes });
+    const reader = response.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (mine !== serverLoadGeneration) return;
+      const buffer = value.byteOffset === 0 && value.byteLength === value.buffer.byteLength
+        ? value.buffer
+        : value.slice().buffer;
+      worker.postMessage({ type: 'load-chunk', buffer }, [buffer]);
+    }
+    if (mine !== serverLoadGeneration) return;
+    serverStreaming = false;
+    worker.postMessage({ type: 'load-end' });
+  } catch (error) {
+    if (mine !== serverLoadGeneration) return;
+    if (serverStreaming) worker.postMessage({ type: 'load-cancel' });
+    serverStreaming = false;
+    pendingServerTraceId = null;
+    $('st-trace').textContent = `local trace load failed: ${(error as Error).message}`;
+  } finally {
+    if (mine === serverLoadGeneration) serverTraceController = null;
+  }
+});
 
 // expose for tests / console poking
 window.__heap_visualizer = UI;
@@ -237,10 +306,12 @@ new ResizeObserver(sendResizes).observe($('strip-t'));
 // loading
 // ---------------------------------------------------------------------------
 
-async function loadBuffer(buf, name) {
+async function loadBuffer(buf, name, serverTraceId: string | null = null) {
   $('progress').hidden = false;
   $('progress-pct').textContent = '0%';
   UI.fileName = name;
+  renderedServerTraceId = null;
+  pendingServerTraceId = serverTraceId;
   worker.postMessage({ type: 'load', buffer: buf }, [buf]);
 }
 
@@ -304,6 +375,7 @@ worker.onmessage = (ev) => {
   const m = ev.data;
   switch (m.type) {
     case 'ready': {
+      resolveWorkerReady();
       sendResizes();
       worker.postMessage({ type: 'set', key: 'rowPx', value: +$('row-px').value });
       const url = new URLSearchParams(location.search).get('trace');
@@ -314,6 +386,8 @@ worker.onmessage = (ev) => {
       $('progress-pct').textContent = `${m.pct}%`;
       break;
     case 'error':
+      serverStreaming = false;
+      pendingServerTraceId = null;
       $('progress').hidden = true;
       $('st-trace').textContent = `load failed: ${m.message}`;
       break;
@@ -404,6 +478,8 @@ worker.onmessage = (ev) => {
 };
 
 function onLoaded(m) {
+  renderedServerTraceId = pendingServerTraceId;
+  pendingServerTraceId = null;
   $('progress').hidden = true;
   UI.meta = m.meta;
   UI.warnings = m.warnings;

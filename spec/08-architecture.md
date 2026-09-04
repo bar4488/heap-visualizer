@@ -166,3 +166,13 @@ connected endpoint must not silently select standalone mode and create a
 second writable analysis history. The connection control must also let the
 current tab discard its capability and return immediately to standalone; it
 must not stop the server or disconnect any other client.
+
+The first server process must start with exactly one readable `.heapl` path and
+establish that file as its active trace before listening. Its session response
+must identify the trace by a stable content digest, name its byte length and
+authenticated trace endpoint, and that endpoint must stream an immutable
+snapshot of the original bytes without first buffering the whole file in
+memory. A connected browser must incrementally load that trace into its local
+WASM renderer automatically; it must not ask the user to open the same file
+again or retain a whole response buffer. Reconnecting while that renderer still
+holds the same trace identity must not parse it again.

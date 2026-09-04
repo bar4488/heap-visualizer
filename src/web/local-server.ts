@@ -1,9 +1,15 @@
 export type LocalServerConfig = { baseURL: string; token: string };
+export type LocalSession = {
+  apiVersion: 1;
+  mode: 'local';
+  serverVersion: string;
+  trace: { id: string; name: string; bytes: number; url: string };
+};
 
 export type LocalServerStatus =
   | { state: 'standalone' }
   | { state: 'connecting' }
-  | { state: 'connected'; version: string }
+  | { state: 'connected'; version: string; session: LocalSession }
   | { state: 'auth-failed' }
   | { state: 'permission-denied' }
   | { state: 'unreachable' };
@@ -105,7 +111,18 @@ export async function connectLocalServer(
       if (!response.ok) return { state: 'unreachable' };
       const body = await response.json();
       if (body?.apiVersion !== 1 || body?.mode !== 'local') return { state: 'unreachable' };
-      return { state: 'connected', version: String(body.serverVersion || '') };
+      if (!body.trace
+          || typeof body.trace.id !== 'string' || !body.trace.id
+          || typeof body.trace.name !== 'string'
+          || !Number.isSafeInteger(body.trace.bytes) || body.trace.bytes < 0
+          || typeof body.trace.url !== 'string') {
+        return { state: 'unreachable' };
+      }
+      const traceURL = new URL(body.trace.url, config.baseURL);
+      if (traceURL.origin !== config.baseURL || !body.trace.url.startsWith('/')) {
+        return { state: 'unreachable' };
+      }
+      return { state: 'connected', version: String(body.serverVersion || ''), session: body };
     } finally {
       clearTimeout(timeout);
     }
@@ -137,7 +154,11 @@ const STATUS_TEXT: Record<LocalServerStatus['state'], string> = {
   unreachable: 'local server: unavailable or blocked',
 };
 
-export async function initLocalServerMode(element: HTMLElement, button: HTMLButtonElement) {
+export async function initLocalServerMode(
+  element: HTMLElement,
+  button: HTMLButtonElement,
+  onStatus: (config: LocalServerConfig | null, status: LocalServerStatus) => void = () => {},
+) {
   let config = localServerConfig(window.location, window.sessionStorage, window.history);
   let generation = 0;
 
@@ -154,6 +175,7 @@ export async function initLocalServerMode(element: HTMLElement, button: HTMLButt
     const status = await connectLocalServer(config);
     if (mine !== generation) return;
     setStatus(element, status);
+    onStatus(config, status);
   }
 
   button.onclick = () => {
@@ -162,7 +184,9 @@ export async function initLocalServerMode(element: HTMLElement, button: HTMLButt
       generation++;
       forgetLocalServerConfig(window.sessionStorage);
       updateButton();
-      setStatus(element, { state: 'standalone' });
+      const status: LocalServerStatus = { state: 'standalone' };
+      setStatus(element, status);
+      onStatus(config, status);
       return;
     }
     const value = window.prompt('Paste the connection string printed by heap-visualizer-local-server:');

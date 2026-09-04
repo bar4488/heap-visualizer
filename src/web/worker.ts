@@ -17,6 +17,9 @@ let E: Engine = null;    // wasm exports
 let wasmModule: WebAssembly.Module | null = null; // compiled module, re-instantiated per trace load
 const td = new TextDecoder();
 const te = new TextEncoder();
+let loading = false;
+let loadTotal = 0;
+let loadDone = 0;
 
 const canvases = { addr: null, tlt: null, tls: null }; // OffscreenCanvas
 const ctxs = { addr: null, tlt: null, tls: null };
@@ -90,7 +93,7 @@ function writeBuf(bytes) {
 // loading
 // ---------------------------------------------------------------------------
 
-async function loadTrace(buffer) {
+function beginTraceLoad(total) {
   // Fresh wasm instance per load: Rust frees into its own allocator, never
   // back to the browser, so reusing one instance ratchets linear memory up to
   // the high-water mark of every trace opened this session. A new instance
@@ -101,21 +104,47 @@ async function loadTrace(buffer) {
   S.loaded = false;
   S.playing = false;
   if (wasmModule) {
-    E = (await WebAssembly.instantiate(wasmModule, {})).exports;
+    E = new WebAssembly.Instance(wasmModule, {}).exports;
     applyRowPx();
   }
   E.hp_parse_begin();
-  const CH = 8 << 20;
-  const total = buffer.byteLength;
-  let done = 0;
-  for (let off = 0; off < total; off += CH) {
-    const len = Math.min(CH, total - off);
-    const ptr = E.hp_buf_ptr(CH);
-    new Uint8Array(E.memory.buffer, ptr, len).set(new Uint8Array(buffer, off, len));
-    E.hp_parse_chunk(len);
-    done += len;
-    postMessage({ type: 'progress', pct: Math.round((done / total) * 100) });
+  loading = true;
+  loadTotal = total;
+  loadDone = 0;
+}
+
+function loadTraceChunk(buffer) {
+  if (!loading) throw new Error('trace chunk arrived without a load');
+  const len = buffer.byteLength;
+  const ptr = E.hp_buf_ptr(len);
+  new Uint8Array(E.memory.buffer, ptr, len).set(new Uint8Array(buffer));
+  E.hp_parse_chunk(len);
+  loadDone += len;
+  postMessage({
+    type: 'progress',
+    pct: loadTotal ? Math.min(100, Math.round((loadDone / loadTotal) * 100)) : 100,
+  });
+}
+
+function endTraceLoad() {
+  if (!loading) throw new Error('trace ended without a load');
+  loading = false;
+  if (loadDone !== loadTotal) {
+    throw new Error(`trace ended after ${loadDone} of ${loadTotal} bytes`);
   }
+  finishTraceLoad();
+}
+
+function loadTrace(buffer) {
+  beginTraceLoad(buffer.byteLength);
+  const CH = 8 << 20;
+  for (let off = 0; off < buffer.byteLength; off += CH) {
+    loadTraceChunk(buffer.slice(off, Math.min(buffer.byteLength, off + CH)));
+  }
+  endTraceLoad();
+}
+
+function finishTraceLoad() {
   const n = E.hp_parse_end();
   E.hp_meta_json();
   const meta = retJson();
@@ -543,10 +572,38 @@ onmessage = async (ev: MessageEvent<ToWorker>) => {
     }
     case 'load':
       try {
-        await loadTrace(m.buffer);
+        loadTrace(m.buffer);
       } catch (err) {
+        loading = false;
         postMessage({ type: 'error', message: String((err as Error)?.message || err) });
       }
+      break;
+    case 'load-begin':
+      try {
+        beginTraceLoad(m.total);
+      } catch (err) {
+        loading = false;
+        postMessage({ type: 'error', message: String((err as Error)?.message || err) });
+      }
+      break;
+    case 'load-chunk':
+      try {
+        loadTraceChunk(m.buffer);
+      } catch (err) {
+        loading = false;
+        postMessage({ type: 'error', message: String((err as Error)?.message || err) });
+      }
+      break;
+    case 'load-end':
+      try {
+        endTraceLoad();
+      } catch (err) {
+        loading = false;
+        postMessage({ type: 'error', message: String((err as Error)?.message || err) });
+      }
+      break;
+    case 'load-cancel':
+      loading = false;
       break;
     case 'resize': {
       const cv = canvases[m.which];

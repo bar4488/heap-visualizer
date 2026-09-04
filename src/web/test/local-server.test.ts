@@ -58,10 +58,37 @@ test('a valid session response establishes connected mode', async () => {
     { baseURL: 'http://127.0.0.1:8631', token: 'x'.repeat(64) },
     async (_input, init) => {
       assert.equal(new Headers(init?.headers).get('Authorization'), `Bearer ${'x'.repeat(64)}`);
-      return Response.json({ apiVersion: 1, mode: 'local', serverVersion: '0.1.0' });
+      return Response.json({
+        apiVersion: 1,
+        mode: 'local',
+        serverVersion: '0.1.0',
+        trace: { id: 'trace-id', name: 'trace.heapl', bytes: 1, url: '/api/v1/trace' },
+      });
     },
   );
-  assert.deepEqual(status, { state: 'connected', version: '0.1.0' });
+  assert.deepEqual(status, {
+    state: 'connected',
+    version: '0.1.0',
+    session: {
+      apiVersion: 1,
+      mode: 'local',
+      serverVersion: '0.1.0',
+      trace: { id: 'trace-id', name: 'trace.heapl', bytes: 1, url: '/api/v1/trace' },
+    },
+  });
+});
+
+test('a session cannot direct trace retrieval away from its loopback origin', async () => {
+  const status = await connectLocalServer(
+    { baseURL: 'http://127.0.0.1:8631', token: 'x'.repeat(64) },
+    async () => Response.json({
+      apiVersion: 1,
+      mode: 'local',
+      serverVersion: '0.1.0',
+      trace: { id: 'trace-id', name: 'trace.heapl', bytes: 1, url: 'https://example.test/trace' },
+    }),
+  );
+  assert.deepEqual(status, { state: 'unreachable' });
 });
 
 test('authentication failure is distinct', async () => {

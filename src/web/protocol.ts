@@ -105,6 +105,10 @@ export type SetMessage = {
 export type Command =
   | { type: 'init'; wasmURL: string; addr: OffscreenCanvas; tlt: OffscreenCanvas; tls: OffscreenCanvas; dpr: number }
   | { type: 'load'; buffer: ArrayBuffer }
+  | { type: 'load-begin'; total: number }
+  | { type: 'load-chunk'; buffer: ArrayBuffer }
+  | { type: 'load-end' }
+  | { type: 'load-cancel' }
   | { type: 'resize'; which: CanvasKey; w: number; h: number; dpr?: number }
   | { type: 'seek'; seq?: number; t?: number }
   | { type: 'play'; mode: 't' | 'seq'; rate: number }

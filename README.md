@@ -26,8 +26,8 @@ docker compose up                             # the site plus the feature-reques
                                               # service; /admin reviews what came in
 HEAP_ADMIN_TOKEN=…  docker compose up         # /admin defaults to the token `admin`
 
-cargo run --manifest-path src/local-server/Cargo.toml
-                                              # server-only loopback API; open its URL
+cargo run --manifest-path src/local-server/Cargo.toml -- trace.heapl
+                                              # paste its connection string into Connect…
 ```
 
 ## Test

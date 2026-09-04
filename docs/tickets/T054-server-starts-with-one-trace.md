@@ -20,7 +20,7 @@ without asking the user to open a file.
 - [ ] The authenticated session response identifies the trace, and an
       authenticated bounded-memory endpoint streams its original bytes with an
       immutable ETag.
-- [ ] Connected mode automatically loads those bytes into the existing worker;
+- [ ] Connected mode incrementally streams those bytes into the existing worker;
       standalone mode retains Open… and Demo unchanged.
 - [ ] Disconnect returns the tab to standalone controls, while reconnecting to
       the same trace does not reload it unnecessarily.

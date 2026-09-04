@@ -65,10 +65,10 @@ python3 gen.py --seed 2 --ops 200000 --threads 8 --out dist/big.heapl
 ### Prove the local-server connection
 
 The local binary serves only its API; the web app and feature-request service
-stay at the URL passed to it. With the development site on its usual port:
+remain hosted independently. With the development site on its usual port:
 
 ```sh
-cargo run --manifest-path src/local-server/Cargo.toml
+cargo run --manifest-path src/local-server/Cargo.toml -- trace.heapl
 # paste the connection string it prints into Connect… on any compatible UI
 ```
 
@@ -78,6 +78,9 @@ hosted URL: its connection string contains only `http://127.0.0.1:8631` and the
 capability in the fragment. The app retains it in that tab's session storage;
 an ordinary visit stays standalone and makes no local request. The same control
 reads **Disconnect** while configured and discards only that tab's capability.
+The server snapshots and identifies the trace before listening; once connected,
+the web app streams it in bounded chunks into the same local WASM renderer
+standalone mode uses.
 
 ## Test
 
