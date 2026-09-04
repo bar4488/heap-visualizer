@@ -1,6 +1,6 @@
 # Now
 
-_Updated: 2026-09-04._
+_Updated: 2026-09-05._
 
 **No count in this file is written by hand.** Test counts, module sizes and
 requirement totals are derivable, and the ones that used to be here had all
@@ -146,15 +146,19 @@ together; the image carries no toolchain and bind-mounts an already-built
 is intact and [T038](tickets/T038-drop-the-docker-build.md) is not being
 reversed.
 
-**A separate server-only native binary now proves the future local data
-boundary.** `src/local-server/` binds to loopback and prints a
+**A separate server-only native binary owns one local trace and its canonical
+analysis.** `src/local-server/` binds to loopback and prints a
 deployment-agnostic connection string carrying a fresh bearer capability only
 in its fragment. Any compatible hosted UI can accept it through Connect…,
 keeps it for that tab, and visibly reports connected or the distinct failure
 states; an ordinary visit remains standalone and makes no local request
 ([ARCH-008](../spec/08-architecture.md#arch-008-local-data-server-connection),
-[T050](tickets/T050-prove-the-hosted-to-loopback-connection.md)). It serves no
-trace yet and does no rendering; E021's next slice is the native data engine.
+[T050](tickets/T050-prove-the-hosted-to-loopback-connection.md)). It snapshots,
+identifies, parses, and incrementally serves one trace; bounded native reads and
+queries never carry rendering state. Analysis edits use one revisioned Rust
+document in native and WASM execution, persist by trace digest before
+acknowledgement, and project names and tags into native query semantics. The
+browser keeps rendering locally from its own WASM copy.
 
 **Verification — native, web and service suites, a type-checker, and a
 person.** `cargo test`
@@ -224,9 +228,10 @@ layout and the send path in a browser — the outcomes are unit-tested and the
 routes were driven with `curl` against the container, but no automated check
 presses the button (D001).
 
-**T059 is in flight:** add the persistent canonical analysis document,
-revisioned mutations for every analysis feature, and analysis-aware native
-queries. Held changes and browser synchronization remain the following slice.
+**T059 is complete:** the persistent canonical analysis document, revisioned
+mutations, browser adapters, and analysis-aware native queries now share one
+Rust implementation. [T060](tickets/T060-held-analysis-changes.md) is the next
+slice: held committed deltas and connected-tab synchronization.
 The browser still owns all rendering. The older backlog is
 [T045](tickets/T045-lower-integer-arithmetic-to-a-narrow-path.md) and
 [T046](tickets/T046-negative-numbers-are-writable.md) — both came out of that
@@ -285,5 +290,4 @@ friction with `PROTOCOL.md` itself goes in
 
 <!-- generated:begin -->
 ## Doing
-- [T059](tickets/T059-canonical-analysis-and-revisions.md) — canonical analysis and revisions
 <!-- generated:end -->
