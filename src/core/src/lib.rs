@@ -185,6 +185,18 @@ impl Engine {
         write_events_json(&mut self.app, from, count);
         self.app.out.clone()
     }
+
+    pub fn allocation_json(&self, creator: u32) -> Option<String> {
+        let mut out = String::with_capacity(512);
+        write_allocation_json(&mut out, &self.app.store, creator).then_some(out)
+    }
+
+    /// Compile and execute one independent filter query. This never installs
+    /// the filter into `cfg`, so one agent query cannot affect another query or
+    /// a browser view.
+    pub fn query_json(&self, source: &str, from: u32, count: u32) -> String {
+        query_json(&self.app, source, from, count)
+    }
 }
 
 static APP: Global<Option<App>> = Global(UnsafeCell::new(None));
@@ -1429,6 +1441,120 @@ fn push_event_json(o: &mut String, s: &Store, e: u32) {
     o.push('}');
 }
 
+fn write_allocation_json(o: &mut String, s: &Store, e: u32) -> bool {
+    if e >= s.len() || !matches!(s.op[e as usize], OP_M | OP_R) {
+        return false;
+    }
+    let i = e as usize;
+    let addr = s.addr[i];
+    o.push_str(&format!(
+        "{{\"creator\":{},\"op\":{},\"id\":{},\"addr\":\"0x{:x}\",\"end\":\"0x{:x}\",\"size\":{},\"usable\":{},\"t\":{}",
+        e,
+        s.op[i],
+        s.id[i],
+        addr,
+        addr.saturating_add(s.size[i]),
+        s.size[i],
+        s.usable_at(e),
+        s.t[i] as f64
+    ));
+    o.push_str(",\"site\":");
+    if s.site[i] != NONE_U32 {
+        push_json_str(o, &s.sites[s.site[i] as usize]);
+    } else {
+        o.push_str("null");
+    }
+    o.push_str(",\"thread\":");
+    if s.thr_idx[i] != NONE_U16 {
+        o.push_str(&s.thrs[s.thr_idx[i] as usize].to_string());
+    } else {
+        o.push_str("null");
+    }
+    let death = s.death[i];
+    o.push_str(",\"death\":");
+    if death != NONE_U32 {
+        o.push_str(&format!(
+            "{{\"seq\":{},\"t\":{}}}",
+            death, s.t[death as usize] as f64
+        ));
+    } else {
+        o.push_str("null");
+    }
+    if s.stack_at(e) != NONE_U32 {
+        o.push_str(",\"stack\":");
+        push_json_str(o, &s.stacks[s.stack_at(e) as usize]);
+    }
+    if s.extra_at(e) != NONE_U32 {
+        o.push_str(",\"fields\":{");
+        o.push_str(&s.extras[s.extra_at(e) as usize]);
+        o.push('}');
+    }
+    if death != NONE_U32 && s.extra_at(death) != NONE_U32 {
+        o.push_str(",\"deathFields\":{");
+        o.push_str(&s.extras[s.extra_at(death) as usize]);
+        o.push('}');
+    }
+    o.push('}');
+    true
+}
+
+fn query_json(a: &App, source: &str, from: u32, count: u32) -> String {
+    let mut bits = None;
+    if !source.trim().is_empty() {
+        let expr = match heap_visualizer_filter_dsl::parse(source) {
+            Ok(expr) => expr,
+            Err(error) => return query_diagnostic(&error.message, error.span.start, error.span.end),
+        };
+        let base = filter_eval::Ctx::new(&a.store, &[], &[]);
+        if let Err(error) = filter_eval::check(&expr, &base) {
+            return query_diagnostic(&error.message, error.span.start, error.span.end);
+        }
+        let fields = filter_eval::FieldValues::resolve(&expr, &a.store);
+        let context = base.with_fields(&fields);
+        let plan = match filter_plan::lower(&expr, &context) {
+            Ok(plan) => plan,
+            Err(error) => return query_diagnostic(&error.message, error.span.start, error.span.end),
+        };
+        let mut found = vec![0_u64; (a.store.len() as usize).div_ceil(64)];
+        filter_plan::scan(&plan, &context, &mut found);
+        bits = Some(found);
+    }
+    let matches: Vec<u32> = (0..a.store.len())
+        .filter(|&e| matches!(a.store.op[e as usize], OP_M | OP_R))
+        .filter(|&e| {
+            bits.as_ref().is_none_or(|found| {
+                found[e as usize / 64] & (1_u64 << (e % 64)) != 0
+            })
+        })
+        .collect();
+    let lo = (from as usize).min(matches.len());
+    let hi = lo.saturating_add(count as usize).min(matches.len());
+    let mut out = format!(
+        "{{\"valid\":true,\"total\":{},\"next\":{},\"items\":[",
+        matches.len(),
+        if hi < matches.len() {
+            hi.to_string()
+        } else {
+            "null".into()
+        }
+    );
+    for (index, &creator) in matches[lo..hi].iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        let _ = write_allocation_json(&mut out, &a.store, creator);
+    }
+    out.push_str("]}");
+    out
+}
+
+fn query_diagnostic(message: &str, start: usize, end: usize) -> String {
+    let mut out = "{\"valid\":false,\"diagnostic\":{\"message\":".to_string();
+    push_json_str(&mut out, message);
+    out.push_str(&format!(",\"start\":{start},\"end\":{end}}}}}"));
+    out
+}
+
 /// Details of one event (for the step readout / warning jumps).
 #[no_mangle]
 pub extern "C" fn hp_event_json(e: u32) {
@@ -1680,6 +1806,21 @@ mod tests {
         let events = engine.events_json(1, 2);
         assert!(events.starts_with("[{\"seq\":1,"));
         assert!(events.contains("},{\"seq\":2,"));
+        let allocation = engine.allocation_json(1).unwrap();
+        assert!(allocation.contains("\"creator\":1"));
+        assert!(!allocation.contains("rects"));
+        assert!(engine.allocation_json(2).is_none());
+
+        let query = engine.query_json("alloc.size >= 128", 0, 1);
+        assert!(query.contains("\"valid\":true"));
+        assert!(query.contains("\"total\":2"));
+        assert!(query.contains("\"creator\":1"));
+        let repeated = engine.query_json("alloc.size < 100", 0, 10);
+        assert!(repeated.contains("\"total\":1"));
+        assert!(repeated.contains("\"creator\":0"));
+        assert!(engine
+            .query_json("alloc.size >", 0, 10)
+            .contains("\"valid\":false"));
     }
 
     #[test]
