@@ -63,6 +63,13 @@ export async function changeAnalysis(document: AnalysisDocument, change: unknown
   return readAnalysis();
 }
 
+export async function replaceStandaloneAnalysis(document: AnalysisDocument): Promise<AnalysisDocument> {
+  if (server) throw new Error('connected analysis cannot be replaced from browser state');
+  const installed = await request('analysis-replace', { document });
+  if (!installed.ok) throw new Error(installed.message || 'analysis rejected by browser core');
+  return readAnalysis();
+}
+
 export function persistentId(prefix: string): string {
   return `${prefix}-${crypto.randomUUID()}`;
 }

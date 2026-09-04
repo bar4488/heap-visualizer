@@ -851,7 +851,7 @@ onmessage = async (ev: MessageEvent<ToWorker>) => {
       })));
       E.hp_analysis_apply(len);
       const result = retJson();
-      if (result.ok) allDirty();
+      if (result.ok) tagsChanged();
       postMessage({ type: 'analysis-change-result', reqId: m.reqId, ...result });
       break;
     }
@@ -859,7 +859,7 @@ onmessage = async (ev: MessageEvent<ToWorker>) => {
       const len = writeBuf(te.encode(JSON.stringify(m.document)));
       E.hp_analysis_replace(len);
       const result = retJson();
-      if (result.ok) allDirty();
+      if (result.ok) tagsChanged();
       postMessage({ type: 'analysis-replace-result', reqId: m.reqId, ...result });
       break;
     }

@@ -230,6 +230,9 @@ fn project_analysis(a: &mut App) {
     a.store.clear_tags();
     a.names = a.analysis.allocations.iter().filter_map(|(&e, value)| value.name.clone().map(|name| (e, name))).collect();
     a.cfg.overrides.clear();
+    a.cfg.tag_colors = a.analysis.tags.values().filter_map(|tag| {
+        u32::from_str_radix(&tag.color[1..], 16).ok().map(|rgb| [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8])
+    }).collect();
     let tag_ids: std::collections::BTreeMap<&str, u8> = a.analysis.tags.keys().enumerate().map(|(i, id)| (id.as_str(), (i + 1) as u8)).collect();
     a.tag_labels = a.analysis.tags.values().map(|tag| tag.name.clone()).collect();
     for (&e, value) in &a.analysis.allocations {

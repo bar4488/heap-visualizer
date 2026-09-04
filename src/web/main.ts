@@ -18,8 +18,11 @@ import {
   initAnalysis, markDirty, tagIdFor, syncTagDatalist, buildMarksPanel,
   buildTagsSection, buildNamesSection, sendAddrMarks, gotoAddr, addAddrMark,
   renderAddrMarkLines, setAddrMarkYs, addBookmark, updateMarkers,
-  requestAllocInfo, buildMarks, applyMarks,
+  requestAllocInfo, buildMarks, applyMarks, loadCanonicalAnalysis,
+  commitCanonicalAnalysis, commitTagMembers, replaceAllocationTags, seedStandaloneAnalysis,
 } from './heap/analysis.ts';
+import { useServerAnalysis } from './analysis-port.ts';
+import { persistentId } from './analysis-port.ts';
 import {
   initEventsPanel, evState, refreshEventsPanel, onEventsSlice, flashRects,
   updateEventsPanel, onEvPos, resetEventsPanel, updateEventsSelBand,
@@ -47,9 +50,9 @@ import type {
   AllocInfo, Domain, FilterCompletions, FromWorker, Range, TraceField, TraceMeta,
 } from './protocol.ts';
 
-/** A user-authored tag. Its id is its index here + 1; id 0 means untagged. */
-type Tag = { name: string; color: string };
-type SavedFilter = { name: string; source: string };
+/** A user-authored tag; the worker derives its numeric render id from this stable id. */
+type Tag = { id?: string; name: string; color: string };
+type SavedFilter = { id?: string; name: string; source: string };
 
 /** A range selection or its mirror, in whichever domain `kind` names. */
 type Selection = { kind: Domain; lo: number; hi: number };
@@ -83,9 +86,9 @@ type UIState = {
   /** Creator event -> a `#rrggbb` override for every color mode. */
   allocColors: Map<number, string>;
   /** Time marks. */
-  bookmarks: { name: string; seq: number; t: number }[];
+  bookmarks: { id?: string; name: string; seq: number; t: number }[];
   /** Address marks; `addr` is a `0x…` string. */
-  addrMarks: { name: string; addr: string }[];
+  addrMarks: { id?: string; name: string; addr: string }[];
   /** Named filter source saved with the authored analysis. */
   savedFilters: SavedFilter[];
   /** The trace's custom field catalog, from the load pass. Read-only here. */
@@ -173,6 +176,7 @@ void initLocalServerMode($('st-server'), $('btn-connect'), async (config, status
   serverTraceController?.abort();
   serverTraceController = null;
   if (status.state === 'standalone') {
+    useServerAnalysis(null);
     if (serverStreaming) {
       serverStreaming = false;
       pendingServerTraceId = null;
@@ -183,6 +187,7 @@ void initLocalServerMode($('st-server'), $('btn-connect'), async (config, status
     return;
   }
   if (!config || status.state !== 'connected') return;
+  useServerAnalysis(config, status.session.trace.id);
   $('btn-open').hidden = true;
   $('btn-demo').hidden = true;
   if (renderedServerTraceId === status.session.trace.id
@@ -551,6 +556,10 @@ function onLoaded(m) {
   // filter/layout messages, pinned windows torn down and rebuilt) — prefer
   // the marks blob when there is one, and fall back to the session alone
   if (!restoreMarksAutosave()) restoreSession();
+  const loadAnalysis = renderedServerTraceId ? loadCanonicalAnalysis : seedStandaloneAnalysis;
+  void loadAnalysis().catch((error) => {
+    $('st-info').textContent = `analysis load failed: ${(error as Error).message}`;
+  });
 }
 
 function onState(m) {
@@ -1273,7 +1282,7 @@ function buildFieldCatalog() {
   }).join('');
 }
 
-function saveCurrentFilter() {
+async function saveCurrentFilter() {
   const input = $('saved-filter-name');
   const name = input.value.trim();
   if (!name) {
@@ -1281,15 +1290,16 @@ function saveCurrentFilter() {
     return;
   }
   const existing = UI.savedFilters.find((filter) => filter.name === name);
-  if (existing) existing.source = UI.filterDraft;
-  else UI.savedFilters.push({ name, source: UI.filterDraft });
+  await commitCanonicalAnalysis({
+    type: 'putSavedFilter', id: existing?.id || persistentId('filter'), name, source: UI.filterDraft,
+  });
   input.value = '';
   buildSavedFilters();
   markDirty();
   setFilterStatus(`Saved “${name}”`);
 }
 
-function tagFilterMatches() {
+async function tagFilterMatches() {
   if (!UI.filterApplied) {
     setFilterStatus('Apply a filter before tagging matches', 'invalid');
     return;
@@ -1305,8 +1315,9 @@ function tagFilterMatches() {
     $('st-info').textContent = 'cannot create another tag: the 255-tag limit is reached';
     return;
   }
-  const tag = tagIdFor(name);
+  const tag = await tagIdFor(name);
   worker.postMessage({ type: 'tag-filter', tag });
+  await commitTagMembers(tag);
   buildLegend();
   markDirty();
 }
@@ -1364,21 +1375,21 @@ $('filter-completions').onpointermove = (e) => {
   if (option) setActiveFilterCompletion(+option.dataset.completion);
 };
 $('filter-apply').onclick = () => { void applyFilterSource(); };
-$('saved-filter-save').onclick = saveCurrentFilter;
-$('filter-to-tag').onclick = tagFilterMatches;
+$('saved-filter-save').onclick = () => { void saveCurrentFilter(); };
+$('filter-to-tag').onclick = () => { void tagFilterMatches(); };
 $('filter-tag-name').onkeydown = (event) => {
   if (event.key === 'Enter') {
     event.preventDefault();
-    tagFilterMatches();
+    void tagFilterMatches();
   }
 };
 $('saved-filter-name').onkeydown = (event) => {
   if (event.key === 'Enter') {
     event.preventDefault();
-    saveCurrentFilter();
+    void saveCurrentFilter();
   }
 };
-$('saved-filter-list').onchange = (event) => {
+$('saved-filter-list').onchange = async (event) => {
   const input = event.target.closest('[data-saved-filter-name]');
   if (!input) return;
   let index = +input.dataset.savedFilterName;
@@ -1387,14 +1398,8 @@ $('saved-filter-list').onchange = (event) => {
     buildSavedFilters();
     return;
   }
-  const duplicate = UI.savedFilters.findIndex((filter, i) => i !== index && filter.name === name);
-  if (duplicate >= 0) {
-    UI.savedFilters.splice(duplicate, 1);
-    if (duplicate < index) index--;
-  }
-  UI.savedFilters[index].name = name;
-  buildSavedFilters();
-  markDirty();
+  const filter = UI.savedFilters[index];
+  await commitCanonicalAnalysis({ type: 'putSavedFilter', id: filter.id, name, source: filter.source });
 };
 // insert a catalogued field's reference at the cursor: a starting point for
 // an expression, not an applied filter — the user still has to say what about
@@ -1421,9 +1426,8 @@ $('saved-filter-list').onclick = (event) => {
   }
   const del = event.target.closest('[data-saved-filter-delete]');
   if (del) {
-    UI.savedFilters.splice(+del.dataset.savedFilterDelete, 1);
-    buildSavedFilters();
-    markDirty();
+    const filter = UI.savedFilters[+del.dataset.savedFilterDelete];
+    if (filter) void commitCanonicalAnalysis({ type: 'deleteSavedFilter', id: filter.id });
   }
 };
 $('filter-clear').onclick = () => {
@@ -1712,16 +1716,17 @@ $('sel-crop').onclick = () => {
   }
   clearSelection();
 };
-$('sel-tag').onclick = () => applySelTag(false);
-$('sel-tag-freed').onclick = () => applySelTag(true);
-$('sel-tag-name').addEventListener('keydown', (e) => { if (e.key === 'Enter') applySelTag(false); });
+$('sel-tag').onclick = () => { void applySelTag(false); };
+$('sel-tag-freed').onclick = () => { void applySelTag(true); };
+$('sel-tag-name').addEventListener('keydown', (e) => { if (e.key === 'Enter') void applySelTag(false); });
 $('sel-cancel').onclick = clearSelection;
 
-function applySelTag(byFree) {
+async function applySelTag(byFree) {
   if (!UI.sel) return;
-  const id = tagIdFor($('sel-tag-name').value);
+  const id = await tagIdFor($('sel-tag-name').value);
   if (!id) { $('sel-tag-name').focus(); return; }
   worker.postMessage({ type: 'tag-range', kind: UI.sel.kind, lo: UI.sel.lo, hi: UI.sel.hi, tag: id, byFree });
+  await commitTagMembers(id);
   // the color mode stays as-is: tags remain visible via their stripe
   buildLegend();
   clearSelection();
@@ -2076,16 +2081,13 @@ function buildDetailBody(root, info) {
   }
   q('.d-name').onchange = () => {
     const v = q('.d-name').value.trim();
-    if (v) UI.names.set(info.e, { name: v, id: info.id, addr: info.addr });
-    else UI.names.delete(info.e);
-    buildNamesSection();
-    sendNames();
+    void commitCanonicalAnalysis({ type: 'setAllocationName', creator: info.e, name: v || null });
     // keep the enclosing window's title in sync with the name
     const t = root.closest('.panel')?.querySelector('.ph-t');
     if (t) t.textContent = detailTitle(info);
     markDirty();
   };
-  q('.d-tag-apply').onclick = () => {
+  q('.d-tag-apply').onclick = async () => {
     const names = [...new Set(
       q('.d-tag').value.split(',').map((name) => name.trim()).filter(Boolean),
     )];
@@ -2093,11 +2095,11 @@ function buildDetailBody(root, info) {
       $('st-info').textContent = 'cannot create these tags: the 255-tag limit would be exceeded';
       return;
     }
-    const tags = names.map(tagIdFor);
+    const tags = await Promise.all(names.map(tagIdFor));
     worker.postMessage({ type: 'tag-event', e: info.e, tags });
+    await replaceAllocationTags(info.e, tags);
     info.tags = tags;
     buildLegend();
-    markDirty();
   };
   const curColor = UI.allocColors.get(info.e);
   if (curColor) q('.d-color').value = curColor;
@@ -2110,15 +2112,12 @@ function buildDetailBody(root, info) {
     // replace elements while the user is mid-gesture on them
     const sw = $('an-names').querySelector(`input[data-ncolor="${info.e}"]`);
     if (sw) sw.value = v;
-    markDirty();
+    void commitCanonicalAnalysis({ type: 'setAllocationColor', creator: info.e, color: v });
   };
   // the full names-list rebuild waits for the committed value
   q('.d-color').onchange = () => buildNamesSection();
   q('.d-color-clear').onclick = () => {
-    UI.allocColors.delete(info.e);
-    worker.postMessage({ type: 'alloc-color', e: info.e, rgb: null });
-    buildNamesSection();
-    markDirty();
+    void commitCanonicalAnalysis({ type: 'setAllocationColor', creator: info.e, color: null });
   };
 }
 

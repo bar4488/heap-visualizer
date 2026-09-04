@@ -3,6 +3,7 @@ export type LocalSession = {
   apiVersion: 1;
   mode: 'local';
   serverVersion: string;
+  analysisRevision: number;
   trace: { id: string; name: string; bytes: number; url: string };
 };
 
@@ -118,6 +119,7 @@ export async function connectLocalServer(
           || typeof body.trace.url !== 'string') {
         return { state: 'unreachable' };
       }
+      if (!Number.isSafeInteger(body.analysisRevision) || body.analysisRevision < 0) return { state: 'unreachable' };
       const traceURL = new URL(body.trace.url, config.baseURL);
       if (traceURL.origin !== config.baseURL || !body.trace.url.startsWith('/')) {
         return { state: 'unreachable' };

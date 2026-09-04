@@ -62,6 +62,7 @@ test('a valid session response establishes connected mode', async () => {
         apiVersion: 1,
         mode: 'local',
         serverVersion: '0.1.0',
+        analysisRevision: 0,
         trace: { id: 'trace-id', name: 'trace.heapl', bytes: 1, url: '/api/v1/trace' },
       });
     },
@@ -73,6 +74,7 @@ test('a valid session response establishes connected mode', async () => {
       apiVersion: 1,
       mode: 'local',
       serverVersion: '0.1.0',
+      analysisRevision: 0,
       trace: { id: 'trace-id', name: 'trace.heapl', bytes: 1, url: '/api/v1/trace' },
     },
   });
@@ -85,6 +87,7 @@ test('a session cannot direct trace retrieval away from its loopback origin', as
       apiVersion: 1,
       mode: 'local',
       serverVersion: '0.1.0',
+      analysisRevision: 0,
       trace: { id: 'trace-id', name: 'trace.heapl', bytes: 1, url: 'https://example.test/trace' },
     }),
   );
@@ -164,7 +167,7 @@ test('disconnect wins over a late connection response', async () => {
     assert.equal(element.dataset.state, 'standalone');
     assert.equal(store.value(), null);
 
-    resolveFetch(Response.json({ apiVersion: 1, mode: 'local', serverVersion: 'late' }));
+    resolveFetch(Response.json({ apiVersion: 1, mode: 'local', serverVersion: 'late', analysisRevision: 0 }));
     await initializing;
     assert.equal(element.dataset.state, 'standalone');
   } finally {

@@ -149,6 +149,7 @@ struct SessionResponse<'a> {
     server_version: &'a str,
     trace: TraceResponse<'a>,
     metadata: &'a serde_json::Value,
+    analysis_revision: u64,
 }
 
 #[derive(Serialize)]
@@ -265,6 +266,7 @@ async fn session(State(state): State<ServerState>, headers: HeaderMap) -> Respon
         Ok(origin) => origin,
         Err(error) => return error.response(),
     };
+    let analysis_revision = state.engine.lock().expect("engine lock poisoned").analysis().revision;
     json(
         StatusCode::OK,
         &SessionResponse {
@@ -278,6 +280,7 @@ async fn session(State(state): State<ServerState>, headers: HeaderMap) -> Respon
                 url: "/api/v1/trace",
             },
             metadata: &state.metadata,
+            analysis_revision,
         },
         origin,
     )

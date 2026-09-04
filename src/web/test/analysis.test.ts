@@ -29,6 +29,9 @@ const posted = [];
 
 // the engine's authoritative tag->events map, as `tags-dump` would report it
 let tagsDump = { 1: [10, 11], 2: [20] };
+let analysisDocument = {
+  version: 1, revision: 0, allocations: {}, tags: {}, bookmarks: {}, addressMarks: {}, savedFilters: {},
+};
 
 // a worker stand-in that answers rpc requests inline
 initRpc({
@@ -36,6 +39,18 @@ initRpc({
     posted.push(m);
     if (m.type === 'tags-dump') queueMicrotask(() => handleReply({ type: 'tags-dump', reqId: m.reqId, tags: tagsDump }));
     if (m.type === 'alloc-info') queueMicrotask(() => handleReply({ type: 'alloc-info-result', reqId: m.reqId, info: null }));
+    if (m.type === 'analysis-get') queueMicrotask(() => handleReply({ type: 'analysis-get-result', reqId: m.reqId, document: analysisDocument }));
+    if (m.type === 'analysis-replace') {
+      analysisDocument = m.document;
+      queueMicrotask(() => handleReply({ type: 'analysis-replace-result', reqId: m.reqId, ok: true, revision: analysisDocument.revision }));
+    }
+    if (m.type === 'analysis-change') {
+      const change = m.change;
+      if (change.type === 'putTag') analysisDocument.tags[change.id] = { name: change.name.trim(), color: change.color.toLowerCase() };
+      if (change.type === 'deleteTag') delete analysisDocument.tags[change.id];
+      analysisDocument.revision++;
+      queueMicrotask(() => handleReply({ type: 'analysis-change-result', reqId: m.reqId, ok: true, revision: analysisDocument.revision, change }));
+    }
   },
 });
 
@@ -172,22 +187,17 @@ test('buildMarks captures the analysis layer and folds in a session', async () =
   assert.ok(typeof m.saved === 'string' && m.saved.endsWith('Z'));
 });
 
-test('tag mutations mirror the live completion catalog', () => {
+test('tag mutations mirror the live completion catalog', async () => {
   ui.tags = [];
+  analysisDocument = { version: 1, revision: 0, allocations: {}, tags: {}, bookmarks: {}, addressMarks: {}, savedFilters: {} };
   posted.length = 0;
 
-  assert.equal(analysis.tagIdFor('quoted "tag"'), 1);
-  assert.deepEqual(
-    posted.filter((message) => message.type === 'tag-labels').at(-1),
-    { type: 'tag-labels', labels: ['quoted "tag"'] },
-  );
+  assert.equal(await analysis.tagIdFor('quoted "tag"'), 1);
+  assert.equal(ui.tags[0].name, 'quoted "tag"');
 
-  analysis.tagIdFor('second');
-  analysis.deleteTag(1);
-  assert.deepEqual(
-    posted.filter((message) => message.type === 'tag-labels').at(-1),
-    { type: 'tag-labels', labels: ['second'] },
-  );
+  await analysis.tagIdFor('second');
+  await analysis.deleteTag(1);
+  assert.deepEqual(ui.tags.map((tag) => tag.name), ['second']);
 
   posted.length = 0;
   analysis.applyMarks({

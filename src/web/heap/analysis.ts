@@ -16,14 +16,113 @@ import { showPanel } from '../shell/panels.ts';
 import { esc, fmtNum } from '../fmt.ts';
 import { request } from '../rpc.ts';
 import { buildSession, applySession } from '../session.ts';
+import { changeAnalysis, persistentId, readAnalysis, replaceStandaloneAnalysis, type AnalysisDocument } from '../analysis-port.ts';
 
 let d = null;
+let canonical: AnalysisDocument | null = null;
+let changeQueue: Promise<AnalysisDocument | null> = Promise.resolve(null);
 
 // deps: { ui, post, CAT, DEFAULT_ROW_BYTES, fmtTime, buildLegend, buildFilterPanel,
 //         sendNames, rowBytesValue, setRowBytesInput, sendCollapseMin }
 export function initAnalysis(deps) {
   d = deps;
   wireAnalysisPanel();
+}
+
+export async function loadCanonicalAnalysis() {
+  canonical = await readAnalysis();
+  projectCanonicalAnalysis();
+}
+
+export async function seedStandaloneAnalysis() {
+  const tagged = await requestTagsDump();
+  const tags = Object.fromEntries(d.ui.tags.map((tag, index) => {
+    tag.id ||= `tag-${index + 1}`;
+    return [tag.id, { name: tag.name, color: tag.color }];
+  }));
+  const allocations = {};
+  for (const [creator, value] of d.ui.names) allocations[creator] = { ...(allocations[creator] || {}), name: value.name };
+  for (const [creator, color] of d.ui.allocColors) allocations[creator] = { ...(allocations[creator] || {}), color };
+  for (const [numeric, creators] of Object.entries(tagged)) {
+    const id = d.ui.tags[+numeric - 1]?.id;
+    if (!id) continue;
+    for (const creator of creators) {
+      const value = allocations[creator] ||= {};
+      (value.tags ||= []).push(id);
+    }
+  }
+  const withIds = (values, prefix) => Object.fromEntries(values.map((value, index) => {
+    value.id ||= `${prefix}-${index + 1}`;
+    const { id, ...rest } = value;
+    return [id, rest];
+  }));
+  canonical = await replaceStandaloneAnalysis({
+    version: 1,
+    revision: 0,
+    allocations,
+    tags,
+    bookmarks: withIds(d.ui.bookmarks, 'bookmark'),
+    addressMarks: withIds(d.ui.addrMarks, 'address'),
+    savedFilters: withIds(d.ui.savedFilters, 'filter'),
+  });
+  projectCanonicalAnalysis();
+}
+
+export function commitCanonicalAnalysis(change) {
+  const run = async () => {
+    if (!canonical) canonical = await readAnalysis();
+    canonical = await changeAnalysis(canonical, change);
+    projectCanonicalAnalysis();
+    markDirty();
+    return canonical;
+  };
+  changeQueue = changeQueue.then(run, run);
+  return changeQueue;
+}
+
+function commit(change) {
+  void commitCanonicalAnalysis(change).catch((error) => {
+    $('st-info').textContent = `analysis change failed: ${(error as Error).message}`;
+  });
+}
+
+export function tagPersistentId(id) { return d.ui.tags[id - 1]?.id || null; }
+
+export async function commitTagMembers(id) {
+  const tag = d.ui.tags[id - 1];
+  if (!tag) return;
+  const tagged = await requestTagsDump();
+  await commitCanonicalAnalysis({ type: 'replaceTagMembers', tagId: tag.id, creators: tagged[String(id)] || [] });
+}
+
+export async function replaceAllocationTags(creator, numericIds) {
+  const tagIds = numericIds.map(tagPersistentId).filter(Boolean);
+  await commitCanonicalAnalysis({ type: 'replaceAllocationTags', creator, tagIds });
+}
+
+function projectCanonicalAnalysis() {
+  if (!canonical) return;
+  d.ui.tags = Object.entries(canonical.tags).map(([id, tag]) => ({ id, ...tag }));
+  const previousNames = d.ui.names;
+  d.ui.names = new Map();
+  d.ui.allocColors = new Map();
+  for (const [creator, value] of Object.entries(canonical.allocations)) {
+    const e = +creator;
+    if (value.name) {
+      const previous = previousNames.get(e);
+      d.ui.names.set(e, { name: value.name, id: previous?.id ?? e, addr: previous?.addr ?? '' });
+    }
+    if (value.color) d.ui.allocColors.set(e, value.color);
+  }
+  d.ui.bookmarks = Object.entries(canonical.bookmarks).map(([id, value]) => ({ id, ...value }));
+  d.ui.addrMarks = Object.entries(canonical.addressMarks).map(([id, value]) => ({ id, ...value }));
+  d.ui.savedFilters = Object.entries(canonical.savedFilters).map(([id, value]) => ({ id, ...value }));
+  sendAddrMarks();
+  syncTagDatalist();
+  buildMarksPanel();
+  d.buildFilterPanel();
+  d.buildLegend();
+  updateMarkers();
 }
 
 // tracks whether marks changed since the last save/load/autosave — drives
@@ -47,19 +146,14 @@ export function normalizeSavedFilters(value) {
 // tags
 // ---------------------------------------------------------------------------
 
-export function tagIdFor(name) {
+export async function tagIdFor(name) {
   name = name.trim();
   if (!name) return 0;
   let i = d.ui.tags.findIndex((t) => t.name === name);
   if (i === -1) {
-    i = d.ui.tags.length;
-    d.ui.tags.push({ name, color: d.CAT[i % 12] });
-    syncTagDatalist();
-    sendTagColors();
-    buildTagsSection();
-    // the Marks panel is not revealed here: tags live in the Filter panel
-    // (T032), and loading a trace already unhides its button
-    markDirty();
+    const color = d.CAT[d.ui.tags.length % 12];
+    await commitCanonicalAnalysis({ type: 'putTag', id: persistentId('tag'), name, color });
+    i = d.ui.tags.findIndex((t) => t.name === name);
   }
   return i + 1;
 }
@@ -114,16 +208,8 @@ export function buildTagsSection() {
 }
 
 export function deleteTag(id) {
-  d.post({ type: 'retag', from: id, to: 0 });
-  for (let k = id + 1; k <= d.ui.tags.length; k++) {
-    d.post({ type: 'retag', from: k, to: k - 1 });
-  }
-  d.ui.tags.splice(id - 1, 1);
-  syncTagDatalist();
-  sendTagColors();
-  buildTagsSection();
-  d.buildLegend();
-  markDirty();
+  const tag = d.ui.tags[id - 1];
+  return tag ? commitCanonicalAnalysis({ type: 'deleteTag', id: tag.id }) : Promise.resolve(canonical);
 }
 
 // ---------------------------------------------------------------------------
@@ -169,9 +255,7 @@ export function gotoAddr(addrHex) {
 }
 
 export function addAddrMark(addrHex) {
-  d.ui.addrMarks.push({ name: `addr ${d.ui.addrMarks.length + 1}`, addr: addrHex });
-  sendAddrMarks();
-  buildAddrMarksSection();
+  commit({ type: 'putAddressMark', id: persistentId('address'), name: `addr ${d.ui.addrMarks.length + 1}`, addr: addrHex });
   $('st-info').textContent = `marked ${addrHex} — rename it in the Marks panel`;
   showPanel('analysis-panel');
   markDirty();
@@ -214,9 +298,7 @@ export function renderAddrMarkLines() {
 export function addBookmark() {
   if (!d.ui.state) return;
   const b = { name: `mark ${d.ui.bookmarks.length + 1}`, seq: d.ui.state.seq, t: d.ui.state.t };
-  d.ui.bookmarks.push(b);
-  buildBookmarksSection();
-  updateMarkers();
+  commit({ type: 'putBookmark', id: persistentId('bookmark'), ...b });
   $('st-info').textContent = `bookmarked seq ${fmtNum(b.seq)} · ${d.fmtTime(b.t)} — rename it in the Marks panel`;
   showPanel('analysis-panel');
   markDirty();
@@ -384,9 +466,8 @@ export function applyMarks(obj, quiet?) {
 function wireAnalysisPanel() {
   delegate($('an-bookmarks'), 'change', {
     bmname: (inp, i) => {
-      d.ui.bookmarks[+i].name = inp.value.trim() || `mark ${+i + 1}`;
-      updateMarkers();
-      markDirty();
+      const bookmark = d.ui.bookmarks[+i];
+      commit({ type: 'putBookmark', id: bookmark.id, name: inp.value.trim() || `mark ${+i + 1}`, seq: bookmark.seq, t: bookmark.t });
     },
   });
   delegate($('an-bookmarks'), 'click', {
@@ -395,79 +476,57 @@ function wireAnalysisPanel() {
     // time + place: centers the allocation the event touched
     bmloc: (_, i) => d.post({ type: 'jump', seq: d.ui.bookmarks[+i].seq }),
     bmdel: (_, i) => {
-      d.ui.bookmarks.splice(+i, 1);
-      buildBookmarksSection();
-      updateMarkers();
-      markDirty();
+      commit({ type: 'deleteBookmark', id: d.ui.bookmarks[+i].id });
     },
   });
 
   delegate($('tags-list'), 'change', {
     tagname: (inp, id) => {
       const v = inp.value.trim();
-      if (v) d.ui.tags[+id - 1].name = v;
-      syncTagDatalist();
-      d.post({ type: 'tag-labels', labels: d.ui.tags.map((t) => t.name) });
-      d.buildLegend();
-      markDirty();
+      const tag = d.ui.tags[+id - 1];
+      if (v && tag) commit({ type: 'putTag', id: tag.id, name: v, color: tag.color });
     },
   });
-  delegate($('tags-list'), 'input', {
+  delegate($('tags-list'), 'change', {
     tagcolor: (inp, id) => {
-      d.ui.tags[+id - 1].color = inp.value;
-      sendTagColors();
-      d.buildLegend();
-      markDirty();
+      const tag = d.ui.tags[+id - 1];
+      if (tag) commit({ type: 'putTag', id: tag.id, name: tag.name, color: inp.value });
     },
   });
   delegate($('tags-list'), 'click', {
     tagdel: (_, id) => deleteTag(+id),
   });
 
-  delegate($('an-names'), 'input', {
+  delegate($('an-names'), 'change', {
     ncolor: (inp, e) => {
-      d.ui.allocColors.set(+e, inp.value);
-      d.post({ type: 'alloc-color', e: +e, rgb: parseInt(inp.value.slice(1), 16) });
-      markDirty();
+      commit({ type: 'setAllocationColor', creator: +e, color: inp.value });
     },
   });
   delegate($('an-names'), 'change', {
     nname: (inp, e) => {
       const v = inp.value.trim();
-      if (v) d.ui.names.get(+e).name = v;
-      else { d.ui.names.delete(+e); buildNamesSection(); }
-      d.sendNames();
-      markDirty();
+      commit({ type: 'setAllocationName', creator: +e, name: v || null });
     },
   });
   delegate($('an-names'), 'click', {
     // select, jump to birth, and open the allocation info window
     ngo: (_, e) => d.post({ type: 'jump', seq: +e + 1, select: true }),
     ndel: (_, e) => {
-      d.ui.names.delete(+e);
-      if (d.ui.allocColors.delete(+e)) {
-        d.post({ type: 'alloc-color', e: +e, rgb: null });
-      }
-      buildNamesSection();
-      d.sendNames();
-      markDirty();
+      commit({ type: 'setAllocationName', creator: +e, name: null });
+      if (d.ui.allocColors.has(+e)) commit({ type: 'setAllocationColor', creator: +e, color: null });
     },
   });
 
   delegate($('an-addrmarks'), 'change', {
     amname: (inp, i) => {
-      d.ui.addrMarks[+i].name = inp.value.trim() || `addr ${+i + 1}`;
-      renderAddrMarkLines();
-      markDirty();
+      const mark = d.ui.addrMarks[+i];
+      commit({ type: 'putAddressMark', id: mark.id, name: inp.value.trim() || `addr ${+i + 1}`, addr: mark.addr });
     },
   });
   delegate($('an-addrmarks'), 'click', {
     amgo: (_, i) => gotoAddr(d.ui.addrMarks[+i].addr),
     amdel: (_, i) => {
-      d.ui.addrMarks.splice(+i, 1);
-      markDirty();
-      sendAddrMarks();
-      buildAddrMarksSection();
+      commit({ type: 'deleteAddressMark', id: d.ui.addrMarks[+i].id });
     },
   });
 

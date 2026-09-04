@@ -69,6 +69,8 @@ pub enum Change {
     SetAllocationName { creator: u32, name: Option<String> },
     SetAllocationColor { creator: u32, color: Option<String> },
     SetAllocationTag { creator: u32, tag_id: String, present: bool },
+    ReplaceAllocationTags { creator: u32, tag_ids: BTreeSet<String> },
+    ReplaceTagMembers { tag_id: String, creators: BTreeSet<u32> },
     PutTag { id: String, name: String, color: String },
     DeleteTag { id: String },
     PutBookmark { id: String, name: String, seq: u32, t: f64 },
@@ -120,6 +122,19 @@ impl Document {
                 let entry = self.allocations.entry(*e).or_default();
                 if *present { entry.tags.insert(tag_id.clone()); } else { entry.tags.remove(tag_id); }
                 self.prune(*e);
+            }
+            Change::ReplaceAllocationTags { creator: e, tag_ids } => {
+                require_creator(*e, &creator)?;
+                if tag_ids.iter().any(|id| !self.tags.contains_key(id)) { return Err(ApplyError::Invalid("unknown tag")); }
+                self.allocations.entry(*e).or_default().tags = tag_ids.clone();
+                self.prune(*e);
+            }
+            Change::ReplaceTagMembers { tag_id, creators } => {
+                if !self.tags.contains_key(tag_id) { return Err(ApplyError::Invalid("unknown tag")); }
+                if creators.iter().any(|&event| !creator(event)) { return Err(ApplyError::Invalid("allocation not found")); }
+                for value in self.allocations.values_mut() { value.tags.remove(tag_id); }
+                for &event in creators { self.allocations.entry(event).or_default().tags.insert(tag_id.clone()); }
+                self.allocations.retain(|_, value| value != &Allocation::default());
             }
             Change::PutTag { id, name, color } => {
                 if !self.tags.contains_key(id) && self.tags.len() >= MAX_TAGS { return Err(ApplyError::Invalid("too many tags")); }
@@ -173,6 +188,12 @@ fn normalize(change: &mut Change) -> Result<(), ApplyError> {
         SetAllocationName { name: Some(name), .. } => clean_name(name)?,
         SetAllocationColor { color: Some(color), .. } => clean_color(color)?,
         SetAllocationTag { tag_id, .. } => clean_id(tag_id)?,
+        ReplaceAllocationTags { tag_ids, .. } => {
+            let mut clean = BTreeSet::new();
+            for mut id in std::mem::take(tag_ids) { clean_id(&mut id)?; clean.insert(id); }
+            *tag_ids = clean;
+        }
+        ReplaceTagMembers { tag_id, .. } => clean_id(tag_id)?,
         PutTag { id, name, color } => { clean_id(id)?; clean_name(name)?; clean_color(color)?; }
         DeleteTag { id } | DeleteBookmark { id } | DeleteAddressMark { id } | DeleteSavedFilter { id } => clean_id(id)?,
         PutBookmark { id, name, t, .. } => { clean_id(id)?; clean_name(name)?; if !t.is_finite() { return Err(ApplyError::Invalid("invalid time")); } }
