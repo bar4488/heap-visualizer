@@ -204,10 +204,7 @@ impl Engine {
     pub fn analysis(&self) -> &analysis::Document { &self.app.analysis }
 
     pub fn replace_analysis(&mut self, document: analysis::Document) -> Result<(), analysis::ApplyError> {
-        document.validate(self.app.store.len(), |e| is_creator(&self.app.store, e))?;
-        self.app.analysis = document;
-        project_analysis(&mut self.app);
-        Ok(())
+        replace_analysis(&mut self.app, document)
     }
 
     pub fn apply_analysis(&mut self, expected: u64, change: analysis::Change) -> Result<analysis::Change, analysis::ApplyError> {
@@ -220,6 +217,13 @@ impl Engine {
 
 fn is_creator(store: &Store, e: u32) -> bool {
     e < store.len() && matches!(store.op[e as usize], OP_M | OP_R)
+}
+
+fn replace_analysis(a: &mut App, document: analysis::Document) -> Result<(), analysis::ApplyError> {
+    document.validate(a.store.len(), |e| is_creator(&a.store, e))?;
+    a.analysis = document;
+    project_analysis(a);
+    Ok(())
 }
 
 fn project_analysis(a: &mut App) {
@@ -412,6 +416,58 @@ fn write_metadata_json(a: &mut App) {
 pub extern "C" fn hp_warnings_json() {
     let a = unsafe { &mut *app() };
     write_warnings_json(a);
+    ret_str(&a.out);
+}
+
+#[no_mangle]
+pub extern "C" fn hp_analysis_json() {
+    let a = unsafe { &mut *app() };
+    a.out = serde_json::to_string(&a.analysis).expect("analysis is serializable");
+    ret_str(&a.out);
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AnalysisApplyRequest {
+    expected_revision: u64,
+    change: analysis::Change,
+}
+
+#[no_mangle]
+pub extern "C" fn hp_analysis_apply(len: u32) {
+    let a = unsafe { &mut *app() };
+    let request = serde_json::from_slice::<AnalysisApplyRequest>(&a.buf[..len as usize]);
+    let response = match request {
+        Ok(request) => {
+            let store = &a.store;
+            match a.analysis.apply(request.expected_revision, store.len(), request.change, |e| is_creator(store, e)) {
+                Ok(change) => {
+                    project_analysis(a);
+                    serde_json::json!({ "ok": true, "revision": a.analysis.revision, "change": change })
+                }
+                Err(analysis::ApplyError::Conflict) => serde_json::json!({ "ok": false, "error": "conflict", "revision": a.analysis.revision }),
+                Err(analysis::ApplyError::Invalid(message)) => serde_json::json!({ "ok": false, "error": "invalid", "message": message, "revision": a.analysis.revision }),
+            }
+        }
+        Err(_) => serde_json::json!({ "ok": false, "error": "invalid", "message": "invalid analysis change", "revision": a.analysis.revision }),
+    };
+    a.out = serde_json::to_string(&response).expect("analysis response is serializable");
+    ret_str(&a.out);
+}
+
+#[no_mangle]
+pub extern "C" fn hp_analysis_replace(len: u32) {
+    let a = unsafe { &mut *app() };
+    let document = serde_json::from_slice::<analysis::Document>(&a.buf[..len as usize]);
+    let response = match document {
+        Ok(document) => match replace_analysis(a, document) {
+            Ok(()) => serde_json::json!({ "ok": true, "revision": a.analysis.revision }),
+            Err(analysis::ApplyError::Invalid(message)) => serde_json::json!({ "ok": false, "error": "invalid", "message": message }),
+            Err(analysis::ApplyError::Conflict) => unreachable!(),
+        },
+        Err(_) => serde_json::json!({ "ok": false, "error": "invalid", "message": "invalid analysis document" }),
+    };
+    a.out = serde_json::to_string(&response).expect("analysis response is serializable");
     ret_str(&a.out);
 }
 

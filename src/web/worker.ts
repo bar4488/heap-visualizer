@@ -839,6 +839,30 @@ onmessage = async (ev: MessageEvent<ToWorker>) => {
       postMessage({ type: 'filter-apply-result', reqId: m.reqId, ...result });
       break;
     }
+    case 'analysis-get': {
+      E.hp_analysis_json();
+      postMessage({ type: 'analysis-get-result', reqId: m.reqId, document: retJson() });
+      break;
+    }
+    case 'analysis-change': {
+      const len = writeBuf(te.encode(JSON.stringify({
+        expectedRevision: m.expectedRevision,
+        change: m.change,
+      })));
+      E.hp_analysis_apply(len);
+      const result = retJson();
+      if (result.ok) allDirty();
+      postMessage({ type: 'analysis-change-result', reqId: m.reqId, ...result });
+      break;
+    }
+    case 'analysis-replace': {
+      const len = writeBuf(te.encode(JSON.stringify(m.document)));
+      E.hp_analysis_replace(len);
+      const result = retJson();
+      if (result.ok) allDirty();
+      postMessage({ type: 'analysis-replace-result', reqId: m.reqId, ...result });
+      break;
+    }
     // domain conversion: given a [lo,hi] range in the `kind` domain (0 = time,
     // 1 = seq), return the equivalent range in the other domain — shared by
     // crop (time -> seq) and the time/events strip mirroring (either way)

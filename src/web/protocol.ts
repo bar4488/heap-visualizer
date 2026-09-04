@@ -148,7 +148,10 @@ export type Query =
   | { type: 'ev-pos'; reqId: number; seq: number }
   | { type: 'tlhover'; reqId: number; kind: Domain; x: number }
   | { type: 'filter-check'; reqId: number; source: string; cursor: number }
-  | { type: 'filter-apply'; reqId: number; source: string };
+  | { type: 'filter-apply'; reqId: number; source: string }
+  | { type: 'analysis-get'; reqId: number }
+  | { type: 'analysis-change'; reqId: number; expectedRevision: number; change: unknown }
+  | { type: 'analysis-replace'; reqId: number; document: unknown };
 
 export type ToWorker = Command | Query;
 
@@ -183,6 +186,12 @@ export type ReplyTo = {
     elapsedMs?: number;
     diagnostic?: FilterDiagnostic;
   };
+  'analysis-get': { type: 'analysis-get-result'; reqId: number; document: unknown };
+  'analysis-change': {
+    type: 'analysis-change-result'; reqId: number; ok: boolean; revision: number;
+    change?: unknown; error?: string; message?: string;
+  };
+  'analysis-replace': { type: 'analysis-replace-result'; reqId: number; ok: boolean; revision?: number; error?: string; message?: string };
 };
 
 export type QueryType = keyof ReplyTo;
