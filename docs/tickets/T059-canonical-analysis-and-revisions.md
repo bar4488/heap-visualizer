@@ -15,9 +15,13 @@ changed through optimistic revisioned operations.
 
 ## Done when
 
-- [ ] A versioned analysis document uses stable persistent ids rather than
-      worker tag indexes or array positions, validates references against the
-      active trace, and has pure apply-change semantics covered by fixtures.
+- [ ] A versioned core-owned analysis document uses stable persistent ids
+      rather than worker tag indexes or array positions, validates references
+      against the active trace, and has pure apply-change semantics covered by
+      fixtures.
+- [ ] Standalone and connected UI paths call one analysis-port contract: its
+      worker and HTTP adapters execute the same Rust core change implementation,
+      with no TypeScript or server-side duplicate evaluator.
 - [ ] The binary accepts a server data directory, loads analysis by trace
       identity before listening, and durably replaces it before acknowledging a
       committed revision.
@@ -41,7 +45,8 @@ See [E021](../explorations/E021-a-shared-local-session-for-people-and-agents.md)
 
 ## Handoff
 
-First extract the analysis value validation and pure change application from
-`src/web/heap/analysis.ts` into a DOM-free module with versioned JSON fixtures.
-Define the stable-id wire document in `ARCH-008` before adding Rust persistence
-or routes; the current `.heapa` numeric tag ids are explicitly not API identity.
+Add the canonical document and change evaluator to `src/core/` first, exposing
+it through both owned `Engine` methods and WASM exports. Then introduce one
+TypeScript analysis-port interface with worker and HTTP adapters and migrate the
+existing handlers in `src/web/heap/analysis.ts`; do not retain a TypeScript
+change evaluator. The current `.heapa` numeric tag ids are not API identity.

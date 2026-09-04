@@ -193,3 +193,11 @@ allocation detail or not-found and must omit render rectangles. `POST
 source-span diagnostics or a trace-identified page of creator allocations. A
 query is ephemeral: it must not install filter, view, or selection state in the
 native engine or any connected browser.
+
+Analysis validation and change semantics must have one implementation in the
+Rust core, used by both its WASM and native forms. The browser must issue every
+analysis operation through one analysis-port contract: standalone mode routes
+it to the worker and connected mode routes it to HTTP. TypeScript may project a
+returned canonical document into UI and render messages, but neither the web
+adapter nor local-server routes may independently normalize or apply analysis
+changes. See [D011](../docs/decisions/D011-analysis-changes-have-one-core-implementation.md).
