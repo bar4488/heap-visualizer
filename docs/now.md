@@ -224,11 +224,10 @@ layout and the send path in a browser — the outcomes are unit-tested and the
 routes were driven with `curl` against the container, but no automated check
 presses the button (D001).
 
-**The server now owns a native engine and bounded read surface:** session and
-metadata expose the parsed trace, while warnings and events are authenticated,
-identified, and paged. The next E021 slice is allocation detail and ephemeral
-filter queries, but it has no ticket until grounded. The browser still owns all
-rendering. The older backlog is
+**T058 is in flight:** add render-free allocation detail and ephemeral bounded
+filter queries to the server's native read surface. Canonical revisioned
+analysis and synchronization follow as their own slice. The browser still owns
+all rendering. The older backlog is
 [T045](tickets/T045-lower-integer-arithmetic-to-a-narrow-path.md) and
 [T046](tickets/T046-negative-numbers-are-writable.md) — both came out of that
 work, neither is urgent — plus T009, T030, and the blocked T004.
@@ -286,5 +285,5 @@ friction with `PROTOCOL.md` itself goes in
 
 <!-- generated:begin -->
 ## Doing
-Nothing in flight.
+- [T058](tickets/T058-allocation-detail-and-filter-query.md) — allocation detail and ephemeral filter query
 <!-- generated:end -->

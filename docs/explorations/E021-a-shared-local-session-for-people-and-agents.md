@@ -389,3 +389,5 @@ it.
   with one trace and have a connected browser load it automatically.
 - [T057](../tickets/T057-native-engine-and-bounded-events.md) — give the server
   an owned native engine and bounded semantic event reads.
+- [T058](../tickets/T058-allocation-detail-and-filter-query.md) — add render-free
+  allocation detail and ephemeral bounded filter queries.
