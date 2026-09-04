@@ -214,11 +214,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "heap-visualizer-core"
+version = "0.1.0"
+dependencies = [
+ "heap-visualizer-filter-dsl",
+]
+
+[[package]]
+name = "heap-visualizer-filter-dsl"
+version = "0.1.0"
+
+[[package]]
 name = "heap-visualizer-local-server"
 version = "0.1.0"
 dependencies = [
  "axum",
  "getrandom",
+ "heap-visualizer-core",
  "http-body-util",
  "serde",
  "serde_json",

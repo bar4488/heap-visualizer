@@ -59,13 +59,17 @@ async fn main() {
         eprintln!("error: cannot read {}: {error}", config.trace.display());
         std::process::exit(1);
     });
+    let engine = trace.parse_engine().unwrap_or_else(|error| {
+        eprintln!("error: cannot parse {}: {error}", config.trace.display());
+        std::process::exit(1);
+    });
     let token = fresh_token().unwrap_or_else(|error| {
         eprintln!("error: could not generate a connection capability: {error}");
         std::process::exit(1);
     });
     let address = SocketAddr::from(([127, 0, 0, 1], config.port));
     let api_url = format!("http://{address}");
-    let state = ServerState::new(token.clone(), config.port, trace);
+    let state = ServerState::new(token.clone(), config.port, trace, engine);
     let listener = TcpListener::bind(address).await.unwrap_or_else(|error| {
         eprintln!("error: cannot listen on {address}: {error}");
         std::process::exit(1);

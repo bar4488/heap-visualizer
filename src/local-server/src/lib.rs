@@ -2,13 +2,13 @@ use std::{
     fs::File,
     io::{self, Read, Write},
     path::Path,
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use axum::{
     body::Body,
     extract::State,
-    http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode},
+    http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri},
     response::Response,
     routing::get,
     Router,
@@ -28,14 +28,33 @@ pub struct ServerState {
     token: Arc<str>,
     port: u16,
     trace: TraceFile,
+    engine: Arc<Mutex<heap_visualizer_core::Engine>>,
+    metadata: Arc<serde_json::Value>,
+    fields: Arc<serde_json::Value>,
+    warnings: Arc<Vec<serde_json::Value>>,
 }
 
 impl ServerState {
-    pub fn new(token: String, port: u16, trace: TraceFile) -> Self {
+    pub fn new(
+        token: String,
+        port: u16,
+        trace: TraceFile,
+        mut engine: heap_visualizer_core::Engine,
+    ) -> Self {
+        let metadata = serde_json::from_str(&engine.metadata_json())
+            .expect("the core produces valid metadata JSON");
+        let fields = serde_json::from_str(&engine.fields_json())
+            .expect("the core produces valid field JSON");
+        let warnings = serde_json::from_str(&engine.warnings_json())
+            .expect("the core produces valid warning JSON");
         Self {
             token: token.into(),
             port,
             trace,
+            engine: Arc::new(Mutex::new(engine)),
+            metadata: Arc::new(metadata),
+            fields: Arc::new(fields),
+            warnings: Arc::new(warnings),
         }
     }
 }
@@ -79,6 +98,22 @@ impl TraceFile {
             len,
         })
     }
+
+    pub fn parse_engine(&self) -> io::Result<heap_visualizer_core::Engine> {
+        let mut file = self.snapshot.reopen()?;
+        let mut engine = heap_visualizer_core::Engine::new();
+        let mut chunk = vec![0_u8; 8 << 20];
+        engine.parse_begin();
+        loop {
+            let read = file.read(&mut chunk)?;
+            if read == 0 {
+                break;
+            }
+            engine.parse_chunk(&chunk[..read]);
+        }
+        engine.parse_end();
+        Ok(engine)
+    }
 }
 
 #[derive(Serialize)]
@@ -88,6 +123,7 @@ struct SessionResponse<'a> {
     mode: &'a str,
     server_version: &'a str,
     trace: TraceResponse<'a>,
+    metadata: &'a serde_json::Value,
 }
 
 #[derive(Serialize)]
@@ -104,10 +140,32 @@ struct ErrorResponse<'a> {
     error: &'a str,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MetadataResponse<'a> {
+    trace_id: &'a str,
+    metadata: &'a serde_json::Value,
+    fields: &'a serde_json::Value,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PageResponse<'a> {
+    trace_id: &'a str,
+    from: u32,
+    count: usize,
+    total: u32,
+    next: Option<u32>,
+    items: &'a [serde_json::Value],
+}
+
 pub fn router(state: ServerState) -> Router {
     Router::new()
         .route("/api/v1/session", get(session).options(preflight))
         .route("/api/v1/trace", get(trace).options(preflight))
+        .route("/api/v1/metadata", get(metadata).options(preflight))
+        .route("/api/v1/warnings", get(warnings).options(preflight))
+        .route("/api/v1/events", get(events).options(preflight))
         .fallback(not_found)
         .with_state(state)
 }
@@ -128,41 +186,10 @@ pub fn connection_string(api_url: &str, token: &str) -> String {
 }
 
 async fn session(State(state): State<ServerState>, headers: HeaderMap) -> Response {
-    if !host_allowed(&headers, state.port) {
-        return json(
-            StatusCode::BAD_REQUEST,
-            &ErrorResponse {
-                error: "invalid Host",
-            },
-            None,
-        );
-    }
-    let origin = match browser_origin(&headers) {
+    let origin = match authorize(&headers, &state) {
         Ok(origin) => origin,
-        Err(()) => {
-            return json(
-                StatusCode::FORBIDDEN,
-                &ErrorResponse {
-                    error: "origin is not allowed",
-                },
-                None,
-            )
-        }
+        Err(error) => return error.response(),
     };
-    let expected = format!("Bearer {}", state.token);
-    if headers
-        .get(header::AUTHORIZATION)
-        .and_then(|h| h.to_str().ok())
-        != Some(&expected)
-    {
-        return json(
-            StatusCode::UNAUTHORIZED,
-            &ErrorResponse {
-                error: "bad or missing capability",
-            },
-            origin,
-        );
-    }
     json(
         StatusCode::OK,
         &SessionResponse {
@@ -175,9 +202,120 @@ async fn session(State(state): State<ServerState>, headers: HeaderMap) -> Respon
                 bytes: state.trace.len,
                 url: "/api/v1/trace",
             },
+            metadata: &state.metadata,
         },
         origin,
     )
+}
+
+async fn metadata(State(state): State<ServerState>, headers: HeaderMap) -> Response {
+    let origin = match authorize(&headers, &state) {
+        Ok(origin) => origin,
+        Err(error) => return error.response(),
+    };
+    json(
+        StatusCode::OK,
+        &MetadataResponse {
+            trace_id: &state.trace.id,
+            metadata: &state.metadata,
+            fields: &state.fields,
+        },
+        origin,
+    )
+}
+
+async fn warnings(State(state): State<ServerState>, headers: HeaderMap, uri: Uri) -> Response {
+    let origin = match authorize(&headers, &state) {
+        Ok(origin) => origin,
+        Err(error) => return error.response(),
+    };
+    let total = state.warnings.len() as u32;
+    let (from, count) = match page(uri.query(), total, origin.clone()) {
+        Ok(page) => page,
+        Err(error) => return error.response(),
+    };
+    let hi = from.saturating_add(count).min(total);
+    let items = &state.warnings[from as usize..hi as usize];
+    json(
+        StatusCode::OK,
+        &PageResponse {
+            trace_id: &state.trace.id,
+            from,
+            count: items.len(),
+            total,
+            next: (hi < total).then_some(hi),
+            items,
+        },
+        origin,
+    )
+}
+
+async fn events(State(state): State<ServerState>, headers: HeaderMap, uri: Uri) -> Response {
+    let origin = match authorize(&headers, &state) {
+        Ok(origin) => origin,
+        Err(error) => return error.response(),
+    };
+    let total = state.engine.lock().expect("engine lock poisoned").len();
+    let (from, count) = match page(uri.query(), total, origin.clone()) {
+        Ok(page) => page,
+        Err(error) => return error.response(),
+    };
+    let encoded = state
+        .engine
+        .lock()
+        .expect("engine lock poisoned")
+        .events_json(from, count);
+    let items: Vec<serde_json::Value> =
+        serde_json::from_str(&encoded).expect("the core produces valid event JSON");
+    let hi = from + items.len() as u32;
+    json(
+        StatusCode::OK,
+        &PageResponse {
+            trace_id: &state.trace.id,
+            from,
+            count: items.len(),
+            total,
+            next: (hi < total).then_some(hi),
+            items: &items,
+        },
+        origin,
+    )
+}
+
+const MAX_PAGE: u32 = 200;
+
+fn page(
+    query: Option<&str>,
+    total: u32,
+    origin: Option<HeaderValue>,
+) -> Result<(u32, u32), RequestError> {
+    let mut from = None;
+    let mut count = None;
+    for (key, value) in url::form_urlencoded::parse(query.unwrap_or_default().as_bytes()) {
+        match key.as_ref() {
+            "from" if from.is_none() => {
+                from = Some(value.parse().map_err(|_| bad_page(origin.clone()))?);
+            }
+            "count" if count.is_none() => {
+                count = Some(value.parse().map_err(|_| bad_page(origin.clone()))?);
+            }
+            _ => return Err(bad_page(origin)),
+        }
+    }
+    let from = from.unwrap_or(0);
+    let count = count.ok_or_else(|| bad_page(origin.clone()))?;
+    if count == 0 || count > MAX_PAGE || from > total {
+        return Err(bad_page(origin));
+    }
+    Ok((from, count))
+}
+
+fn bad_page(origin: Option<HeaderValue>) -> RequestError {
+    RequestError {
+        status: StatusCode::BAD_REQUEST,
+        error: "pagination requires from >= 0 and count from 1 through 200",
+        origin,
+    }
 }
 
 async fn trace(State(state): State<ServerState>, headers: HeaderMap) -> Response {
@@ -395,7 +533,8 @@ mod tests {
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../web/guide/traces/format.heapl"),
         )
         .unwrap();
-        router(ServerState::new(TOKEN.into(), 8631, trace))
+        let engine = trace.parse_engine().unwrap();
+        router(ServerState::new(TOKEN.into(), 8631, trace, engine))
     }
 
     fn request(method: Method) -> axum::http::request::Builder {
@@ -467,6 +606,73 @@ mod tests {
         )
         .unwrap();
         assert_eq!(body.as_ref(), expected);
+    }
+
+    #[tokio::test]
+    async fn metadata_and_events_are_native_semantic_reads() {
+        let metadata = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/metadata")
+                    .header(header::HOST, "127.0.0.1:8631")
+                    .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(metadata.status(), StatusCode::OK);
+        let body = metadata.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(body["traceId"].as_str().unwrap().starts_with("sha256:"));
+        assert!(body["metadata"]["n"].as_u64().unwrap() > 0);
+
+        let events = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/events?from=1&count=2")
+                    .header(header::HOST, "127.0.0.1:8631")
+                    .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(events.status(), StatusCode::OK);
+        let body = events.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["from"], 1);
+        assert_eq!(body["count"], 2);
+        assert_eq!(body["items"][0]["seq"], 1);
+    }
+
+    #[tokio::test]
+    async fn list_reads_require_explicit_bounded_pagination() {
+        for uri in [
+            "/api/v1/events",
+            "/api/v1/events?count=0",
+            "/api/v1/events?count=201",
+            "/api/v1/events?from=999999&count=1",
+            "/api/v1/warnings?count=1&count=1",
+        ] {
+            let response = app()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header(header::HOST, "127.0.0.1:8631")
+                        .header(header::ORIGIN, ORIGIN)
+                        .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+            assert_eq!(
+                response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+                ORIGIN
+            );
+        }
     }
 
     #[tokio::test]

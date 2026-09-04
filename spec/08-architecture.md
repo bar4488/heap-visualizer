@@ -176,3 +176,12 @@ memory. A connected browser must incrementally load that trace into its local
 WASM renderer automatically; it must not ask the user to open the same file
 again or retain a whole response buffer. Reconnecting while that renderer still
 holds the same trace identity must not parse it again.
+
+The server must parse that snapshot into one owned native engine before it
+listens. `GET /api/v1/session` must include the engine's trace metadata;
+`GET /api/v1/metadata` must return that metadata and the custom-field catalog.
+`GET /api/v1/events` and `GET /api/v1/warnings` must require `count` from 1
+through 200, accept an optional zero-based `from`, reject cursors beyond the
+list, and return `traceId`, `from`, actual `count`, `total`, nullable `next`, and
+`items`. These are semantic data endpoints: their request and response shapes
+must contain no viewport, canvas, pixel, playback, or layout state.

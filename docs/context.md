@@ -82,6 +82,14 @@ The server snapshots and identifies the trace before listening; once connected,
 the web app streams it in bounded chunks into the same local WASM renderer
 standalone mode uses.
 
+Agents use the same bearer capability. Semantic list endpoints are explicitly
+bounded, for example:
+
+```sh
+curl -H "Authorization: Bearer $CAPABILITY" \
+  'http://127.0.0.1:8631/api/v1/events?from=0&count=100'
+```
+
 ## Test
 
 ```sh
