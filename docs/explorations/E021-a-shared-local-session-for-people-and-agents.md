@@ -40,6 +40,15 @@ transfer and move pointer interaction onto a network round trip. Keeping the
 browser as the authority would require it to stay open for an agent to work.
 Neither is the intended separation.
 
+**The server does no rendering.** "Rendering projection" in this proposal
+means the browser keeps the current worker, WASM instance and OffscreenCanvas
+path. It does not mean pixels are rendered twice. What exists twice while a
+connected browser is open is the parsed trace/model: a native copy so agents
+can work with no browser open, and a WASM copy so every pan, seek, pick and
+frame stays inside the browser. That memory cost is deliberate; streaming raw
+frames or geometry commands would cost latency and bandwidth on every
+interaction instead of once when the trace loads.
+
 ## Proposed architecture
 
 ```text
@@ -100,6 +109,41 @@ per-tab view state stay local. Names and tag membership are mirrored into both
 engines because filters depend on them. A revision gap triggers a fresh
 snapshot rather than an attempted merge.
 
+The connected mode is therefore not a remote replacement for the `Worker`
+object. The browser has two explicit ports:
+
+- a **render port**, always the local worker, for playhead, view, pointer
+  geometry, filter display and every canvas operation; and
+- a **session port**, local in standalone mode and HTTP-backed in connected
+  mode, for trace acquisition and canonical analysis.
+
+`main.ts` should not decide message by message whether one operation is local
+or remote. Analysis actions call the session port; committed analysis changes
+are then projected into the render port. View actions call the render port
+only. This makes split-brain writes structurally difficult and leaves the
+existing worker protocol browser-internal.
+
+### What "the worker's functionality" means at the server
+
+The local API provides the same **data capabilities**, not wire compatibility
+with `protocol.ts`:
+
+| Server data capability | Current worker operation |
+|---|---|
+| Load and identify a trace; return metadata, warnings and field catalog | `load`, `loaded` |
+| Page raw or filtered events | `events`, `ev-pos` |
+| Resolve an allocation by creator event | `alloc-info` without canvas geometry |
+| Check and run an allocation filter | `filter-check`, `filter-apply` |
+| Convert time and sequence positions | `convert` |
+| Read and mutate names, tags and allocation colors | `names`, `tag-*`, `alloc-color` |
+| Read and mutate bookmarks, address marks and saved filters | currently main-thread analysis state |
+
+Canvas initialization and resizing, playback, scrolling, visual selection,
+layout settings, hit-testing, timeline hover and frame notifications remain
+browser-only. An agent gets semantic allocation/event queries rather than
+pixel coordinates. The browser may answer its own interactive queries locally
+even when an equivalent semantic query exists on the server.
+
 Opening the hosted site normally selects the existing standalone path. A local
 server launch URL, or an explicit Connect action, selects connected mode. Once
 connected, a disconnect leaves trace exploration available from the local
@@ -124,6 +168,84 @@ reason for the server to own browser layout.
 Allocation references carry both the creator event index and the active trace
 identity. A mutation for a stale trace must fail rather than annotate the same
 event index in a newly loaded trace.
+
+## Implementation structure
+
+### Rust core and server
+
+The smallest safe core refactor is to turn the current private `App` into a
+normal owned `Engine`. The WASM exports remain thin calls into one singleton
+`Engine`; the local server owns another `Engine` directly. The server never
+calls its render methods, so render buffers remain unallocated. This avoids a
+premature rewrite of `Store`, `View` and `Cfg` while removing the 32-bit pointer
+ABI from native callers.
+
+The local server belongs in its own Rust crate (`src/local-server/`), separate
+from the existing hosted Python feature-request service. HTTP/runtime/JSON
+dependencies belong to that binary crate and must not enter the WASM core's
+dependency graph.
+
+One engine actor should own the native `Engine` and canonical analysis state.
+HTTP tasks submit typed commands over a bounded channel and await typed
+results. This matches the core's current single-owner assumptions, gives every
+mutation one total order, and avoids a lock around dozens of mutable indexes.
+Filter scans are already expected to complete in milliseconds; parallel query
+execution should be added only if measurement shows the actor queue matters.
+
+The actor publishes `(traceId, revision, change)` after durable commit. Held
+change requests wait on a watch/broadcast signal outside the engine actor, so
+idle browsers consume neither a thread nor a polling interval.
+
+### Trace transfer
+
+Connected mode must not materialize extra whole-file copies. The browser worker
+currently receives one `ArrayBuffer` and only then feeds it to Rust in 8 MiB
+pieces. Replace that command with `load-begin`, transferable `load-chunk`, and
+`load-end`; both a browser `File.stream()` and the server's trace response can
+then flow through bounded chunks.
+
+When the browser opens a file, it streams the same file independently to the
+server and its local worker. When the server starts with a trace path, the
+browser streams that file once from `GET /api/v1/trace` into the worker. A
+browser upload is spooled into the server data directory while the native
+parser consumes it, so a later tab can retrieve it without retaining the
+upload in RAM.
+
+The server computes a content identity while parsing. The trace response is
+immutable for that identity and carries an `ETag`; analysis mutations name the
+identity. Switching trace atomically replaces the active engine only after the
+new parse succeeds.
+
+### Analysis synchronization
+
+Canonical analysis is a plain domain document plus a revision. Each operation
+has a stable change shape — for example, set one allocation name or add one tag
+membership — and is applied only once by the server. The browser applies the
+committed change it reads back; it does not optimistically invent a second
+revision.
+
+The TypeScript analysis code should first be separated into pure document
+updates and DOM refreshes. Rust and TypeScript then share versioned JSON
+fixtures asserting that the same starting document and change produce the same
+result. They should not share the current numeric tag ids as API identity: tag
+ids are an engine representation, while stable tag ids or names belong to the
+session document and are translated when projecting into either engine.
+
+### Efficiency rules
+
+- No frame, pixel buffer, pointer move, scroll or playback tick crosses HTTP.
+- Trace bytes cross once per browser and are parsed incrementally at both ends.
+- Every list/query endpoint is bounded and paged; no accidental whole-trace
+  JSON response exists.
+- HTTP bodies use compact JSON initially. A binary protocol is not earned until
+  measurement shows response encoding rather than filtering is material.
+- Analysis changes are small deltas; a full snapshot is only startup or gap
+  recovery.
+- Server query filters are ephemeral and must not change a browser's applied
+  filter or any per-tab view state.
+- The native server serializes core access first. Concurrency, query caches and
+  a render-free core feature are measurement-driven follow-ups, not initial
+  architecture.
 
 ## HTTP surface
 
