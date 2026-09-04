@@ -1,6 +1,6 @@
 # Now
 
-_Updated: 2026-08-11._
+_Updated: 2026-09-04._
 
 **No count in this file is written by hand.** Test counts, module sizes and
 requirement totals are derivable, and the ones that used to be here had all
@@ -207,7 +207,11 @@ layout and the send path in a browser — the outcomes are unit-tested and the
 routes were driven with `curl` against the container, but no automated check
 presses the button (D001).
 
-**Nothing is in flight.** The backlog is
+**T050 is in flight:** prove that the hosted HTTPS app can connect to an
+authenticated server-only binary on loopback while an ordinary visit remains
+standalone. It is the transport gate for
+[E021](explorations/E021-a-shared-local-session-for-people-and-agents.md);
+no trace or rendering boundary moves until it works. The older backlog is
 [T045](tickets/T045-lower-integer-arithmetic-to-a-narrow-path.md) and
 [T046](tickets/T046-negative-numbers-are-writable.md) — both came out of that
 work, neither is urgent — plus T009, T030, and the blocked T004.
@@ -262,5 +266,5 @@ friction with `PROTOCOL.md` itself goes in
 <!-- generated:begin -->
 ## Doing
 
-Nothing in flight.
+- [T050](tickets/T050-prove-the-hosted-to-loopback-connection.md) — prove the hosted-to-loopback connection
 <!-- generated:end -->

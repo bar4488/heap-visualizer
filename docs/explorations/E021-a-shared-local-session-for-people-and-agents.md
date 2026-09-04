@@ -376,3 +376,8 @@ it.
 - The distributable is one native binary containing only the local session
   server. The UI remains the hosted site.
 - Feature requests remain entirely at the hosted deployment.
+
+## Derived artifacts
+
+- [T050](../tickets/T050-prove-the-hosted-to-loopback-connection.md) — the
+  hosted-to-loopback transport proof, before the engine boundary moves.
