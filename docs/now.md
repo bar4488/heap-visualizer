@@ -218,11 +218,12 @@ layout and the send path in a browser — the outcomes are unit-tested and the
 routes were driven with `curl` against the container, but no automated check
 presses the button (D001).
 
-**Nothing is in flight.** Connect… changes to Disconnect while a tab retains a
-local-server capability; disconnect discards only that tab's capability and a
-late request cannot reconnect it. The next E021 deliverable is the native
-engine and bounded read API, but it has no ticket until selected and grounded.
-The older backlog is
+**T053 is in flight:** make the guide a compact technical entry point through
+the trace model, views, query language and saved analysis. Separately, Connect…
+changes to Disconnect while a tab retains a local-server capability; disconnect
+discards only that tab's capability and a late request cannot reconnect it. The
+next E021 deliverable is the native engine and bounded read API, but it has no
+ticket until selected and grounded. The older backlog is
 [T045](tickets/T045-lower-integer-arithmetic-to-a-narrow-path.md) and
 [T046](tickets/T046-negative-numbers-are-writable.md) — both came out of that
 work, neither is urgent — plus T009, T030, and the blocked T004.
@@ -281,5 +282,5 @@ friction with `PROTOCOL.md` itself goes in
 <!-- generated:begin -->
 ## Doing
 
-Nothing in flight.
+- [T053](tickets/T053-make-the-guide-a-technical-entry-point.md) — make the guide a technical entry point
 <!-- generated:end -->
