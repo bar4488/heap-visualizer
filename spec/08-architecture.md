@@ -185,3 +185,11 @@ through 200, accept an optional zero-based `from`, reject cursors beyond the
 list, and return `traceId`, `from`, actual `count`, `total`, nullable `next`, and
 `items`. These are semantic data endpoints: their request and response shapes
 must contain no viewport, canvas, pixel, playback, or layout state.
+
+`GET /api/v1/allocations/{creator}` must return trace-identified semantic
+allocation detail or not-found and must omit render rectangles. `POST
+/api/v1/query` must require the active `traceId`, a filter source no larger than
+16 KiB, and `from`/`count` under the same 200-item page cap. It must return
+source-span diagnostics or a trace-identified page of creator allocations. A
+query is ephemeral: it must not install filter, view, or selection state in the
+native engine or any connected browser.

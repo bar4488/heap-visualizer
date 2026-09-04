@@ -88,6 +88,14 @@ bounded, for example:
 ```sh
 curl -H "Authorization: Bearer $CAPABILITY" \
   'http://127.0.0.1:8631/api/v1/events?from=0&count=100'
+
+curl -H "Authorization: Bearer $CAPABILITY" \
+  'http://127.0.0.1:8631/api/v1/allocations/42'
+
+curl -H "Authorization: Bearer $CAPABILITY" \
+  -H 'Content-Type: application/json' \
+  --data '{"traceId":"sha256:…","source":"alloc.size >= 4096","from":0,"count":100}' \
+  'http://127.0.0.1:8631/api/v1/query'
 ```
 
 ## Test

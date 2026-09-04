@@ -6,14 +6,14 @@ use std::{
 };
 
 use axum::{
-    body::Body,
-    extract::State,
-    http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri},
+    body::{Body, Bytes},
+    extract::{DefaultBodyLimit, Path as AxumPath, State},
+    http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode, Uri},
     response::Response,
-    routing::get,
+    routing::{get, post},
     Router,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio_util::io::ReaderStream;
 use url::Url;
@@ -159,6 +159,22 @@ struct PageResponse<'a> {
     items: &'a [serde_json::Value],
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AllocationResponse<'a> {
+    trace_id: &'a str,
+    allocation: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct QueryRequest {
+    trace_id: String,
+    source: String,
+    from: u32,
+    count: u32,
+}
+
 pub fn router(state: ServerState) -> Router {
     Router::new()
         .route("/api/v1/session", get(session).options(preflight))
@@ -166,7 +182,13 @@ pub fn router(state: ServerState) -> Router {
         .route("/api/v1/metadata", get(metadata).options(preflight))
         .route("/api/v1/warnings", get(warnings).options(preflight))
         .route("/api/v1/events", get(events).options(preflight))
+        .route(
+            "/api/v1/allocations/{creator}",
+            get(allocation).options(preflight),
+        )
+        .route("/api/v1/query", post(query).options(preflight))
         .fallback(not_found)
+        .layer(DefaultBodyLimit::max(32 << 10))
         .with_state(state)
 }
 
@@ -282,6 +304,83 @@ async fn events(State(state): State<ServerState>, headers: HeaderMap, uri: Uri) 
     )
 }
 
+async fn allocation(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    AxumPath(creator): AxumPath<String>,
+) -> Response {
+    let origin = match authorize(&headers, &state) {
+        Ok(origin) => origin,
+        Err(error) => return error.response(),
+    };
+    let Ok(creator) = creator.parse::<u32>() else {
+        return request_error(StatusCode::BAD_REQUEST, "creator must be a u32", origin).response();
+    };
+    let encoded = state
+        .engine
+        .lock()
+        .expect("engine lock poisoned")
+        .allocation_json(creator);
+    let Some(encoded) = encoded else {
+        return request_error(StatusCode::NOT_FOUND, "allocation not found", origin).response();
+    };
+    let allocation =
+        serde_json::from_str(&encoded).expect("the core produces valid allocation JSON");
+    json(
+        StatusCode::OK,
+        &AllocationResponse {
+            trace_id: &state.trace.id,
+            allocation,
+        },
+        origin,
+    )
+}
+
+async fn query(State(state): State<ServerState>, headers: HeaderMap, body: Bytes) -> Response {
+    let origin = match authorize(&headers, &state) {
+        Ok(origin) => origin,
+        Err(error) => return error.response(),
+    };
+    let request: QueryRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(_) => {
+            return request_error(StatusCode::BAD_REQUEST, "invalid query request", origin)
+                .response()
+        }
+    };
+    if request.trace_id != state.trace.id.as_ref() {
+        return request_error(StatusCode::CONFLICT, "trace identity changed", origin).response();
+    }
+    if request.source.len() > 16 << 10 || request.count == 0 || request.count > MAX_PAGE {
+        return request_error(StatusCode::BAD_REQUEST, "query is outside its bounds", origin)
+            .response();
+    }
+    let encoded = state
+        .engine
+        .lock()
+        .expect("engine lock poisoned")
+        .query_json(&request.source, request.from, request.count);
+    let mut result: serde_json::Value =
+        serde_json::from_str(&encoded).expect("the core produces valid query JSON");
+    if result["valid"] == true
+        && request.from > result["total"].as_u64().unwrap_or_default() as u32
+    {
+        return request_error(StatusCode::BAD_REQUEST, "query cursor is out of range", origin)
+            .response();
+    }
+    let result_object = result.as_object_mut().expect("query result is an object");
+    result_object.insert(
+        "traceId".into(),
+        serde_json::Value::String(state.trace.id.to_string()),
+    );
+    if result_object.get("valid") == Some(&serde_json::Value::Bool(true)) {
+        let actual = result_object["items"].as_array().unwrap().len() as u64;
+        result_object.insert("from".into(), serde_json::Value::from(request.from));
+        result_object.insert("count".into(), serde_json::Value::from(actual));
+    }
+    json(StatusCode::OK, &result, origin)
+}
+
 const MAX_PAGE: u32 = 200;
 
 fn page(
@@ -311,9 +410,21 @@ fn page(
 }
 
 fn bad_page(origin: Option<HeaderValue>) -> RequestError {
+    request_error(
+        StatusCode::BAD_REQUEST,
+        "pagination requires from >= 0 and count from 1 through 200",
+        origin,
+    )
+}
+
+fn request_error(
+    status: StatusCode,
+    error: &'static str,
+    origin: Option<HeaderValue>,
+) -> RequestError {
     RequestError {
-        status: StatusCode::BAD_REQUEST,
-        error: "pagination requires from >= 0 and count from 1 through 200",
+        status,
+        error,
         origin,
     }
 }
@@ -425,11 +536,10 @@ async fn preflight(State(state): State<ServerState>, headers: HeaderMap) -> Resp
             )
         }
     };
-    if headers
+    let requested_method = headers
         .get(header::ACCESS_CONTROL_REQUEST_METHOD)
-        .and_then(|h| h.to_str().ok())
-        != Some(Method::GET.as_str())
-    {
+        .and_then(|h| h.to_str().ok());
+    if !matches!(requested_method, Some("GET" | "POST")) {
         return json(
             StatusCode::FORBIDDEN,
             &ErrorResponse {
@@ -442,10 +552,13 @@ async fn preflight(State(state): State<ServerState>, headers: HeaderMap) -> Resp
     let mut response = Response::builder()
         .status(StatusCode::NO_CONTENT)
         .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin)
-        .header(header::ACCESS_CONTROL_ALLOW_METHODS, Method::GET.as_str())
+        .header(
+            header::ACCESS_CONTROL_ALLOW_METHODS,
+            requested_method.expect("validated above"),
+        )
         .header(
             header::ACCESS_CONTROL_ALLOW_HEADERS,
-            header::AUTHORIZATION.as_str(),
+            "authorization,content-type",
         )
         .header(header::ACCESS_CONTROL_MAX_AGE, "600")
         .header(header::VARY, "Origin")
@@ -521,7 +634,7 @@ fn add_cors(headers: &mut HeaderMap, origin: Option<HeaderValue>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::Request;
+    use axum::http::{Method, Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
@@ -535,6 +648,15 @@ mod tests {
         .unwrap();
         let engine = trace.parse_engine().unwrap();
         router(ServerState::new(TOKEN.into(), 8631, trace, engine))
+    }
+
+    fn trace_id() -> String {
+        TraceFile::open(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../web/guide/traces/format.heapl"),
+        )
+        .unwrap()
+        .id
+        .to_string()
     }
 
     fn request(method: Method) -> axum::http::request::Builder {
@@ -647,6 +769,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn allocation_detail_has_no_render_geometry() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/allocations/1")
+                    .header(header::HOST, "127.0.0.1:8631")
+                    .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["allocation"]["creator"], 1);
+        assert!(body["allocation"].get("rects").is_none());
+        assert!(body.get("traceId").is_some());
+
+        let missing = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/allocations/999999")
+                    .header(header::HOST, "127.0.0.1:8631")
+                    .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn filter_queries_are_bounded_diagnostic_and_authenticated() {
+        let request_body = serde_json::json!({
+            "traceId": trace_id(),
+            "source": "alloc.size >= 1",
+            "from": 0,
+            "count": 2
+        })
+        .to_string();
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/query")
+                    .header(header::HOST, "127.0.0.1:8631")
+                    .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(request_body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["valid"], true);
+        assert_eq!(body["from"], 0);
+        assert_eq!(body["count"], 2);
+        assert_eq!(body["items"].as_array().unwrap().len(), 2);
+        assert!(body["next"].is_number());
+
+        let denied = app()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/query")
+                    .header(header::HOST, "127.0.0.1:8631")
+                    .body(Body::from(request_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+
+        let diagnostic = serde_json::json!({
+            "traceId": trace_id(),
+            "source": "alloc.size >",
+            "from": 0,
+            "count": 2
+        })
+        .to_string();
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/query")
+                    .header(header::HOST, "127.0.0.1:8631")
+                    .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                    .body(Body::from(diagnostic))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["valid"], false);
+        assert!(body["diagnostic"]["start"].is_number());
+    }
+
+    #[tokio::test]
     async fn list_reads_require_explicit_bounded_pagination() {
         for uri in [
             "/api/v1/events",
@@ -756,7 +981,31 @@ mod tests {
         assert_eq!(response.headers()[ALLOW_PRIVATE_NETWORK], "true");
         assert_eq!(
             response.headers()[header::ACCESS_CONTROL_ALLOW_HEADERS],
-            "authorization"
+            "authorization,content-type"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_preflight_admits_json_post() {
+        let response = app()
+            .oneshot(
+                request(Method::OPTIONS)
+                    .header(header::ORIGIN, ORIGIN)
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                    .header(
+                        header::ACCESS_CONTROL_REQUEST_HEADERS,
+                        "authorization,content-type",
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(response.headers()[header::ACCESS_CONTROL_ALLOW_METHODS], "POST");
+        assert_eq!(
+            response.headers()[header::ACCESS_CONTROL_ALLOW_HEADERS],
+            "authorization,content-type"
         );
     }
 
