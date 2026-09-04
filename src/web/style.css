@@ -70,6 +70,12 @@ label { color: var(--fg-dim); font-size: 12px; display: inline-flex; align-items
 input { font-family: ui-monospace, monospace; }
 
 #btn-warnings { color: #d29922; border-color: #d2992255; }
+#st-server { color: var(--fg-dim); }
+#st-server[data-state="connected"] { color: var(--green); }
+#st-server[data-state="connecting"] { color: var(--accent); }
+#st-server[data-state="auth-failed"],
+#st-server[data-state="permission-denied"],
+#st-server[data-state="unreachable"] { color: var(--red); }
 
 /* ---------- legend ---------- */
 

@@ -140,7 +140,8 @@ together; the image carries no toolchain and bind-mounts an already-built
 is intact and [T038](tickets/T038-drop-the-docker-build.md) is not being
 reversed.
 
-**Verification — four suites, a type-checker, and a person.** `cargo test`
+**Verification — native, web and service suites, a type-checker, and a
+person.** `cargo test`
 covers the engine and the filter parser/completion contexts;
 `node --test 'src/web/**/*.test.ts'` covers the pure functions, the panel
 table, the guide's markdown renderer, and both persisted round-trips, with no
@@ -149,7 +150,7 @@ what those do not reach: the worker protocol
 (`src/web/protocol.ts`, imported by both sides), the persisted shapes, and the
 panel records — a message name one side does not know fails the build.
 `python3 -m unittest discover -s src/server` covers the request service against
-a real socket. How
+a real socket, and the local data server has its own Rust transport suite. How
 strict that check is is a named list of flags rather than `strict: true`, most
 on and two off, per [D005](decisions/D005-strictness-is-per-flag.md).
 

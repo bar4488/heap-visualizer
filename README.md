@@ -25,6 +25,9 @@ npm install
 docker compose up                             # the site plus the feature-request
                                               # service; /admin reviews what came in
 HEAP_ADMIN_TOKEN=…  docker compose up         # /admin defaults to the token `admin`
+
+cargo run --manifest-path src/local-server/Cargo.toml
+                                              # server-only loopback API; open its URL
 ```
 
 ## Test
@@ -35,6 +38,7 @@ cargo test --manifest-path src/filter-dsl/Cargo.toml
 node --test 'src/web/**/*.test.ts'
 node_modules/.bin/tsc -p tsconfig.test.json
 python3 -m unittest discover -s src/server
+cargo test --manifest-path src/local-server/Cargo.toml
 ```
 
 ## Where things are

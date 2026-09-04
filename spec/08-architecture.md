@@ -134,3 +134,31 @@ analysis domains, heap being the first; see
 One drop target for everything: a dropped/opened file whose head contains the
 `"heapVisualizerAnalysis"` marker is applied as a marks file; anything else is
 parsed as a trace. `?trace=URL` autoloads a trace over HTTP.
+
+## ARCH-008: Local data-server connection
+
+The hosted web app must have two explicit startup modes:
+
+- **standalone**, the existing in-browser engine and persistence path, selected
+  by an ordinary visit; and
+- **connected**, selected by a launch capability from the local data server.
+
+The local server must be a server-only native executable: it must bind to
+loopback, expose a versioned data API, and serve neither the web UI nor the
+feature-request routes. The launch capability must be generated afresh for
+each server run, carried to the hosted app in the URL fragment so it is not
+sent to the hosted service, removed from browser history after it is read, and
+required as a bearer capability by the local API. Browser access must be
+limited to the configured hosted origin.
+
+Connected mode must not move rendering onto the server. The browser worker,
+WASM engine and OffscreenCanvas remain the complete rendering path; no frame,
+pixel buffer, pointer movement, scroll or playback tick may cross the HTTP
+boundary. The local server is a data authority, and an ordinary standalone tab
+must not contact it.
+
+The app must visibly distinguish standalone, connecting, connected,
+authentication failure, browser permission denial when that state is exposed,
+and a local endpoint that is otherwise unavailable or blocked. Losing a
+connected endpoint must not silently select standalone mode and create a
+second writable analysis history.

@@ -1,0 +1,135 @@
+export type LocalServerConfig = { baseURL: string; token: string };
+
+export type LocalServerStatus =
+  | { state: 'standalone' }
+  | { state: 'connecting' }
+  | { state: 'connected'; version: string }
+  | { state: 'auth-failed' }
+  | { state: 'permission-denied' }
+  | { state: 'unreachable' };
+
+const STORAGE_KEY = 'heapviz:local-server';
+
+type StoredConfig = Pick<Storage, 'getItem' | 'setItem'>;
+type HistoryLike = Pick<History, 'replaceState'>;
+type LocationLike = Pick<Location, 'hash' | 'pathname' | 'search'>;
+
+/**
+ * Read a server launch fragment once, persist it only for this tab, and remove
+ * the capability from browser history. An ordinary new tab has no fragment or
+ * sessionStorage entry and therefore stays standalone.
+ */
+export function localServerConfig(
+  location: LocationLike,
+  storage: StoredConfig,
+  history: HistoryLike,
+): LocalServerConfig | null {
+  const fragment = new URLSearchParams(location.hash.replace(/^#/, ''));
+  const baseURL = fragment.get('heap-server');
+  const token = fragment.get('heap-token');
+  if (baseURL !== null || token !== null) {
+    fragment.delete('heap-server');
+    fragment.delete('heap-token');
+    const rest = fragment.toString();
+    history.replaceState(null, '', `${location.pathname}${location.search}${rest ? `#${rest}` : ''}`);
+    const config = validConfig(baseURL, token);
+    if (!config) return null;
+    try { storage.setItem(STORAGE_KEY, JSON.stringify(config)); } catch { /* unavailable storage */ }
+    return config;
+  }
+
+  try {
+    const raw = storage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return validConfig(parsed?.baseURL, parsed?.token);
+  } catch {
+    return null;
+  }
+}
+
+function validConfig(baseURL: unknown, token: unknown): LocalServerConfig | null {
+  if (typeof baseURL !== 'string' || typeof token !== 'string' || token.length < 32) return null;
+  try {
+    const url = new URL(baseURL);
+    if (url.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) return null;
+    if (url.username || url.password || url.pathname !== '/' || url.search || url.hash) return null;
+    return { baseURL: url.origin, token };
+  } catch {
+    return null;
+  }
+}
+
+type PermissionStateReader = () => Promise<PermissionState | null>;
+
+export async function connectLocalServer(
+  config: LocalServerConfig | null,
+  fetchFn: typeof fetch = fetch,
+  permissionState: PermissionStateReader = loopbackPermissionState,
+): Promise<LocalServerStatus> {
+  if (!config) return { state: 'standalone' };
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3000);
+    try {
+      // targetAddressSpace is the current Local Network Access hint. It is
+      // intentionally progressive: browsers that do not know it ignore it.
+      const init: RequestInit & { targetAddressSpace?: 'loopback' } = {
+        headers: { Authorization: `Bearer ${config.token}` },
+        cache: 'no-store',
+        signal: controller.signal,
+        targetAddressSpace: 'loopback',
+      };
+      const response = await fetchFn(`${config.baseURL}/api/v1/session`, init);
+      if (response.status === 401) return { state: 'auth-failed' };
+      if (!response.ok) return { state: 'unreachable' };
+      const body = await response.json();
+      if (body?.apiVersion !== 1 || body?.mode !== 'local') return { state: 'unreachable' };
+      return { state: 'connected', version: String(body.serverVersion || '') };
+    } finally {
+      clearTimeout(timeout);
+    }
+  } catch {
+    return await permissionState() === 'denied'
+      ? { state: 'permission-denied' }
+      : { state: 'unreachable' };
+  }
+}
+
+async function loopbackPermissionState(): Promise<PermissionState | null> {
+  if (!navigator.permissions) return null;
+  // Chrome 145 split loopback from broader local-network permission; older
+  // releases used local-network-access. Neither name is in every DOM lib yet.
+  for (const name of ['loopback-network', 'local-network-access']) {
+    try {
+      return (await navigator.permissions.query({ name } as PermissionDescriptor)).state;
+    } catch { /* try the older spelling */ }
+  }
+  return null;
+}
+
+const STATUS_TEXT: Record<LocalServerStatus['state'], string> = {
+  standalone: 'standalone',
+  connecting: 'connecting to local server…',
+  connected: 'local server',
+  'auth-failed': 'local server: authentication failed',
+  'permission-denied': 'local server: browser permission denied',
+  unreachable: 'local server: unavailable or blocked',
+};
+
+export async function initLocalServerMode(element: HTMLElement) {
+  const config = localServerConfig(window.location, window.sessionStorage, window.history);
+  setStatus(element, config ? { state: 'connecting' } : { state: 'standalone' });
+  const status = await connectLocalServer(config);
+  setStatus(element, status);
+}
+
+function setStatus(element: HTMLElement, status: LocalServerStatus) {
+  element.dataset.state = status.state;
+  element.textContent = STATUS_TEXT[status.state];
+  element.title = status.state === 'connected'
+    ? `Connected to the local data server${status.version ? ` v${status.version}` : ''}; rendering remains in this browser`
+    : status.state === 'standalone'
+      ? 'This tab is fully standalone; it has not contacted a local server'
+      : STATUS_TEXT[status.state];
+}

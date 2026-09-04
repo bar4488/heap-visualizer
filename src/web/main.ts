@@ -39,6 +39,7 @@ import {
 } from './filter-actions.ts';
 import { customFieldsSection } from './heap/custom-fields.ts';
 import { eventWindowBody, eventWindowTitle } from './heap/event-window.ts';
+import { initLocalServerMode } from './local-server.ts';
 import {
   applyDrawersState, drawersState, dock, initDrawers, drawerEl, refreshDrawerDividers,
 } from './shell/drawers.ts';
@@ -159,6 +160,8 @@ const UI: UIState = {
   locked: false,
   xview: { zoom: 1, pan: 0 },
 };
+
+void initLocalServerMode($('st-server'));
 
 // expose for tests / console poking
 window.__heap_visualizer = UI;

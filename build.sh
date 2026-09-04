@@ -30,6 +30,9 @@ if (( ! web_only )); then
   cargo build --release --target wasm32-unknown-unknown --manifest-path src/filter-dsl/Cargo.toml
   cp src/filter-dsl/target/wasm32-unknown-unknown/release/heap_visualizer_filter_dsl.wasm \
     dist/filter_lexer.wasm
+  # The local server is a separate native artifact. It serves only the API,
+  # never dist/; building it here keeps one full build path for every product.
+  cargo build --release --manifest-path src/local-server/Cargo.toml
 fi
 
 # TypeScript -> browser ES modules. tsc is configured with noEmitOnError, so a
@@ -60,5 +63,6 @@ if [[ ! -f dist/demo.heapl ]]; then
 fi
 
 ls -la dist/heap_visualizer_core.wasm dist/filter_lexer.wasm
+(( web_only )) || ls -la src/local-server/target/release/heap-visualizer-local-server
 
 echo "serve with: ./serve.py   (http.server sends no Cache-Control, so browsers cache stale js)"

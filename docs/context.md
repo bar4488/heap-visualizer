@@ -62,6 +62,29 @@ python3 gen.py --seed 2 --ops 200000 --threads 8 --out dist/big.heapl
 
 `window.__heap_visualizer` exposes `UI` in the console for poking at state.
 
+### Prove the local-server connection
+
+The local binary serves only its API; the web app and feature-request service
+stay at the URL passed to it. With the development site on its usual port:
+
+```sh
+cargo run --manifest-path src/local-server/Cargo.toml
+# open the launch URL it prints; an ordinary http://localhost:8630 visit stays standalone
+```
+
+Against a hosted build, name its URL exactly so the server admits only that
+browser origin:
+
+```sh
+cargo run --release --manifest-path src/local-server/Cargo.toml -- \
+  --app-url https://your-deployment.example/
+```
+
+The connection badge is in the status bar. Chromium asks for its Apps on
+device / Local Network Access permission on first contact. The capability in
+the printed URL is in the fragment, is never sent to the hosted service, and is
+removed from browser history after the app reads it.
+
 ## Test
 
 ```sh
@@ -70,6 +93,7 @@ cargo test --manifest-path src/filter-dsl/Cargo.toml  # the DSL parser, completi
 node --test 'src/web/**/*.test.ts'                    # the web suite, no npm, no browser
 node_modules/.bin/tsc -p tsconfig.test.json           # type-check everything, emit nothing
 python3 -m unittest discover -s src/server            # the request service, over a real socket
+cargo test --manifest-path src/local-server/Cargo.toml # the local data-server transport
 ```
 
 **Counts are not written down anywhere here.** Each command prints its own, and
@@ -86,7 +110,8 @@ the compiler — and a piped `| grep -c 'error TS'` reads that as zero errors.
 [T018](tickets/T018-build-resolves-local-tsc.md) and
 [T021](tickets/T021-live-docs-drop-npx-tsc.md).
 
-The three test suites run from a clean checkout with no install step — Node
+The Rust, Node and Python suites run from a clean checkout with no project
+install step — Node
 strips the types itself, which is why sources import each other as `./x.ts` and
 `tsc` rewrites those specifiers on the way out. The web suite runs against the
 sources in `src/web/`, not against `dist/`. Type-checking is the one thing that

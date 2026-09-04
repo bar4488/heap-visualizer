@@ -42,7 +42,9 @@ counts, leaks, peak live, address span) prints to stderr.
 
 - `build.sh` — the whole build. It produces `dist/`, the served tree: the wasm
   from `cargo build --release --target wasm32-unknown-unknown`, the compiled
-  web layer, `index.html`/`style.css`, and a generated demo trace.
+  web layer, `index.html`/`style.css`, and a generated demo trace. It also builds
+  the separate native local-data-server binary; that binary does not enter or
+  serve `dist/`.
   `./build.sh web` skips the cargo build.
 - **Hand-written files live under `src/`, generated files under `dist/`, and
   nothing crosses.** `dist/` is not in version control; a clean checkout is not
@@ -118,6 +120,11 @@ other fails the build.
 suite ([11-feature-requests](11-feature-requests.md)), stdlib `unittest` against
 the real handler over a loopback socket rather than a stub of it: the routing,
 the status codes and the token check are the feature. It needs no `dist/`.
+
+`cargo test --manifest-path src/local-server/Cargo.toml` runs the local
+data-server suite. Its transport tests exercise the real router: loopback Host
+validation, bearer capability, exact-origin CORS, and the private-network
+preflight response.
 
 Rendering, pointer interaction and the real worker round trip are still
 verified by hand — against `dist/`, after a build — and there is no fixed
