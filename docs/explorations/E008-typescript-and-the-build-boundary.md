@@ -13,7 +13,7 @@ conclusion alone.
 
 ## Summary
 
-[T003](../tickets/T003-typescript-at-the-contracts.md) was written as "types at
+T003 was written as "types at
 the contracts, and a build step". Grounding it surfaced a prior question the
 ticket had already answered implicitly: **does adopting TypeScript here require
 compiling, or only checking?** Two shapes were argued. The compiling one won,
@@ -28,7 +28,7 @@ independent of TypeScript and was pulled out into its own ticket.
 
 Reversing [TOOL-002](../../spec/10-tooling.md#tool-002-build) is not a
 preference. "`web/` is served as-is" is load-bearing for how a person verifies
-a change ([D001](../decisions/D001-web-changes-are-hand-smoke-tested.md)): edit,
+a change (D001): edit,
 refresh, look at the canvas. Anything that puts a step between the file and the
 browser is taxing the only end-to-end check this project has.
 
@@ -110,15 +110,15 @@ Costs accepted, both named rather than discovered later:
 
 Three tickets rather than one, because the two changes fail differently and the
 only end-to-end check is a person looking at the app
-([D003](../decisions/D003-one-slice-per-commit.md)):
+in a separate implementation step:
 
-1. **[T007](../tickets/T007-src-dist-layout.md)** — the move, with the web layer
+1. **T007** — the move, with the web layer
    still plain JavaScript. Pure `git mv` plus path fixes; both suites stay green;
    one thing to hand-verify: the app still loads from `dist/`.
-2. **[T003](../tickets/T003-typescript-at-the-contracts.md)** — toolchain and
+2. **T003** — toolchain and
    contracts: `tsconfig.json`, the `typescript` dev dependency, `tsc` in
    `build.sh`, and the contract-bearing modules converted.
-3. **[T008](../tickets/T008-convert-web-to-typescript.md)** — the remaining
+3. **T008** — the remaining
    modules, one slice per commit, deferred.
 
 Folding 1 into 2 would produce a single diff in which files both moved and
@@ -149,8 +149,8 @@ gitignore.
 
 - [D004](../decisions/D004-typescript-is-the-language-for-web.md) — the language
   and build-step decision, and what would reverse it.
-- [T007](../tickets/T007-src-dist-layout.md) — the layout move.
-- [T003](../tickets/T003-typescript-at-the-contracts.md) — re-grounded against
+- T007 — the layout move.
+- T003 — re-grounded against
   the new layout.
-- [T008](../tickets/T008-convert-web-to-typescript.md) — the rest of the
+- T008 — the rest of the
   conversion, deferred.

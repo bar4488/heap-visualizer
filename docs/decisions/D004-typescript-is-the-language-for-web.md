@@ -26,7 +26,7 @@ same commit as the toolchain.
 ## Why
 
 Types are the only automated checking most of this code will ever get. There is
-no browser automation ([D001](D001-web-changes-are-hand-smoke-tested.md)) and
+no browser automation (D001) and
 there will not be; the JS suite covers pure functions and the two persisted
 round-trips, and stops there by design. A typo in one of the 89 `postMessage`
 sites is currently a silent no-op that a person discovers by noticing the app
@@ -34,7 +34,7 @@ did nothing.
 
 The destination is a shell hosting several analysis domains
 ([E007](../explorations/E007-web-architecture-direction.md),
-[T004](../tickets/T004-shell-host.md)). A host API is an agreement between
+T004). A host API is an agreement between
 pieces of code that do not know about each other — exactly what types keep
 honest and comments do not.
 

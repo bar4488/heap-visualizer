@@ -160,7 +160,7 @@ string/number or signed/unsigned conversions.
 > silently matched nothing. The language now has float literals and one
 > numeric type across both representations, specified by
 > [ANL-012](../../spec/07-analysis.md#anl-012-numbers-in-the-filter-language)
-> and built in [T034](../tickets/T034-the-filter-language-has-floats.md). The
+> and built in T034. The
 > rest of this section still holds: there are still no implicit string/number
 > conversions.
 
@@ -558,7 +558,7 @@ cutover:
 ## Remaining work before a decision
 
 The language shape no longer needs an implementation comparison.
-[T010](../tickets/T010-standalone-filter-dsl-parser.md) established the
+T010 established the
 dependency-free parser, public source-spanned AST, syntax diagnostics, and
 parser limits. The remaining useful evidence is:
 

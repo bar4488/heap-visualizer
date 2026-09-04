@@ -124,8 +124,8 @@ costs more than the saving below `U≈32`.
 
 - [D009](../decisions/D009-tag-membership-has-one-owner-and-derived-indexes.md)
   — the ownership rule the three indexes live under.
-- [T044](../tickets/T044-tag-scans-track-tags-in-use.md) — the work.
-- [T041](../tickets/T041-lower-the-filter-to-a-typed-plan.md) already owns
+- T044 — the work.
+- T041 already owns
   compiling tag predicates to ids; this document does not duplicate it, and
   T044 runs first because T041's `tags contains` row cannot reach its 2× bar
   over an `O(H)` scan.

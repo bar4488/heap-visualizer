@@ -55,7 +55,7 @@ layout allows. And E010's gate — 25 ms median over 1M creators, *in release
 WASM* — is already missed by 38 ms of **native** time, before the browser's
 penalty.
 
-> **2026-08-07, after [T041](../tickets/T041-lower-the-filter-to-a-typed-plan.md).**
+> **2026-08-07, after T041.**
 > Same harness, same machine, now against the lowered plan. The floor control
 > reads 0.30 ms in this run rather than 0.8 ms; the ratio is the comparable
 > quantity.
@@ -132,7 +132,7 @@ free      the record that ended it, or None
 | `field["allocator-class"]` | `malloc.fields["allocator-class"]` | per catalog |
 | `death.field.reason` | `free.fields.reason` | per catalog |
 
-> **2026-08-09, during [T042](../tickets/T042-the-filter-language-is-python-shaped.md).**
+> **2026-08-09, during T042.**
 > Two things this file got wrong, both settled in the build.
 >
 > **`named()` is regular, not short.** The examples above and below show
@@ -322,11 +322,11 @@ What it does not cover is the two places a filter source is written by
 something other than a person:
 
 - **`.heapa` marks** carry named filter expressions
-  ([T013](../tickets/T013-saved-filters.md)). A saved filter written against
+  (T013). A saved filter written against
   the old surface will not compile after the cutover.
 - **The filter actions** — legend chips, match range, filter-to-tag
-  ([T011](../tickets/T011-legend-chips-toggle-filter.md),
-  [T012](../tickets/T012-match-range-replaces-filter.md),
+  (T011,
+  T012,
   `src/web/filter-actions.ts`) — generate source text and pattern-match on it
   to derive active styling. Every generated predicate and every matcher
   changes.
@@ -345,15 +345,15 @@ ships without it.
 
 - [D008](../decisions/D008-the-filter-evaluator-is-a-lowered-plan.md) — the
   evaluator is a lowered plan, with the measurement above as its rationale.
-- [T041](../tickets/T041-lower-the-filter-to-a-typed-plan.md) — lowering, and
+- T041 — lowering, and
   the gates.
-- [T042](../tickets/T042-the-filter-language-is-python-shaped.md) — the
+- T042 — the
   surface cutover: Python spelling and the three namespaces.
-- [T046](../tickets/T046-negative-numbers-are-writable.md) — a defect T042
+- T046 — a defect T042
   surfaced without causing: the language has no unary minus, so the
   custom-field panel offers a one-click predicate for a negative value that
   cannot compile.
-- [T043](../tickets/T043-filter-syntax-highlighting.md) — the editor overlay
+- T043 — the editor overlay
   and the main-thread lexer.
 
 Nothing here binds until those land. The spec changes with T042.

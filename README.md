@@ -43,5 +43,6 @@ cargo test --manifest-path src/local-server/Cargo.toml
 
 ## Where things are
 
-The specification is [spec/](spec/README.md). How work is done here is
-[docs/now.md](docs/now.md).
+The specification is [spec/](spec/README.md), operational details are in
+[docs/context.md](docs/context.md), and possible follow-up work is in
+[TODO.md](TODO.md).

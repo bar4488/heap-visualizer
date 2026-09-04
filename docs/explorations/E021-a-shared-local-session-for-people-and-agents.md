@@ -379,17 +379,17 @@ it.
 
 ## Derived artifacts
 
-- [T050](../tickets/T050-prove-the-hosted-to-loopback-connection.md) — the
+- T050 — the
   hosted-to-loopback transport proof, before the engine boundary moves.
-- [T051](../tickets/T051-the-local-server-knows-no-hosted-url.md) — remove the
+- T051 — remove the
   accidental hosted-origin configuration from the local binary.
-- [T052](../tickets/T052-disconnect-from-the-local-server.md) — let one tab
+- T052 — let one tab
   discard its capability and return to standalone mode.
-- [T054](../tickets/T054-server-starts-with-one-trace.md) — start the binary
+- T054 — start the binary
   with one trace and have a connected browser load it automatically.
-- [T057](../tickets/T057-native-engine-and-bounded-events.md) — give the server
+- T057 — give the server
   an owned native engine and bounded semantic event reads.
-- [T058](../tickets/T058-allocation-detail-and-filter-query.md) — add render-free
+- T058 — add render-free
   allocation detail and ephemeral bounded filter queries.
-- [T059](../tickets/T059-canonical-analysis-and-revisions.md) — persist the
+- T059 — persist the
   canonical analysis document and expose revisioned mutations.

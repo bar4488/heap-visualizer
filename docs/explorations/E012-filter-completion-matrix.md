@@ -197,7 +197,7 @@ from its own catalog.
 One row did not survive contact, and it is the correction below rather than a
 change of mind about the design.
 
-_(Recorded 2026-07-31 by [T025](../tickets/T025-e012-carries-a-controlled-status.md),
+_(Recorded 2026-07-31 by T025,
 which found this file carrying `status: complete` — a value neither documented
 query matches. The section is added because a settled exploration is required
 to carry one; nothing above it was edited.)_
@@ -205,7 +205,7 @@ to carry one; nothing above it was edited.)_
 ## Correction — 2026-07-29
 
 Every `tag` row above names a field that no longer exists.
-[T016](../tickets/T016-tags-is-a-string-set.md) replaced the scalar `tag` with
+T016 replaced the scalar `tag` with
 the set-typed `tags`, so the completion positions changed shape: after `tags`
 the operators are `==`, `!=` and `contains` (not `<`, `in`, or `is`); `tags ==`
 offers only `{`; `tags contains` and `tags == {` are where the current tag

@@ -23,7 +23,7 @@ Needs the wasm target: `rustup target add wasm32-unknown-unknown`.
 engine, loaded by the worker. `filter_lexer.wasm` is `src/filter-dsl/` on its
 own, loaded by the main thread so the filter editor can highlight
 synchronously as you type — the grammar has one owner and the editor does not
-wait on a message port ([T043](tickets/T043-filter-syntax-highlighting.md)).
+wait on a message port.
 
 ## Run
 
@@ -121,19 +121,14 @@ python3 -m unittest discover -s src/server            # the request service, ove
 cargo test --manifest-path src/local-server/Cargo.toml # the local data-server transport
 ```
 
-**Counts are not written down anywhere here.** Each command prints its own, and
-a number in prose is a number that goes stale between the commit that changes
-it and the commit that notices — which is what
-[T022](tickets/T022-docs-cite-commands-not-counts.md) was filed for.
+Each command prints its own test count; do not maintain duplicate counts here.
 
 **Invoke the compiler as `node_modules/.bin/tsc`, not `npx tsc`.** `typescript`
 is a devDependency, so with `node_modules/` absent npx fetches an unrelated
 package from the registry whose entire content is a message saying it is not
 the compiler — and a piped `| grep -c 'error TS'` reads that as zero errors.
 `./build.sh` resolves the same binary and fails with a message naming
-`npm install`, so it is the safer habit. See
-[T018](tickets/T018-build-resolves-local-tsc.md) and
-[T021](tickets/T021-live-docs-drop-npx-tsc.md).
+`npm install`, so it is the safer habit.
 
 The Rust, Node and Python suites run from a clean checkout with no project
 install step — Node
@@ -156,11 +151,8 @@ What it does not cover, and what no suite will: see
 ## Verify a web change
 
 Rendering, pointer interaction, and the real worker round trip are **not**
-covered by either suite, and no harness is going to cover them
-([D001](decisions/D001-web-changes-are-hand-smoke-tested.md),
-[E009](explorations/E009-the-hand-verification-bottleneck.md)). What that
-leaves is: run everything cheap, and say precisely what it did and did not
-establish.
+covered by either suite. Run the available checks and say precisely what they
+did and did not establish.
 
 ```sh
 cargo test --manifest-path src/core/Cargo.toml
@@ -184,9 +176,8 @@ HTTP 200 means the file exists, not that the page works. Everything is checked
 against `dist/` after a build — the served tree is a build product, and a stale
 one is the new way to be confused.
 
-**A person's pass is not a gate on closing a ticket.** If a change carries a
-risk only an eye can retire, name it in the ticket and in
-[now](now.md) and close.
+If a change carries a risk only a person's eye can retire, state that limitation
+in the final result rather than blocking otherwise verified work.
 
 ## Layout
 

@@ -5,9 +5,8 @@ The active workflow is in [AGENTS.md](../AGENTS.md). It is intentionally short.
 ## Start here
 
 - [context.md](context.md) — build, run, test, and deployment commands.
-- [now.md](now.md) — current architecture, known limitations, and likely next
-  work. Read only the sections relevant to the task.
 - [spec/](../spec/README.md) — authoritative product behavior.
+- [../TODO.md](../TODO.md) — short list of worthwhile follow-up work.
 
 ## Repository map
 
@@ -22,7 +21,6 @@ The active workflow is in [AGENTS.md](../AGENTS.md). It is intentionally short.
 | `spec/` | Product requirements. |
 | `docs/decisions/` | Architectural rationale worth retaining. |
 | `docs/explorations/` | Historical research and proposals. |
-| `docs/tickets/` | Existing backlog and completed work records. New tickets are optional. |
 
 ## Practical rules
 

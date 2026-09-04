@@ -9,7 +9,7 @@ updated: 2026-07-31
 
 ## Summary
 
-[T015](../tickets/T015-overlapping-tags.md) changed tags from one `u8` per
+T015 changed tags from one `u8` per
 event to overlapping memberships. The behavior is correct: adding tag `b` to
 allocations selected by tag `a` preserves both memberships, both predicates
 match, and `.heapa` persists both.
@@ -330,7 +330,7 @@ Measure:
 
 The benchmark should use release-native core code for repeatable CPU
 measurements and one WASM/browser memory observation only if the native result
-shows a problem. Per [D001](../decisions/D001-web-changes-are-hand-smoke-tested.md),
+shows a problem. Per D001,
 this exploration does not itself authorize building a browser harness.
 
 ## Open questions
@@ -353,7 +353,7 @@ this exploration does not itself authorize building a browser harness.
 
 **The DSL sections of this document describe a language that no longer exists.**
 They are left standing above as the analysis that was true on 2026-07-25;
-[T016](../tickets/T016-tags-is-a-string-set.md) replaced it four days later.
+T016 replaced it four days later.
 
 Three claims are now wrong:
 

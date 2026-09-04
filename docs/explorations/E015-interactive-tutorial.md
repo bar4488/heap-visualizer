@@ -94,7 +94,7 @@ describes a filter can **apply it**.
   (`src/web/shell/dom.ts:34`). Rendering markdown is either a build-time step
   in `build.sh` or a small client-side renderer — a new dependency either way,
   and untrusted-HTML rules apply if it is client-side.
-- **[D001](../decisions/D001-web-changes-are-hand-smoke-tested.md)**: no
+- **D001**: no
   browser automation. A guide that drives the UI for the *user's* benefit is
   fine; a suite that drives the guide to verify it is what D001 declines.
 - **`src/` in, `dist/` out.** Guide content is hand-written under `src/`; if it
@@ -244,14 +244,14 @@ describes a filter can **apply it**.
 
 ## Derived artifacts
 
-- **[T019](../tickets/T019-guide-drawer-prototype.md)** — the prototype:
+- **T019** — the prototype:
   `#guide` at the left edge of the workspace, `src/web/guide/*.md`,
   `#show:` / `#do:` / `#set:` acting on real controls.
 - **[SHELL-009](../../spec/09-ui-shell.md#shell-009-the-guide-surface)** — the
   guide surface is not a window, and reaches app state only through real
   controls. Written with T019 because the code would otherwise knowingly
   disagree with SHELL-001's account of the workspace.
-- **[T024](../tickets/T024-guide-renderer-tests.md)** — the markdown renderer
+- **T024** — the markdown renderer
   the prototype shipped untested.
 
 ## Where it stands, 2026-07-31

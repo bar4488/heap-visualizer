@@ -52,7 +52,7 @@ service over it. There is no Rust and no `tsc` in the image, nothing to keep in
 sync with the real build, and `compose up` on a tree that was never built fails
 saying so.
 
-What [T038](../tickets/T038-drop-the-docker-build.md) removed — a container
+What T038 removed — a container
 that ran `cargo` and `tsc` so that a second toolchain had to be maintained — is
 not coming back. Reversing that would need its own record.
 

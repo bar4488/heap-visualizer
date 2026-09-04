@@ -365,11 +365,11 @@ which own status; the rationale it argues lives in a decision record:
 - [D002](../decisions/D002-shell-split-before-host.md) — why the host is last.
 - Stage 0 and Stage 1 — done, before this repository adopted the protocol;
   `git log 41f4e37..a18c1ce`.
-- [T001](../tickets/T001-namespace-heap-session-state.md) — the namespacing
+- T001 — the namespacing
   constraint from §3, carried out of Stage 1.
-- [T002](../tickets/T002-panel-content-as-data.md) — Stage 2.
-- [T003](../tickets/T003-typescript-at-the-contracts.md) — Stage 3.
-- [T004](../tickets/T004-shell-host.md) — Stage 4, and §5's open questions.
+- T002 — Stage 2.
+- T003 — Stage 3.
+- T004 — Stage 4, and §5's open questions.
 
 §6's two proposals (undo/redo, multiple open traces) have no tickets: neither is
 started, and each needs its own exploration first.

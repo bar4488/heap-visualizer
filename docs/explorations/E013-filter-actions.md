@@ -125,10 +125,10 @@ made by the tickets below. Nothing here binds until those land.
 
 ## Derived artifacts
 
-- [T011](../tickets/T011-legend-chips-toggle-filter.md) — legend chips toggle a
+- T011 — legend chips toggle a
   filter conjunct.
-- [T012](../tickets/T012-match-range-replaces-filter.md) — match range replaces
+- T012 — match range replaces
   the applied filter.
-- [T013](../tickets/T013-saved-filters.md) — named filters saved in the marks
+- T013 — named filters saved in the marks
   file.
-- [T014](../tickets/T014-filter-to-tag.md) — tag every current match.
+- T014 — tag every current match.

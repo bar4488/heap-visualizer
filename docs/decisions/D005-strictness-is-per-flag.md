@@ -29,7 +29,7 @@ down.
 releases. Turning it on means agreeing in advance to checks that do not exist
 yet, and the first upgrade that adds one produces a wall of errors in a layer
 whose only other automated coverage is 44 unit tests
-([D001](D001-web-changes-are-hand-smoke-tested.md)). Listing the flags means an
+(D001). Listing the flags means an
 upgrade changes nothing until someone chooses.
 
 The list is also the honest form of the answer. "Strictness is low" says
@@ -52,7 +52,7 @@ The counts above were measured with `npx tsc`, which resolves the same local
 binary whenever `node_modules/` is present, so they stand. The invocation is
 spelled out here because the piped form is the one that fails quietly without
 it: npx would fetch an unrelated package and `grep -c` would report **0
-errors** rather than an error ([T021](../tickets/T021-live-docs-drop-npx-tsc.md)).
+errors** rather than an error (T021).
 
 `d` is `analysis.ts`, `session.ts` and `events-panel.ts` holding their injected
 dependencies as module state:
@@ -65,7 +65,7 @@ export function initAnalysis(deps) { d = deps; ... }
 `deps` is untyped, so every `d.ui.tags` reads a property off an implicit `any`;
 `d` starts as `null`, so every one of them is also a possibly-null read. One
 pattern, roughly 200 errors under each flag, and
-[T009](../tickets/T009-type-the-deps-contracts.md) is what retires it.
+T009 is what retires it.
 
 T009 does **not** finish either flag — it is the largest single cause, not the
 majority. The ~350 that remain under `noImplicitAny` are unannotated function

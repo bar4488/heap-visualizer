@@ -22,7 +22,7 @@ Two constraints follow and are honored in every stage:
   `grep -ric heap web/shell/` reports 0 for every file.
 - **Persisted domain state is namespaced and versioned** — cheap with one
   writer, a migration nobody wants to write later. This is
-  [T001](../tickets/T001-namespace-heap-session-state.md).
+  T001.
 
 ## Why
 
@@ -46,8 +46,8 @@ exists to share the name.
 
 ## What would reverse it
 
-A second domain becoming concrete moves [T004](../tickets/T004-shell-host.md)
+A second domain becoming concrete moves T004
 from blocked to startable. That is the trigger this decision exists to wait for,
 not a reversal of it. An actual reversal would be evidence that the seam drawn
 in `web/shell/` is wrong — most likely a panel that cannot be expressed as a
-declared record in [T002](../tickets/T002-panel-content-as-data.md).
+declared record in T002.
