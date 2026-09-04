@@ -140,6 +140,16 @@ together; the image carries no toolchain and bind-mounts an already-built
 is intact and [T038](tickets/T038-drop-the-docker-build.md) is not being
 reversed.
 
+**A separate server-only native binary now proves the future local data
+boundary.** `src/local-server/` binds to loopback, admits one configured browser
+origin and a fresh bearer capability, and prints a hosted launch URL carrying
+that capability only in its fragment. The hosted app removes it from history,
+keeps it for that tab, and visibly reports connected or the distinct failure
+states; an ordinary visit remains standalone and makes no local request
+([ARCH-008](../spec/08-architecture.md#arch-008-local-data-server-connection),
+[T050](tickets/T050-prove-the-hosted-to-loopback-connection.md)). It serves no
+trace yet and does no rendering; E021's next slice is the native data engine.
+
 **Verification — native, web and service suites, a type-checker, and a
 person.** `cargo test`
 covers the engine and the filter parser/completion contexts;
@@ -208,22 +218,25 @@ layout and the send path in a browser — the outcomes are unit-tested and the
 routes were driven with `curl` against the container, but no automated check
 presses the button (D001).
 
-**T050 is in flight:** prove that the hosted HTTPS app can connect to an
-authenticated server-only binary on loopback while an ordinary visit remains
-standalone. It is the transport gate for
-[E021](explorations/E021-a-shared-local-session-for-people-and-agents.md);
-no trace or rendering boundary moves until it works. The older backlog is
+**Nothing is in flight.** The transport gate for
+[E021](explorations/E021-a-shared-local-session-for-people-and-agents.md) is
+complete; the next deliverable is the native engine and bounded read API, but
+it has no ticket until it is selected and grounded. The older backlog is
 [T045](tickets/T045-lower-integer-arithmetic-to-a-narrow-path.md) and
 [T046](tickets/T046-negative-numbers-are-writable.md) — both came out of that
 work, neither is urgent — plus T009, T030, and the blocked T004.
 
-**Two checks are outstanding and both are a person's**, because
+**Browser checks are outstanding and are a person's**, because
 [D001](decisions/D001-web-changes-are-hand-smoke-tested.md) says an agent must
 not drive a browser. E010's performance gates are stated in release WASM and
 T041 measured native, where the margin is 60×. And the filter editor's
 highlight overlay has to sit exactly under the textarea's own text at every
 zoom and wrap point; if the module fails to load the panel falls back to plain
-text, so the failure mode is visible rather than silent.
+text, so the failure mode is visible rather than silent. T050 additionally
+needs its printed launch URL opened from the actual HTTPS deployment in current
+Chrome (both granting and denying Apps on device), Firefox and Safari; the UI
+already distinguishes permission denial where the browser exposes it from an
+otherwise blocked or absent endpoint.
 
 **[T046](tickets/T046-negative-numbers-are-writable.md) is worth knowing about
 before writing a filter**: the language has no unary minus, in any version of
@@ -267,5 +280,5 @@ friction with `PROTOCOL.md` itself goes in
 <!-- generated:begin -->
 ## Doing
 
-- [T050](tickets/T050-prove-the-hosted-to-loopback-connection.md) — prove the hosted-to-loopback connection
+Nothing in flight.
 <!-- generated:end -->
