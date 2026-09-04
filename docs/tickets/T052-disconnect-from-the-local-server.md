@@ -1,7 +1,7 @@
 ---
 id: T052
 title: Disconnect from the local server
-status: doing
+status: done
 updated: 2026-09-05
 ---
 
@@ -14,15 +14,21 @@ return immediately to explicit standalone mode.
 
 ## Done when
 
-- [ ] The connection control reads **Disconnect** whenever the tab retains a
+- [x] The connection control reads **Disconnect** whenever the tab retains a
       capability and **Connect…** otherwise.
-- [ ] Disconnect removes the tab-scoped capability and reports standalone
+- [x] Disconnect removes the tab-scoped capability and reports standalone
       without a reload.
-- [ ] A late response from a disconnected request cannot restore connected
+- [x] A late response from a disconnected request cannot restore connected
       status.
-- [ ] The web suite, type-check and emitted web build pass.
+- [x] The web suite, type-check and emitted web build pass.
 
 ## Non-goals
 
 - Stopping the local binary.
 - Disconnecting another browser tab or an agent.
+
+## Result
+
+The one control now connects or disconnects according to tab state. The web
+suite, type-check and emitted build pass, including a deferred-response test
+that disconnects before the connection completes.
