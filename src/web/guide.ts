@@ -38,12 +38,12 @@ const PANEL_TOGGLE = new Map(heapPanels().map((p) => [p.id, p.toggle]));
 
 // Section files, in reading order. Each is fetched from dist/guide/.
 const SECTIONS = [
-  { file: 'the-format.md', title: 'Trace format' },
-  { file: 'the-map.md', title: 'Address map' },
-  { file: 'time.md', title: 'Time and navigation' },
-  { file: 'selecting.md', title: 'Selection' },
-  { file: 'filters.md', title: 'Query language' },
-  { file: 'tags-and-marks.md', title: 'Analysis state' },
+  { file: 'the-format.md', title: 'Load a trace' },
+  { file: 'the-map.md', title: 'Read the address map' },
+  { file: 'time.md', title: 'Move through the trace' },
+  { file: 'selecting.md', title: 'Inspect an allocation' },
+  { file: 'filters.md', title: 'Ask a question' },
+  { file: 'tags-and-marks.md', title: 'Keep the result' },
 ];
 
 const HIGHLIGHT_MS = 2200;

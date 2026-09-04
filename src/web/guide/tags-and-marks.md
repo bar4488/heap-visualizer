@@ -1,31 +1,29 @@
-# Analysis state
+# 6. Keep the result
 
-Tags, names, colors, marks, and saved filters annotate a trace without changing
-it. Their allocation identity is the creator event index, so annotations remain
-stable across seeks and layout changes.
+Turn the current query result into data you can revisit. Enter
+[surviving buffers](#set:filter-tag-name=surviving buffers), then click
+[Tag matches](#do:filter-to-tag).
 
-## Tags
+Clear the query with [Clear](#do:filter-clear). The filter disappears, but the
+tag remains: **Tag matches** captured a set of allocation identities rather than
+a live query. Switch to [tag color](#set:color-mode=5) to see the set on the
+map.
 
-A tag is a named, colored allocation set. Create memberships directly from an
-Allocation panel, from allocations born/freed in a selected range, or by
-snapshotting the applied filter. Range tagging intersects with the filter when
-one is active. Tag legend chips add their predicate to the query; tag color mode
-fills by first membership and shows additional memberships as stripes.
+Open [Marks](#show:analysis-panel). This is the analysis layer:
 
-## Marks
+- tags are named allocation sets;
+- time and address marks name positions in the trace and map;
+- allocation names and colors annotate individual objects;
+- saved filters preserve query source for reuse.
 
-[Marks](#show:analysis-panel) contains:
+All allocation annotations key off creator event indices, so they survive seeks
+and layout changes. Press `m` to add a time mark at the playhead; Shift-click
+the map to add an address mark. Search (`g`) resolves marks and allocation names.
 
-- time marks, added with `m`, which seek to a named playhead position;
-- address marks, added with Shift-click, which keep an address row laid out;
-- named allocations and saved filter expressions.
+**Save…** writes this layer to `.heapa.json` with the trace fingerprint,
+playhead, and key view settings. **Load…** or dropping that file restores it.
+The trace itself is unchanged, and both trace and analysis remain in the
+browser.
 
-Rows can be renamed inline, and search (`g`) resolves all of them.
-
-## Persistence
-
-**Save…** writes `.heapa.json`: trace fingerprint, annotations, playhead, and
-key view settings. **Load…** or dropping the file restores it; a fingerprint
-mismatch warns but does not block the load. The same analysis autosaves locally
-per trace filename. Layout, filter, crop, zoom, panel geometry, and pinned
-windows are saved separately as view state.
+You now have the core workflow: load, orient spatially, seek, inspect, query,
+and preserve the result.

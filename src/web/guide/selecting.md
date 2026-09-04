@@ -1,26 +1,23 @@
-# Selection
+# 4. Inspect an allocation
 
-Click a map allocation, seek to an allocation event, or jump to an address. The
-Allocation panel reports its span, requested and usable sizes, birth/death,
-site, thread, stack, and producer-defined fields.
+Jump to [0x555555551000](#set:jump-input=0x555555551000), then press
+[Go](#do:btn-jump). An address jump leaves the playhead in place, scrolls to the
+nearest live row, and selects the allocation there.
 
-From that panel you can focus the map location, seek to birth or death, assign a
-name/color/tags, or replace the filter with
-`alloc.span.overlaps(range(<address>, <end>))`. Pinning freezes the current
-allocation in an independent window for comparison; selecting a pinned
-allocation raises it.
+The Allocation panel ties the rectangle back to the trace: address span,
+requested and usable sizes, creator and death events, site, thread, stack, and
+producer-defined fields. **go to birth** and **go to death** move the playhead;
+**focus** returns to the rectangle.
 
-Shift-click the map to create an address mark.
+Pin the panel if you want to compare this allocation with another. The pinned
+window stops following selection; selecting that allocation again raises it.
 
-## Ranges
+There are two useful selection gestures:
 
-Shift-drag either strip, or drag vertically in Events. A range is defined in one
-domain and projected onto both strips. Escape clears it.
+- Shift-click the map to create a persistent address mark.
+- Shift-drag a timeline, or drag vertically in Events, to select a sequence
+  range. From its popover you can zoom, crop, or tag allocations born or freed
+  in that range.
 
-The range popover can zoom the strip, crop the view, tag allocations born in
-the range, or tag allocations freed in it. Crop restricts attention to births
-inside the sequence window; it dims rather than hides and remains active until
-cleared from the toolbar.
-
-[sites.heapl](index.html?trace=guide/traces/sites.heapl&guide=1) is a small
-trace for inspecting selections, producer fields, ranges, and layout changes.
+Crop always dims rather than hides. This keeps the surrounding heap visible
+while narrowing the investigation.

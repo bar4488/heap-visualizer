@@ -1,31 +1,21 @@
-# Time and navigation
+# 3. Move through the trace
 
-Two strips share one playhead:
+The two strips share one playhead but use different x axes: **time** uses trace
+timestamps, while **events** gives every record equal width. One exposes pauses
+and bursts; the other exposes order and count.
 
-- [time](#show:strip-t) maps wall-clock timestamps, exposing bursts and idle
-  gaps;
-- [events](#show:strip-s) maps event sequence uniformly, exposing order and
-  count.
+Jump to [sequence 12](#set:jump-input=12), then press [Go](#do:btn-jump).
+Several rectangles disappear because you moved before their allocations were
+created. The status bar shows both the event `seq` and its timestamp `t`.
 
-[bursts.heapl](index.html?trace=guide/traces/bursts.heapl&guide=1) makes the
-difference explicit. The playhead is an event `seq` plus that event's `t`.
-Stepping changes `seq` by one; elapsed time depends on the trace.
+Use `←` and `→` to step. Each step consumes one record, so an `M` adds an
+allocation, an `F` removes one, and an `R` may move or resize one. Shift steps
+100 records; Home and End seek to the bounds. `L` disables automatic map
+scrolling while you inspect a fixed address range.
 
-The jump box accepts a sequence (`41200`, including scientific notation), a
-timestamp (`t:1e6`), or an address (`0x7f001000`). An address jump selects the
-nearest live allocation without moving the playhead. Try
-[seq 12](#set:jump-input=12), then [Go](#do:btn-jump). `g` opens search across
-marks, names, and warnings.
+Open [Play](#show:play-panel). **advance by time** respects timestamp gaps;
+**advance by events** advances a fixed record count per tick. Space toggles
+playback.
 
-[Play](#show:play-panel) can advance by timestamp or by fixed event count.
-`←`/`→` step one event, Shift steps 100, Space toggles playback, and Home/End
-seek to the bounds. `L` disables map auto-scroll.
-
-The Events panel is the sequence as a virtualized table. Click a row to seek and
-select; arrow keys step; vertical drag selects a range. **filtered** retains the
-birth and death records of matching allocations. Custom `E` records remain in
-the unfiltered event stream.
-
-On realloc, the map links the old and new regions unless the address is
-unchanged. [realloc.heapl](index.html?trace=guide/traces/realloc.heapl&guide=1)
-contains both cases.
+Drag either strip to select a range. The selection appears on both axes, even
+though its width differs. Press Escape to clear it before continuing.

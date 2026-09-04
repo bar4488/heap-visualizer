@@ -1,7 +1,7 @@
 ---
 id: T055
 title: Turn the guide into a walkthrough
-status: doing
+status: done
 updated: 2026-09-05
 ---
 
@@ -14,12 +14,19 @@ with each short explanation followed by an action and an observable result.
 
 ## Done when
 
-- [ ] The sections form a sequential path rather than an API-style reference.
-- [ ] A reader can follow the primary path with one trace and working guide
+- [x] The sections form a sequential path rather than an API-style reference.
+- [x] A reader can follow the primary path with one trace and working guide
       actions.
-- [ ] Technical details explain observations at the point they become useful.
-- [ ] `node --test 'src/web/**/*.test.ts'` passes and `./build.sh web` succeeds.
+- [x] Technical details explain observations at the point they become useful.
+- [x] `node --test 'src/web/**/*.test.ts'` passes and `./build.sh web` succeeds.
 
 ## Non-goals
 
 - Exhaustively documenting every control or changing application behavior.
+
+## Result
+
+The six sections now lead one investigation over `sites.heapl`: load, alter the
+map, seek, inspect an allocation, refine a query, and snapshot it as a tag.
+Actions state the expected visual result before introducing the model behind it.
+The shipped guide-page checks, full web suite, type-check, and emitted build pass.

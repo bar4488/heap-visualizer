@@ -64,10 +64,11 @@ check/apply/mode worker protocol, and **highlights as you type** from a second
 wasm module built from `src/filter-dsl/` and loaded on the main thread
 ([T043](tickets/T043-filter-syntax-highlighting.md)).
 
-**The in-app guide is a compact technical entry point.** Its six sections follow
-the data flow from trace format through spatial and temporal views, selection,
-the query language, and persisted analysis. Standard Markdown soft wraps render
-as paragraphs, and headings with whitespace organize the drawer without rules.
+**The in-app guide is a technical walkthrough, not a reference manual.** Its six
+sections lead one investigation over a small trace: load, alter the map, seek,
+inspect, query, and preserve the result. Each explanation follows an action and
+its expected observation. Standard Markdown soft wraps render as paragraphs,
+and headings with whitespace organize the drawer without rules.
 
 **The filter language is Python.** `and`/`or`/`not`, `in` for every membership,
 `range(lo, hi)`, `is None`, chained comparison, `len()`, `startswith` —
