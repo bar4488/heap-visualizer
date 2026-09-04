@@ -44,9 +44,14 @@ test('a run of list items becomes one list, closed by the next block', () => {
     render('- one\n\n# After'),
     '<ul><li>one</li></ul>\n<h2>After</h2>',
   );
-  // two runs separated by a paragraph are two lists, not one
+  // A soft-wrapped line continues the preceding item, like ordinary Markdown.
   assert.equal(
-    render('- a\ntext\n- b'),
+    render('- a\n  continued\n- b'),
+    '<ul><li>a continued</li><li>b</li></ul>',
+  );
+  // A paragraph after a list needs the same blank-line boundary as Markdown.
+  assert.equal(
+    render('- a\n\ntext\n\n- b'),
     '<ul><li>a</li></ul>\n<p>text</p>\n<ul><li>b</li></ul>',
   );
 });
@@ -67,6 +72,7 @@ test('an unterminated fence still emits its contents', () => {
 
 test('paragraphs, rules, and blank lines', () => {
   assert.equal(render('one\n\ntwo'), '<p>one</p>\n<p>two</p>');
+  assert.equal(render('one soft\nwrap'), '<p>one soft wrap</p>');
   assert.equal(render('---'), '<hr>');
   assert.equal(render('-----'), '<hr>');
   assert.equal(render(''), '');

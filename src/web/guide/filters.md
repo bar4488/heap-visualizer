@@ -1,75 +1,40 @@
-# Filters
+# Query language
 
-One expression over allocations, written in [Filter](#show:filter-panel). **dim
-others** keeps the surrounding heap visible; **hide others** removes it.
+[Filter](#show:filter-panel) evaluates one Python-shaped expression over every
+allocation. **dim others** preserves heap context; **hide others** removes
+non-matches. Typing only checks the expression; **Apply** compiles and scans it.
+An invalid draft leaves the previous filter active.
 
-**It is a Python expression.** `and`, `or`, `not`, `in`, `is None`, chained
-comparisons, `len()` — all mean what they mean in Python. The language ignores
-the playhead: `alloc.freed` and `alloc.lifetime` describe the whole trace. A
-`live_now` field would invalidate the match set on every seek, so there isn't
-one.
+The object model has three roots:
 
-## The three objects
+- `alloc`: `id`, `address`, `end`, `span`, `size`, `usable`, `tags`, `freed`,
+  and `lifetime`;
+- `malloc`: creator `seq`, `time`, `site`, `thread`, `stack`, and
+  `fields.<key>`;
+- `free`: terminating `seq`, `time`, and `fields.<key>`, or absent.
 
-Every field hangs off one of three: the allocation, and the two records that
-bound its life.
+The match set describes the complete trace, independent of the playhead.
+Optional values use `is None`; operations on a missing value are false.
 
-- **`alloc`** — the allocation itself. `size`, `usable`, `address`, `end`,
-  `span`, `id`, `tags`, `freed`, `lifetime`.
-- **`malloc`** — the record that created it. `seq`, `time`, `site`, `thread`,
-  `stack`, and `fields.<key>` for the producer's own.
-- **`free`** — the record that ended it, or nothing. `seq`, `time`, and
-  `fields.<key>`.
+## Examples
 
-`site` and `thread` are on `malloc` because that is the record carrying them —
-an `F` record has neither. Type `alloc.` and the completion list is the whole
-object.
+- `0 <= alloc.size < 4096`
+- `alloc.address in range(0x1000, 0x1800)`
+- `alloc.span.overlaps(range(A, B))`
+- `malloc.site.startswith("json_") and not alloc.freed`
+- `"hot" in alloc.tags`
+- `alloc.tags == {"a", "b"}` or `alloc.tags == {}`
+- `malloc.fields.pool == "request"`
 
-Anything on `malloc` or `free` can be absent, and absent is its own state:
-write `malloc.site is None`, not `malloc.site == ""`. Every other operation on
-a missing value is false, so an allocation with no site never matches
-`malloc.site.startswith("x")` and never matches its negation either.
+`range` is half-open. Numeric literals accept units (`4KiB`) and separators
+(`0x7f00_0000`). Ctrl/Cmd-Space requests type-aware completion from the same
+catalog used by the checker.
 
-## Writing it
+Against [sites.heapl](index.html?trace=guide/traces/sites.heapl&guide=1), try
+[alloc.size >= 4096](#set:filter-source=alloc.size >= 4096) or
+[malloc.site == "json_node"](#set:filter-source=malloc.site == "json_node"),
+then [Apply](#do:filter-apply). [Clear](#do:filter-clear) disables filtering.
 
-- `"x" in alloc.tags` — membership, the same `in` that tests a set, a
-  substring of `malloc.site`, a frame of `malloc.stack`, and a `range`.
-- `alloc.address in range(0x1000, 0x1800)` — half-open, like Python's.
-- `alloc.span.overlaps(range(A, B))` — the range test against an allocation.
-- `0 <= alloc.size < 4096` — comparisons chain.
-- `malloc.site.startswith("x")`, `.endswith("x")`.
-- `alloc.tags == {"a", "b"}` is exact set equality; `alloc.tags == {}` is
-  untagged; `len(alloc.tags) > 1` counts.
-- Sizes accept units — `4KiB`. Addresses accept `_` separators —
-  `0x7f00_0000`.
-- Ctrl or Cmd with Space opens completions. They come from the same catalog
-  that checks the expression, so they only offer what the evaluator implements.
-
-## Applying
-
-Typing checks the expression and changes nothing. **Apply** compiles and scans.
-On a diagnostic the previous filter stays active. Applying an empty source
-turns filtering off, same as **Clear**.
-
-Against [sites.heapl](index.html?trace=guide/traces/sites.heapl&guide=1) — 16
-allocations:
-
-- [alloc.size >= 4096](#set:filter-source=alloc.size >= 4096) matches 6.
-- [malloc.site == "json_node"](#set:filter-source=malloc.site == "json_node")
-  matches 10.
-- [not alloc.freed](#set:filter-source=not alloc.freed) matches the 5 that
-  leak.
-- [malloc.site == "read_buffer" and not alloc.freed](#set:filter-source=malloc.site == "read_buffer" and not alloc.freed)
-  matches 2.
-
-[Apply](#do:filter-apply) after setting one, or [Clear](#do:filter-clear).
-
-Three things write the expression for you, all editing that same source:
-
-- Legend chips toggle their own predicate as a top-level conjunct and apply.
-  Shift-click uses a disjunction. String values are escaped, and an existing
-  top-level disjunction is parenthesized so its meaning survives.
-- **match range** on the allocation panel replaces it with
-  `alloc.span.overlaps(range(<addr>, <end>))`.
-- Saving under a name keeps the source text, per trace. Setting a saved filter
-  again applies it.
+Legend chips, Allocation's **match range**, and saved filters all rewrite this
+same source. **Tag matches** snapshots the current applied set; later query edits
+do not change that tag.

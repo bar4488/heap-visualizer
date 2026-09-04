@@ -64,6 +64,11 @@ check/apply/mode worker protocol, and **highlights as you type** from a second
 wasm module built from `src/filter-dsl/` and loaded on the main thread
 ([T043](tickets/T043-filter-syntax-highlighting.md)).
 
+**The in-app guide is a compact technical entry point.** Its six sections follow
+the data flow from trace format through spatial and temporal views, selection,
+the query language, and persisted analysis. Standard Markdown soft wraps render
+as paragraphs, and headings with whitespace organize the drawer without rules.
+
 **The filter language is Python.** `and`/`or`/`not`, `in` for every membership,
 `range(lo, hi)`, `is None`, chained comparison, `len()`, `startswith` —
 [ANL-003](../spec/07-analysis.md#anl-003-filter) is the rule and
@@ -218,12 +223,10 @@ layout and the send path in a browser — the outcomes are unit-tested and the
 routes were driven with `curl` against the container, but no automated check
 presses the button (D001).
 
-**T053 is in flight:** make the guide a compact technical entry point through
-the trace model, views, query language and saved analysis. Separately, Connect…
-changes to Disconnect while a tab retains a local-server capability; disconnect
-discards only that tab's capability and a late request cannot reconnect it. The
-next E021 deliverable is the native engine and bounded read API, but it has no
-ticket until selected and grounded. The older backlog is
+**Connect… changes to Disconnect while a tab retains a local-server
+capability;** disconnect discards only that tab's capability and a late request
+cannot reconnect it. The next E021 deliverable is the native engine and bounded
+read API, but it has no ticket until selected and grounded. The older backlog is
 [T045](tickets/T045-lower-integer-arithmetic-to-a-narrow-path.md) and
 [T046](tickets/T046-negative-numbers-are-writable.md) — both came out of that
 work, neither is urgent — plus T009, T030, and the blocked T004.
@@ -281,6 +284,4 @@ friction with `PROTOCOL.md` itself goes in
 
 <!-- generated:begin -->
 ## Doing
-
-- [T053](tickets/T053-make-the-guide-a-technical-entry-point.md) — make the guide a technical entry point
 <!-- generated:end -->

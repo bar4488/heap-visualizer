@@ -38,12 +38,12 @@ const PANEL_TOGGLE = new Map(heapPanels().map((p) => [p.id, p.toggle]));
 
 // Section files, in reading order. Each is fetched from dist/guide/.
 const SECTIONS = [
-  { file: 'the-format.md', title: 'The format' },
-  { file: 'the-map.md', title: 'The map' },
-  { file: 'time.md', title: 'Time' },
-  { file: 'selecting.md', title: 'Selecting' },
-  { file: 'filters.md', title: 'Filters' },
-  { file: 'tags-and-marks.md', title: 'Tags and marks' },
+  { file: 'the-format.md', title: 'Trace format' },
+  { file: 'the-map.md', title: 'Address map' },
+  { file: 'time.md', title: 'Time and navigation' },
+  { file: 'selecting.md', title: 'Selection' },
+  { file: 'filters.md', title: 'Query language' },
+  { file: 'tags-and-marks.md', title: 'Analysis state' },
 ];
 
 const HIGHLIGHT_MS = 2200;
@@ -90,16 +90,23 @@ export function render(src: string): string {
   const out: string[] = [];
   let list: string[] | null = null;
   let code: string[] | null = null;
+  let paragraph: string[] = [];
 
   const flushList = () => {
     if (list) out.push(`<ul>${list.map((li) => `<li>${inline(li)}</li>`).join('')}</ul>`);
     list = null;
+  };
+  const flushParagraph = () => {
+    if (paragraph.length) out.push(`<p>${inline(paragraph.join(' '))}</p>`);
+    paragraph = [];
   };
 
   for (const raw of esc(src).split('\n')) {
     const line = raw.trimEnd();
 
     if (line.startsWith('```')) {
+      flushParagraph();
+      flushList();
       if (code) { out.push(`<pre><code>${code.join('\n')}</code></pre>`); code = null; } else code = [];
       continue;
     }
@@ -107,19 +114,21 @@ export function render(src: string): string {
 
     const heading = /^(#{1,4})\s+(.*)$/.exec(line);
     if (heading) {
+      flushParagraph();
       flushList();
       const level = Math.min(heading[1].length + 1, 4);
       out.push(`<h${level}>${inline(heading[2])}</h${level}>`);
       continue;
     }
     const item = /^[-*]\s+(.*)$/.exec(line);
-    if (item) { (list ||= []).push(item[1]); continue; }
+    if (item) { flushParagraph(); (list ||= []).push(item[1]); continue; }
 
-    flushList();
-    if (!line) continue;
-    if (/^---+$/.test(line)) { out.push('<hr>'); continue; }
-    out.push(`<p>${inline(line)}</p>`);
+    if (!line) { flushParagraph(); flushList(); continue; }
+    if (/^---+$/.test(line)) { flushParagraph(); flushList(); out.push('<hr>'); continue; }
+    if (list) { list[list.length - 1] += ` ${line.trimStart()}`; continue; }
+    paragraph.push(line.trimStart());
   }
+  flushParagraph();
   flushList();
   if (code) out.push(`<pre><code>${code.join('\n')}</code></pre>`);
   return out.join('\n');
