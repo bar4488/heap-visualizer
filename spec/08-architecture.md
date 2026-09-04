@@ -163,4 +163,6 @@ The app must visibly distinguish standalone, connecting, connected,
 authentication failure, browser permission denial when that state is exposed,
 and a local endpoint that is otherwise unavailable or blocked. Losing a
 connected endpoint must not silently select standalone mode and create a
-second writable analysis history.
+second writable analysis history. The connection control must also let the
+current tab discard its capability and return immediately to standalone; it
+must not stop the server or disconnect any other client.

@@ -76,7 +76,8 @@ The connection badge is in the status bar. Chromium asks for its Apps on
 device / Local Network Access permission on first contact. The binary knows no
 hosted URL: its connection string contains only `http://127.0.0.1:8631` and the
 capability in the fragment. The app retains it in that tab's session storage;
-an ordinary visit stays standalone and makes no local request.
+an ordinary visit stays standalone and makes no local request. The same control
+reads **Disconnect** while configured and discards only that tab's capability.
 
 ## Test
 

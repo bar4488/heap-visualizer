@@ -10,7 +10,7 @@ export type LocalServerStatus =
 
 const STORAGE_KEY = 'heapviz:local-server';
 
-type StoredConfig = Pick<Storage, 'getItem' | 'setItem'>;
+type StoredConfig = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 type HistoryLike = Pick<History, 'replaceState'>;
 type LocationLike = Pick<Location, 'hash' | 'pathname' | 'search'>;
 
@@ -76,6 +76,10 @@ function retainLocalServerConfig(config: LocalServerConfig, storage: StoredConfi
   try { storage.setItem(STORAGE_KEY, JSON.stringify(config)); } catch { /* unavailable storage */ }
 }
 
+export function forgetLocalServerConfig(storage: StoredConfig) {
+  try { storage.removeItem(STORAGE_KEY); } catch { /* unavailable storage */ }
+}
+
 type PermissionStateReader = () => Promise<PermissionState | null>;
 
 export async function connectLocalServer(
@@ -134,27 +138,50 @@ const STATUS_TEXT: Record<LocalServerStatus['state'], string> = {
 };
 
 export async function initLocalServerMode(element: HTMLElement, button: HTMLButtonElement) {
+  let config = localServerConfig(window.location, window.sessionStorage, window.history);
+  let generation = 0;
+
+  function updateButton() {
+    button.textContent = config ? 'Disconnect' : 'Connect…';
+    button.title = config
+      ? 'Disconnect this tab from the local data server'
+      : 'Connect this tab to a local data server';
+  }
+
   async function connect(config: LocalServerConfig | null) {
+    const mine = ++generation;
     setStatus(element, config ? { state: 'connecting' } : { state: 'standalone' });
     const status = await connectLocalServer(config);
+    if (mine !== generation) return;
     setStatus(element, status);
   }
 
   button.onclick = () => {
+    if (config) {
+      config = null;
+      generation++;
+      forgetLocalServerConfig(window.sessionStorage);
+      updateButton();
+      setStatus(element, { state: 'standalone' });
+      return;
+    }
     const value = window.prompt('Paste the connection string printed by heap-visualizer-local-server:');
     if (value === null) return;
-    const config = parseLocalServerConnection(value);
-    if (!config) {
+    const next = parseLocalServerConnection(value);
+    if (!next) {
       element.dataset.state = 'unreachable';
       element.textContent = 'local server: invalid connection string';
       element.title = 'Expected the loopback connection string printed by the local server';
       return;
     }
+    config = next;
     retainLocalServerConfig(config, window.sessionStorage);
+    updateButton();
     void connect(config);
   };
 
-  await connect(localServerConfig(window.location, window.sessionStorage, window.history));
+  updateButton();
+  await connect(config);
 }
 
 function setStatus(element: HTMLElement, status: LocalServerStatus) {

@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  connectLocalServer, localServerConfig, parseLocalServerConnection,
+  connectLocalServer, forgetLocalServerConfig, initLocalServerMode,
+  localServerConfig, parseLocalServerConnection,
 } from '../local-server.ts';
 
 function storage(initial: string | null = null) {
@@ -10,6 +11,7 @@ function storage(initial: string | null = null) {
   return {
     getItem() { return value; },
     setItem(_key: string, next: string) { value = next; },
+    removeItem() { value = null; },
     value() { return value; },
   };
 }
@@ -97,4 +99,49 @@ test('the binary connection string names no web deployment', () => {
   );
   assert.equal(parseLocalServerConnection(`https://viewer.example/#${'a'.repeat(64)}`), null);
   assert.equal(parseLocalServerConnection('http://127.0.0.1:8631#short'), null);
+});
+
+test('disconnect forgets only this tab connection', () => {
+  const store = storage(JSON.stringify({
+    baseURL: 'http://127.0.0.1:8631',
+    token: 'a'.repeat(64),
+  }));
+  forgetLocalServerConfig(store);
+  assert.equal(store.value(), null);
+});
+
+test('disconnect wins over a late connection response', async () => {
+  const store = storage(JSON.stringify({
+    baseURL: 'http://127.0.0.1:8631',
+    token: 'a'.repeat(64),
+  }));
+  const element = { dataset: {}, textContent: '', title: '' } as unknown as HTMLElement;
+  const button = { textContent: '', title: '', onclick: null } as unknown as HTMLButtonElement;
+  let resolveFetch!: (response: Response) => void;
+  const response = new Promise<Response>((resolve) => { resolveFetch = resolve; });
+  const oldWindow = globalThis.window;
+  const oldFetch = globalThis.fetch;
+  try {
+    globalThis.window = {
+      location: { hash: '', pathname: '/', search: '' },
+      sessionStorage: store,
+      history: { replaceState() {} },
+      prompt() { throw new Error('disconnect must not prompt'); },
+    } as unknown as Window & typeof globalThis;
+    globalThis.fetch = (() => response) as typeof fetch;
+
+    const initializing = initLocalServerMode(element, button);
+    assert.equal(button.textContent, 'Disconnect');
+    button.onclick!(null as unknown as PointerEvent);
+    assert.equal(button.textContent, 'Connect…');
+    assert.equal(element.dataset.state, 'standalone');
+    assert.equal(store.value(), null);
+
+    resolveFetch(Response.json({ apiVersion: 1, mode: 'local', serverVersion: 'late' }));
+    await initializing;
+    assert.equal(element.dataset.state, 'standalone');
+  } finally {
+    globalThis.window = oldWindow;
+    globalThis.fetch = oldFetch;
+  }
 });
