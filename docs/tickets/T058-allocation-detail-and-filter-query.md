@@ -1,7 +1,7 @@
 ---
 id: T058
 title: Allocation detail and ephemeral filter query
-status: doing
+status: done
 updated: 2026-09-05
 ---
 
@@ -15,15 +15,15 @@ browser's filter or any server view state.
 
 ## Done when
 
-- [ ] The native engine emits allocation detail without rectangles or other
+- [x] The native engine emits allocation detail without rectangles or other
       render geometry and returns not-found for a non-creator event.
-- [ ] `GET /api/v1/allocations/{creator}` is authenticated and trace-identified.
-- [ ] `POST /api/v1/query` accepts a bounded source and page request, returns
+- [x] `GET /api/v1/allocations/{creator}` is authenticated and trace-identified.
+- [x] `POST /api/v1/query` accepts a bounded source and page request, returns
       filter diagnostics or a capped page of creator allocations, and leaves
       engine state unchanged.
-- [ ] Query and allocation payloads contain no browser view state; tests prove
+- [x] Query and allocation payloads contain no browser view state; tests prove
       pagination, diagnostics, authentication, and repeated-query isolation.
-- [ ] Core/server tests, local-server clippy, type-check, and full build pass.
+- [x] Core/server tests, local-server clippy, type-check, and full build pass.
 
 ## Non-goals
 
@@ -33,9 +33,10 @@ browser's filter or any server view state.
 
 See [E021](../explorations/E021-a-shared-local-session-for-people-and-agents.md).
 
-## Handoff
+## Result
 
-Add render-free allocation serialization and an ephemeral query method to
-`heap_visualizer_core::Engine`, then route them from
-`src/local-server/src/lib.rs`. The existing `push_event_json` and lowered filter
-path in `src/core/src/lib.rs` are the grounded implementation sources.
+The owned engine now emits semantic allocation records and executes each query
+with independent lowered-plan match bits. The server authenticates both routes,
+requires query trace identity, caps source and page sizes, returns source-span
+diagnostics, and supports browser JSON preflight. Core/server tests,
+local-server clippy, web tests and type-check, and the full build pass.
