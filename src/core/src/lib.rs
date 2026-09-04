@@ -105,6 +105,7 @@ struct App {
     /// pushed in on every change, exactly as `tag_labels` is; the core holds a
     /// copy so `named()` can resolve.
     names: Vec<(u32, String)>,
+    analysis: analysis::Document,
 }
 
 impl App {
@@ -123,6 +124,7 @@ impl App {
             ev_dirty: true,
             tag_labels: Vec::new(),
             names: Vec::new(),
+            analysis: analysis::Document::default(),
         }
     }
 }
@@ -198,6 +200,41 @@ impl Engine {
     pub fn query_json(&self, source: &str, from: u32, count: u32) -> String {
         query_json(&self.app, source, from, count)
     }
+
+    pub fn analysis(&self) -> &analysis::Document { &self.app.analysis }
+
+    pub fn replace_analysis(&mut self, document: analysis::Document) -> Result<(), analysis::ApplyError> {
+        document.validate(self.app.store.len(), |e| is_creator(&self.app.store, e))?;
+        self.app.analysis = document;
+        project_analysis(&mut self.app);
+        Ok(())
+    }
+
+    pub fn apply_analysis(&mut self, expected: u64, change: analysis::Change) -> Result<analysis::Change, analysis::ApplyError> {
+        let store = &self.app.store;
+        let applied = self.app.analysis.apply(expected, store.len(), change, |e| is_creator(store, e))?;
+        project_analysis(&mut self.app);
+        Ok(applied)
+    }
+}
+
+fn is_creator(store: &Store, e: u32) -> bool {
+    e < store.len() && matches!(store.op[e as usize], OP_M | OP_R)
+}
+
+fn project_analysis(a: &mut App) {
+    a.store.clear_tags();
+    a.names = a.analysis.allocations.iter().filter_map(|(&e, value)| value.name.clone().map(|name| (e, name))).collect();
+    a.cfg.overrides.clear();
+    let tag_ids: std::collections::BTreeMap<&str, u8> = a.analysis.tags.keys().enumerate().map(|(i, id)| (id.as_str(), (i + 1) as u8)).collect();
+    a.tag_labels = a.analysis.tags.values().map(|tag| tag.name.clone()).collect();
+    for (&e, value) in &a.analysis.allocations {
+        if let Some(color) = &value.color {
+            if let Ok(rgb) = u32::from_str_radix(&color[1..], 16) { a.cfg.overrides.insert(e, [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8]); }
+        }
+        for tag in &value.tags { if let Some(&id) = tag_ids.get(tag.as_str()) { a.store.add_tag(e, id); } }
+    }
+    a.ev_dirty = true;
 }
 
 static APP: Global<Option<App>> = Global(UnsafeCell::new(None));
@@ -270,6 +307,7 @@ fn parse_begin(a: &mut App) {
     a.cfg = Cfg::new();
     a.tag_labels.clear();
     a.names.clear();
+    a.analysis = analysis::Document::default();
 }
 
 #[no_mangle]
@@ -1506,7 +1544,7 @@ fn query_json(a: &App, source: &str, from: u32, count: u32) -> String {
             Ok(expr) => expr,
             Err(error) => return query_diagnostic(&error.message, error.span.start, error.span.end),
         };
-        let base = filter_eval::Ctx::new(&a.store, &[], &[]);
+        let base = filter_eval::Ctx::new(&a.store, &a.tag_labels, &a.names);
         if let Err(error) = filter_eval::check(&expr, &base) {
             return query_diagnostic(&error.message, error.span.start, error.span.end);
         }
@@ -1822,6 +1860,17 @@ mod tests {
         assert!(engine
             .query_json("alloc.size >", 0, 10)
             .contains("\"valid\":false"));
+        engine.apply_analysis(0, analysis::Change::PutTag {
+            id: "important".into(), name: "Important".into(), color: "#112233".into(),
+        }).unwrap();
+        engine.apply_analysis(1, analysis::Change::SetAllocationName {
+            creator: 1, name: Some("owner".into()),
+        }).unwrap();
+        engine.apply_analysis(2, analysis::Change::SetAllocationTag {
+            creator: 1, tag_id: "important".into(), present: true,
+        }).unwrap();
+        assert!(engine.query_json("named(\"owner\").malloc.seq == 1", 0, 10).contains("\"creator\":1"));
+        assert!(engine.query_json("\"Important\" in alloc.tags", 0, 10).contains("\"creator\":1"));
     }
 
     #[test]

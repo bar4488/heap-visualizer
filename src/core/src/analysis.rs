@@ -83,6 +83,22 @@ pub enum Change {
 pub enum ApplyError { Conflict, Invalid(&'static str) }
 
 impl Document {
+    pub fn validate<F>(&self, event_count: u32, creator: F) -> Result<(), ApplyError>
+    where F: Fn(u32) -> bool {
+        if self.version != VERSION || self.tags.len() > MAX_TAGS { return Err(ApplyError::Invalid("unsupported analysis document")); }
+        for (id, tag) in &self.tags { let mut c = Change::PutTag { id: id.clone(), name: tag.name.clone(), color: tag.color.clone() }; normalize(&mut c)?; }
+        for (&event, value) in &self.allocations {
+            require_creator(event, &creator)?;
+            if let Some(name) = &value.name { let mut c = Change::SetAllocationName { creator: event, name: Some(name.clone()) }; normalize(&mut c)?; }
+            if let Some(color) = &value.color { let mut c = Change::SetAllocationColor { creator: event, color: Some(color.clone()) }; normalize(&mut c)?; }
+            if value.tags.iter().any(|id| !self.tags.contains_key(id)) { return Err(ApplyError::Invalid("unknown tag")); }
+        }
+        for (id, value) in &self.bookmarks { let mut c = Change::PutBookmark { id: id.clone(), name: value.name.clone(), seq: value.seq, t: value.t }; normalize(&mut c)?; if value.seq > event_count { return Err(ApplyError::Invalid("invalid bookmark")); } }
+        for (id, value) in &self.address_marks { let mut c = Change::PutAddressMark { id: id.clone(), name: value.name.clone(), addr: value.addr.clone() }; normalize(&mut c)?; }
+        for (id, value) in &self.saved_filters { let mut c = Change::PutSavedFilter { id: id.clone(), name: value.name.clone(), source: value.source.clone() }; normalize(&mut c)?; }
+        Ok(())
+    }
+
     pub fn apply<F>(&mut self, expected: u64, event_count: u32, mut change: Change, creator: F) -> Result<Change, ApplyError>
     where F: Fn(u32) -> bool {
         if expected != self.revision { return Err(ApplyError::Conflict); }
