@@ -1,18 +1,10 @@
-# 1. Load a trace
+# 1. Open the example
 
-We will use one small trace for the whole walkthrough. It has 16 allocations,
-three call sites, two threads, several frees, and five allocations left live.
+[Open sites.heapl](index.html?trace=guide/traces/sites.heapl&guide=1). We will use
+this small trace throughout the guide.
 
-[Open sites.heapl](index.html?trace=guide/traces/sites.heapl&guide=1).
+A `.heapl` trace is JSONL: a header followed by malloc, free, realloc, and
+optional custom-event records. The viewer derives every view from that stream.
 
-You should now see a sparse address map and both timelines populated. The
-playhead starts at the end, so the map contains the allocations still live after
-the final event.
-
-The input is `.heapl`: JSONL with a header followed by `M`, `F`, `R`, and
-optional custom-event `E` records. `#` starts a comment. Producer-defined fields
-are preserved and queryable, so an emitter can add domain data without extending
-the viewer.
-
-[Download the annotated format sample](guide/traces/format.heapl) when you want
-to instrument your own allocator. For now, keep `sites.heapl` open and continue.
+[Download the annotated format sample](guide/traces/format.heapl) when you are
+ready to emit traces from your own program.
