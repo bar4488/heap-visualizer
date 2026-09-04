@@ -224,10 +224,11 @@ layout and the send path in a browser — the outcomes are unit-tested and the
 routes were driven with `curl` against the container, but no automated check
 presses the button (D001).
 
-**T057 is in flight:** the local server will parse its immutable trace into an
-owned native engine before listening and expose metadata, warnings, and bounded
-semantic event pages. The browser still owns all rendering. The older backlog
-is
+**The server now owns a native engine and bounded read surface:** session and
+metadata expose the parsed trace, while warnings and events are authenticated,
+identified, and paged. The next E021 slice is allocation detail and ephemeral
+filter queries, but it has no ticket until grounded. The browser still owns all
+rendering. The older backlog is
 [T045](tickets/T045-lower-integer-arithmetic-to-a-narrow-path.md) and
 [T046](tickets/T046-negative-numbers-are-writable.md) — both came out of that
 work, neither is urgent — plus T009, T030, and the blocked T004.
@@ -285,5 +286,5 @@ friction with `PROTOCOL.md` itself goes in
 
 <!-- generated:begin -->
 ## Doing
-- [T057](tickets/T057-native-engine-and-bounded-events.md) — native engine and bounded event reads
+Nothing in flight.
 <!-- generated:end -->
