@@ -10,16 +10,25 @@ const DEFAULT_PORT: u16 = 8631;
 struct Config {
     port: u16,
     trace: PathBuf,
+    data_dir: PathBuf,
 }
 
 fn usage() -> &'static str {
-    "usage: heap-visualizer-local-server [--port PORT] TRACE.heapl\n\
+    "usage: heap-visualizer-local-server [--port PORT] [--data-dir PATH] TRACE.heapl\n\
      default: --port 8631"
+}
+
+fn default_data_dir() -> PathBuf {
+    env::var_os("XDG_DATA_HOME").map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("heap-visualizer")
 }
 
 fn parse_config() -> Result<Option<Config>, String> {
     let mut port = DEFAULT_PORT;
     let mut trace = None;
+    let mut data_dir = default_data_dir();
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -33,13 +42,16 @@ fn parse_config() -> Result<Option<Config>, String> {
                     return Err("port must not be zero".into());
                 }
             }
+            "--data-dir" => {
+                data_dir = PathBuf::from(args.next().ok_or("--data-dir requires a value")?);
+            }
             _ if arg.starts_with('-') => return Err(format!("unknown argument: {arg}")),
             _ if trace.is_none() => trace = Some(PathBuf::from(arg)),
             _ => return Err("only one trace may be supplied".into()),
         }
     }
     let trace = trace.ok_or("a .heapl trace path is required")?;
-    Ok(Some(Config { port, trace }))
+    Ok(Some(Config { port, trace, data_dir }))
 }
 
 #[tokio::main]
@@ -69,7 +81,11 @@ async fn main() {
     });
     let address = SocketAddr::from(([127, 0, 0, 1], config.port));
     let api_url = format!("http://{address}");
-    let state = ServerState::new(token.clone(), config.port, trace, engine);
+    let state = ServerState::persistent(token.clone(), config.port, trace, engine, &config.data_dir)
+        .unwrap_or_else(|error| {
+            eprintln!("error: cannot load analysis from {}: {error}", config.data_dir.display());
+            std::process::exit(1);
+        });
     let listener = TcpListener::bind(address).await.unwrap_or_else(|error| {
         eprintln!("error: cannot listen on {address}: {error}");
         std::process::exit(1);

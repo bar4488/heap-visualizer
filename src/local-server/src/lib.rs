@@ -1,7 +1,7 @@
 use std::{
     fs::File,
     io::{self, Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
@@ -32,6 +32,7 @@ pub struct ServerState {
     metadata: Arc<serde_json::Value>,
     fields: Arc<serde_json::Value>,
     warnings: Arc<Vec<serde_json::Value>>,
+    analysis_path: Option<Arc<PathBuf>>,
 }
 
 impl ServerState {
@@ -55,7 +56,31 @@ impl ServerState {
             metadata: Arc::new(metadata),
             fields: Arc::new(fields),
             warnings: Arc::new(warnings),
+            analysis_path: None,
         }
+    }
+
+    pub fn persistent(
+        token: String,
+        port: u16,
+        trace: TraceFile,
+        mut engine: heap_visualizer_core::Engine,
+        data_dir: impl AsRef<Path>,
+    ) -> io::Result<Self> {
+        let directory = data_dir.as_ref().join("analysis");
+        std::fs::create_dir_all(&directory)?;
+        let digest = trace.id.strip_prefix("sha256:").unwrap_or(&trace.id);
+        let path = directory.join(format!("{digest}.json"));
+        if path.exists() {
+            let bytes = std::fs::read(&path)?;
+            let document = serde_json::from_slice(&bytes)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            engine.replace_analysis(document)
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "analysis does not match trace"))?;
+        }
+        let mut state = Self::new(token, port, trace, engine);
+        state.analysis_path = Some(Arc::new(path));
+        Ok(state)
     }
 }
 
@@ -175,6 +200,29 @@ struct QueryRequest {
     count: u32,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AnalysisChangeRequest {
+    trace_id: String,
+    expected_revision: u64,
+    change: heap_visualizer_core::analysis::Change,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AnalysisResponse<'a> {
+    trace_id: &'a str,
+    document: &'a heap_visualizer_core::analysis::Document,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AnalysisChangeResponse<'a> {
+    trace_id: &'a str,
+    revision: u64,
+    change: &'a heap_visualizer_core::analysis::Change,
+}
+
 pub fn router(state: ServerState) -> Router {
     Router::new()
         .route("/api/v1/session", get(session).options(preflight))
@@ -187,6 +235,11 @@ pub fn router(state: ServerState) -> Router {
             get(allocation).options(preflight),
         )
         .route("/api/v1/query", post(query).options(preflight))
+        .route("/api/v1/analysis", get(analysis).options(preflight))
+        .route(
+            "/api/v1/analysis/changes",
+            post(change_analysis).options(preflight),
+        )
         .fallback(not_found)
         .layer(DefaultBodyLimit::max(32 << 10))
         .with_state(state)
@@ -379,6 +432,75 @@ async fn query(State(state): State<ServerState>, headers: HeaderMap, body: Bytes
         result_object.insert("count".into(), serde_json::Value::from(actual));
     }
     json(StatusCode::OK, &result, origin)
+}
+
+async fn analysis(State(state): State<ServerState>, headers: HeaderMap) -> Response {
+    let origin = match authorize(&headers, &state) {
+        Ok(origin) => origin,
+        Err(error) => return error.response(),
+    };
+    let engine = state.engine.lock().expect("engine lock poisoned");
+    json(
+        StatusCode::OK,
+        &AnalysisResponse {
+            trace_id: &state.trace.id,
+            document: engine.analysis(),
+        },
+        origin,
+    )
+}
+
+async fn change_analysis(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let origin = match authorize(&headers, &state) {
+        Ok(origin) => origin,
+        Err(error) => return error.response(),
+    };
+    let request: AnalysisChangeRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(_) => return request_error(StatusCode::BAD_REQUEST, "invalid analysis change", origin).response(),
+    };
+    if request.trace_id != state.trace.id.as_ref() {
+        return request_error(StatusCode::CONFLICT, "trace identity changed", origin).response();
+    }
+    let mut engine = state.engine.lock().expect("engine lock poisoned");
+    let before = engine.analysis().clone();
+    let change = match engine.apply_analysis(request.expected_revision, request.change) {
+        Ok(change) => change,
+        Err(heap_visualizer_core::analysis::ApplyError::Conflict) => {
+            return request_error(StatusCode::CONFLICT, "analysis revision changed", origin).response()
+        }
+        Err(heap_visualizer_core::analysis::ApplyError::Invalid(message)) => {
+            return request_error(StatusCode::BAD_REQUEST, message, origin).response()
+        }
+    };
+    if let Some(path) = &state.analysis_path {
+        if persist_analysis(path, engine.analysis()).is_err() {
+            engine.replace_analysis(before).expect("previous analysis was valid");
+            return request_error(StatusCode::INTERNAL_SERVER_ERROR, "analysis could not be persisted", origin).response();
+        }
+    }
+    json(
+        StatusCode::OK,
+        &AnalysisChangeResponse {
+            trace_id: &state.trace.id,
+            revision: engine.analysis().revision,
+            change: &change,
+        },
+        origin,
+    )
+}
+
+fn persist_analysis(path: &Path, document: &heap_visualizer_core::analysis::Document) -> io::Result<()> {
+    let parent = path.parent().expect("analysis path has a parent");
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    serde_json::to_writer(&mut temporary, document)?;
+    temporary.as_file().sync_all()?;
+    temporary.persist(path).map_err(|error| error.error)?;
+    Ok(())
 }
 
 const MAX_PAGE: u32 = 200;
@@ -659,6 +781,21 @@ mod tests {
         .to_string()
     }
 
+    fn analysis_change(id: &str, expected: u64, change: serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/analysis/changes")
+            .header(header::HOST, "127.0.0.1:8631")
+            .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::json!({
+                "traceId": id,
+                "expectedRevision": expected,
+                "change": change,
+            }).to_string()))
+            .unwrap()
+    }
+
     fn request(method: Method) -> axum::http::request::Builder {
         Request::builder()
             .method(method)
@@ -869,6 +1006,46 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["valid"], false);
         assert!(body["diagnostic"]["start"].is_number());
+    }
+
+    #[tokio::test]
+    async fn analysis_changes_are_revisioned_and_persist_before_acknowledgement() {
+        let directory = tempfile::tempdir().unwrap();
+        let trace_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../web/guide/traces/format.heapl");
+        let trace = TraceFile::open(&trace_path).unwrap();
+        let id = trace.id.to_string();
+        let engine = trace.parse_engine().unwrap();
+        let state = ServerState::persistent(TOKEN.into(), 8631, trace, engine, directory.path()).unwrap();
+        let response = router(state)
+            .oneshot(analysis_change(&id, 0, serde_json::json!({
+                "type": "putTag", "id": "leak", "name": "Leak", "color": "#AABBCC"
+            })))
+            .await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["revision"], 1);
+        assert_eq!(body["change"]["color"], "#aabbcc");
+
+        let trace = TraceFile::open(&trace_path).unwrap();
+        let engine = trace.parse_engine().unwrap();
+        let reloaded = ServerState::persistent(TOKEN.into(), 8631, trace, engine, directory.path()).unwrap();
+        let stale = router(reloaded.clone())
+            .oneshot(analysis_change(&id, 0, serde_json::json!({ "type": "deleteTag", "id": "leak" })))
+            .await.unwrap();
+        assert_eq!(stale.status(), StatusCode::CONFLICT);
+
+        let snapshot = router(reloaded)
+            .oneshot(Request::builder()
+                .uri("/api/v1/analysis")
+                .header(header::HOST, "127.0.0.1:8631")
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .body(Body::empty()).unwrap())
+            .await.unwrap();
+        let body = snapshot.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["document"]["revision"], 1);
+        assert_eq!(body["document"]["tags"]["leak"]["name"], "Leak");
     }
 
     #[tokio::test]
