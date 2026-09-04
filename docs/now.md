@@ -218,10 +218,10 @@ layout and the send path in a browser — the outcomes are unit-tested and the
 routes were driven with `curl` against the container, but no automated check
 presses the button (D001).
 
-**Nothing is in flight.** The transport gate for
-[E021](explorations/E021-a-shared-local-session-for-people-and-agents.md) is
-complete; the next deliverable is the native engine and bounded read API, but
-it has no ticket until it is selected and grounded. The older backlog is
+**T051 is in flight:** remove the hosted deployment from the local binary's
+configuration. The capability, not a compiled origin, is the authority; one
+connection string should work with any compatible UI or agent. After it, the
+next E021 deliverable is the native engine and bounded read API. The older backlog is
 [T045](tickets/T045-lower-integer-arithmetic-to-a-narrow-path.md) and
 [T046](tickets/T046-negative-numbers-are-writable.md) — both came out of that
 work, neither is urgent — plus T009, T030, and the blocked T004.
@@ -280,5 +280,5 @@ friction with `PROTOCOL.md` itself goes in
 <!-- generated:begin -->
 ## Doing
 
-Nothing in flight.
+- [T051](tickets/T051-the-local-server-knows-no-hosted-url.md) — the local server knows no hosted URL
 <!-- generated:end -->

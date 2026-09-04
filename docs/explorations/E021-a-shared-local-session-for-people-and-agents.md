@@ -381,3 +381,5 @@ it.
 
 - [T050](../tickets/T050-prove-the-hosted-to-loopback-connection.md) — the
   hosted-to-loopback transport proof, before the engine boundary moves.
+- [T051](../tickets/T051-the-local-server-knows-no-hosted-url.md) — remove the
+  accidental hosted-origin configuration from the local binary.
