@@ -383,3 +383,5 @@ it.
   hosted-to-loopback transport proof, before the engine boundary moves.
 - [T051](../tickets/T051-the-local-server-knows-no-hosted-url.md) — remove the
   accidental hosted-origin configuration from the local binary.
+- [T052](../tickets/T052-disconnect-from-the-local-server.md) — let one tab
+  discard its capability and return to standalone mode.
