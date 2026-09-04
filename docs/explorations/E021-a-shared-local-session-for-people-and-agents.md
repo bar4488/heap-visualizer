@@ -391,3 +391,5 @@ it.
   an owned native engine and bounded semantic event reads.
 - [T058](../tickets/T058-allocation-detail-and-filter-query.md) — add render-free
   allocation detail and ephemeral bounded filter queries.
+- [T059](../tickets/T059-canonical-analysis-and-revisions.md) — persist the
+  canonical analysis document and expose revisioned mutations.

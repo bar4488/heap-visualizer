@@ -224,11 +224,10 @@ layout and the send path in a browser — the outcomes are unit-tested and the
 routes were driven with `curl` against the container, but no automated check
 presses the button (D001).
 
-**The server read/query API is complete for trace-only data:** metadata,
-warnings, events, allocation detail, and ephemeral bounded filter queries are
-all authenticated and trace-identified. Canonical revisioned analysis and
-synchronization are the next E021 slice, but have no ticket until grounded. The
-browser still owns all rendering. The older backlog is
+**T059 is in flight:** add the persistent canonical analysis document,
+revisioned mutations for every analysis feature, and analysis-aware native
+queries. Held changes and browser synchronization remain the following slice.
+The browser still owns all rendering. The older backlog is
 [T045](tickets/T045-lower-integer-arithmetic-to-a-narrow-path.md) and
 [T046](tickets/T046-negative-numbers-are-writable.md) — both came out of that
 work, neither is urgent — plus T009, T030, and the blocked T004.
@@ -286,5 +285,5 @@ friction with `PROTOCOL.md` itself goes in
 
 <!-- generated:begin -->
 ## Doing
-Nothing in flight.
+- [T059](tickets/T059-canonical-analysis-and-revisions.md) — canonical analysis and revisions
 <!-- generated:end -->
