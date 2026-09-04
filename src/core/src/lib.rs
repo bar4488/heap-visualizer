@@ -3,9 +3,9 @@
 //! 8-slot u32 return area at `hp_ret()`, and structured results are JSON
 //! strings (ptr/len in ret[0]/ret[1]).
 
-pub mod json;
 mod filter_eval;
 mod filter_plan;
+pub mod json;
 pub mod parse;
 pub mod render;
 pub mod state;
@@ -126,6 +126,67 @@ impl App {
     }
 }
 
+/// An owned native engine for server and command-line consumers. The browser
+/// ABI below retains its singleton because wasm exports cannot carry Rust
+/// object references, but both paths use the same parser and JSON writers.
+pub struct Engine {
+    app: App,
+}
+
+impl Default for Engine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Engine {
+    pub fn new() -> Self {
+        Self { app: App::new() }
+    }
+
+    pub fn parse_begin(&mut self) {
+        parse_begin(&mut self.app);
+    }
+
+    pub fn parse_chunk(&mut self, data: &[u8]) {
+        if let Some(parser) = self.app.parser.as_mut() {
+            parser.chunk(data);
+        }
+    }
+
+    pub fn parse_end(&mut self) -> u32 {
+        parse_end(&mut self.app)
+    }
+
+    pub fn len(&self) -> u32 {
+        self.app.store.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn metadata_json(&mut self) -> String {
+        write_metadata_json(&mut self.app);
+        self.app.out.clone()
+    }
+
+    pub fn warnings_json(&mut self) -> String {
+        write_warnings_json(&mut self.app);
+        self.app.out.clone()
+    }
+
+    pub fn fields_json(&mut self) -> String {
+        write_fields_json(&mut self.app);
+        self.app.out.clone()
+    }
+
+    pub fn events_json(&mut self, from: u32, count: u32) -> String {
+        write_events_json(&mut self.app, from, count);
+        self.app.out.clone()
+    }
+}
+
 static APP: Global<Option<App>> = Global(UnsafeCell::new(None));
 static RET: Global<[u32; 8]> = Global(UnsafeCell::new([0; 8]));
 
@@ -180,7 +241,10 @@ pub extern "C" fn hp_buf_ptr(cap: u32) -> *mut u8 {
 
 #[no_mangle]
 pub extern "C" fn hp_parse_begin() {
-    let a = unsafe { &mut *app() };
+    parse_begin(unsafe { &mut *app() });
+}
+
+fn parse_begin(a: &mut App) {
     a.parser = Some(Parser::new());
     a.store = Store::default();
     a.view = View::new();
@@ -199,14 +263,16 @@ pub extern "C" fn hp_parse_begin() {
 pub extern "C" fn hp_parse_chunk(len: u32) {
     let a = unsafe { &mut *app() };
     if let Some(p) = a.parser.as_mut() {
-        let data = &a.buf[..len as usize];
-        p.chunk(data);
+        p.chunk(&a.buf[..len as usize]);
     }
 }
 
 #[no_mangle]
 pub extern "C" fn hp_parse_end() -> u32 {
-    let a = unsafe { &mut *app() };
+    parse_end(unsafe { &mut *app() })
+}
+
+fn parse_end(a: &mut App) -> u32 {
     if let Some(mut p) = a.parser.take() {
         p.finish();
         a.store = p.store;
@@ -224,6 +290,11 @@ pub extern "C" fn hp_parse_end() -> u32 {
 #[no_mangle]
 pub extern "C" fn hp_meta_json() {
     let a = unsafe { &mut *app() };
+    write_metadata_json(a);
+    ret_str(&a.out);
+}
+
+fn write_metadata_json(a: &mut App) {
     let s = &a.store;
     let o = &mut a.out;
     o.clear();
@@ -240,7 +311,11 @@ pub extern "C" fn hp_meta_json() {
     ));
     o.push_str(&format!(
         ",\"addrMin\":\"0x{:x}\",\"addrMax\":\"0x{:x}\",\"peakLive\":{},\"totalAlloc\":{}",
-        if s.addr_min == u64::MAX { 0 } else { s.addr_min },
+        if s.addr_min == u64::MAX {
+            0
+        } else {
+            s.addr_min
+        },
         s.addr_max,
         s.peak_live_bytes as f64,
         s.total_alloc_bytes as f64
@@ -251,9 +326,7 @@ pub extern "C" fn hp_meta_json() {
     push_json_str(o, &s.title);
     o.push_str(&format!(
         ",\"hasHeader\":{},\"rowBytesHint\":{},\"rowBytes\":{}",
-        s.has_header,
-        s.hdr_row_bytes as f64,
-        a.view.row_bytes as f64
+        s.has_header, s.hdr_row_bytes as f64, a.view.row_bytes as f64
     ));
     o.push_str(",\"sites\":[");
     for (i, name) in s.sites.iter().enumerate() {
@@ -282,12 +355,16 @@ pub extern "C" fn hp_meta_json() {
         o.push_str(&format!("{}", c));
     }
     o.push_str("]}");
-    ret_str(o);
 }
 
 #[no_mangle]
 pub extern "C" fn hp_warnings_json() {
     let a = unsafe { &mut *app() };
+    write_warnings_json(a);
+    ret_str(&a.out);
+}
+
+fn write_warnings_json(a: &mut App) {
     let s = &a.store;
     let o = &mut a.out;
     o.clear();
@@ -301,7 +378,6 @@ pub extern "C" fn hp_warnings_json() {
         o.push_str(&format!(",\"detail\":{}}}", w.detail as f64));
     }
     o.push(']');
-    ret_str(o);
 }
 
 // ---------------------------------------------------------------------------
@@ -375,7 +451,9 @@ pub extern "C" fn hp_set_collapse_min(n: u32) {
 
 #[no_mangle]
 pub extern "C" fn hp_set_collapse_min_bytes(bytes: f64) {
-    unsafe { &mut *app() }.view.set_collapse_min_bytes(bytes.max(1.0) as u64);
+    unsafe { &mut *app() }
+        .view
+        .set_collapse_min_bytes(bytes.max(1.0) as u64);
 }
 
 #[no_mangle]
@@ -402,7 +480,11 @@ pub extern "C" fn hp_set_xview(zoom: f64, pan: f64) {
     let a = unsafe { &mut *app() };
     a.cfg.x_zoom = if zoom.is_finite() { zoom.max(1.0) } else { 1.0 };
     let max_pan = 1.0 - 1.0 / a.cfg.x_zoom;
-    a.cfg.x_pan = if pan.is_finite() { pan.clamp(0.0, max_pan) } else { 0.0 };
+    a.cfg.x_pan = if pan.is_finite() {
+        pan.clamp(0.0, max_pan)
+    } else {
+        0.0
+    };
 }
 
 /// Pan the horizontal view so the allocation touched by event `e` is centered
@@ -671,7 +753,9 @@ pub extern "C" fn hp_filter_check(len: u32, cursor: u32) {
 #[no_mangle]
 pub extern "C" fn hp_filter_apply(len: u32) {
     let a = unsafe { &mut *app() };
-    let source = std::str::from_utf8(&a.buf[..len as usize]).unwrap_or("").to_string();
+    let source = std::str::from_utf8(&a.buf[..len as usize])
+        .unwrap_or("")
+        .to_string();
     if source.trim().is_empty() {
         a.cfg.filter = Filter::default();
         a.ev_dirty = true;
@@ -689,7 +773,13 @@ pub extern "C" fn hp_filter_apply(len: u32) {
     };
     let ctx = filter_eval::Ctx::new(&a.store, &a.tag_labels, &a.names);
     if let Err(err) = filter_eval::check(&expr, &ctx) {
-        filter_diagnostic_json(&mut a.out, "success", &err.message, err.span.start, err.span.end);
+        filter_diagnostic_json(
+            &mut a.out,
+            "success",
+            &err.message,
+            err.span.start,
+            err.span.end,
+        );
         ret_str(&a.out);
         return;
     }
@@ -702,7 +792,13 @@ pub extern "C" fn hp_filter_apply(len: u32) {
     let plan = match filter_plan::lower(&expr, &ctx) {
         Ok(plan) => plan,
         Err(err) => {
-            filter_diagnostic_json(&mut a.out, "success", &err.message, err.span.start, err.span.end);
+            filter_diagnostic_json(
+                &mut a.out,
+                "success",
+                &err.message,
+                err.span.start,
+                err.span.end,
+            );
             ret_str(&a.out);
             return;
         }
@@ -1118,6 +1214,11 @@ pub extern "C" fn hp_labels_json() {
 #[no_mangle]
 pub extern "C" fn hp_fields_json() {
     let a = unsafe { &mut *app() };
+    write_fields_json(a);
+    ret_str(&a.out);
+}
+
+fn write_fields_json(a: &mut App) {
     a.out.clear();
     a.out.push('[');
     for (index, f) in a.store.fields.iter().enumerate() {
@@ -1141,7 +1242,6 @@ pub extern "C" fn hp_fields_json() {
         a.out.push('}');
     }
     a.out.push(']');
-    ret_str(&a.out);
 }
 
 #[no_mangle]
@@ -1343,10 +1443,12 @@ pub extern "C" fn hp_event_json(e: u32) {
 /// A slice of events [from, from + count) for the event-list panel.
 #[no_mangle]
 pub extern "C" fn hp_events_json(from: u32, count: u32) {
-    events_json(unsafe { &mut *app() }, from, count);
+    let a = unsafe { &mut *app() };
+    write_events_json(a, from, count);
+    ret_str(&a.out);
 }
 
-fn events_json(a: &mut App, from: u32, count: u32) {
+fn write_events_json(a: &mut App, from: u32, count: u32) {
     let s = &a.store;
     let o = &mut a.out;
     o.clear();
@@ -1359,7 +1461,6 @@ fn events_json(a: &mut App, from: u32, count: u32) {
         push_event_json(o, s, e);
     }
     o.push(']');
-    ret_str(o);
 }
 
 /// Whether the event list has a real filter to apply; without one the
@@ -1417,7 +1518,8 @@ pub extern "C" fn hp_events_filtered_json(from: u32, count: u32) {
     if !ev_filter_active(a) {
         // same borrow, not a re-entry into the hp_events_json export — the
         // exports are leaf entry points (see `app()`)
-        return events_json(a, from, count);
+        write_events_json(a, from, count);
+        return ret_str(&a.out);
     }
     ensure_ev_filtered(a);
     let s = &a.store;
@@ -1425,7 +1527,10 @@ pub extern "C" fn hp_events_filtered_json(from: u32, count: u32) {
     o.clear();
     o.push('[');
     let hi = (from.saturating_add(count.min(2000)) as usize).min(a.ev_filtered.len());
-    for (i, &e) in a.ev_filtered[(from as usize).min(hi)..hi].iter().enumerate() {
+    for (i, &e) in a.ev_filtered[(from as usize).min(hi)..hi]
+        .iter()
+        .enumerate()
+    {
         if i > 0 {
             o.push(',');
         }
@@ -1518,8 +1623,8 @@ mod tests {
         filter_eval::check(&expr, &base).unwrap_or_else(|e| panic!("{source}: {}", e.message));
         let fields = filter_eval::FieldValues::resolve(&expr, &a.store);
         let full = base.with_fields(&fields);
-        let plan = filter_plan::lower(&expr, &full)
-            .unwrap_or_else(|e| panic!("{source}: {}", e.message));
+        let plan =
+            filter_plan::lower(&expr, &full).unwrap_or_else(|e| panic!("{source}: {}", e.message));
         let mut bits = vec![0u64; (a.store.len() as usize).div_ceil(64).max(1)];
         let matched = filter_plan::scan(&plan, &full, &mut bits);
 
@@ -1561,6 +1666,21 @@ mod tests {
 {"seq":3,"t":300,"op":"R","id":3,"old_id":2,"addr":"0x3000","size":256}
 {"seq":4,"t":400,"op":"F","id":3}
 "#;
+
+    #[test]
+    fn owned_engine_exposes_the_same_semantic_read_path() {
+        let mut engine = Engine::new();
+        engine.parse_begin();
+        for chunk in SAMPLE.as_bytes().chunks(7) {
+            engine.parse_chunk(chunk);
+        }
+        assert_eq!(engine.parse_end(), 5);
+        assert_eq!(engine.len(), 5);
+        assert!(engine.metadata_json().contains("\"title\":\"test\""));
+        let events = engine.events_json(1, 2);
+        assert!(events.starts_with("[{\"seq\":1,"));
+        assert!(events.contains("},{\"seq\":2,"));
+    }
 
     #[test]
     fn parse_basic() {
@@ -1629,8 +1749,14 @@ mod tests {
                 .count() as u32;
             a.view.seek(&a.store, applied);
             plain.view.seek(&plain.store, allocs);
-            assert_eq!(a.view.live_count, plain.view.live_count, "applied {applied}");
-            assert_eq!(a.view.live_bytes, plain.view.live_bytes, "applied {applied}");
+            assert_eq!(
+                a.view.live_count, plain.view.live_count,
+                "applied {applied}"
+            );
+            assert_eq!(
+                a.view.live_bytes, plain.view.live_bytes,
+                "applied {applied}"
+            );
         }
     }
 
@@ -1644,7 +1770,10 @@ mod tests {
         // were an allocation
         assert!(out.contains("\"e\":null"), "{out}");
         assert!(out.contains("\"title\":\"phase: steady\""), "{out}");
-        assert!(out.contains("\"extra\":{\"phase\":\"steady\",\"frame\":12}"), "{out}");
+        assert!(
+            out.contains("\"extra\":{\"phase\":\"steady\",\"frame\":12}"),
+            "{out}"
+        );
         assert!(!out.contains("addr"), "{out}");
 
         // and no creator-walking path picks one up
@@ -1670,7 +1799,9 @@ mod tests {
         a.ev_dirty = true;
         ensure_ev_filtered(&mut a);
         assert!(
-            a.ev_filtered.iter().all(|&e| a.store.op[e as usize] != OP_E),
+            a.ev_filtered
+                .iter()
+                .all(|&e| a.store.op[e as usize] != OP_E),
             "{:?}",
             a.ev_filtered
         );
@@ -1789,14 +1920,35 @@ not json at all
         let mut a = load(input);
         a.view.seek(&a.store, 2);
         let has_orange = |f: &Frame| {
-            f.px.chunks(4)
-                .any(|c| c[0] == render::OVERLAP[0] && c[1] == render::OVERLAP[1] && c[2] == render::OVERLAP[2])
+            f.px.chunks(4).any(|c| {
+                c[0] == render::OVERLAP[0]
+                    && c[1] == render::OVERLAP[1]
+                    && c[2] == render::OVERLAP[2]
+            })
         };
         a.cfg.overlap_mode = render::OVERLAP_HIGHLIGHT;
-        render::render_addr(&a.store, &mut a.view, &a.cfg, &mut a.frame, &mut a.scratch, 256, 100, 0.0);
+        render::render_addr(
+            &a.store,
+            &mut a.view,
+            &a.cfg,
+            &mut a.frame,
+            &mut a.scratch,
+            256,
+            100,
+            0.0,
+        );
         assert!(has_orange(&a.frame));
         a.cfg.overlap_mode = render::OVERLAP_IGNORE;
-        render::render_addr(&a.store, &mut a.view, &a.cfg, &mut a.frame, &mut a.scratch, 256, 100, 0.0);
+        render::render_addr(
+            &a.store,
+            &mut a.view,
+            &a.cfg,
+            &mut a.frame,
+            &mut a.scratch,
+            256,
+            100,
+            0.0,
+        );
         assert!(!has_orange(&a.frame));
     }
 
@@ -1813,7 +1965,16 @@ not json at all
         a.view.seek(&a.store, 2);
         a.cfg.color_mode = render::MODE_SIZE; // 64 vs 160 → distinct colors
         a.cfg.overlap_mode = render::OVERLAP_IGNORE;
-        render::render_addr(&a.store, &mut a.view, &a.cfg, &mut a.frame, &mut a.scratch, 256, 100, 0.0);
+        render::render_addr(
+            &a.store,
+            &mut a.view,
+            &a.cfg,
+            &mut a.frame,
+            &mut a.scratch,
+            256,
+            100,
+            0.0,
+        );
         let px_at = |f: &Frame, x: usize| {
             let p = (2 * f.w as usize + x) * 4;
             [f.px[p], f.px[p + 1], f.px[p + 2]]
@@ -1821,7 +1982,11 @@ not json at all
         // 1 px per byte: x=0x90 is shared, x=0x40 is only the newer
         // allocation, x=0xa8 only the older one
         assert_ne!(px_at(&a.frame, 0x40), px_at(&a.frame, 0xa8));
-        assert_eq!(px_at(&a.frame, 0x90), px_at(&a.frame, 0x40), "newest must win");
+        assert_eq!(
+            px_at(&a.frame, 0x90),
+            px_at(&a.frame, 0x40),
+            "newest must win"
+        );
     }
 
     #[test]
@@ -1862,19 +2027,50 @@ not json at all
             (g[2] as u32 * 3 / 5) as u8,
         ];
         a.view.seek(&a.store, 3);
-        render::render_addr(&a.store, &mut a.view, &a.cfg, &mut a.frame, &mut a.scratch, 256, 100, 0.0);
-        assert_eq!(px_at(&a.frame, 0x50, 2), interior, "ghost interior recessed");
+        render::render_addr(
+            &a.store,
+            &mut a.view,
+            &a.cfg,
+            &mut a.frame,
+            &mut a.scratch,
+            256,
+            100,
+            0.0,
+        );
+        assert_eq!(
+            px_at(&a.frame, 0x50, 2),
+            interior,
+            "ghost interior recessed"
+        );
         assert_eq!(px_at(&a.frame, 0x20, 2), g, "outside the ghost: plain fill");
         // divider edge at the ghost boundary is darker than the interior
         assert!(px_at(&a.frame, 0x40, 2)[1] < interior[1], "edge divider");
         // while the inner is still live there is no ghost
         a.view.seek(&a.store, 2);
-        render::render_addr(&a.store, &mut a.view, &a.cfg, &mut a.frame, &mut a.scratch, 256, 100, 0.0);
+        render::render_addr(
+            &a.store,
+            &mut a.view,
+            &a.cfg,
+            &mut a.frame,
+            &mut a.scratch,
+            256,
+            100,
+            0.0,
+        );
         assert_ne!(px_at(&a.frame, 0x50, 2), interior);
         // and the toggle turns it off
         a.cfg.ghosts = false;
         a.view.seek(&a.store, 3);
-        render::render_addr(&a.store, &mut a.view, &a.cfg, &mut a.frame, &mut a.scratch, 256, 100, 0.0);
+        render::render_addr(
+            &a.store,
+            &mut a.view,
+            &a.cfg,
+            &mut a.frame,
+            &mut a.scratch,
+            256,
+            100,
+            0.0,
+        );
         assert_eq!(px_at(&a.frame, 0x50, 2), g);
     }
 
@@ -2010,7 +2206,7 @@ not json at all
         a.view.seek(&a.store, 4);
         let y_after = a.view.scroll_for_addr(addr, off, row_px, gap_px);
         assert_eq!(y_after, 0.0); // 0x9000 is now the first row
-        // and the anchor row still resolves to the same address
+                                  // and the anchor row still resolves to the same address
         let (addr2, _) = a.view.anchor_at(y_after, row_px, gap_px).unwrap();
         assert_eq!(addr2, 0x9000);
     }
@@ -2032,11 +2228,23 @@ not json at all
             n
         };
         assert_eq!(n, 3);
-        assert_eq!(tags(&a.store), vec![vec![2], vec![2], vec![], vec![2], vec![]]);
+        assert_eq!(
+            tags(&a.store),
+            vec![vec![2], vec![2], vec![], vec![2], vec![]]
+        );
         // tag color mode renders tagged colors
         a.view.seek(&a.store, 4);
         a.cfg.color_mode = render::MODE_TAG;
-        let _ = render::render_addr(&a.store, &mut a.view, &a.cfg, &mut a.frame, &mut a.scratch, 200, 100, 0.0);
+        let _ = render::render_addr(
+            &a.store,
+            &mut a.view,
+            &a.cfg,
+            &mut a.frame,
+            &mut a.scratch,
+            200,
+            100,
+            0.0,
+        );
         let cat = render::CAT[1]; // tag 2 -> palette index 1
         let has_tag_color = a
             .frame
@@ -2053,7 +2261,10 @@ not json at all
 {"seq":1,"t":200,"op":"M","id":2,"addr":"0x2000","size":32}
 "#;
         let mut a = load(src);
-        assert_eq!(a.store.extras, vec!["\"pool\":\"gfx\",\"refs\":3".to_string()]);
+        assert_eq!(
+            a.store.extras,
+            vec!["\"pool\":\"gfx\",\"refs\":3".to_string()]
+        );
         assert_eq!(a.store.extra[0], 0);
         assert_eq!(a.store.extra[1], NONE_U32);
         a.view.seek(&a.store, 2);
@@ -2250,7 +2461,10 @@ not json at all
         // creators: 0 (site a → filtered out), 1 (site b → tagged),
         // 3 (realloc without a site field → unconstrained, passes)
         assert_eq!(to_tag, vec![1, 3]);
-        assert_eq!(tags(&a.store), vec![vec![], vec![1], vec![], vec![1], vec![]]);
+        assert_eq!(
+            tags(&a.store),
+            vec![vec![], vec![1], vec![], vec![1], vec![]]
+        );
     }
 
     #[test]
@@ -2259,7 +2473,10 @@ not json at all
         a.cfg.filter.matches = Some(match_bits(&a, &[], "alloc.size >= 128"));
 
         assert_eq!(tag_filter_matches(&mut a, 2), 2);
-        assert_eq!(tags(&a.store), vec![vec![], vec![2], vec![], vec![2], vec![]]);
+        assert_eq!(
+            tags(&a.store),
+            vec![vec![], vec![2], vec![], vec![2], vec![]]
+        );
 
         let mut no_filter = load(SAMPLE);
         assert_eq!(tag_filter_matches(&mut no_filter, 1), 0);
@@ -2310,7 +2527,10 @@ not json at all
         let tagged: u32 = creators.iter().filter(|&&e| a.store.has_tags(e)).count() as u32;
         assert_eq!(counts[0], creators.len() as u32 - tagged);
         for tag in 1..=255u8 {
-            let want = creators.iter().filter(|&&e| a.store.has_tag(e, tag)).count();
+            let want = creators
+                .iter()
+                .filter(|&&e| a.store.has_tag(e, tag))
+                .count();
             assert_eq!(counts[tag as usize] as usize, want, "count for tag {tag}");
         }
 
@@ -2321,7 +2541,9 @@ not json at all
 
     /// `hp_retag` against a local app rather than the global one.
     fn hp_retag_on(a: &mut App, from: u8, to: u8) -> u32 {
-        let events: Vec<u32> = (0..a.store.len()).filter(|&e| a.store.has_tag(e, from)).collect();
+        let events: Vec<u32> = (0..a.store.len())
+            .filter(|&e| a.store.has_tag(e, from))
+            .collect();
         for &e in &events {
             a.store.remove_tag(e, from);
             if to != 0 {
@@ -2361,11 +2583,17 @@ not json at all
         // frees in [2, 4): F#2 kills creator 0, R#3 kills creator 1
         let n = tag_seq_range(&mut a, 2, 4, 1, 1);
         assert_eq!(n, 2);
-        assert_eq!(tags(&a.store), vec![vec![1], vec![1], vec![], vec![], vec![]]);
+        assert_eq!(
+            tags(&a.store),
+            vec![vec![1], vec![1], vec![], vec![], vec![]]
+        );
         // freed in [4, 5): F#4 kills the realloc creator (event 3)
         let n = tag_seq_range(&mut a, 4, 5, 2, 1);
         assert_eq!(n, 1);
-        assert_eq!(tags(&a.store), vec![vec![1], vec![1], vec![], vec![2], vec![]]);
+        assert_eq!(
+            tags(&a.store),
+            vec![vec![1], vec![1], vec![], vec![2], vec![]]
+        );
         // by_free = 0 keeps the old "creators in range" behavior
         let n = tag_seq_range(&mut a, 0, 5, 3, 0);
         assert_eq!(n, 3);
@@ -2458,17 +2686,43 @@ not json at all
         let input = r#"{"op":"M","id":1,"addr":"0x1000","size":12288,"t":10}"#;
         let mut a = load(input);
         a.view.seek(&a.store, 1);
-        render::render_addr(&a.store, &mut a.view, &a.cfg, &mut a.frame, &mut a.scratch, 400, 300, 0.0);
+        render::render_addr(
+            &a.store,
+            &mut a.view,
+            &a.cfg,
+            &mut a.frame,
+            &mut a.scratch,
+            400,
+            300,
+            0.0,
+        );
         // rows are contiguous: row_y(1) = row_px = 12
         let labels = &a.scratch.labels;
-        assert!(labels.contains("\"k\":2,\"x\":0,\"y\":12"), "labels: {}", labels);
+        assert!(
+            labels.contains("\"k\":2,\"x\":0,\"y\":12"),
+            "labels: {}",
+            labels
+        );
         // a 4-row allocation rounds to the top middle: row index 1 again
         let input = r#"{"op":"M","id":1,"addr":"0x1000","size":16384,"t":10}"#;
         let mut a = load(input);
         a.view.seek(&a.store, 1);
-        render::render_addr(&a.store, &mut a.view, &a.cfg, &mut a.frame, &mut a.scratch, 400, 300, 0.0);
+        render::render_addr(
+            &a.store,
+            &mut a.view,
+            &a.cfg,
+            &mut a.frame,
+            &mut a.scratch,
+            400,
+            300,
+            0.0,
+        );
         let labels = &a.scratch.labels;
-        assert!(labels.contains("\"k\":2,\"x\":0,\"y\":12"), "labels: {}", labels);
+        assert!(
+            labels.contains("\"k\":2,\"x\":0,\"y\":12"),
+            "labels: {}",
+            labels
+        );
     }
 
     #[test]
@@ -2491,7 +2745,7 @@ not json at all
             [px[p], px[p + 1], px[p + 2]]
         };
         let c = render::CAT[0]; // tag 1 -> palette index 0
-        // creation lane along the top edge, free lane along the bottom edge
+                                // creation lane along the top edge, free lane along the bottom edge
         assert!((0..100).any(|x| at(&px, x, 0) == c), "no tagged-alloc lane");
         assert!((0..100).any(|x| at(&px, x, 39) == c), "no tagged-free lane");
         // untagged: both lanes empty
@@ -2517,11 +2771,7 @@ not json at all
         assert!(a.scratch.labels.starts_with('['));
         assert_eq!(a.frame.px.len(), 400 * 300 * 4);
         // some green pixels present
-        let has_fill = a
-            .frame
-            .px
-            .chunks(4)
-            .any(|c| c[1] > 0x80 && c[0] < 0x80);
+        let has_fill = a.frame.px.chunks(4).any(|c| c[1] > 0x80 && c[0] < 0x80);
         assert!(has_fill);
         // pick at the first allocation: row for 0x1000, x=0
         let p = render::pick(&a.store, &mut a.view, &a.cfg, 400, 0, 0.0, 0.0);
@@ -2535,7 +2785,11 @@ not json at all
     #[test]
     fn expression_filter_evaluates_creator_columns() {
         let a = load(SAMPLE);
-        let columns = matching(&a, &[], r#"alloc.size >= 100 and malloc.site == "b" and alloc.span.overlaps(range(0x1800, 0x2800))"#);
+        let columns = matching(
+            &a,
+            &[],
+            r#"alloc.size >= 100 and malloc.site == "b" and alloc.span.overlaps(range(0x1800, 0x2800))"#,
+        );
         assert!(!columns.contains(&0));
         assert!(columns.contains(&1));
 
@@ -2564,7 +2818,10 @@ not json at all
     #[test]
     fn custom_fields_filter_in_all_four_spellings() {
         let a = load(CUSTOM);
-        assert_eq!(matches_custom(&a, r#"malloc.fields.pool == "gfx""#), vec![0]);
+        assert_eq!(
+            matches_custom(&a, r#"malloc.fields.pool == "gfx""#),
+            vec![0]
+        );
         assert_eq!(
             matches_custom(&a, r#"malloc.fields["allocator-class"] == "bump""#),
             vec![1]
@@ -2581,7 +2838,10 @@ not json at all
             vec![0]
         );
         // string methods and sets reach custom fields like any other string
-        assert_eq!(matches_custom(&a, r#"malloc.fields.pool.startswith("g")"#), vec![0]);
+        assert_eq!(
+            matches_custom(&a, r#"malloc.fields.pool.startswith("g")"#),
+            vec![0]
+        );
         assert_eq!(
             matches_custom(&a, r#"malloc.fields.pool in {"gfx", "ui"}"#),
             vec![0, 1]
@@ -2606,8 +2866,14 @@ not json at all
         assert_eq!(matches_custom(&a, "malloc.fields.ratio < 0.5"), vec![0, 2]);
         assert_eq!(matches_custom(&a, "malloc.fields.ratio == 0.25"), vec![0]);
         assert_eq!(matches_custom(&a, "malloc.fields.ratio == 1e-3"), vec![2]);
-        assert_eq!(matches_custom(&a, "malloc.fields.ratio in range(0.2, 0.8)"), vec![0, 1]);
-        assert_eq!(matches_custom(&a, "malloc.fields.ratio in {0.25, 0.75}"), vec![0, 1]);
+        assert_eq!(
+            matches_custom(&a, "malloc.fields.ratio in range(0.2, 0.8)"),
+            vec![0, 1]
+        );
+        assert_eq!(
+            matches_custom(&a, "malloc.fields.ratio in {0.25, 0.75}"),
+            vec![0, 1]
+        );
         // and the death record's own float
         assert_eq!(matches_custom(&a, "free.fields.drift < 0"), vec![0]);
         assert_eq!(matches_custom(&a, "abs(free.fields.drift) > 2"), vec![0]);
@@ -2632,9 +2898,15 @@ not json at all
         let a = load(FLOATS);
         // an integer field against a float literal, and the other way round
         assert_eq!(matches_custom(&a, "alloc.size > 32.5"), vec![0]);
-        assert_eq!(matches_custom(&a, "alloc.size in range(31.5, 64.5)"), vec![0, 1, 2]);
+        assert_eq!(
+            matches_custom(&a, "alloc.size in range(31.5, 64.5)"),
+            vec![0, 1, 2]
+        );
         assert_eq!(matches_custom(&a, "malloc.fields.ratio < 1"), vec![0, 1, 2]);
-        assert_eq!(matches_custom(&a, "alloc.size > 1.5KiB"), vec![] as Vec<u32>);
+        assert_eq!(
+            matches_custom(&a, "alloc.size > 1.5KiB"),
+            vec![] as Vec<u32>
+        );
         // arithmetic promotes rather than truncating
         assert_eq!(matches_custom(&a, "alloc.size + 0.5 > 64"), vec![0]);
     }
@@ -2653,7 +2925,10 @@ not json at all
         let a = load(&src);
         let two53 = (1u64 << 53) as f64;
         assert_eq!(field(&a, "big").scalar(), Some(FIELD_INT));
-        assert_eq!(matches_custom(&a, &format!("malloc.fields.big > {two53}")), vec![0]);
+        assert_eq!(
+            matches_custom(&a, &format!("malloc.fields.big > {two53}")),
+            vec![0]
+        );
         assert_eq!(
             matches_custom(&a, &format!("malloc.fields.big == {two53}")),
             vec![] as Vec<u32>
@@ -2713,7 +2988,8 @@ not json at all
             let matched = filter_plan::scan(&plan, &full, &mut bits);
             let after = counting_alloc::count();
             assert_eq!(
-                after, before,
+                after,
+                before,
                 "`{source}` allocated {} times during the scan",
                 after - before
             );
@@ -2913,10 +3189,12 @@ not json at all
 
     #[test]
     fn an_untypable_custom_field_is_a_diagnostic() {
-        let a = load(r#"{"op":"H","v":1,"unit":"ns","row_bytes":4096}
+        let a = load(
+            r#"{"op":"H","v":1,"unit":"ns","row_bytes":4096}
 {"seq":0,"t":100,"op":"M","id":1,"addr":"0x1000","size":64,"mixed":3,"nested":{"a":1},"maybe":null}
 {"seq":1,"t":200,"op":"M","id":2,"addr":"0x2000","size":32,"mixed":"x","maybe":7}
-"#);
+"#,
+        );
         assert_eq!(
             custom_error(&a, "malloc.fields.mixed == 3"),
             "`mixed` holds integer and string in this trace, so it has no single type to filter on"
@@ -2970,7 +3248,10 @@ not json at all
         let expr = heap_visualizer_filter_dsl::parse(r#"malloc.fields.pool == "gfx""#).unwrap();
         let fields = filter_eval::FieldValues::resolve(&expr, &a.store);
         assert_eq!(fields.rows(), 2);
-        assert_eq!(matches_custom(&a, r#"malloc.fields.pool == "gfx""#).len(), 100);
+        assert_eq!(
+            matches_custom(&a, r#"malloc.fields.pool == "gfx""#).len(),
+            100
+        );
     }
 
     #[test]
@@ -3004,10 +3285,12 @@ not json at all
 
     #[test]
     fn completion_never_offers_an_unfilterable_field() {
-        let a = load(r#"{"op":"H","v":1,"unit":"ns","row_bytes":4096}
+        let a = load(
+            r#"{"op":"H","v":1,"unit":"ns","row_bytes":4096}
 {"seq":0,"t":100,"op":"M","id":1,"addr":"0x1000","size":64,"mixed":3,"nested":{"a":1}}
 {"seq":1,"t":200,"op":"M","id":2,"addr":"0x2000","size":32,"mixed":"x"}
-"#);
+"#,
+        );
         let mut out = String::new();
         filter_eval::push_completions_json(&mut out, "malloc.fields.", 6, &ctx(&a, &[]));
         assert!(!out.contains("mixed"));
@@ -3024,7 +3307,8 @@ not json at all
         a.names = vec![(0, "request root".into())];
         let near = heap_visualizer_filter_dsl::parse(
             r#"abs(malloc.seq - named("request root").malloc.seq) <= 1"#,
-        ).unwrap();
+        )
+        .unwrap();
         let c = ctx(&a, &[]);
         assert!(filter_eval::check(&near, &c).is_ok());
         // events 0 and 1 are within one of the reference, event 3 is not
@@ -3035,7 +3319,8 @@ not json at all
         // a field read through the reference is that field's ordinary type
         let addr = heap_visualizer_filter_dsl::parse(
             r#"alloc.address >= named("request root").alloc.address"#,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(filter_eval::check(&addr, &c).is_ok());
         assert!(filter_eval::evaluate(&addr, &c, 0).unwrap());
     }
@@ -3048,7 +3333,9 @@ not json at all
 
         // nothing named at all
         assert_eq!(
-            filter_eval::check(&expr, &ctx(&a, &[])).unwrap_err().message,
+            filter_eval::check(&expr, &ctx(&a, &[]))
+                .unwrap_err()
+                .message,
             "no allocation is named `ghost`"
         );
 
@@ -3056,7 +3343,9 @@ not json at all
         // wrong in a way nothing reports
         a.names = vec![(0, "ghost".into()), (1, "ghost".into())];
         assert_eq!(
-            filter_eval::check(&expr, &ctx(&a, &[])).unwrap_err().message,
+            filter_eval::check(&expr, &ctx(&a, &[]))
+                .unwrap_err()
+                .message,
             "2 allocations are named `ghost`; the name must be unique"
         );
 
@@ -3073,17 +3362,23 @@ not json at all
         let c = ctx(&a, &[]);
         // a bare reference produces no bool
         assert_eq!(
-            filter_eval::check(&parse(r#"named("root")"#), &c).unwrap_err().message,
+            filter_eval::check(&parse(r#"named("root")"#), &c)
+                .unwrap_err()
+                .message,
             "filter expression must produce bool"
         );
         // and cannot be compared with anything
         assert_eq!(
-            filter_eval::check(&parse(r#"named("root") == 1"#), &c).unwrap_err().message,
+            filter_eval::check(&parse(r#"named("root") == 1"#), &c)
+                .unwrap_err()
+                .message,
             "equality operands have incompatible types"
         );
         // the argument is a constant, resolved while checking
         assert_eq!(
-            filter_eval::check(&parse("named(malloc.site).seq == 0"), &c).unwrap_err().message,
+            filter_eval::check(&parse("named(malloc.site).seq == 0"), &c)
+                .unwrap_err()
+                .message,
             "named requires one string constant, as `named(\"request root\")`"
         );
     }
@@ -3097,7 +3392,9 @@ not json at all
         // the web layer pushes the new map; the same source stops checking
         a.names = vec![(0, "after".into())];
         assert_eq!(
-            filter_eval::check(&expr, &ctx(&a, &[])).unwrap_err().message,
+            filter_eval::check(&expr, &ctx(&a, &[]))
+                .unwrap_err()
+                .message,
             "no allocation is named `before`"
         );
     }
@@ -3174,21 +3471,28 @@ not json at all
     fn filter_check_rejects_semantic_errors_before_scanning() {
         let valid = heap_visualizer_filter_dsl::parse(
             r#"alloc.size >= 100 and malloc.site.startswith("a")"#,
-        ).unwrap();
-        let store = Store { unit: "ns".into(), ..Store::default() };
+        )
+        .unwrap();
+        let store = Store {
+            unit: "ns".into(),
+            ..Store::default()
+        };
         assert!(filter_eval::check(&valid, &store_ctx(&store)).is_ok());
 
-        let wrong_method = heap_visualizer_filter_dsl::parse(
-            r#"alloc.size.startswith("1")"#,
-        ).unwrap();
+        let wrong_method =
+            heap_visualizer_filter_dsl::parse(r#"alloc.size.startswith("1")"#).unwrap();
         assert_eq!(
-            filter_eval::check(&wrong_method, &store_ctx(&store)).unwrap_err().message,
+            filter_eval::check(&wrong_method, &store_ctx(&store))
+                .unwrap_err()
+                .message,
             "`startswith` requires one string argument"
         );
 
         let not_boolean = heap_visualizer_filter_dsl::parse("alloc.size + 1").unwrap();
         assert_eq!(
-            filter_eval::check(&not_boolean, &store_ctx(&store)).unwrap_err().message,
+            filter_eval::check(&not_boolean, &store_ctx(&store))
+                .unwrap_err()
+                .message,
             "filter expression must produce bool"
         );
 
@@ -3198,40 +3502,59 @@ not json at all
         // `alloc.tags` is a set: it compares to a set, tests one member with
         // `in`, and is never missing
         let parse = |source: &str| heap_visualizer_filter_dsl::parse(source).unwrap();
-        assert!(filter_eval::check(&parse(r#"alloc.tags == {"a", "b"}"#), &store_ctx(&store)).is_ok());
+        assert!(
+            filter_eval::check(&parse(r#"alloc.tags == {"a", "b"}"#), &store_ctx(&store)).is_ok()
+        );
         assert!(filter_eval::check(&parse("alloc.tags == {}"), &store_ctx(&store)).is_ok());
         assert!(filter_eval::check(&parse(r#""a" in alloc.tags"#), &store_ctx(&store)).is_ok());
         assert_eq!(
-            filter_eval::check(&parse(r#"tag == "a""#), &store_ctx(&store)).unwrap_err().message,
+            filter_eval::check(&parse(r#"tag == "a""#), &store_ctx(&store))
+                .unwrap_err()
+                .message,
             "unknown field `tag`"
         );
         // and the old flat spelling says where the field went
         assert_eq!(
-            filter_eval::check(&parse("size >= 1"), &store_ctx(&store)).unwrap_err().message,
+            filter_eval::check(&parse("size >= 1"), &store_ctx(&store))
+                .unwrap_err()
+                .message,
             "write `alloc.size`"
         );
         assert_eq!(
-            filter_eval::check(&parse(r#"alloc.tags == "a""#), &store_ctx(&store)).unwrap_err().message,
+            filter_eval::check(&parse(r#"alloc.tags == "a""#), &store_ctx(&store))
+                .unwrap_err()
+                .message,
             "a set compares to a set; use `contains` to test one member"
         );
         assert_eq!(
-            filter_eval::check(&parse("1 in alloc.tags"), &store_ctx(&store)).unwrap_err().message,
+            filter_eval::check(&parse("1 in alloc.tags"), &store_ctx(&store))
+                .unwrap_err()
+                .message,
             "`in` requires a set, a string, or a range on the right"
         );
         // `contains` is gone; the diagnostic names the Python spelling
         assert_eq!(
-            filter_eval::check(&parse(r#"malloc.site.contains("a")"#), &store_ctx(&store)).unwrap_err().message,
+            filter_eval::check(&parse(r#"malloc.site.contains("a")"#), &store_ctx(&store))
+                .unwrap_err()
+                .message,
             "write `x in malloc.site`"
         );
         assert_eq!(
-            filter_eval::check(&parse("alloc.tags is None"), &store_ctx(&store)).unwrap_err().message,
+            filter_eval::check(&parse("alloc.tags is None"), &store_ctx(&store))
+                .unwrap_err()
+                .message,
             "`is None` requires an optional field"
         );
 
-        let tick_store = Store { unit: "tick".into(), ..Store::default() };
+        let tick_store = Store {
+            unit: "tick".into(),
+            ..Store::default()
+        };
         let time_unit = heap_visualizer_filter_dsl::parse("malloc.time > 1ms").unwrap();
         assert_eq!(
-            filter_eval::check(&time_unit, &store_ctx(&tick_store)).unwrap_err().message,
+            filter_eval::check(&time_unit, &store_ctx(&tick_store))
+                .unwrap_err()
+                .message,
             "time literals are unavailable for a tick trace"
         );
     }
@@ -3255,9 +3578,7 @@ not json at all
 
         out.clear();
         let source = "alloc.tags == {\"q";
-        filter_eval::push_completions_json(
-            &mut out, source, source.len(), &ctx(&a, &a.tag_labels),
-        );
+        filter_eval::push_completions_json(&mut out, source, source.len(), &ctx(&a, &a.tag_labels));
         assert!(out.contains("\"label\":\"quoted \\\"tag\\\"\""));
         assert!(out.contains("\"insertText\":\"\\\"quoted \\\\\\\"tag\\\\\\\"\\\"\""));
 
@@ -3275,7 +3596,10 @@ not json at all
         let complete = |source: &str| {
             let mut out = String::new();
             filter_eval::push_completions_json(
-                &mut out, source, source.len(), &ctx(&a, &a.tag_labels),
+                &mut out,
+                source,
+                source.len(),
+                &ctx(&a, &a.tag_labels),
             );
             out
         };
@@ -3291,7 +3615,10 @@ not json at all
             assert!(out.contains(&format!("\"label\":\"{field}\"")), "{out}");
         }
         for elsewhere in ["size", "tags", "freed", "lifetime"] {
-            assert!(!out.contains(&format!("\"label\":\"{elsewhere}\"")), "{out}");
+            assert!(
+                !out.contains(&format!("\"label\":\"{elsewhere}\"")),
+                "{out}"
+            );
         }
 
         // `overlaps` is a method on a range, not an operator
@@ -3304,7 +3631,10 @@ not json at all
             assert!(out.contains(&format!("\"label\":\"{numeric}\"")), "{out}");
         }
         for incompatible in ["false", "true"] {
-            assert!(!out.contains(&format!("\"label\":\"{incompatible}\"")), "{out}");
+            assert!(
+                !out.contains(&format!("\"label\":\"{incompatible}\"")),
+                "{out}"
+            );
         }
 
         // a finished path advances to its operators
@@ -3319,7 +3649,10 @@ not json at all
         let out = complete("alloc.tags == ");
         assert!(out.contains("\"label\":\"{\""), "{out}");
         for incompatible in ["parser", "suspect", "malloc"] {
-            assert!(!out.contains(&format!("\"label\":\"{incompatible}\"")), "{out}");
+            assert!(
+                !out.contains(&format!("\"label\":\"{incompatible}\"")),
+                "{out}"
+            );
         }
 
         // `in` over a string takes the objects holding a string, and `alloc`
@@ -3337,7 +3670,10 @@ not json at all
         assert!(out.contains("\"label\":\"alloc\""));
 
         let out = complete("alloc.span.overlaps(");
-        assert!(out.contains("\"label\":\"range\"") || out.contains("\"label\":\"alloc\""), "{out}");
+        assert!(
+            out.contains("\"label\":\"range\"") || out.contains("\"label\":\"alloc\""),
+            "{out}"
+        );
 
         let out = complete("alloc.tags == {\"suspect\"");
         assert!(out.contains("\"label\":\",\""));
