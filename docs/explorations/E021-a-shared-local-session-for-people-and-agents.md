@@ -387,3 +387,5 @@ it.
   discard its capability and return to standalone mode.
 - [T054](../tickets/T054-server-starts-with-one-trace.md) — start the binary
   with one trace and have a connected browser load it automatically.
+- [T057](../tickets/T057-native-engine-and-bounded-events.md) — give the server
+  an owned native engine and bounded semantic event reads.
