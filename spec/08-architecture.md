@@ -145,11 +145,13 @@ The hosted web app must have two explicit startup modes:
 
 The local server must be a server-only native executable: it must bind to
 loopback, expose a versioned data API, and serve neither the web UI nor the
-feature-request routes. The launch capability must be generated afresh for
-each server run, carried to the hosted app in the URL fragment so it is not
-sent to the hosted service, removed from browser history after it is read, and
-required as a bearer capability by the local API. Browser access must be
-limited to the configured hosted origin.
+feature-request routes. It must know nothing about which compatible UI or agent
+will use it. The connection string must carry only the loopback API origin and
+a freshly generated capability in its URL fragment, and the UI must retain it
+only for that tab. The capability must be required as a bearer value by every
+data request. CORS may admit a syntactically valid browser origin so any
+compatible deployment can connect; possession of the capability, not the web
+origin, is the authority.
 
 Connected mode must not move rendering onto the server. The browser worker,
 WASM engine and OffscreenCanvas remain the complete rendering path; no frame,

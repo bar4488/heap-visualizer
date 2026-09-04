@@ -47,3 +47,7 @@ returned authenticated 200, exact-origin CORS and wrong-token 401. A person
 still needs to open its URL from the actual HTTPS deployment in current Chrome
 (grant and deny Apps on device), Firefox and Safari; D001 keeps that out of the
 automated gate.
+
+_Correction, 2026-09-05:_ T051 removed the configured hosted origin and launch
+URL. The binary now prints one deployment-agnostic connection string; the
+capability is the authority and any compatible UI may present it.

@@ -141,9 +141,9 @@ is intact and [T038](tickets/T038-drop-the-docker-build.md) is not being
 reversed.
 
 **A separate server-only native binary now proves the future local data
-boundary.** `src/local-server/` binds to loopback, admits one configured browser
-origin and a fresh bearer capability, and prints a hosted launch URL carrying
-that capability only in its fragment. The hosted app removes it from history,
+boundary.** `src/local-server/` binds to loopback and prints a
+deployment-agnostic connection string carrying a fresh bearer capability only
+in its fragment. Any compatible hosted UI can accept it through Connect…,
 keeps it for that tab, and visibly reports connected or the distinct failure
 states; an ordinary visit remains standalone and makes no local request
 ([ARCH-008](../spec/08-architecture.md#arch-008-local-data-server-connection),
@@ -233,7 +233,7 @@ T041 measured native, where the margin is 60×. And the filter editor's
 highlight overlay has to sit exactly under the textarea's own text at every
 zoom and wrap point; if the module fails to load the panel falls back to plain
 text, so the failure mode is visible rather than silent. T050 additionally
-needs its printed launch URL opened from the actual HTTPS deployment in current
+needs its connection string pasted into the actual HTTPS deployment in current
 Chrome (both granting and denying Apps on device), Firefox and Safari; the UI
 already distinguishes permission denial where the browser exposes it from an
 otherwise blocked or absent endpoint.

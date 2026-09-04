@@ -19,20 +19,15 @@ const ALLOW_PRIVATE_NETWORK: HeaderName =
 #[derive(Clone)]
 pub struct ServerState {
     token: Arc<str>,
-    allowed_origin: HeaderValue,
     port: u16,
 }
 
 impl ServerState {
-    pub fn new(token: String, app_url: &Url, port: u16) -> Result<Self, String> {
-        let origin = app_url.origin().ascii_serialization();
-        let allowed_origin = HeaderValue::from_str(&origin)
-            .map_err(|_| format!("app URL has an invalid origin: {origin}"))?;
-        Ok(Self {
+    pub fn new(token: String, port: u16) -> Self {
+        Self {
             token: token.into(),
-            allowed_origin,
             port,
-        })
+        }
     }
 }
 
@@ -67,14 +62,8 @@ pub fn fresh_token() -> Result<String, getrandom::Error> {
     Ok(token)
 }
 
-pub fn launch_url(app_url: &Url, api_url: &str, token: &str) -> Url {
-    let mut launch = app_url.clone();
-    let fragment = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("heap-server", api_url)
-        .append_pair("heap-token", token)
-        .finish();
-    launch.set_fragment(Some(&fragment));
-    launch
+pub fn connection_string(api_url: &str, token: &str) -> String {
+    format!("{api_url}#{token}")
 }
 
 async fn session(State(state): State<ServerState>, headers: HeaderMap) -> Response {
@@ -87,7 +76,7 @@ async fn session(State(state): State<ServerState>, headers: HeaderMap) -> Respon
             None,
         );
     }
-    let origin = match browser_origin(&headers, &state) {
+    let origin = match browser_origin(&headers) {
         Ok(origin) => origin,
         Err(()) => {
             return json(
@@ -134,7 +123,7 @@ async fn preflight(State(state): State<ServerState>, headers: HeaderMap) -> Resp
             None,
         );
     }
-    let origin = match browser_origin(&headers, &state) {
+    let origin = match browser_origin(&headers) {
         Ok(Some(origin)) => origin,
         Ok(None) => {
             return json(
@@ -210,11 +199,20 @@ fn host_allowed(headers: &HeaderMap, port: u16) -> bool {
     host == format!("127.0.0.1:{port}") || host == format!("localhost:{port}")
 }
 
-fn browser_origin(headers: &HeaderMap, state: &ServerState) -> Result<Option<HeaderValue>, ()> {
+fn browser_origin(headers: &HeaderMap) -> Result<Option<HeaderValue>, ()> {
     let Some(origin) = headers.get(header::ORIGIN) else {
         return Ok(None);
     };
-    if origin != state.allowed_origin {
+    let Ok(text) = origin.to_str() else {
+        return Err(());
+    };
+    let Ok(url) = Url::parse(text) else {
+        return Err(());
+    };
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || url.origin().ascii_serialization() != text
+    {
         return Err(());
     }
     Ok(Some(origin.clone()))
@@ -250,8 +248,7 @@ mod tests {
     const ORIGIN: &str = "https://viewer.example";
 
     fn app() -> Router {
-        let app_url = Url::parse("https://viewer.example/app").unwrap();
-        router(ServerState::new(TOKEN.into(), &app_url, 8631).unwrap())
+        router(ServerState::new(TOKEN.into(), 8631))
     }
 
     fn request(method: Method) -> axum::http::request::Builder {
@@ -303,7 +300,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn browser_get_rejects_every_other_origin_without_cors() {
+    async fn the_capability_not_the_browser_deployment_is_the_authority() {
         let response = app()
             .oneshot(
                 request(Method::GET)
@@ -314,11 +311,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        assert!(response
-            .headers()
-            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
-            .is_none());
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+            "https://attacker.example"
+        );
     }
 
     #[tokio::test]
@@ -370,13 +367,10 @@ mod tests {
     }
 
     #[test]
-    fn launch_parameters_are_in_the_fragment_only() {
-        let app_url = Url::parse("https://viewer.example/app?x=1").unwrap();
-        let launch = launch_url(&app_url, "http://127.0.0.1:8631", TOKEN);
-        assert_eq!(launch.query(), Some("x=1"));
+    fn the_connection_string_is_deployment_agnostic() {
         assert_eq!(
-            launch.fragment(),
-            Some("heap-server=http%3A%2F%2F127.0.0.1%3A8631&heap-token=0123456789abcdef")
+            connection_string("http://127.0.0.1:8631", TOKEN),
+            "http://127.0.0.1:8631#0123456789abcdef"
         );
     }
 

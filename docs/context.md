@@ -69,21 +69,14 @@ stay at the URL passed to it. With the development site on its usual port:
 
 ```sh
 cargo run --manifest-path src/local-server/Cargo.toml
-# open the launch URL it prints; an ordinary http://localhost:8630 visit stays standalone
-```
-
-Against a hosted build, name its URL exactly so the server admits only that
-browser origin:
-
-```sh
-cargo run --release --manifest-path src/local-server/Cargo.toml -- \
-  --app-url https://your-deployment.example/
+# paste the connection string it prints into Connect… on any compatible UI
 ```
 
 The connection badge is in the status bar. Chromium asks for its Apps on
-device / Local Network Access permission on first contact. The capability in
-the printed URL is in the fragment, is never sent to the hosted service, and is
-removed from browser history after the app reads it.
+device / Local Network Access permission on first contact. The binary knows no
+hosted URL: its connection string contains only `http://127.0.0.1:8631` and the
+capability in the fragment. The app retains it in that tab's session storage;
+an ordinary visit stays standalone and makes no local request.
 
 ## Test
 

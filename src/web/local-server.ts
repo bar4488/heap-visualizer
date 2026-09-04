@@ -60,6 +60,22 @@ function validConfig(baseURL: unknown, token: unknown): LocalServerConfig | null
   }
 }
 
+/** Parse the deployment-agnostic string printed by the local binary. */
+export function parseLocalServerConnection(value: string): LocalServerConfig | null {
+  try {
+    const url = new URL(value.trim());
+    const token = url.hash.replace(/^#/, '');
+    url.hash = '';
+    return validConfig(url.href, token);
+  } catch {
+    return null;
+  }
+}
+
+function retainLocalServerConfig(config: LocalServerConfig, storage: StoredConfig) {
+  try { storage.setItem(STORAGE_KEY, JSON.stringify(config)); } catch { /* unavailable storage */ }
+}
+
 type PermissionStateReader = () => Promise<PermissionState | null>;
 
 export async function connectLocalServer(
@@ -117,11 +133,28 @@ const STATUS_TEXT: Record<LocalServerStatus['state'], string> = {
   unreachable: 'local server: unavailable or blocked',
 };
 
-export async function initLocalServerMode(element: HTMLElement) {
-  const config = localServerConfig(window.location, window.sessionStorage, window.history);
-  setStatus(element, config ? { state: 'connecting' } : { state: 'standalone' });
-  const status = await connectLocalServer(config);
-  setStatus(element, status);
+export async function initLocalServerMode(element: HTMLElement, button: HTMLButtonElement) {
+  async function connect(config: LocalServerConfig | null) {
+    setStatus(element, config ? { state: 'connecting' } : { state: 'standalone' });
+    const status = await connectLocalServer(config);
+    setStatus(element, status);
+  }
+
+  button.onclick = () => {
+    const value = window.prompt('Paste the connection string printed by heap-visualizer-local-server:');
+    if (value === null) return;
+    const config = parseLocalServerConnection(value);
+    if (!config) {
+      element.dataset.state = 'unreachable';
+      element.textContent = 'local server: invalid connection string';
+      element.title = 'Expected the loopback connection string printed by the local server';
+      return;
+    }
+    retainLocalServerConfig(config, window.sessionStorage);
+    void connect(config);
+  };
+
+  await connect(localServerConfig(window.location, window.sessionStorage, window.history));
 }
 
 function setStatus(element: HTMLElement, status: LocalServerStatus) {

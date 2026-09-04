@@ -123,7 +123,7 @@ the status codes and the token check are the feature. It needs no `dist/`.
 
 `cargo test --manifest-path src/local-server/Cargo.toml` runs the local
 data-server suite. Its transport tests exercise the real router: loopback Host
-validation, bearer capability, exact-origin CORS, and the private-network
+validation, bearer capability, origin-reflecting CORS, and the private-network
 preflight response.
 
 Rendering, pointer interaction and the real worker round trip are still

@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { connectLocalServer, localServerConfig } from '../local-server.ts';
+import {
+  connectLocalServer, localServerConfig, parseLocalServerConnection,
+} from '../local-server.ts';
 
 function storage(initial: string | null = null) {
   let value = initial;
@@ -86,4 +88,13 @@ test('a launch fragment cannot point the hosted app at a non-loopback service', 
     { replaceState() {} },
   );
   assert.equal(config, null);
+});
+
+test('the binary connection string names no web deployment', () => {
+  assert.deepEqual(
+    parseLocalServerConnection(`http://127.0.0.1:8631#${'a'.repeat(64)}`),
+    { baseURL: 'http://127.0.0.1:8631', token: 'a'.repeat(64) },
+  );
+  assert.equal(parseLocalServerConnection(`https://viewer.example/#${'a'.repeat(64)}`), null);
+  assert.equal(parseLocalServerConnection('http://127.0.0.1:8631#short'), null);
 });

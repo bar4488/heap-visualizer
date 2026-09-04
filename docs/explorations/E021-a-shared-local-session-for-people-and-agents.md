@@ -85,13 +85,12 @@ behind that ABI; the WASM exports should become a thin singleton adapter over
 the same type. This keeps parsing, filtering and allocation identity in one
 implementation.
 
-One command should start the server and print both its API URL and a launch URL
-for the hosted app. The launch URL carries an ephemeral connection capability
-in its fragment, which is not sent to the hosted server; the app removes it
-from browser history after reading it. The same capability is printed for an
-agent to use as a bearer token. A trace may be named on the command or opened
-by the web UI. Agent trace loading is outside the first tool surface even
-though the browser needs a load route.
+One command should start the server and print a deployment-agnostic connection
+string: the loopback API URL with an ephemeral capability in its fragment. A
+person can paste that string into any compatible hosted UI, and an agent can
+use the same URL and capability directly. The binary knows no hosted URL. A
+trace may be named on the command or opened by the web UI. Agent trace loading
+is outside the first tool surface even though the browser needs a load route.
 
 ### The browser client
 
@@ -144,8 +143,9 @@ browser-only. An agent gets semantic allocation/event queries rather than
 pixel coordinates. The browser may answer its own interactive queries locally
 even when an equivalent semantic query exists on the server.
 
-Opening the hosted site normally selects the existing standalone path. A local
-server launch URL, or an explicit Connect action, selects connected mode. Once
+Opening the hosted site normally selects the existing standalone path. Pasting
+the server's connection string into the explicit Connect action selects
+connected mode. Once
 connected, a disconnect leaves trace exploration available from the local
 worker but makes canonical annotation writes unavailable until resync. It must
 not start writing a second analysis history to `localStorage`.
@@ -289,11 +289,11 @@ canvas or DOM concepts. An eventual MCP server maps tools such as
 ## Safety and deployment
 
 The first server binds only `127.0.0.1` (and loopback IPv6 when supported),
-rejects non-local Host values, and accepts browser origins only from an exact
-allowlist containing the hosted app and configured development origins. Every
-API request requires the ephemeral bearer capability. The hosted page must
+rejects non-local Host values, and reflects any syntactically valid HTTP(S)
+browser origin for CORS. Every data request requires the ephemeral bearer
+capability; origin is interoperability, not authority. The hosted page must
 explicitly allow the loopback endpoint in `connect-src`; the local server must
-answer CORS preflights for only that origin and token-bearing request shape.
+answer CORS preflights for only the token-bearing request shape.
 
 Current Chromium releases gate public-site-to-loopback requests behind the
 Local Network Access permission, and the API is exposed as
@@ -330,7 +330,7 @@ and the hosted feature-request deployment acquires no trace access.
    worker transport, synchronize the rendering replica, route browser analysis
    edits through the server, and retain an explicit standalone startup path.
 5. **Local product path.** Produce one server-only binary, provide one
-   documented start command and hosted launch URL, add connection
+   documented start command and deployment-agnostic connection string, add connection
    status in the UI, API examples for agents, and an end-to-end check in which
    an HTTP tag mutation appears in an already-open browser.
 
@@ -341,8 +341,8 @@ it.
 
 ## Done when
 
-- One local command starts a loopback API server and gives the user a URL that
-  opens the hosted web app connected to it.
+- One local command starts a loopback API server and gives the user a connection
+  string accepted by any compatible hosted web app.
 - The browser and two independent HTTP clients observe one trace id and one
   monotonically revised analysis state.
 - An agent can inspect metadata, events and allocations, run a bounded filter
@@ -355,8 +355,8 @@ it.
   working, visibly standalone viewer.
 - Connected-server loss is visible and does not create a second writable copy
   of analysis state.
-- The local API is unreachable off-machine by default and rejects a browser
-  without the expected hosted origin and ephemeral capability.
+- The local API is unreachable off-machine by default and returns no data to a
+  browser without the ephemeral capability.
 
 ## Non-goals
 

@@ -161,7 +161,7 @@ const UI: UIState = {
   xview: { zoom: 1, pan: 0 },
 };
 
-void initLocalServerMode($('st-server'));
+void initLocalServerMode($('st-server'), $('btn-connect'));
 
 // expose for tests / console poking
 window.__heap_visualizer = UI;
