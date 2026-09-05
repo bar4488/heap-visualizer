@@ -1,0 +1,13 @@
+{"op":"H","v":2,"unit":"ns","arena_base":"0x10000000","row_bytes":4096,"title":"agent benchmark: corrupted-telemetry","meta":{"generator":"src/benchmarks/generate.py","suite":2}}
+{"seq":0,"t":1,"op":"E","title":"capture begins","stage":"capture"}
+{"seq":1,"t":2,"op":"M","id":1,"addr":"0x10000000","size":1024,"thr":0,"site":"session_state","session":"s-1"}
+{"op":"M","id":
+{"seq":999,"t":1,"op":"M","id":2,"addr":"0x10000410","size":2048,"thr":1,"site":"normal_buffer","session":"s-2"}
+{"seq":3,"t":3,"op":"F","id":999999,"addr":"0xdead0000","size":32,"thr":2}
+{"seq":4,"t":4,"op":"F","id":1,"addr":"0x10000000","size":1024,"thr":0,"reason":"complete"}
+{"seq":5,"t":5,"op":"F","id":1,"addr":"0x10000000","size":1024,"thr":0,"reason":"duplicate-record"}
+{"seq":6,"t":6,"op":"M","id":77,"addr":"0x10000c20","size":4096,"thr":0,"site":"session_state","session":"s-dup-a"}
+{"seq":7,"t":7,"op":"M","id":77,"addr":"0x10001c30","size":8192,"thr":0,"site":"session_state","session":"s-dup-b"}
+{"seq":8,"t":8,"op":"M","id":78,"addr":"0x10000ca0","size":512,"thr":3,"site":"overlapping_region","session":"s-overlap"}
+{"seq":9,"t":9,"op":"M","id":79,"addr":"0x10003c40","size":0,"thr":4,"site":"zero_record","session":"s-zero"}
+{"seq":10,"t":10,"op":"E","title":"capture ends","stage":"capture"}

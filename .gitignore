@@ -5,6 +5,7 @@ src/local-server/target/
 images/*.tar
 *.heapl
 !src/web/guide/traces/*.heapl
+!benchmarks/agent/traces/*.heapl
 node_modules/
 __pycache__/
 data/

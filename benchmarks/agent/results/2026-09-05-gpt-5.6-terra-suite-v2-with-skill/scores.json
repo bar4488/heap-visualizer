@@ -1,0 +1,269 @@
+{
+  "suiteVersion": 2,
+  "caseCount": 11,
+  "runDate": "2026-09-05",
+  "model": "openai/gpt-5.6-terra",
+  "modelVariant": "standard (non-fast)",
+  "skill": {
+    "id": "heap-analysis-api",
+    "path": ".opencode/skills/heap-analysis-api/SKILL.md",
+    "sha256": "72737e518b8cfa3b82bac52477efcb5e3c74cfbadcb49518c49fb5426b0fc7e5"
+  },
+  "cases": [
+    {
+      "case": "retained-cache-cohort",
+      "category": "memory-analysis",
+      "difficulty": "medium",
+      "score": 10,
+      "maxScore": 10,
+      "note": "Exact cohort, count, bytes, earliest creator, attributes, and evidence.",
+      "sessionId": "ses_f8e282f2affe6UdoK2l1ho6c4K",
+      "elapsedSeconds": 83.291,
+      "exitCode": 0,
+      "usage": {
+        "input": 28436,
+        "output": 2886,
+        "reasoning": 943,
+        "cacheRead": 50176,
+        "steps": 8,
+        "toolCalls": 12,
+        "invalidRequestResponses": 3,
+        "skillLoads": 1,
+        "providerErrors": 0
+      }
+    },
+    {
+      "case": "transient-decompression-spike",
+      "category": "memory-analysis",
+      "difficulty": "medium",
+      "score": 10,
+      "maxScore": 10,
+      "note": "Exact operation, window, cohort quantities, peak, and transient conclusion.",
+      "sessionId": "ses_f8e282da8ffeVuSPwDdCAEAfDX",
+      "elapsedSeconds": 44.5,
+      "exitCode": 0,
+      "usage": {
+        "input": 17441,
+        "output": 866,
+        "reasoning": 229,
+        "cacheRead": 13824,
+        "steps": 4,
+        "toolCalls": 4,
+        "invalidRequestResponses": 0,
+        "skillLoads": 1,
+        "providerErrors": 0
+      }
+    },
+    {
+      "case": "realloc-lineage",
+      "category": "memory-analysis",
+      "difficulty": "medium",
+      "score": 10,
+      "maxScore": 10,
+      "note": "All rubric requirements met. Minor extra-text imprecision: called all 54 freed stream-buffer generations completed-request generations, while separately identifying the correct 12 completed four-generation chains.",
+      "sessionId": "ses_f8e282d3effenlXOZam69a0XYh",
+      "elapsedSeconds": 116.513,
+      "exitCode": 0,
+      "usage": {
+        "input": 23580,
+        "output": 2981,
+        "reasoning": 1318,
+        "cacheRead": 101376,
+        "steps": 13,
+        "toolCalls": 21,
+        "invalidRequestResponses": 0,
+        "skillLoads": 1,
+        "providerErrors": 0
+      }
+    },
+    {
+      "case": "worker-drain-imbalance",
+      "category": "memory-analysis",
+      "difficulty": "medium",
+      "score": 10,
+      "maxScore": 10,
+      "note": "Exact worker/queue cohort, all-worker comparison, and precise filter.",
+      "sessionId": "ses_f8e282ffdffeqEp4JRR24BvVOh",
+      "elapsedSeconds": 112.597,
+      "exitCode": 0,
+      "usage": {
+        "input": 16013,
+        "output": 3224,
+        "reasoning": 1163,
+        "cacheRead": 58368,
+        "steps": 8,
+        "toolCalls": 16,
+        "invalidRequestResponses": 0,
+        "skillLoads": 1,
+        "providerErrors": 0
+      }
+    },
+    {
+      "case": "corrupted-telemetry",
+      "category": "memory-analysis",
+      "difficulty": "medium",
+      "score": 10,
+      "maxScore": 10,
+      "note": "Exact warning inventory/sequences, risk analysis, and appropriately bounded conclusion.",
+      "sessionId": "ses_f8e261ed0ffeQYmKufRKeexYu8",
+      "elapsedSeconds": 68.887,
+      "exitCode": 0,
+      "usage": {
+        "input": 11979,
+        "output": 1769,
+        "reasoning": 797,
+        "cacheRead": 25088,
+        "steps": 5,
+        "toolCalls": 4,
+        "invalidRequestResponses": 0,
+        "skillLoads": 1,
+        "providerErrors": 0
+      }
+    },
+    {
+      "case": "dual-leak-ranking-and-tagging",
+      "category": "memory-analysis",
+      "difficulty": "medium",
+      "score": 10,
+      "maxScore": 10,
+      "note": "Exact rankings and exclusion; atomically tagged 429 members and reported revision 2.",
+      "sessionId": "ses_f8e261c9dffeaSPjOwJLTlCNAQ",
+      "elapsedSeconds": 107.403,
+      "exitCode": 0,
+      "usage": {
+        "input": 42890,
+        "output": 2640,
+        "reasoning": 1337,
+        "cacheRead": 86528,
+        "steps": 10,
+        "toolCalls": 10,
+        "invalidRequestResponses": 6,
+        "skillLoads": 1,
+        "providerErrors": 0
+      }
+    },
+    {
+      "case": "uaf-callback-hijack",
+      "category": "security-uaf",
+      "difficulty": "hard",
+      "score": 10,
+      "maxScore": 10,
+      "note": "Exact victim and four-generation reuse chain, same-time sequence order, controlled occupant, attempted callback, and impact verdict.",
+      "sessionId": "ses_f8e227eb0ffejApkqJKQ97052G",
+      "elapsedSeconds": 93.885,
+      "exitCode": 0,
+      "usage": {
+        "input": 13289,
+        "output": 3054,
+        "reasoning": 363,
+        "cacheRead": 25088,
+        "steps": 5,
+        "toolCalls": 18,
+        "invalidRequestResponses": 0,
+        "skillLoads": 1,
+        "providerErrors": 0
+      }
+    },
+    {
+      "case": "uaf-realloc-interior-write",
+      "category": "security-uaf",
+      "difficulty": "hard",
+      "score": 10,
+      "maxScore": 10,
+      "note": "Exact use-after-realloc chain, pointer arithmetic, write-time owner, role overwrite, event order, and impact.",
+      "sessionId": "ses_f8e227ef6ffeypK444kKrwBNf9",
+      "elapsedSeconds": 64.597,
+      "exitCode": 0,
+      "usage": {
+        "input": 21236,
+        "output": 1750,
+        "reasoning": 202,
+        "cacheRead": 16384,
+        "steps": 5,
+        "toolCalls": 12,
+        "invalidRequestResponses": 0,
+        "skillLoads": 1,
+        "providerErrors": 0
+      }
+    },
+    {
+      "case": "stale-handle-generation-guard",
+      "category": "security-uaf",
+      "difficulty": "hard",
+      "score": 10,
+      "maxScore": 10,
+      "note": "Correctly rejected an executed-UAF claim and reconstructed the generation guard and reuse evidence.",
+      "sessionId": "ses_f8e227defffexCfmfSSKPzb1QJ",
+      "elapsedSeconds": 53.237,
+      "exitCode": 0,
+      "usage": {
+        "input": 11414,
+        "output": 1483,
+        "reasoning": 108,
+        "cacheRead": 14848,
+        "steps": 4,
+        "toolCalls": 11,
+        "invalidRequestResponses": 0,
+        "skillLoads": 1,
+        "providerErrors": 0
+      }
+    },
+    {
+      "case": "cycle-normalized-retention-growth",
+      "category": "temporal-retention",
+      "difficulty": "hard",
+      "score": 10,
+      "maxScore": 10,
+      "note": "Exact eight-cycle contributions, cycle-5 excess, producer condition, cumulative total, and JIT exclusion.",
+      "sessionId": "ses_f8e20bca9ffex8rhoi7MF7HmR9",
+      "elapsedSeconds": 118.607,
+      "exitCode": 0,
+      "usage": {
+        "input": 37938,
+        "output": 3166,
+        "reasoning": 1304,
+        "cacheRead": 40960,
+        "steps": 7,
+        "toolCalls": 13,
+        "invalidRequestResponses": 10,
+        "skillLoads": 1,
+        "providerErrors": 0
+      }
+    },
+    {
+      "case": "allocator-slack-regression",
+      "category": "allocator-accounting",
+      "difficulty": "hard",
+      "score": 10,
+      "maxScore": 10,
+      "note": "Exact measured-site accounting, slack/amplification leader, unknown-measurement caveat, and no-leak conclusion.",
+      "sessionId": "ses_f8e20bc9fffeeAejZScmwhBBLY",
+      "elapsedSeconds": 79.937,
+      "exitCode": 0,
+      "usage": {
+        "input": 14508,
+        "output": 934,
+        "reasoning": 220,
+        "cacheRead": 23552,
+        "steps": 5,
+        "toolCalls": 6,
+        "invalidRequestResponses": 0,
+        "skillLoads": 1,
+        "providerErrors": 0
+      }
+    }
+  ],
+  "score": 110,
+  "maxScore": 110,
+  "method": {
+    "freshModelSessionPerCase": true,
+    "freshOpenCodeStandaloneServerPerCase": true,
+    "freshHeapServerDataDirectoryPerCase": true,
+    "skillLoadedByEveryCase": true,
+    "allRunsExitedSuccessfully": true,
+    "publicPromptOnly": true,
+    "rawTraceExposed": false,
+    "privateSolutionExposed": false,
+    "scoring": "Manual application of solutions.json rubrics."
+  }
+}

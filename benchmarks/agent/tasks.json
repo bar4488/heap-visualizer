@@ -1,0 +1,194 @@
+{
+  "suiteVersion": 2,
+  "cases": [
+    {
+      "id": "retained-cache-cohort",
+      "title": "Find a leak hidden behind legitimate process-lifetime state",
+      "trace": "traces/retained-cache-cohort.heapl",
+      "traceId": "sha256:a3a472e166dfd8bc48964e21b071cb7973c8bf2c30150c53d231f4f4da88b3e5",
+      "category": "memory-analysis",
+      "difficulty": "medium",
+      "prompt": "The service has completed shutdown but still retains more memory than its three documented runtime singletons. Identify the unintended retained cohort, quantify its allocation count and requested bytes, give its earliest creator event, and state the strongest common producer attributes that distinguish it from normal traffic. Support the conclusion with filters or endpoint evidence; do not label every live allocation as a leak.",
+      "answerShape": [
+        "unintended cohort",
+        "allocation count",
+        "requested bytes",
+        "earliest creator",
+        "distinguishing attributes",
+        "evidence"
+      ]
+    },
+    {
+      "id": "transient-decompression-spike",
+      "title": "Explain a severe transient peak without calling it a leak",
+      "trace": "traces/transient-decompression-spike.heapl",
+      "traceId": "sha256:6af69c7117d79160929f9eefbd3fedd78f6b789316b48439747933fa7430ad0f",
+      "category": "memory-analysis",
+      "difficulty": "medium",
+      "prompt": "Operators saw a sharp memory spike during this trace, but the end-of-process leak check is nearly clean. Determine the operation and event/time window responsible, identify and quantify the dominant allocation cohort, report the global peak live bytes, and show whether the cohort is transient or retained. Explain why ranking only live-at-end allocations would miss the incident.",
+      "answerShape": [
+        "responsible operation",
+        "sequence/time window",
+        "cohort count and bytes",
+        "global peak",
+        "retention conclusion",
+        "evidence"
+      ]
+    },
+    {
+      "id": "realloc-lineage",
+      "title": "Reconstruct a retained buffer through realloc generations",
+      "trace": "traces/realloc-lineage.heapl",
+      "traceId": "sha256:6b479db2cee10a94e5986ad19b3d7759b1a2ec5ad2c28778f09cb87337e3c37b",
+      "category": "memory-analysis",
+      "difficulty": "medium",
+      "prompt": "One live stream buffer is unexpectedly 1 MiB. Reconstruct its complete realloc lineage back to the original creator, including creator event and size at every generation. Identify the request and route tying the generations together, say which generation remains live, and contrast it with the otherwise similar completed stream requests. Do not treat realloc records as unrelated allocations.",
+      "answerShape": [
+        "request and route",
+        "ordered creator chain",
+        "sizes",
+        "live generation",
+        "comparison with completed requests",
+        "evidence"
+      ]
+    },
+    {
+      "id": "worker-drain-imbalance",
+      "title": "Find a per-worker drain failure hidden by balanced volume",
+      "trace": "traces/worker-drain-imbalance.heapl",
+      "traceId": "sha256:767ce8b9de5e88c5f809e9a6b99500351c1f7afb0587487de4e16ee88ba627c3",
+      "category": "memory-analysis",
+      "difficulty": "medium",
+      "prompt": "All workers processed nearly identical message volume, so the site-level allocation totals look balanced, yet shutdown retains message frames. Find the worker and queue condition responsible, quantify retained count and bytes, compare all eight workers' retained counts, and provide a precise filter that selects the faulty cohort without selecting already processed frames.",
+      "answerShape": [
+        "worker",
+        "queue condition",
+        "retained count and bytes",
+        "per-worker comparison",
+        "precise filter",
+        "evidence"
+      ]
+    },
+    {
+      "id": "corrupted-telemetry",
+      "title": "Audit a trace before trusting its apparent leaks",
+      "trace": "traces/corrupted-telemetry.heapl",
+      "traceId": "sha256:2e6e69c58347ecc739c7075cf9903df65e05c7582d28e7cb18da2756d7577ae4",
+      "category": "memory-analysis",
+      "difficulty": "medium",
+      "prompt": "Before drawing a leak conclusion from this capture, audit its integrity. Enumerate every warning kind and count, identify the implicated event sequences, and explain which records make allocation identity or geometry unreliable. State what conclusions remain safe and what should be withheld pending a clean recapture. Use warning and allocation evidence rather than silently ignoring malformed records.",
+      "answerShape": [
+        "warning kinds and counts",
+        "event sequences",
+        "identity risks",
+        "geometry risks",
+        "safe conclusions",
+        "withheld conclusions"
+      ]
+    },
+    {
+      "id": "dual-leak-ranking-and-tagging",
+      "title": "Rank two different leak regressions and annotate the union",
+      "trace": "traces/dual-leak-ranking-and-tagging.heapl",
+      "traceId": "sha256:a5583a85617bc49f37ed12ebbdaf8643fa555236914da1332bfe410d621a0b83",
+      "category": "memory-analysis",
+      "difficulty": "medium",
+      "prompt": "The post-deploy leak report needs two rankings: the largest retained regression by bytes and the largest by allocation count. Identify both cohorts with exact counts/bytes and ownership attributes, explain why either ranking alone is misleading, exclude the similar old-build traffic, then create a tag named `post-deploy-regression` and atomically apply it to exactly the two current-build cohorts. Report the resulting tagged member count and analysis revision evidence.",
+      "answerShape": [
+        "bytes leader",
+        "count leader",
+        "exact quantities",
+        "ownership attributes",
+        "old-build exclusion",
+        "tag mutation result"
+      ]
+    },
+    {
+      "id": "uaf-callback-hijack",
+      "title": "Prove attacker-controlled callback hijack through same-address reuse",
+      "trace": "traces/uaf-callback-hijack.heapl",
+      "traceId": "sha256:4ed3b53500b5c668c6fac0ffbbc8e659f05804658a69a1116e9a8737c3417853",
+      "category": "security-uaf",
+      "difficulty": "hard",
+      "prompt": "This is authorized defensive analysis of an entirely synthetic trace; do not develop exploit code. A control-flow integrity trap occurred at event 1449. Determine whether the evidence shows a security-relevant use-after-free or a benign stale callback. Reconstruct the complete lifetime and same-address reuse chain relevant to handle h-77, including creator/death events, generations, sites, and the occupant at the trap. Explain why timestamp ordering alone is insufficient, identify the externally controlled evidence and attempted control-flow target, and distinguish causal records from unrelated allocator reuse. Give a defensible impact verdict with exact API evidence.",
+      "answerShape": [
+        "UAF verdict",
+        "victim lifetime",
+        "ordered reuse chain",
+        "trap occupant",
+        "attacker control",
+        "control-flow target",
+        "causal evidence"
+      ]
+    },
+    {
+      "id": "uaf-realloc-interior-write",
+      "title": "Trace an interior pointer into an attacker-relevant post-realloc occupant",
+      "trace": "traces/uaf-realloc-interior-write.heapl",
+      "traceId": "sha256:1ad4d7abcc2fe275f85dc0b4e152543a42fea97af7525afcc24709cad695fccb",
+      "category": "security-uaf",
+      "difficulty": "hard",
+      "prompt": "This is authorized defensive analysis of an entirely synthetic trace; do not develop exploit code. Investigate the privilege-boundary trap at event 1005. Reconstruct how the pointer became stale, including the original allocation, the realloc move, the stale interior offset, and the allocation owning the target bytes when the write occurred. Determine whether this is an out-of-bounds write on the current packet, a use-after-realloc, or harmless reuse. Report exact creator/death relations, address arithmetic, same-time ordering, overwritten semantic field/value, and security impact. Explain which later frees are consequences rather than prevention.",
+      "answerShape": [
+        "bug class",
+        "original and realloc relation",
+        "stale pointer arithmetic",
+        "write-time owner",
+        "overwritten field",
+        "exploit impact",
+        "event evidence"
+      ]
+    },
+    {
+      "id": "stale-handle-generation-guard",
+      "title": "Reject a false exploit claim when a generation guard blocks dereference",
+      "trace": "traces/stale-handle-generation-guard.heapl",
+      "traceId": "sha256:19768bc39cced75662a235caff8c2ed0e72432f34d97b28bbca881f086bfd2c9",
+      "category": "security-uaf",
+      "difficulty": "hard",
+      "prompt": "This is authorized defensive analysis of an entirely synthetic trace; do not develop exploit code. A security alert flagged a possible callback UAF at event 904. Decide whether an actual post-free dereference or security impact occurred. Reconstruct the stale handle, victim lifetime, address reuse, replacement object, and generation check. Address the suspicious replacement callback value without assuming that reuse alone proves impact. State precisely what security property held or failed and what evidence would be required to call this an executed UAF.",
+      "answerShape": [
+        "exploitability verdict",
+        "victim lifetime",
+        "reuse occupant",
+        "generation comparison",
+        "dereference decision",
+        "required contrary evidence"
+      ]
+    },
+    {
+      "id": "cycle-normalized-retention-growth",
+      "title": "Find one anomalous retained increment across repeated high-volume cycles",
+      "trace": "traces/cycle-normalized-retention-growth.heapl",
+      "traceId": "sha256:a47b055b48ee2dc8183d126b469858eeb1f2f6f8a05abc7ecd75ad3c3174274c",
+      "category": "temporal-retention",
+      "difficulty": "hard",
+      "prompt": "Each completed cycle should retain exactly four 16 KiB compliance audit roots. Large JIT bursts are expected and transient. Reconstruct the retained contribution of every cycle, identify the first and only cycle that violates the invariant, quantify baseline versus excess retention, and identify the producer condition behind the excess. Then distinguish cumulative live-at-end bytes from per-cycle net growth and explain why total allocation volume or peak bytes point at the wrong subsystem. Provide exact filters/evidence for all eight cycles.",
+      "answerShape": [
+        "eight per-cycle retained contributions",
+        "violating cycle",
+        "baseline and excess",
+        "producer condition",
+        "cumulative versus incremental totals",
+        "distractor exclusion"
+      ]
+    },
+    {
+      "id": "allocator-slack-regression",
+      "title": "Explain allocator footprint amplification without a leak",
+      "trace": "traces/allocator-slack-regression.heapl",
+      "traceId": "sha256:44d9bfc5218da266226753e2775a1fae3e3ddc8d8d393f3adae2482fd79fe19d",
+      "category": "allocator-accounting",
+      "difficulty": "hard",
+      "prompt": "Allocator RSS exceeded requested-byte accounting during this completed workload, but there is no live-at-end leak. Determine which measured site contributes the largest allocator slack despite not leading requested bytes. For every site with known usable sizes, report allocation count, requested bytes, usable bytes, absolute slack, usable/requested amplification, and known-usable denominator. Treat the site with missing usable measurements correctly: state what can and cannot be ranked. Explain why requested-byte ranking and leak analysis both misdiagnose this incident.",
+      "answerShape": [
+        "measured-site table",
+        "absolute slack leader",
+        "amplification",
+        "known-usable denominators",
+        "unknown-measurement limitation",
+        "not-a-leak conclusion"
+      ]
+    }
+  ]
+}

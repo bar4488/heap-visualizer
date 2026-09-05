@@ -1,0 +1,1120 @@
+{
+  "suiteVersion": 2,
+  "cases": [
+    {
+      "id": "retained-cache-cohort",
+      "traceId": "sha256:a3a472e166dfd8bc48964e21b071cb7973c8bf2c30150c53d231f4f4da88b3e5",
+      "explanation": "Filtering live-at-end allocations first leaves three legitimate runtime singletons and one coherent cache cohort. Grouping by site reveals cache_insert; its records all share region eu-west, generation 17, and entryKind compiled-policy. The much larger image allocations are fully freed and are not leaks.",
+      "answer": {
+        "site": "cache_insert",
+        "count": 18,
+        "requestedBytes": "1253376",
+        "earliestCreator": 3205,
+        "attributes": {
+          "region": "eu-west",
+          "generation": 17,
+          "entryKind": "compiled-policy"
+        },
+        "excludedExpectedLive": {
+          "site": "runtime_singleton",
+          "count": 3
+        }
+      },
+      "traceStats": {
+        "events": 4688,
+        "allocations": 2353,
+        "liveAtEndCount": 21,
+        "liveAtEndBytes": 1265664,
+        "peakLiveBytes": 9654272,
+        "peakEventsApplied": 3255,
+        "totalAllocatedBytes": 11313296
+      },
+      "evidence": [
+        {
+          "endpoint": "/api/v1/allocations/summarize",
+          "body": {
+            "filter": {
+              "source": "not alloc.freed"
+            },
+            "groupBy": "site",
+            "limit": 20
+          },
+          "expectGroup": {
+            "key": "cache_insert",
+            "allocations": 18,
+            "requestedBytes": "1253376"
+          }
+        },
+        {
+          "endpoint": "/api/v1/allocations/query",
+          "body": {
+            "filter": {
+              "source": "not alloc.freed and malloc.site == \"cache_insert\""
+            },
+            "orderBy": "creator-asc",
+            "limit": 20
+          },
+          "expect": {
+            "matched.allocations": 18,
+            "items.0.creator": 3205
+          }
+        }
+      ],
+      "rubric": [
+        {
+          "criterion": "Identifies cache_insert rather than image_decode or all live state",
+          "points": 4
+        },
+        {
+          "criterion": "Reports exact count, bytes, and earliest creator",
+          "points": 3
+        },
+        {
+          "criterion": "Finds all three common custom attributes",
+          "points": 2
+        },
+        {
+          "criterion": "Cites reproducible semantic evidence",
+          "points": 1
+        }
+      ],
+      "maxScore": 10
+    },
+    {
+      "id": "transient-decompression-spike",
+      "traceId": "sha256:6af69c7117d79160929f9eefbd3fedd78f6b789316b48439747933fa7430ad0f",
+      "explanation": "The import creates 96 zstd decompression chunks at one timestamp, then frees every one after the index build. They dominate the peak but contribute nothing to live-at-end state; the only retained allocation is the documented dictionary singleton.",
+      "answer": {
+        "site": "decompress_chunk",
+        "operation": "snapshot import imp-73",
+        "count": 96,
+        "requestedBytes": "87949312",
+        "allFreed": true,
+        "startSeq": 1003,
+        "endSeqExclusive": 1196,
+        "allocationTime": "1103",
+        "freeTime": "1603",
+        "peakLiveBytes": "87957504",
+        "peakEventsApplied": 1099,
+        "liveAtEnd": {
+          "site": "runtime_singleton",
+          "count": 1,
+          "bytes": "8192"
+        }
+      },
+      "traceStats": {
+        "events": 2397,
+        "allocations": 1197,
+        "liveAtEndCount": 1,
+        "liveAtEndBytes": 8192,
+        "peakLiveBytes": 87957504,
+        "peakEventsApplied": 1099,
+        "totalAllocatedBytes": 88721744
+      },
+      "evidence": [
+        {
+          "endpoint": "/api/v1/timeline",
+          "body": {
+            "domain": "sequence",
+            "range": {
+              "from": 1003,
+              "to": 1196
+            },
+            "bins": 8
+          },
+          "expectTotals": {
+            "allocations": 96,
+            "frees": 96
+          }
+        },
+        {
+          "endpoint": "/api/v1/allocations/query",
+          "body": {
+            "filter": {
+              "source": "malloc.site == \"decompress_chunk\""
+            },
+            "orderBy": "size-desc",
+            "limit": 100
+          },
+          "expect": {
+            "matched.allocations": 96
+          }
+        }
+      ],
+      "rubric": [
+        {
+          "criterion": "Identifies snapshot import/decompress_chunk",
+          "points": 3
+        },
+        {
+          "criterion": "Reports exact cohort and peak quantities",
+          "points": 3
+        },
+        {
+          "criterion": "Proves all chunks were freed in the correct window",
+          "points": 3
+        },
+        {
+          "criterion": "Explains the live-at-end blind spot",
+          "points": 1
+        }
+      ],
+      "maxScore": 10
+    },
+    {
+      "id": "realloc-lineage",
+      "traceId": "sha256:6b479db2cee10a94e5986ad19b3d7759b1a2ec5ad2c28778f09cb87337e3c37b",
+      "explanation": "Filtering live stream buffers isolates req-8841. Each allocation detail points backward through reallocatedFrom; following those relations yields seven generations from 4 KiB to 1 MiB. The twelve distractor requests follow shorter chains and their final generations are freed.",
+      "answer": {
+        "request": "req-8841",
+        "route": "/bulk/export",
+        "site": "stream_buffer",
+        "creators": [
+          1161,
+          1162,
+          1163,
+          1164,
+          1165,
+          1166,
+          1167
+        ],
+        "sizes": [
+          "4096",
+          "8192",
+          "16384",
+          "65536",
+          "262144",
+          "524288",
+          "1048576"
+        ],
+        "liveCreator": 1167,
+        "completedComparableRequests": 12
+      },
+      "traceStats": {
+        "events": 2468,
+        "allocations": 1255,
+        "liveAtEndCount": 1,
+        "liveAtEndBytes": 1048576,
+        "peakLiveBytes": 1572864,
+        "peakEventsApplied": 1149,
+        "totalAllocatedBytes": 4887056
+      },
+      "evidence": [
+        {
+          "endpoint": "/api/v1/allocations/query",
+          "body": {
+            "filter": {
+              "source": "not alloc.freed and malloc.site == \"stream_buffer\""
+            },
+            "orderBy": "size-desc",
+            "limit": 20
+          },
+          "expect": {
+            "matched.allocations": 1,
+            "items.0.creator": 1167
+          }
+        },
+        {
+          "endpoint": "/api/v1/allocations/query",
+          "body": {
+            "filter": {
+              "source": "malloc.fields.request == \"req-8841\""
+            },
+            "orderBy": "creator-asc",
+            "limit": 20
+          },
+          "expect": {
+            "matched.allocations": 7
+          }
+        }
+      ],
+      "rubric": [
+        {
+          "criterion": "Identifies req-8841 and /bulk/export",
+          "points": 2
+        },
+        {
+          "criterion": "Reports every creator and size in order",
+          "points": 5
+        },
+        {
+          "criterion": "Identifies only the final generation as live",
+          "points": 2
+        },
+        {
+          "criterion": "Distinguishes completed comparison requests",
+          "points": 1
+        }
+      ],
+      "maxScore": 10
+    },
+    {
+      "id": "worker-drain-imbalance",
+      "traceId": "sha256:767ce8b9de5e88c5f809e9a6b99500351c1f7afb0587487de4e16ee88ba627c3",
+      "explanation": "Every worker allocates 180 frames, hiding the issue in unfiltered volume. Only thread 6 retains its deferred queue entries; ready entries and all entries on the other seven workers are freed.",
+      "answer": {
+        "thread": "6",
+        "queue": "deferred",
+        "count": 36,
+        "requestedBytes": "87552",
+        "liveCountsByThread": {
+          "0": 0,
+          "1": 0,
+          "2": 0,
+          "3": 0,
+          "4": 0,
+          "5": 0,
+          "6": 36,
+          "7": 0
+        },
+        "filter": "not alloc.freed and malloc.site == \"message_frame\" and malloc.thread == 6 and malloc.fields.queue == \"deferred\""
+      },
+      "traceStats": {
+        "events": 3846,
+        "allocations": 1940,
+        "liveAtEndCount": 36,
+        "liveAtEndBytes": 87552,
+        "peakLiveBytes": 525312,
+        "peakEventsApplied": 2665,
+        "totalAllocatedBytes": 3888464
+      },
+      "evidence": [
+        {
+          "endpoint": "/api/v1/allocations/summarize",
+          "body": {
+            "filter": {
+              "source": "not alloc.freed and malloc.site == \"message_frame\""
+            },
+            "groupBy": "thread",
+            "limit": 20
+          },
+          "expectGroup": {
+            "key": "6",
+            "allocations": 36,
+            "requestedBytes": "87552"
+          }
+        }
+      ],
+      "rubric": [
+        {
+          "criterion": "Identifies thread 6 and deferred queue",
+          "points": 4
+        },
+        {
+          "criterion": "Reports exact retained count and bytes",
+          "points": 2
+        },
+        {
+          "criterion": "Shows zero retained frames on every other worker",
+          "points": 2
+        },
+        {
+          "criterion": "Provides a filter constrained to live matching frames",
+          "points": 2
+        }
+      ],
+      "maxScore": 10
+    },
+    {
+      "id": "corrupted-telemetry",
+      "traceId": "sha256:2e6e69c58347ecc739c7075cf9903df65e05c7582d28e7cb18da2756d7577ae4",
+      "explanation": "The trace deliberately exercises every v1 warning class once. The duplicate id makes id-to-creator attribution ambiguous, the overlap makes address ownership ambiguous, and the zero-size record is not valid allocation geometry. Other well-formed records remain inspectable, but an exact leak total or ownership claim for the implicated session records should be withheld.",
+      "answer": {
+        "warningCounts": {
+          "unknown_version": 1,
+          "malformed_line": 1,
+          "decreasing_time": 1,
+          "sequence_mismatch": 1,
+          "unknown_id": 1,
+          "double_free": 1,
+          "duplicate_id": 1,
+          "overlap": 1,
+          "invalid_size": 1
+        },
+        "expectedWarningTotal": 9,
+        "warningEvents": {
+          "unknown_version": [
+            0
+          ],
+          "malformed_line": [
+            1
+          ],
+          "decreasing_time": [
+            2
+          ],
+          "sequence_mismatch": [
+            2
+          ],
+          "unknown_id": [
+            3
+          ],
+          "double_free": [
+            5
+          ],
+          "duplicate_id": [
+            7
+          ],
+          "overlap": [
+            8
+          ],
+          "invalid_size": [
+            9
+          ]
+        },
+        "identityRiskSites": [
+          "session_state"
+        ],
+        "geometryRiskSites": [
+          "overlapping_region",
+          "zero_record"
+        ],
+        "requiredConclusion": "request a clean recapture before exact leak attribution"
+      },
+      "traceStats": {
+        "events": 11,
+        "allocations": 6,
+        "liveAtEndCount": 5,
+        "liveAtEndBytes": 14848,
+        "peakLiveBytes": 14848,
+        "peakEventsApplied": 9,
+        "totalAllocatedBytes": 15872
+      },
+      "evidence": [
+        {
+          "endpoint": "/api/v1/overview",
+          "expect": {
+            "warnings.total": 9,
+            "warnings.byCode": {
+              "unknown_version": 1,
+              "malformed_line": 1,
+              "decreasing_time": 1,
+              "sequence_mismatch": 1,
+              "unknown_id": 1,
+              "double_free": 1,
+              "duplicate_id": 1,
+              "overlap": 1,
+              "invalid_size": 1
+            }
+          }
+        },
+        {
+          "endpoint": "/api/v1/warnings",
+          "query": {
+            "from": 0,
+            "count": 20
+          },
+          "expectKinds": {
+            "unknown_version": 1,
+            "malformed_line": 1,
+            "decreasing_time": 1,
+            "sequence_mismatch": 1,
+            "unknown_id": 1,
+            "double_free": 1,
+            "duplicate_id": 1,
+            "overlap": 1,
+            "invalid_size": 1
+          }
+        }
+      ],
+      "rubric": [
+        {
+          "criterion": "Finds every warning kind and exact count",
+          "points": 4
+        },
+        {
+          "criterion": "Maps warnings to implicated sequences/records",
+          "points": 2
+        },
+        {
+          "criterion": "Explains duplicate-id and overlap consequences separately",
+          "points": 2
+        },
+        {
+          "criterion": "Avoids an unsupported exact leak conclusion",
+          "points": 2
+        }
+      ],
+      "maxScore": 10
+    },
+    {
+      "id": "dual-leak-ranking-and-tagging",
+      "traceId": "sha256:a5583a85617bc49f37ed12ebbdaf8643fa555236914da1332bfe410d621a0b83",
+      "explanation": "Nine large HV-217 blobs dominate retained bytes, while 420 tiny HV-231 index nodes dominate count. Both are current build 2026.09.5. Similar old-build blobs are freed. After creating the tag, one replace tag-query with the union filter selects exactly 429 creators and emits one snapshot-required revision.",
+      "answer": {
+        "bytesLeader": {
+          "site": "compressed_blob",
+          "ticket": "HV-217",
+          "owner": "artifact-cache",
+          "count": 9,
+          "requestedBytes": "4718592"
+        },
+        "countLeader": {
+          "site": "index_node",
+          "ticket": "HV-231",
+          "owner": "search-index",
+          "count": 420,
+          "requestedBytes": "161280"
+        },
+        "excludedBuild": "2026.08.9",
+        "tagId": "post-deploy-regression",
+        "taggedMembers": 429,
+        "tagFilter": "not alloc.freed and malloc.fields.build == \"2026.09.5\" and malloc.fields.ticket in {\"HV-217\", \"HV-231\"}",
+        "expectedFinalRevision": 2,
+        "snapshotRequired": true
+      },
+      "traceStats": {
+        "events": 3444,
+        "allocations": 1936,
+        "liveAtEndCount": 429,
+        "liveAtEndBytes": 4879872,
+        "peakLiveBytes": 8549888,
+        "peakEventsApplied": 2037,
+        "totalAllocatedBytes": 9725344
+      },
+      "evidence": [
+        {
+          "endpoint": "/api/v1/allocations/summarize",
+          "body": {
+            "filter": {
+              "source": "not alloc.freed"
+            },
+            "groupBy": "site",
+            "limit": 20
+          },
+          "expectGroups": [
+            "compressed_blob",
+            "index_node"
+          ]
+        },
+        {
+          "endpoint": "/api/v1/analysis/changes",
+          "body": {
+            "expectedRevision": 0,
+            "requestId": "bench-create-regression-tag",
+            "change": {
+              "type": "putTag",
+              "id": "post-deploy-regression",
+              "name": "post-deploy-regression",
+              "color": "#d9485f"
+            }
+          },
+          "expect": {
+            "revision": 1
+          }
+        },
+        {
+          "endpoint": "/api/v1/analysis/tag-query",
+          "body": {
+            "expectedRevision": 1,
+            "requestId": "bench-tag-regressions",
+            "tagId": "post-deploy-regression",
+            "filter": {
+              "source": "not alloc.freed and malloc.fields.build == \"2026.09.5\" and malloc.fields.ticket in {\"HV-217\", \"HV-231\"}"
+            },
+            "operation": "replace"
+          },
+          "expect": {
+            "revision": 2,
+            "matched": 429,
+            "changed": 429,
+            "snapshotRequired": true
+          }
+        }
+      ],
+      "rubric": [
+        {
+          "criterion": "Correctly separates bytes and count leaders",
+          "points": 3
+        },
+        {
+          "criterion": "Reports exact quantities and ownership/ticket fields",
+          "points": 2
+        },
+        {
+          "criterion": "Excludes freed old-build traffic",
+          "points": 1
+        },
+        {
+          "criterion": "Creates and atomically applies the requested tag to 429 members",
+          "points": 3
+        },
+        {
+          "criterion": "Reports revision/snapshot evidence",
+          "points": 1
+        }
+      ],
+      "maxScore": 10
+    },
+    {
+      "id": "uaf-callback-hijack",
+      "traceId": "sha256:4ed3b53500b5c668c6fac0ffbbc8e659f05804658a69a1116e9a8737c3417853",
+      "explanation": "The queued handle retains generation 41's extension_state after it is freed. Two benign generations briefly reuse the address and die. At the same timestamp, attacker-controlled request data becomes generation 44 at that address before the stale indirect call reads its first word as a callback. Sequence, not timestamp, establishes the final reuse-before-call ordering.",
+      "answer": {
+        "verdict": "exploitable control-flow UAF",
+        "handle": "h-77",
+        "address": "0x18000000",
+        "queuedEvent": 1202,
+        "victim": {
+          "creator": 1201,
+          "death": 1443,
+          "generation": 41,
+          "site": "extension_state"
+        },
+        "reuseChain": [
+          {
+            "creator": 1444,
+            "death": 1445,
+            "generation": 42,
+            "site": "thumbnail_job"
+          },
+          {
+            "creator": 1446,
+            "death": 1447,
+            "generation": 43,
+            "site": "metrics_packet"
+          },
+          {
+            "creator": 1448,
+            "death": null,
+            "generation": 44,
+            "site": "request_body_chunk"
+          }
+        ],
+        "trapEvent": 1449,
+        "sharedTime": "1454",
+        "trapOccupantCreator": 1448,
+        "attackerRequest": "atk-552",
+        "attackerSource": "network",
+        "attemptedCallback": "0x7fff41414141"
+      },
+      "traceStats": {
+        "events": 2450,
+        "allocations": 1224,
+        "liveAtEndCount": 1,
+        "liveAtEndBytes": 256,
+        "peakLiveBytes": 39024,
+        "peakEventsApplied": 2243,
+        "totalAllocatedBytes": 913824
+      },
+      "evidence": [
+        {
+          "endpoint": "/api/v1/overview",
+          "expect": {
+            "warnings.total": 0
+          }
+        },
+        {
+          "endpoint": "/api/v1/allocations/query",
+          "body": {
+            "filter": {
+              "source": "alloc.address == 0x18000000"
+            },
+            "orderBy": "creator-asc",
+            "limit": 20
+          },
+          "expect": {
+            "matched.allocations": 4,
+            "items.0.creator": 1201,
+            "items.3.creator": 1448
+          }
+        },
+        {
+          "endpoint": "/api/v1/stream/context",
+          "body": {
+            "filter": {
+              "source": "alloc.address == 0x18000000"
+            },
+            "center": 1449,
+            "before": 8,
+            "after": 1,
+            "includeLandmarks": true
+          },
+          "expectEventTitleContains": "stale indirect call"
+        }
+      ],
+      "rubric": [
+        {
+          "criterion": "Identifies an exploitable UAF rather than generic address reuse",
+          "points": 2
+        },
+        {
+          "criterion": "Reconstructs victim and all three reuse generations with exact event ordering",
+          "points": 3
+        },
+        {
+          "criterion": "Identifies generation 44 as the trap occupant and explains same-time sequence ordering",
+          "points": 2
+        },
+        {
+          "criterion": "Connects attacker-controlled request data to callback 0x7fff41414141",
+          "points": 2
+        },
+        {
+          "criterion": "Cites bounded API evidence and excludes non-causal reuse",
+          "points": 1
+        }
+      ],
+      "maxScore": 10
+    },
+    {
+      "id": "uaf-realloc-interior-write",
+      "traceId": "sha256:1ad4d7abcc2fe275f85dc0b4e152543a42fea97af7525afcc24709cad695fccb",
+      "explanation": "Realloc creator movement kills the 512-byte generation and creates a live 4096-byte generation elsewhere. The retained base+128 pointer still targets the old range. authorization_record then reuses that range before the stale write changes its role field from guest to admin. Later frees occur after the write and do not mitigate it.",
+      "answer": {
+        "verdict": "exploitable use-after-realloc write",
+        "session": "sess-204",
+        "originalCreator": 1001,
+        "reallocCreator": 1003,
+        "originalDeath": 1003,
+        "oldAddress": "0x19000000",
+        "offset": 128,
+        "stalePointer": "0x19000080",
+        "replacementCreator": 1004,
+        "replacementSite": "authorization_record",
+        "trapEvent": 1005,
+        "sharedTime": "1024",
+        "field": "role",
+        "before": "guest",
+        "written": "admin",
+        "impact": "privilege escalation"
+      },
+      "traceStats": {
+        "events": 1908,
+        "allocations": 953,
+        "liveAtEndCount": 0,
+        "liveAtEndBytes": 0,
+        "peakLiveBytes": 35856,
+        "peakEventsApplied": 1043,
+        "totalAllocatedBytes": 697424
+      },
+      "evidence": [
+        {
+          "endpoint": "/api/v1/overview",
+          "expect": {
+            "warnings.total": 0
+          }
+        },
+        {
+          "endpoint": "/api/v1/allocations/query",
+          "body": {
+            "filter": {
+              "source": "alloc.address == 0x19000000"
+            },
+            "orderBy": "creator-asc",
+            "limit": 20
+          },
+          "expect": {
+            "matched.allocations": 2,
+            "items.0.creator": 1001,
+            "items.1.creator": 1004
+          }
+        },
+        {
+          "endpoint": "/api/v1/allocations/1003",
+          "expect": {
+            "allocation.relations.reallocatedFrom": 1001
+          }
+        },
+        {
+          "endpoint": "/api/v1/stream/context",
+          "body": {
+            "filter": {
+              "source": "alloc.address == 0x19000000"
+            },
+            "center": 1005,
+            "before": 4,
+            "after": 3,
+            "includeLandmarks": true
+          },
+          "expectEventTitleContains": "privilege-escalation"
+        }
+      ],
+      "rubric": [
+        {
+          "criterion": "Classifies the bug as use-after-realloc rather than current-object OOB",
+          "points": 2
+        },
+        {
+          "criterion": "Reports exact original/realloc creators, death relation, and moved generation",
+          "points": 2
+        },
+        {
+          "criterion": "Computes base plus 128 and identifies the write-time authorization_record owner",
+          "points": 2
+        },
+        {
+          "criterion": "Explains role guest-to-admin overwrite and privilege-escalation impact",
+          "points": 3
+        },
+        {
+          "criterion": "Orders the write before later frees using event evidence",
+          "points": 1
+        }
+      ],
+      "maxScore": 10
+    },
+    {
+      "id": "stale-handle-generation-guard",
+      "traceId": "sha256:19768bc39cced75662a235caff8c2ed0e72432f34d97b28bbca881f086bfd2c9",
+      "explanation": "The handle is stale and the address is reused by an object carrying a suspicious callback, but the generation check compares 12 with 13 and drops the operation before dereference. This is a detected stale handle, not an executed UAF or control-flow exploit.",
+      "answer": {
+        "verdict": "stale handle safely blocked; no UAF dereference",
+        "handle": "poll-18",
+        "victimCreator": 900,
+        "victimDeath": 902,
+        "queuedEvent": 901,
+        "address": "0x1a000000",
+        "replacementCreator": 903,
+        "replacementSite": "admin_command",
+        "expectedGeneration": 12,
+        "observedGeneration": 13,
+        "guardEvent": 904,
+        "action": "drop",
+        "dereference": false
+      },
+      "traceStats": {
+        "events": 1806,
+        "allocations": 902,
+        "liveAtEndCount": 0,
+        "liveAtEndBytes": 0,
+        "peakLiveBytes": 37536,
+        "peakEventsApplied": 765,
+        "totalAllocatedBytes": 703792
+      },
+      "evidence": [
+        {
+          "endpoint": "/api/v1/overview",
+          "expect": {
+            "warnings.total": 0
+          }
+        },
+        {
+          "endpoint": "/api/v1/allocations/query",
+          "body": {
+            "filter": {
+              "source": "alloc.address == 0x1a000000"
+            },
+            "orderBy": "creator-asc",
+            "limit": 20
+          },
+          "expect": {
+            "matched.allocations": 2,
+            "items.0.creator": 900,
+            "items.1.creator": 903
+          }
+        },
+        {
+          "endpoint": "/api/v1/stream/context",
+          "body": {
+            "filter": {
+              "source": "alloc.address == 0x1a000000"
+            },
+            "center": 904,
+            "before": 5,
+            "after": 1,
+            "includeLandmarks": true
+          },
+          "expectEventTitleContains": "dereference=false"
+        }
+      ],
+      "rubric": [
+        {
+          "criterion": "Concludes no post-free dereference or exploit occurred",
+          "points": 3
+        },
+        {
+          "criterion": "Reconstructs exact victim lifetime and replacement creator",
+          "points": 2
+        },
+        {
+          "criterion": "Reports expected generation 12 versus observed 13 and action drop",
+          "points": 2
+        },
+        {
+          "criterion": "Explains why suspicious address reuse/callback data is insufficient",
+          "points": 2
+        },
+        {
+          "criterion": "States the contrary evidence needed for an exploit claim",
+          "points": 1
+        }
+      ],
+      "maxScore": 10
+    },
+    {
+      "id": "cycle-normalized-retention-growth",
+      "traceId": "sha256:a47b055b48ee2dc8183d126b469858eeb1f2f6f8a05abc7ecd75ad3c3174274c",
+      "explanation": "Every cycle contributes four expected 16 KiB audit roots. Cycle 5 alone also retains thirteen 32 KiB retry shadows after ledger 503 responses under an unbounded retry policy. JIT scratch dominates allocation and peak volume but is fully freed.",
+      "answer": {
+        "perCycle": [
+          {
+            "cycle": 0,
+            "start": 0,
+            "checkpoint": 257,
+            "retainedCount": 4,
+            "retainedBytes": "65536"
+          },
+          {
+            "cycle": 1,
+            "start": 258,
+            "checkpoint": 515,
+            "retainedCount": 4,
+            "retainedBytes": "65536"
+          },
+          {
+            "cycle": 2,
+            "start": 516,
+            "checkpoint": 773,
+            "retainedCount": 4,
+            "retainedBytes": "65536"
+          },
+          {
+            "cycle": 3,
+            "start": 774,
+            "checkpoint": 1031,
+            "retainedCount": 4,
+            "retainedBytes": "65536"
+          },
+          {
+            "cycle": 4,
+            "start": 1032,
+            "checkpoint": 1289,
+            "retainedCount": 4,
+            "retainedBytes": "65536"
+          },
+          {
+            "cycle": 5,
+            "start": 1290,
+            "checkpoint": 1560,
+            "retainedCount": 17,
+            "retainedBytes": "491520"
+          },
+          {
+            "cycle": 6,
+            "start": 1561,
+            "checkpoint": 1818,
+            "retainedCount": 4,
+            "retainedBytes": "65536"
+          },
+          {
+            "cycle": 7,
+            "start": 1819,
+            "checkpoint": 2076,
+            "retainedCount": 4,
+            "retainedBytes": "65536"
+          }
+        ],
+        "violatingCycle": 5,
+        "baselinePerCycle": {
+          "count": 4,
+          "bytes": "65536"
+        },
+        "cycleFive": {
+          "count": 17,
+          "bytes": "491520"
+        },
+        "excess": {
+          "count": 13,
+          "bytes": "425984"
+        },
+        "condition": {
+          "kind": "retry-shadow",
+          "owner": "payments",
+          "upstream": "ledger",
+          "status": 503,
+          "retryPolicy": "unbounded"
+        },
+        "liveAtEnd": {
+          "count": 45,
+          "bytes": "950272"
+        },
+        "excludedSite": "jit_scratch"
+      },
+      "traceStats": {
+        "events": 2077,
+        "allocations": 1053,
+        "liveAtEndCount": 45,
+        "liveAtEndBytes": 950272,
+        "peakLiveBytes": 14292480,
+        "peakEventsApplied": 1950,
+        "totalAllocatedBytes": 107076096
+      },
+      "evidence": [
+        {
+          "endpoint": "/api/v1/allocations/summarize",
+          "body": {
+            "filter": {
+              "source": "not alloc.freed and malloc.fields.cycle == 5"
+            },
+            "groupBy": "site",
+            "limit": 20
+          },
+          "expectGroup": {
+            "key": "request_state",
+            "allocations": 17,
+            "requestedBytes": "491520"
+          }
+        },
+        {
+          "endpoint": "/api/v1/allocations/summarize",
+          "body": {
+            "filter": {
+              "source": "malloc.site == \"jit_scratch\""
+            },
+            "groupBy": "freed",
+            "limit": 20
+          },
+          "expectGroup": {
+            "key": "freed",
+            "allocations": 48,
+            "liveAtEnd": 0
+          }
+        },
+        {
+          "endpoint": "/api/v1/allocations/query",
+          "body": {
+            "filter": {
+              "source": "not alloc.freed and malloc.fields.kind == \"retry-shadow\""
+            },
+            "orderBy": "creator-asc",
+            "limit": 20
+          },
+          "expect": {
+            "matched.allocations": 13,
+            "matched.requestedBytes": "425984"
+          }
+        }
+      ],
+      "rubric": [
+        {
+          "criterion": "Reports exact retained count/bytes for all eight cycles",
+          "points": 3
+        },
+        {
+          "criterion": "Identifies cycle 5 and computes 13 allocations / 425984 excess bytes",
+          "points": 2
+        },
+        {
+          "criterion": "Finds the full retry-shadow producer condition",
+          "points": 2
+        },
+        {
+          "criterion": "Separates per-cycle increment from cumulative live-at-end total",
+          "points": 2
+        },
+        {
+          "criterion": "Proves JIT scratch is a freed volume/peak distractor",
+          "points": 1
+        }
+      ],
+      "maxScore": 10
+    },
+    {
+      "id": "allocator-slack-regression",
+      "traceId": "sha256:44d9bfc5218da266226753e2775a1fae3e3ddc8d8d393f3adae2482fd79fe19d",
+      "explanation": "aligned_vector leads requested bytes, but small_header's rounding from 33 to 128 bytes creates by far the largest measured slack and amplification. opaque_cache has no usable measurements, so its slack cannot be ranked. Every allocation is freed.",
+      "answer": {
+        "sites": {
+          "small_header": {
+            "count": 2000,
+            "requestedBytes": "66000",
+            "usableBytes": "256000",
+            "known": 2000,
+            "slackBytes": "190000",
+            "amplification": "3.8787878788"
+          },
+          "payload_fragment": {
+            "count": 800,
+            "requestedBytes": "153600",
+            "usableBytes": "166400",
+            "known": 800,
+            "slackBytes": "12800",
+            "amplification": "1.0833333333"
+          },
+          "aligned_vector": {
+            "count": 100,
+            "requestedBytes": "409600",
+            "usableBytes": "411200",
+            "known": 100,
+            "slackBytes": "1600",
+            "amplification": "1.00390625"
+          },
+          "opaque_cache": {
+            "count": 500,
+            "requestedBytes": "256000",
+            "usableBytes": "0",
+            "known": 0,
+            "slackBytes": null
+          }
+        },
+        "slackLeader": "small_header",
+        "slackLeaderBytes": "190000",
+        "allFreed": true
+      },
+      "traceStats": {
+        "events": 6802,
+        "allocations": 3400,
+        "liveAtEndCount": 0,
+        "liveAtEndBytes": 0,
+        "peakLiveBytes": 885200,
+        "peakEventsApplied": 3401,
+        "totalAllocatedBytes": 885200
+      },
+      "evidence": [
+        {
+          "endpoint": "/api/v1/allocations/summarize",
+          "body": {
+            "groupBy": "site",
+            "limit": 20
+          },
+          "expectGroup": {
+            "key": "small_header",
+            "allocations": 2000,
+            "requestedBytes": "66000",
+            "usableBytes": "256000",
+            "usableKnownAllocations": 2000,
+            "liveAtEnd": 0
+          }
+        },
+        {
+          "endpoint": "/api/v1/allocations/summarize",
+          "body": {
+            "filter": {
+              "source": "malloc.site == \"opaque_cache\""
+            },
+            "groupBy": "site",
+            "limit": 20
+          },
+          "expectGroup": {
+            "key": "opaque_cache",
+            "usableKnownAllocations": 0,
+            "liveAtEnd": 0
+          }
+        }
+      ],
+      "rubric": [
+        {
+          "criterion": "Computes exact requested, usable, slack, and denominator values for measured sites",
+          "points": 4
+        },
+        {
+          "criterion": "Identifies small_header as 190000-byte slack and 3.8788x amplification leader",
+          "points": 2
+        },
+        {
+          "criterion": "Does not treat opaque_cache usableBytes zero as measured zero slack",
+          "points": 2
+        },
+        {
+          "criterion": "Explains why requested-byte ranking points elsewhere",
+          "points": 1
+        },
+        {
+          "criterion": "Proves the workload is fully freed and not a leak",
+          "points": 1
+        }
+      ],
+      "maxScore": 10
+    }
+  ]
+}

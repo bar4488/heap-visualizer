@@ -130,3 +130,33 @@ Rendering, pointer interaction and the real worker round trip are still
 verified by hand — against `dist/`, after a build — and there is no fixed
 script.
 `window.__heap_visualizer` exposes UI state for console poking.
+
+## TOOL-004: Agent-analysis benchmark corpus
+
+`src/benchmarks/generate.py` must deterministically generate the corpus under
+`benchmarks/agent/`. Public `tasks.json` contains prompts, trace identities, and
+answer shapes but no ground truth. Private-to-the-evaluator `solutions.json`
+contains exact answers, explanations, API evidence, trace statistics, and
+rubrics. Generated traces must cover distinct analysis skills rather than only
+varying trace size, and generation must not execute or score a model.
+
+Each evaluated case must use a fresh server data directory so analysis state
+cannot leak between cases. The generated trace digest must agree with the
+`traceId` in both manifests so an evaluator cannot accidentally pair a prompt
+with the wrong trace.
+
+Cases carry category and difficulty metadata. The corpus must include hard
+non-leak analysis and security triage in addition to leak diagnosis. Security
+cases may use custom trace events as producer-observed access, guard, crash, or
+control-flow evidence, but must require correlation with canonical allocation
+birth/death, realloc, address-reuse, and sequence evidence. Address reuse alone
+must never be treated as proof of a use-after-free or exploit; the corpus must
+include both exploitable and correctly mitigated stale-reference cases.
+
+An evaluation may provide a reusable API skill. Such a skill may document only
+the public API contract and general transport workflow: authentication, request
+and response shapes, bounds, pagination, filter syntax, warning access, and
+canonical mutation forms. It must not contain benchmark case identifiers,
+expected findings, case-specific field values, quantities, creator sequences,
+or rubric content. A recorded run must identify the exact skill revision or
+digest it used and must not mix skill-assisted and unassisted scores.
