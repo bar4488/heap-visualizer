@@ -1,11 +1,7 @@
-# 4. Inspect an allocation
+# Inspect an allocation
 
-Jump to [0x555555551000](#set:jump-input=0x555555551000), then press
-[Go](#do:btn-jump). Address jumps select the live allocation at that location
-without changing the playhead.
+- Set the jump box to [0x555555551000](#set:jump-input=0x555555551000), then press [Go](#do:btn-jump).
+- Read its address, size, lifetime, site, thread, stack, and custom fields in Allocation.
+- Shift-drag either activity strip to select a time range.
 
-The Allocation panel connects the rectangle to its trace records: address,
-size, birth and death, site, thread, stack, and producer fields.
-
-Shift-drag either timeline to select a range. The same selection appears on both
-strips and can be cropped or tagged.
+An address jump selects a live allocation without moving the playhead.

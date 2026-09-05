@@ -147,10 +147,11 @@ dock, float, or z-stack ([SHELL-002](#shell-002-panels-are-windows),
 geometry. It is its own surface at the left edge of the workspace, outside the
 docking drawers, toggled from the toolbar and closable.
 
-Its content must be plain markdown authored under `src/`, such that each
-section read as raw text is complete prose. The only non-prose element is a
-link naming a real element id: one form highlights that element in the running
-app, the others act on it.
+Its content must be a concise task list in plain markdown authored under `src/`,
+such that each section read as raw text is complete. It prioritizes actions and
+expected results over tutorial prose. The only non-prose element is a link
+naming a real element id: one form highlights that element in the running app,
+the others act on it.
 
 Content may ship **scenario traces** — small `.heapl` files, each demonstrating
 a specific case the bundled demo does not. A scenario is offered as an ordinary
@@ -167,3 +168,21 @@ clicking the element, or setting its value and dispatching the event that
 element's own handler is bound to. It must not post to the worker, mutate
 shared UI state, or un-hide a panel behind its toolbar toggle. A guide action
 whose target id does not exist must report that and change nothing.
+
+## SHELL-010: First-run onboarding
+
+An ordinary first visit presents two user goals: try the bundled demo or open a
+trace from the current computer. It describes the browser as the workspace and
+`heapviz` as the local companion; implementation terms such as standalone mode,
+bearer capability, and local server are not prerequisites. Setup is always
+reopenable from the toolbar and contains Windows and Linux install, launch,
+AI-assistant skill, update, and diagnostic commands derived from the current hosted
+origin. The companion is deployment-neutral: setup tells the user to start it,
+then the current website accepts its connection string and connects to it.
+Setup also offers an OS-specific command that downloads the deployment's full
+browser demo and opens that local copy through the companion, so the complete
+connection path is testable without a user-supplied trace.
+
+A launch carrying a configured local connection skips the welcome surface.
+Connection failures reopen setup with a specific remedy, and an incompatible
+companion is distinguished from an unreachable or permission-denied one.

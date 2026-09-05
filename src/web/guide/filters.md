@@ -1,12 +1,8 @@
-# 5. Filter the trace
+# Find allocations
 
-Open [Filter](#show:filter-panel), set
-[malloc.site == "read_buffer" and not alloc.freed](#set:filter-source=malloc.site == "read_buffer" and not alloc.freed),
-then press [Apply](#do:filter-apply).
+- Open [Filter](#show:filter-panel).
+- Use [malloc.site == "request_buf" and not alloc.freed](#set:filter-source=malloc.site == "request_buf" and not alloc.freed).
+- Press [Apply](#do:filter-apply).
+- Choose **dim others** for context or **hide others** for only the matches.
 
-The expression runs over allocations in the complete trace. `alloc` describes
-the allocation, `malloc` its creator record, and `free` its terminating record.
-Here it finds buffers from one call site that were never freed.
-
-Use **dim others** to keep context or **hide others** to isolate matches. Editing
-checks a draft; Apply makes it active.
+This finds allocations created by `request_buf` that were never freed.

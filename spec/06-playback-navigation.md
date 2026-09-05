@@ -42,8 +42,8 @@ close-inspection mode, so it does more than move the playhead:
   old→new link for `R`,
 - prints a one-line event readout in the status bar.
 
-**Viewport lock** (🔓/🔒, key L): when locked, stepping never auto-scrolls;
-the view stays anchored on the address under inspection.
+**Viewport lock** (🔓/🔒 in the top toolbar, key L): when locked, stepping
+never auto-scrolls; the view stays anchored on the address under inspection.
 
 ## NAV-004: Jump box and search overlay
 

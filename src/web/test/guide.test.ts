@@ -112,11 +112,11 @@ test('a fragment that is not one of the three verbs stays an ordinary link', () 
 });
 
 test('relative links stay in-tab; absolute links open away', () => {
-  // Scenario traces are relative: they reload this tab via ?trace= autoload,
-  // which is how the guide loads one without a code path into the loader.
+  // Bundled and scenario traces are relative: they reload this tab via
+  // ?trace= autoload without requiring another path into the loader.
   assert.equal(
-    inline('[s](index.html?trace=guide/traces/sites.heapl&guide=1)'),
-    '<a href="index.html?trace=guide/traces/sites.heapl&guide=1">s</a>',
+    inline('[s](index.html?trace=demo.heapl&guide=1)'),
+    '<a href="index.html?trace=demo.heapl&guide=1">s</a>',
   );
   const ext = inline('[e](https://example.invalid/)');
   assert.ok(ext.includes('target="_blank"'));

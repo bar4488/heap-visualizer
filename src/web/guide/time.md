@@ -1,11 +1,7 @@
-# 3. Move through time
+# Move through the trace
 
-The two strips share one playhead. **time** positions events by timestamp;
-**events** gives each record equal width.
+- Set the jump box to [sequence 12](#set:jump-input=12), then press [Go](#do:btn-jump).
+- Press `←` and `→` to step through events.
+- Press `L` to lock the map when you do not want stepping to scroll it.
 
-Jump to [sequence 12](#set:jump-input=12), then press [Go](#do:btn-jump).
-The map changes because it now shows the live set after that event rather than
-at the end of the trace.
-
-Use `←` and `→` to step through records and watch allocations appear, disappear,
-or move.
+The **time** strip uses timestamps. The **events** strip gives every record equal width.
