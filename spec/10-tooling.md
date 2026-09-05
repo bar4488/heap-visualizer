@@ -81,7 +81,8 @@ cache, or open a hosted deployment. `heapviz setup opencode` and `heapviz setup
 claude` install the same bundled API skill into those assistants' user skill
 directories without requiring a repository checkout. `heapviz doctor` checks
 the local setup, and `heapviz update` installs a checksum-verified release from
-the release-channel manifest.
+the release-channel manifest. Ctrl+C stops the companion promptly, cancelling
+held read requests rather than waiting for their long-poll deadlines.
 
 The release-channel format is independent of every hosted deployment and names
 only the latest companion version and checksum-bound, same-origin platform

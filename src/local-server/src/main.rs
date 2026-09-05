@@ -476,12 +476,14 @@ async fn run_server(config: OpenConfig) -> Result<(), String> {
     );
     println!("\nKeep this window open. Press Ctrl+C to stop.");
 
-    axum::serve(listener, router(state))
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await
-        .map_err(|error| format!("server failed: {error}"))
+    tokio::select! {
+        result = async { axum::serve(listener, router(state)).await } => {
+            result.map_err(|error| format!("server failed: {error}"))
+        }
+        signal = tokio::signal::ctrl_c() => {
+            signal.map_err(|error| format!("cannot listen for Ctrl+C: {error}"))
+        }
+    }
 }
 
 fn platform_download(channel: &Channel) -> Option<&Download> {
