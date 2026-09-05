@@ -9,3 +9,4 @@ images/*.tar
 node_modules/
 __pycache__/
 data/
+.claude/settings.local.json

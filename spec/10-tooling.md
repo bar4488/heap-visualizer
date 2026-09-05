@@ -74,6 +74,36 @@ counts, leaks, peak live, address span) prints to stderr.
   with the feature-request service beside it
   ([11-feature-requests](11-feature-requests.md)).
 
+The native companion ships as `heapviz`. Its primary command is `heapviz open
+TRACE_FILE`, which validates one local trace, serves the authenticated loopback API,
+and prints a deployment-neutral connection string. It must not know, select,
+cache, or open a hosted deployment. `heapviz setup opencode` and `heapviz setup
+claude` install the same bundled API skill into those assistants' user skill
+directories without requiring a repository checkout. `heapviz doctor` checks
+the local setup, and `heapviz update` installs a checksum-verified release from
+the release-channel manifest.
+
+The release-channel format is independent of every hosted deployment and names
+only the latest companion version and checksum-bound, same-origin platform
+downloads. It must not contain the web application's URL or compatibility
+floor. An installer records its deployment's channel endpoint; `open` may read
+it only to report an available update. The already-open hosted site accepts the
+connection string and initiates the authenticated loopback connection.
+
+A full local build places the native platform binary, checksum, and channel
+under `dist/downloads/`, so the install/update path can be tested without an
+external release service. Release automation assembles `dist/` with Windows
+and Linux binaries into one self-hostable archive. Installer and updater
+downloads resolve relative to, and may not leave, that channel's origin.
+
+The hosted page declares its minimum compatible companion version in the
+`heapviz-minimum-version` metadata in `index.html`. A self-hoster owns that
+value. The client must report an older or API-incompatible companion as an
+explicit update requirement rather than as an undifferentiated network failure.
+Release-channel schema 1 is a compatibility anchor: fields may be added, but
+existing fields and their meanings must remain available to already-installed
+companions. A new schema may be published in parallel, not in place of schema 1.
+
 ## TOOL-003: Tests
 
 `cargo test` in `src/core/` runs the engine test suite **natively** (no wasm, no

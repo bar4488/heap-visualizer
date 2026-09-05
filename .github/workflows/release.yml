@@ -1,0 +1,139 @@
+name: release heapviz
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  companion:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset: heapviz-linux-x86_64
+            target: x86_64-unknown-linux-musl
+            built: src/local-server/target/x86_64-unknown-linux-musl/release/heapviz
+          - os: windows-latest
+            asset: heapviz-windows-x86_64.exe
+            target: x86_64-pc-windows-msvc
+            built: src/local-server/target/x86_64-pc-windows-msvc/release/heapviz.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - if: runner.os == 'Linux'
+        run: sh -n src/web/install.sh
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path 'src/web/install.ps1'),
+            [ref]$tokens,
+            [ref]$errors
+          ) | Out-Null
+          if ($errors.Count) {
+            $errors | ForEach-Object { Write-Error $_ }
+            exit 1
+          }
+      - run: cargo test --manifest-path src/local-server/Cargo.toml
+      - shell: bash
+        run: cargo build --release --target '${{ matrix.target }}' --manifest-path src/local-server/Cargo.toml --bin heapviz
+      - shell: bash
+        run: cp '${{ matrix.built }}' '${{ matrix.asset }}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: cargo test --manifest-path src/core/Cargo.toml
+      - run: cargo test --manifest-path src/filter-dsl/Cargo.toml
+      - run: python3 -m unittest discover -s src/server
+      - run: node_modules/.bin/tsc -p tsconfig.test.json
+      - run: node --test 'src/web/**/*.test.ts'
+      - run: ./build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    needs: [companion, web]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: self-host
+      - uses: actions/download-artifact@v4
+        with:
+          name: heapviz-linux-x86_64
+          path: self-host/downloads
+      - uses: actions/download-artifact@v4
+        with:
+          name: heapviz-windows-x86_64.exe
+          path: self-host/downloads
+      - name: Assemble self-hosted deployment
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          mkdir -p release
+          python3 - <<'PY'
+          import hashlib, json, os, tomllib
+          from pathlib import Path
+
+          root = Path('self-host/downloads')
+          version = os.environ['TAG'].removeprefix('v')
+          cargo_version = tomllib.loads(Path('src/local-server/Cargo.toml').read_text())['package']['version']
+          if version != cargo_version:
+              raise SystemExit(f'tag version {version} does not match heapviz crate {cargo_version}')
+          downloads = {}
+          for key, name in (
+              ('linux_x86_64', 'heapviz-linux-x86_64'),
+              ('windows_x86_64', 'heapviz-windows-x86_64.exe'),
+          ):
+              data = (root / name).read_bytes()
+              digest = hashlib.sha256(data).hexdigest()
+              (root / f'{name}.sha256').write_text(digest + '\n')
+              downloads[key] = {'url': name, 'sha256': digest}
+          (root / 'heapviz-channel.json').write_text(json.dumps({
+              'schema_version': 1,
+              'latest_version': version,
+              'downloads': downloads,
+          }, indent=2) + '\n')
+          PY
+          cp self-host/downloads/heapviz-* release/
+          tar -C self-host -czf release/heapviz-self-hosted.tar.gz .
+          (cd self-host && zip -qr ../release/heapviz-self-hosted.zip .)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: heapviz-self-hosted
+          path: self-host/
+          if-no-files-found: error
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true

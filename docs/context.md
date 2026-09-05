@@ -62,14 +62,46 @@ python3 gen.py --seed 2 --ops 200000 --threads 8 --out dist/big.heapl
 
 `window.__heap_visualizer` exposes `UI` in the console for poking at state.
 
-### Prove the local-server connection
+### Release the local companion
 
-The local binary serves only its API; the web app and feature-request service
+Pushing a `vX.Y.Z` tag builds `heapviz` for Windows and Linux and publishes
+`heapviz-self-hosted.tar.gz` and `.zip`. Each archive is a complete static
+deployment: the web app, installers, both binaries, checksums, and
+`downloads/heapviz-channel.json`. GitHub performs the build but is not in the
+end-user install or update path after that archive is deployed elsewhere.
+
+A local full build creates the same layout with the current Linux binary:
+
+```sh
+./build.sh
+./serve.py
+# use the Linux install command shown by http://localhost:8630
+```
+
+The installer records that deployment's
+`downloads/heapviz-channel.json` endpoint. `heapviz update` uses only that
+self-hosted endpoint and same-origin relative downloads. The channel contains
+no web-application URL or web compatibility policy.
+
+`heapviz setup opencode` installs the bundled skill under
+`~/.config/opencode/skills/`; `heapviz setup claude` installs it under
+`~/.claude/skills/`. Both are personal, cross-project installations. `doctor`
+reports each assistant and skill independently.
+
+Each deployment sets its compatibility floor through the
+`heapviz-minimum-version` meta value in `src/web/index.html` (or by replacing
+that value in its generated `dist/index.html`). Raise it only when that hosted
+web build intentionally requires a newer companion.
+
+### Prove the local-companion connection
+
+The local companion serves only its API; the web app and feature-request service
 remain hosted independently. With the development site on its usual port:
 
 ```sh
-cargo run --manifest-path src/local-server/Cargo.toml -- trace.heapl
-# paste the connection string it prints into Connect… on any compatible UI
+cargo run --manifest-path src/local-server/Cargo.toml --bin heapviz -- \
+  open trace.heapl
+# paste the connection it prints into Connect… on the hosted workspace
 ```
 
 Canonical analysis is stored by trace digest under
@@ -77,19 +109,25 @@ Canonical analysis is stored by trace digest under
 that location with `--data-dir PATH`.
 
 The connection badge is in the status bar. Chromium asks for its Apps on
-device / Local Network Access permission on first contact. The binary knows no
-hosted URL: its connection string contains only `http://127.0.0.1:8631` and the
-capability in the fragment. The app retains it in that tab's session storage;
-an ordinary visit stays standalone and makes no local request. The same control
+device / Local Network Access permission on first contact. `heapviz` prints a
+deployment-neutral loopback address and temporary capability; it does not know
+which hosted site consumes them. The app retains those in that tab's session
+storage; an ordinary visit makes no local request. The same control
 reads **Disconnect** while configured and discards only that tab's capability.
 The server snapshots and identifies the trace before listening; once connected,
-the web app streams it in bounded chunks into the same local WASM renderer
-standalone mode uses.
+the web app streams it in bounded chunks into the same local WASM renderer used
+for directly opened traces.
 
 Agents use the same bearer capability. Semantic list endpoints are explicitly
 bounded, for example:
 
 ```sh
+curl -H "Authorization: Bearer $CAPABILITY" \
+  'http://127.0.0.1:8631/api/v1/session'
+
+curl -H "Authorization: Bearer $CAPABILITY" \
+  'http://127.0.0.1:8631/api/v1/overview?top=10'
+
 curl -H "Authorization: Bearer $CAPABILITY" \
   'http://127.0.0.1:8631/api/v1/events?from=0&count=100'
 
@@ -101,14 +139,32 @@ curl -H "Authorization: Bearer $CAPABILITY" \
   --data '{"traceId":"sha256:…","source":"alloc.size >= 4096","from":0,"count":100}' \
   'http://127.0.0.1:8631/api/v1/query'
 
+# Compact, cursor-paged matches. Use nextCursor from the response for the next page.
+curl -H "Authorization: Bearer $CAPABILITY" \
+  -H 'Content-Type: application/json' \
+  --data '{"traceId":"sha256:…","filter":{"source":"alloc.size >= 4096"},"orderBy":"size-desc","limit":20}' \
+  'http://127.0.0.1:8631/api/v1/allocations/query'
+
+curl -H "Authorization: Bearer $CAPABILITY" \
+  -H 'Content-Type: application/json' \
+  --data '{"traceId":"sha256:…","filter":{"source":"not alloc.freed"},"groupBy":"site","limit":20}' \
+  'http://127.0.0.1:8631/api/v1/allocations/summarize'
+
 curl -H "Authorization: Bearer $CAPABILITY" \
   'http://127.0.0.1:8631/api/v1/analysis'
 
 curl -H "Authorization: Bearer $CAPABILITY" \
+  'http://127.0.0.1:8631/api/v1/changes?after=0&wait=25'
+
+curl -H "Authorization: Bearer $CAPABILITY" \
   -H 'Content-Type: application/json' \
-  --data '{"traceId":"sha256:…","expectedRevision":0,"change":{"type":"setAllocationName","creator":42,"name":"request root"}}' \
+  --data '{"traceId":"sha256:…","expectedRevision":0,"requestId":"name-request-root-1","change":{"type":"setAllocationName","creator":42,"name":"request root"}}' \
   'http://127.0.0.1:8631/api/v1/analysis/changes'
 ```
+
+The discoverable endpoint/limit catalog is in `/api/v1/session`; the complete
+wire contract and recommended workflow are in
+[spec/12-agent-api](../spec/12-agent-api.md).
 
 ## Test
 

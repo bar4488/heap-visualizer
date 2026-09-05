@@ -30,7 +30,7 @@ if (( ! web_only )); then
   cargo build --release --target wasm32-unknown-unknown --manifest-path src/filter-dsl/Cargo.toml
   cp src/filter-dsl/target/wasm32-unknown-unknown/release/heap_visualizer_filter_dsl.wasm \
     dist/filter_lexer.wasm
-  # The local server is a separate native artifact. It serves only the API,
+  # heapviz is a separate native companion. It serves only the API,
   # never dist/; building it here keeps one full build path for every product.
   cargo build --release --manifest-path src/local-server/Cargo.toml
 fi
@@ -47,7 +47,41 @@ fi
 
 # index.html and style.css compile to nothing, so they are copied. This is the
 # one part of the loop the build step costs you: a CSS tweak needs ./build.sh web.
-cp src/web/index.html src/web/style.css dist/
+cp src/web/index.html src/web/style.css src/web/install.sh src/web/install.ps1 dist/
+
+# A full local build is also a self-hostable Linux test deployment. Release CI
+# replaces/extends these files with both platform binaries, but uses the same
+# relative channel format and installer paths.
+if (( ! web_only )); then
+  rm -rf dist/downloads
+  mkdir -p dist/downloads
+  if [[ "$(uname -s)-$(uname -m)" == "Linux-x86_64" ]]; then
+    cp src/local-server/target/release/heapviz dist/downloads/heapviz-linux-x86_64
+  fi
+  python3 - <<'PY'
+import hashlib, json, tomllib
+from pathlib import Path
+
+root = Path('dist/downloads')
+version = tomllib.loads(Path('src/local-server/Cargo.toml').read_text())['package']['version']
+downloads = {}
+for key, name in (
+    ('linux_x86_64', 'heapviz-linux-x86_64'),
+    ('windows_x86_64', 'heapviz-windows-x86_64.exe'),
+):
+    path = root / name
+    if not path.exists():
+        continue
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    (root / f'{name}.sha256').write_text(digest + '\n')
+    downloads[key] = {'url': name, 'sha256': digest}
+(root / 'heapviz-channel.json').write_text(json.dumps({
+    'schema_version': 1,
+    'latest_version': version,
+    'downloads': downloads,
+}, indent=2) + '\n')
+PY
+fi
 
 # Guide content is plain markdown, fetched at runtime and rendered client-side,
 # so it is copied like the other non-compiling sources. Cleared first for the
@@ -63,6 +97,7 @@ if [[ ! -f dist/demo.heapl ]]; then
 fi
 
 ls -la dist/heap_visualizer_core.wasm dist/filter_lexer.wasm
-(( web_only )) || ls -la src/local-server/target/release/heap-visualizer-local-server
+(( web_only )) || ls -la src/local-server/target/release/heapviz
+(( web_only )) || ls -la dist/downloads/
 
 echo "serve with: ./serve.py   (http.server sends no Cache-Control, so browsers cache stale js)"
