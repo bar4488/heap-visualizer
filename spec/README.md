@@ -49,5 +49,6 @@ Finding everything that touches one: `rg 'MAP-003' .`
 | [09-ui-shell](09-ui-shell.md) | `SHELL-` | Toolbar, floating/dockable panels, events panel, allocation windows, shortcuts | `src/web/main.ts`, `src/web/index.html` |
 | [10-tooling](10-tooling.md) | `TOOL-` | Trace generator, build pipeline, tests | `gen.py`, `build*.sh`, `src/core` tests |
 | [11-feature-requests](11-feature-requests.md) | `REQ-` | The one server-side surface: the request form, its store, and the review panel | `src/server/app.py`, `src/web/request.ts` |
+| [12-agent-api](12-agent-api.md) | `API-` | Progressive semantic trace inspection and canonical agent annotation over the local server | `src/core/src/agent.rs`, `src/local-server/src/lib.rs` |
 
 Reading order for newcomers: 01 → 02 → 03 → 04 → 05, then the rest as needed.

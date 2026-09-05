@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   connectLocalServer, forgetLocalServerConfig, initLocalServerMode,
-  localServerConfig, parseLocalServerConnection,
+  hostedMinimumVersion, localServerConfig, parseLocalServerConnection,
 } from '../local-server.ts';
 
 function storage(initial: string | null = null) {
@@ -61,7 +61,7 @@ test('a valid session response establishes connected mode', async () => {
       return Response.json({
         apiVersion: 1,
         mode: 'local',
-        serverVersion: '0.1.0',
+        serverVersion: '0.2.0',
         analysisRevision: 0,
         trace: { id: 'trace-id', name: 'trace.heapl', bytes: 1, url: '/api/v1/trace' },
       });
@@ -69,15 +69,37 @@ test('a valid session response establishes connected mode', async () => {
   );
   assert.deepEqual(status, {
     state: 'connected',
-    version: '0.1.0',
+    version: '0.2.0',
     session: {
       apiVersion: 1,
       mode: 'local',
-      serverVersion: '0.1.0',
+      serverVersion: '0.2.0',
       analysisRevision: 0,
       trace: { id: 'trace-id', name: 'trace.heapl', bytes: 1, url: '/api/v1/trace' },
     },
   });
+});
+
+test('an old companion is reported as an update requirement', async () => {
+  const status = await connectLocalServer(
+    { baseURL: 'http://127.0.0.1:8631', token: 'x'.repeat(64) },
+    async () => Response.json({ apiVersion: 1, mode: 'local', serverVersion: '0.1.0' }),
+  );
+  assert.deepEqual(status, { state: 'upgrade-required', installed: '0.1.0', minimum: '0.2.0' });
+});
+
+test('the hosted deployment supplies its own minimum companion version', () => {
+  const doc = {
+    querySelector() { return { getAttribute() { return ' 0.7.0 '; } }; },
+  } as unknown as Pick<Document, 'querySelector'>;
+  assert.equal(hostedMinimumVersion(doc), '0.7.0');
+});
+
+test('invalid hosted compatibility metadata falls back safely', () => {
+  const doc = {
+    querySelector() { return { getAttribute() { return 'newest'; } }; },
+  } as unknown as Pick<Document, 'querySelector'>;
+  assert.equal(hostedMinimumVersion(doc), '0.2.0');
 });
 
 test('a session cannot direct trace retrieval away from its loopback origin', async () => {
@@ -86,7 +108,7 @@ test('a session cannot direct trace retrieval away from its loopback origin', as
     async () => Response.json({
       apiVersion: 1,
       mode: 'local',
-      serverVersion: '0.1.0',
+      serverVersion: '0.2.0',
       analysisRevision: 0,
       trace: { id: 'trace-id', name: 'trace.heapl', bytes: 1, url: 'https://example.test/trace' },
     }),

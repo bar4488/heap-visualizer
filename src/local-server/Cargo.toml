@@ -1,17 +1,26 @@
 [package]
-name = "heap-visualizer-local-server"
-version = "0.1.0"
+name = "heapviz"
+version = "0.2.0"
 edition = "2021"
+
+[[bin]]
+name = "heapviz"
+path = "src/main.rs"
+
+[lib]
+name = "heapviz"
+path = "src/lib.rs"
 
 [dependencies]
 axum = "0.8"
 getrandom = "0.3"
 heap-visualizer-core = { path = "../core" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 tempfile = "3"
-tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["io"] }
 url = "2"
 

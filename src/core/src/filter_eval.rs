@@ -315,6 +315,58 @@ fn ns_fields(ns: Ns) -> &'static [(&'static str, &'static str, Type)] {
     }
 }
 
+pub fn schema(store: &Store, from: usize, count: usize) -> serde_json::Value {
+    fn type_name(ty: Type) -> &'static str {
+        match ty {
+            Type::Bool => "bool",
+            Type::Int => "integer",
+            Type::Float => "float",
+            Type::String => "string",
+            Type::Range => "range",
+            Type::Set(ValueKind::String) => "string-set",
+            Type::Set(ValueKind::Bool) => "bool-set",
+            Type::Set(ValueKind::Int) => "integer-set",
+            Type::Set(ValueKind::Float) => "float-set",
+            Type::Allocation => "allocation",
+        }
+    }
+    fn fields(ns: Ns) -> Vec<serde_json::Value> {
+        ns_fields(ns).iter().map(|(name, detail, ty)| serde_json::json!({
+            "name": name, "type": type_name(*ty), "description": detail,
+        })).collect()
+    }
+    let total = store.fields.len();
+    let end = from.saturating_add(count).min(total);
+    let custom: Vec<_> = store.fields[from.min(total)..end].iter().map(|field| serde_json::json!({
+        "name": field.name,
+        "type": match field.scalar() {
+            Some(FIELD_BOOL) => Some("bool"),
+            Some(FIELD_INT) => Some("integer"),
+            Some(FIELD_FLOAT) => Some("float"),
+            Some(FIELD_STRING) => Some("string"),
+            _ => None,
+        },
+        "optional": field.optional(),
+        "events": field.events,
+    })).collect();
+    serde_json::json!({
+        "namespaces": [
+            { "name": "alloc", "fields": fields(Ns::Alloc), "customFields": false },
+            { "name": "malloc", "fields": fields(Ns::Malloc), "customFields": true },
+            { "name": "free", "fields": fields(Ns::Free), "customFields": true }
+        ],
+        "customFields": custom,
+        "customFieldPage": {
+            "from": from, "count": end.saturating_sub(from), "total": total,
+            "next": (end < total).then_some(end)
+        },
+        "customFieldPaths": ["malloc.fields.<name>", "free.fields.<name>"],
+        "functions": [{ "name": "named", "signature": "named(string) -> allocation" }],
+        "operators": ["and", "or", "not", "==", "!=", "<", "<=", ">", ">=", "in", "is none", "is not none", "+", "-", "*", "/", "%"],
+        "literals": ["integer", "float", "string", "bool", "none", "set", "half-open-range"]
+    })
+}
+
 /// The fields of one object, as completion items.
 fn ns_field_items(ns: Ns, expected: Option<Type>, ctx: &Ctx) -> Vec<CompletionItem> {
     let mut items: Vec<_> = ns_fields(ns)

@@ -3,6 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Self-hosters raise this only when their deployed web client requires a newer companion. -->
+<meta name="heapviz-minimum-version" content="0.2.0">
 <title>heap-visualizer — heap allocation visualizer</title>
 <link rel="stylesheet" href="style.css">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect x='1' y='6' width='5' height='4' fill='%233fb950'/><rect x='7' y='6' width='3' height='4' fill='%23f85149'/><rect x='11' y='6' width='4' height='4' fill='%233fb950'/></svg>">
@@ -10,17 +12,19 @@
 <body>
 <header id="toolbar">
   <div class="brand">heap-visualizer</div>
-  <button id="btn-open" title="Open a .heapl trace">Open…</button>
+  <button id="btn-open" title="Open a trace directly in this browser">Open…</button>
   <input type="file" id="file-input" accept=".heapl,.jsonl,.json,.txt" hidden>
   <button id="btn-demo" title="Load the bundled demo trace">Demo</button>
   <button id="btn-guide" title="Guide: what the views show and how to drive them">Guide</button>
-  <button id="btn-connect" title="Connect this tab to a local data server">Connect…</button>
+  <button id="btn-connect" title="Paste a connection from the heapviz local companion">Connect…</button>
+  <button id="btn-setup" title="Install or troubleshoot the local companion">Setup</button>
   <button id="btn-request" title="Ask for a feature">Request…</button>
   <span id="trace-title" class="title"></span>
 
   <span class="sep"></span>
 
   <button id="btn-playcfg" title="Playback controls: step, play/pause (space), mode, speed">Play</button>
+  <button id="btn-lock" title="Lock the viewport: stepping keeps the address view where it is instead of auto-scrolling (L)">🔓</button>
 
   <span class="sep"></span>
 
@@ -53,7 +57,7 @@
      its own surface at the left edge of the workspace, outside #drawer-left. -->
 <aside id="guide" hidden>
   <div id="guide-bar">
-    <span id="guide-title">Guide</span>
+    <span id="guide-title">Tasks</span>
     <span class="grow"></span>
     <button id="guide-close" title="Close the guide">×</button>
   </div>
@@ -98,12 +102,64 @@
   <span id="st-pos">—</span>
   <span id="st-live">—</span>
   <span id="st-info"></span>
-  <span id="st-server" data-state="standalone">standalone</span>
+  <span id="st-server" data-state="standalone">no local trace connected</span>
   <span class="grow"></span>
   <span id="st-trace">drop a .heapl file anywhere</span>
 </footer>
 
 <div id="tooltip" hidden></div>
+
+<div id="welcome" hidden>
+  <div id="welcome-card">
+    <button id="welcome-close" class="welcome-close" title="Close">×</button>
+    <div id="welcome-intro">
+      <h1>See what your program did with memory</h1>
+      <p>Explore allocation lifetimes, memory peaks, retained objects, reallocations, and allocator warnings in one visual workspace.</p>
+      <p class="muted">The website is the workspace. A small local companion opens traces from your computer; your trace stays on your machine.</p>
+      <div class="welcome-actions">
+        <button id="welcome-demo" class="welcome-primary">Try the interactive demo</button>
+        <button id="welcome-setup">Open a trace from my computer</button>
+      </div>
+    </div>
+    <div id="welcome-install" hidden>
+      <h1>Set up the local companion</h1>
+      <p id="setup-alert" hidden></p>
+      <p>Install <code>heapviz</code>, then use one command to load a trace and open this website already connected.</p>
+      <div class="setup-tabs">
+        <button id="setup-linux">Linux</button>
+        <button id="setup-windows">Windows</button>
+      </div>
+      <div id="setup-linux-body">
+        <h2>1. Install</h2>
+        <div class="setup-command"><code id="setup-linux-install"></code><button data-copy="setup-linux-install">Copy</button></div>
+        <h2>2. Open a trace</h2>
+        <div class="setup-command"><code id="setup-linux-open"></code><button data-copy="setup-linux-open">Copy</button></div>
+        <p class="muted">No trace yet? Download and open the complete demo:</p>
+        <div class="setup-command"><code id="setup-linux-demo"></code><button data-copy="setup-linux-demo">Copy</button></div>
+      </div>
+      <div id="setup-windows-body" hidden>
+        <h2>1. Install from PowerShell</h2>
+        <div class="setup-command"><code id="setup-windows-install"></code><button data-copy="setup-windows-install">Copy</button></div>
+        <h2>2. Open a trace</h2>
+        <div class="setup-command"><code id="setup-windows-open"></code><button data-copy="setup-windows-open">Copy</button></div>
+        <p class="muted">No trace yet? Download and open the complete demo:</p>
+        <div class="setup-command"><code id="setup-windows-demo"></code><button data-copy="setup-windows-demo">Copy</button></div>
+      </div>
+      <h2>3. Connect this website</h2>
+      <p>Keep <code>heapviz</code> running. Copy the <strong>Browser connection</strong> printed in its terminal, then paste it here.</p>
+      <div class="welcome-actions"><button id="welcome-connect" class="welcome-primary">Connect this browser</button></div>
+      <h2>Optional: enable an AI assistant</h2>
+      <p class="muted">Install the skill for the assistant you use. See <a href="https://opencode.ai/v2/docs/" target="_blank" rel="noreferrer">OpenCode</a> or <a href="https://docs.anthropic.com/en/docs/claude-code" target="_blank" rel="noreferrer">Claude Code</a> setup if needed.</p>
+      <div class="setup-command"><code id="setup-opencode">heapviz setup opencode</code><button data-copy="setup-opencode">Copy</button></div>
+      <div class="setup-command"><code id="setup-claude">heapviz setup claude</code><button data-copy="setup-claude">Copy</button></div>
+      <p class="muted">After starting a trace, copy the entire “AI assistant” instruction printed by <code>heapviz</code> into OpenCode or Claude. Include everything after <code>#</code>—the URL alone cannot connect. The capability lasts only while that companion is running.</p>
+      <h2>Troubleshooting</h2>
+      <div class="setup-command"><code id="setup-doctor">heapviz doctor</code><button data-copy="setup-doctor">Copy</button></div>
+      <p class="setup-note">Allow local-device or loopback access if your browser asks. Keep the terminal running while you work. If this site says an update is required, run <code>heapviz update</code>.</p>
+      <div class="welcome-actions"><button id="welcome-back">Back</button><button id="welcome-done">Done</button></div>
+    </div>
+  </div>
+</div>
 
 <div id="play-panel" class="panel" hidden>
   <div class="panel-head"><span class="ph-t"></span> <button class="panel-close" data-close="play-panel">×</button></div>
@@ -118,10 +174,6 @@
       <option value="seq">by events</option>
     </select></label></div>
     <div class="filter-row"><label>speed <select id="play-speed" title="Playback speed"></select></label></div>
-    <div class="filter-row">
-      <button id="btn-lock" title="Lock the viewport: stepping keeps the address view where it is instead of auto-scrolling (L)">🔓</button>
-      <label>lock viewport — stepping doesn't scroll (L)</label>
-    </div>
   </div>
 </div>
 

@@ -232,6 +232,7 @@ export function marksKey() {
 // still there for a portable/shareable file, but there's no reason a plain
 // refresh should lose work that was never explicitly exported
 export async function saveMarksAutosave() {
+  if (d.isServerAnalysis?.()) return;
   const key = marksKey();
   if (!key || !d.ui.loaded) return;
   try {

@@ -19,10 +19,12 @@ import {
   buildTagsSection, sendAddrMarks, gotoAddr, addAddrMark,
   renderAddrMarkLines, setAddrMarkYs, addBookmark, updateMarkers,
   requestAllocInfo, buildMarks, applyMarks, loadCanonicalAnalysis,
-  commitCanonicalAnalysis, commitTagMembers, replaceAllocationTags, seedStandaloneAnalysis,
+  commitCanonicalAnalysis, commitTagMembers, replaceAllocationTags, resetStandaloneAnalysis,
+  seedStandaloneAnalysis,
 } from './heap/analysis.ts';
-import { useServerAnalysis } from './analysis-port.ts';
-import { persistentId } from './analysis-port.ts';
+import {
+  isServerAnalysis, persistentId, subscribeAnalysisServerHealth, useServerAnalysis,
+} from './analysis-port.ts';
 import {
   initEventsPanel, evState, refreshEventsPanel, onEventsSlice, flashRects,
   updateEventsPanel, onEvPos, resetEventsPanel, updateEventsSelBand,
@@ -36,13 +38,17 @@ import {
 } from './filter-completion.ts';
 import { initGuide } from './guide.ts';
 import { initRequest } from './request.ts';
+import { initOnboarding, setOnboardingConnectionStatus } from './onboarding.ts';
 import { loadHighlighter, paintHighlight } from './highlight.ts';
 import {
   customFieldRef, hasTopLevelPredicate, quoteFilterString, toggleFilterPredicate,
 } from './filter-actions.ts';
 import { customFieldsSection } from './heap/custom-fields.ts';
 import { eventWindowBody, eventWindowTitle } from './heap/event-window.ts';
-import { initLocalServerMode } from './local-server.ts';
+import {
+  initLocalServerMode, setLocalServerRuntimeHealth, type LocalServerConfig,
+  hostedMinimumVersion,
+} from './local-server.ts';
 import {
   applyDrawersState, drawersState, dock, initDrawers, drawerEl, refreshDrawerDividers,
 } from './shell/drawers.ts';
@@ -137,9 +143,15 @@ let resolveWorkerReady: () => void;
 const workerReady = new Promise<void>((resolve) => { resolveWorkerReady = resolve; });
 let renderedServerTraceId: string | null = null;
 let pendingServerTraceId: string | null = null;
+let pendingServerConfig: LocalServerConfig | null = null;
 let serverLoadGeneration = 0;
 let serverTraceController: AbortController | null = null;
 let serverStreaming = false;
+let serverConfigured = false;
+
+subscribeAnalysisServerHealth((state) => {
+  if (serverConfigured) setLocalServerRuntimeHealth($('st-server'), state);
+});
 
 const UI: UIState = {
   meta: null,
@@ -172,11 +184,15 @@ const UI: UIState = {
 };
 
 void initLocalServerMode($('st-server'), $('btn-connect'), async (config, status) => {
+  setOnboardingConnectionStatus(status);
   const mine = ++serverLoadGeneration;
   serverTraceController?.abort();
   serverTraceController = null;
   if (status.state === 'standalone') {
+    const wasConfigured = serverConfigured;
+    serverConfigured = false;
     useServerAnalysis(null);
+    pendingServerConfig = null;
     if (serverStreaming) {
       serverStreaming = false;
       pendingServerTraceId = null;
@@ -184,22 +200,37 @@ void initLocalServerMode($('st-server'), $('btn-connect'), async (config, status
     }
     $('btn-open').hidden = false;
     $('btn-demo').hidden = false;
+    if (wasConfigured && UI.loaded) {
+      try {
+        await resetStandaloneAnalysis();
+        if (restoreMarksAutosave()) await seedStandaloneAnalysis();
+        else restoreSession();
+      } catch (error) {
+        $('st-info').textContent = `standalone analysis load failed: ${(error as Error).message}`;
+      }
+    }
     return;
   }
-  if (!config || status.state !== 'connected') return;
-  useServerAnalysis(config, status.session.trace.id);
+  serverConfigured = !!config;
+  useServerAnalysis(config);
   $('btn-open').hidden = true;
   $('btn-demo').hidden = true;
+  if (!config || status.state !== 'connected') return;
   if (renderedServerTraceId === status.session.trace.id) {
+    useServerAnalysis(config, status.session.trace.id);
     void loadCanonicalAnalysis().catch((error) => {
       $('st-info').textContent = `analysis load failed: ${(error as Error).message}`;
     });
     return;
   }
   if (pendingServerTraceId === status.session.trace.id) return;
-  const controller = new AbortController();
-  serverTraceController = controller;
   try {
+    await workerReady;
+    if (mine !== serverLoadGeneration) return;
+    UI.loaded = false;
+    worker.postMessage({ type: 'unload' });
+    const controller = new AbortController();
+    serverTraceController = controller;
     const init: RequestInit & { targetAddressSpace?: 'loopback' } = {
       headers: { Authorization: `Bearer ${config.token}` },
       cache: 'no-store',
@@ -208,12 +239,12 @@ void initLocalServerMode($('st-server'), $('btn-connect'), async (config, status
     };
     const response = await fetch(`${config.baseURL}${status.session.trace.url}`, init);
     if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
-    await workerReady;
     if (mine !== serverLoadGeneration) return;
     if (!response.body) throw new Error('trace response has no body');
     UI.fileName = status.session.trace.name;
     renderedServerTraceId = null;
     pendingServerTraceId = status.session.trace.id;
+    pendingServerConfig = config;
     serverStreaming = true;
     $('progress').hidden = false;
     $('progress-pct').textContent = '0%';
@@ -234,13 +265,14 @@ void initLocalServerMode($('st-server'), $('btn-connect'), async (config, status
   } catch (error) {
     if (mine !== serverLoadGeneration) return;
     if (serverStreaming) worker.postMessage({ type: 'load-cancel' });
+    UI.loaded = false;
     serverStreaming = false;
     pendingServerTraceId = null;
     $('st-trace').textContent = `local trace load failed: ${(error as Error).message}`;
   } finally {
     if (mine === serverLoadGeneration) serverTraceController = null;
   }
-});
+}, hostedMinimumVersion());
 
 // expose for tests / console poking
 window.__heap_visualizer = UI;
@@ -326,6 +358,7 @@ async function loadBuffer(buf, name, serverTraceId: string | null = null) {
 }
 
 async function loadURL(url) {
+  if (serverConfigured) return;
   try {
     // always revalidate: a stale cached trace (e.g. an old demo.heapl)
     // would resurface warnings that were fixed in the file
@@ -340,6 +373,7 @@ async function loadURL(url) {
 // Route an incoming file: a saved analysis (single JSON object with the
 // heapVisualizerAnalysis marker) or a trace stream.
 async function handleFile(f) {
+  if (serverConfigured) return;
   const head = await f.slice(0, 300).text();
   if (head.includes('"heapVisualizerAnalysis"')) {
     try {
@@ -389,7 +423,7 @@ worker.onmessage = (ev) => {
       sendResizes();
       worker.postMessage({ type: 'set', key: 'rowPx', value: +$('row-px').value });
       const url = new URLSearchParams(location.search).get('trace');
-      if (url) loadURL(url);
+      if (url && !serverConfigured) loadURL(url);
       break;
     }
     case 'progress':
@@ -398,6 +432,7 @@ worker.onmessage = (ev) => {
     case 'error':
       serverStreaming = false;
       pendingServerTraceId = null;
+      UI.loaded = false;
       $('progress').hidden = true;
       $('st-trace').textContent = `load failed: ${m.message}`;
       break;
@@ -488,8 +523,13 @@ worker.onmessage = (ev) => {
 };
 
 function onLoaded(m) {
+  const serverConfig = pendingServerConfig;
   renderedServerTraceId = pendingServerTraceId;
   pendingServerTraceId = null;
+  pendingServerConfig = null;
+  if (renderedServerTraceId && serverConfig) {
+    useServerAnalysis(serverConfig, renderedServerTraceId);
+  }
   $('progress').hidden = true;
   UI.meta = m.meta;
   UI.warnings = m.warnings;
@@ -565,7 +605,8 @@ function onLoaded(m) {
       $('st-info').textContent = `analysis load failed: ${(error as Error).message}`;
     });
   } else {
-    if (!restoreMarksAutosave()) restoreSession();
+    const restored = restoreMarksAutosave();
+    if (!restored) restoreSession();
     void seedStandaloneAnalysis().catch((error) => {
       $('st-info').textContent = `analysis load failed: ${(error as Error).message}`;
     });
@@ -1594,11 +1635,13 @@ initSession({
   createPinnedWindow,
   buildMarks,
   applyMarks,
+  isServerAnalysis,
 });
 
 // The guide drawer takes no deps: it reaches the app only by driving the real
 // controls wired above (spec SHELL-009), so there is nothing to hand it.
 initGuide();
+initOnboarding(() => serverConfigured);
 
 // Neither does the request form: it talks to the service beside the site and
 // to nothing in here (spec REQ-001, D010). No trace state reaches it, which is

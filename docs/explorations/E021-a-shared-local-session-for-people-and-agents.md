@@ -1,11 +1,16 @@
 ---
 id: E021
 title: A shared local session for people and agents
-status: open
-updated: 2026-09-04
+status: accepted
+updated: 2026-09-05
 ---
 
 # E021: A Shared Local Session for People and Agents
+
+> **Outcome:** the shared local-session architecture is implemented. The exact
+> agent-facing progressive disclosure API, including the canonical single
+> mutation route chosen instead of the resource-specific sketches below, is
+> specified in [spec/12-agent-api](../../spec/12-agent-api.md).
 
 ## Summary
 

@@ -13,7 +13,17 @@ export type LocalServerStatus =
   | { state: 'connected'; version: string; session: LocalSession }
   | { state: 'auth-failed' }
   | { state: 'permission-denied' }
+  | { state: 'upgrade-required'; installed: string; minimum: string }
   | { state: 'unreachable' };
+
+const DEFAULT_MINIMUM_VERSION = '0.2.0';
+
+export function hostedMinimumVersion(doc: Pick<Document, 'querySelector'> = document): string {
+  const configured = doc.querySelector('meta[name="heapviz-minimum-version"]')?.getAttribute('content')?.trim();
+  return configured && /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(configured)
+    ? configured
+    : DEFAULT_MINIMUM_VERSION;
+}
 
 const STORAGE_KEY = 'heapviz:local-server';
 
@@ -93,6 +103,7 @@ export async function connectLocalServer(
   config: LocalServerConfig | null,
   fetchFn: typeof fetch = fetch,
   permissionState: PermissionStateReader = loopbackPermissionState,
+  minimumVersion = DEFAULT_MINIMUM_VERSION,
 ): Promise<LocalServerStatus> {
   if (!config) return { state: 'standalone' };
   try {
@@ -111,7 +122,14 @@ export async function connectLocalServer(
       if (response.status === 401) return { state: 'auth-failed' };
       if (!response.ok) return { state: 'unreachable' };
       const body = await response.json();
-      if (body?.apiVersion !== 1 || body?.mode !== 'local') return { state: 'unreachable' };
+      if (body?.mode !== 'local') return { state: 'unreachable' };
+      if (body?.apiVersion !== 1 || versionLessThan(String(body.serverVersion || '0'), minimumVersion)) {
+        return {
+          state: 'upgrade-required',
+          installed: String(body.serverVersion || 'unknown'),
+          minimum: minimumVersion,
+        };
+      }
       if (!body.trace
           || typeof body.trace.id !== 'string' || !body.trace.id
           || typeof body.trace.name !== 'string'
@@ -135,6 +153,16 @@ export async function connectLocalServer(
   }
 }
 
+function versionLessThan(installed: string, minimum: string): boolean {
+  const parts = (value: string) => value.split('.').map((part) => Number.parseInt(part, 10) || 0);
+  const a = parts(installed);
+  const b = parts(minimum);
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) < (b[i] || 0);
+  }
+  return false;
+}
+
 async function loopbackPermissionState(): Promise<PermissionState | null> {
   if (!navigator.permissions) return null;
   // Chrome 145 split loopback from broader local-network permission; older
@@ -148,18 +176,20 @@ async function loopbackPermissionState(): Promise<PermissionState | null> {
 }
 
 const STATUS_TEXT: Record<LocalServerStatus['state'], string> = {
-  standalone: 'standalone',
-  connecting: 'connecting to local server…',
-  connected: 'local server',
-  'auth-failed': 'local server: authentication failed',
-  'permission-denied': 'local server: browser permission denied',
-  unreachable: 'local server: unavailable or blocked',
+  standalone: 'no local trace connected',
+  connecting: 'connecting to local companion…',
+  connected: 'local companion connected',
+  'auth-failed': 'local companion: connection expired',
+  'permission-denied': 'local companion: browser permission denied',
+  'upgrade-required': 'local companion: update required',
+  unreachable: 'local companion: unavailable or blocked',
 };
 
 export async function initLocalServerMode(
   element: HTMLElement,
   button: HTMLButtonElement,
   onStatus: (config: LocalServerConfig | null, status: LocalServerStatus) => void = () => {},
+  minimumVersion = DEFAULT_MINIMUM_VERSION,
 ) {
   let config = localServerConfig(window.location, window.sessionStorage, window.history);
   let generation = 0;
@@ -173,8 +203,10 @@ export async function initLocalServerMode(
 
   async function connect(config: LocalServerConfig | null) {
     const mine = ++generation;
-    setStatus(element, config ? { state: 'connecting' } : { state: 'standalone' });
-    const status = await connectLocalServer(config);
+    const pending: LocalServerStatus = config ? { state: 'connecting' } : { state: 'standalone' };
+    setStatus(element, pending);
+    onStatus(config, pending);
+    const status = await connectLocalServer(config, fetch, loopbackPermissionState, minimumVersion);
     if (mine !== generation) return;
     setStatus(element, status);
     onStatus(config, status);
@@ -191,13 +223,13 @@ export async function initLocalServerMode(
       onStatus(config, status);
       return;
     }
-    const value = window.prompt('Paste the connection string printed by heap-visualizer-local-server:');
+    const value = window.prompt('Paste the connection string printed by heapviz:');
     if (value === null) return;
     const next = parseLocalServerConnection(value);
     if (!next) {
       element.dataset.state = 'unreachable';
-      element.textContent = 'local server: invalid connection string';
-      element.title = 'Expected the loopback connection string printed by the local server';
+      element.textContent = 'local companion: invalid connection string';
+      element.title = 'Expected the loopback connection string printed by heapviz';
       return;
     }
     config = next;
@@ -210,12 +242,23 @@ export async function initLocalServerMode(
   await connect(config);
 }
 
-function setStatus(element: HTMLElement, status: LocalServerStatus) {
+function setStatus(element: HTMLElement, status: LocalServerStatus | { state: 'connected'; version: string }) {
   element.dataset.state = status.state;
   element.textContent = STATUS_TEXT[status.state];
   element.title = status.state === 'connected'
-    ? `Connected to the local data server${status.version ? ` v${status.version}` : ''}; rendering remains in this browser`
+    ? `Connected to the local companion${status.version ? ` v${status.version}` : ''}; rendering remains in this browser`
+    : status.state === 'upgrade-required'
+      ? `Installed ${status.installed}; this site requires ${status.minimum} or newer. Run heapviz update.`
     : status.state === 'standalone'
-      ? 'This tab is fully standalone; it has not contacted a local server'
+      ? 'This tab has not connected to a local trace'
       : STATUS_TEXT[status.state];
+}
+
+export function setLocalServerRuntimeHealth(
+  element: HTMLElement,
+  state: 'connected' | 'auth-failed' | 'unreachable',
+) {
+  setStatus(element, state === 'connected'
+    ? { state: 'connected', version: '' }
+    : { state });
 }

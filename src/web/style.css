@@ -75,7 +75,38 @@ input { font-family: ui-monospace, monospace; }
 #st-server[data-state="connecting"] { color: var(--accent); }
 #st-server[data-state="auth-failed"],
 #st-server[data-state="permission-denied"],
+#st-server[data-state="upgrade-required"],
 #st-server[data-state="unreachable"] { color: var(--red); }
+
+/* ---------- first-run setup ---------- */
+
+#welcome {
+  position: fixed; inset: 0; z-index: 140;
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px; background: rgba(13,17,23,0.88);
+}
+#welcome-card {
+  width: 680px; max-width: 96vw; max-height: 90vh; overflow-y: auto;
+  padding: 24px; background: var(--bg2); border: 1px solid var(--border);
+  border-radius: 12px; box-shadow: 0 24px 80px rgba(0,0,0,0.75);
+}
+#welcome-card h1 { margin: 0 0 8px; font-size: 24px; }
+#welcome-card h2 { margin: 18px 0 6px; font-size: 16px; }
+#welcome-card p { margin: 6px 0 12px; }
+#welcome-card .muted { color: var(--fg-dim); }
+.welcome-actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 18px 0 8px; }
+.welcome-primary { background: #1f3d2b; border-color: var(--green); }
+.welcome-close { float: right; background: none; border: none; color: var(--fg-dim); font-size: 18px; }
+.setup-tabs { display: flex; gap: 6px; margin: 12px 0; }
+.setup-tabs button.active { background: rgba(88,166,255,0.16); border-color: var(--accent); }
+.setup-command { display: flex; align-items: stretch; gap: 6px; margin: 7px 0 14px; }
+.setup-command code {
+  flex: 1; display: block; overflow-x: auto; white-space: pre;
+  padding: 9px 10px; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 6px; color: var(--fg); font: 12px ui-monospace, monospace;
+}
+.setup-note { padding: 9px 11px; border-left: 3px solid var(--accent); background: rgba(88,166,255,0.08); }
+#setup-alert { color: #f2cc60; }
 
 /* ---------- legend ---------- */
 
@@ -762,17 +793,19 @@ input[type="color"] {
   padding: 8px 14px 40px;
   font-size: 12.5px; line-height: 1.5;
 }
-#guide-body .g-section + .g-section { margin-top: 22px; }
+#guide-body .g-section + .g-section {
+  margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border);
+}
 #guide-body h2 {
   font-size: 11px; font-weight: 600;
   letter-spacing: 0.6px; text-transform: uppercase;
   color: var(--accent);
-  margin: 20px 0 7px;
+  margin: 4px 0 7px;
 }
 #guide-body h3 { font-size: 12.5px; font-weight: 600; margin: 14px 0 5px; }
 #guide-body p { margin: 0 0 8px; color: var(--fg); }
 #guide-body ul { margin: 0 0 9px; padding-left: 17px; }
-#guide-body li { margin-bottom: 4px; }
+#guide-body li { margin-bottom: 3px; }
 #guide-body hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
 #guide-body code {
   font-family: ui-monospace, monospace; font-size: 11.5px;

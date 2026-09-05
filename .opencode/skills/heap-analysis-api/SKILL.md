@@ -5,8 +5,12 @@ description: Use an authenticated heap-visualizer local session to inspect trace
 
 # Heap Analysis API
 
-Use the supplied base URL, bearer capability, and trace ID. Analyze through the
-API rather than reading a raw trace. Send the capability on every request:
+Use the supplied base URL, bearer capability, and trace ID. A compact connection
+string may instead be supplied as `http://127.0.0.1:PORT#CAPABILITY`; the part
+before `#` is the base URL and the complete fragment after `#` is the bearer
+capability. Discover the trace ID from `/api/v1/session` when it was not supplied.
+Analyze through the API rather than reading a raw trace. Send the capability on
+every request:
 
 ```sh
 curl -sS -H "Authorization: Bearer $CAPABILITY" "$BASE/api/v1/session"

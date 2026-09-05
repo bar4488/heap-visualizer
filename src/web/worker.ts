@@ -605,6 +605,16 @@ onmessage = async (ev: MessageEvent<ToWorker>) => {
     case 'load-cancel':
       loading = false;
       break;
+    case 'unload':
+      loading = false;
+      S.loaded = false;
+      S.playing = false;
+      if (wasmModule) {
+        E = new WebAssembly.Instance(wasmModule, {}).exports;
+        applyRowPx();
+      }
+      for (const ctx of Object.values(ctxs)) ctx?.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+      break;
     case 'resize': {
       const cv = canvases[m.which];
       if (cv) {

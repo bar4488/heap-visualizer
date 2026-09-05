@@ -5,6 +5,7 @@
 
 mod filter_eval;
 mod filter_plan;
+pub mod agent;
 pub mod analysis;
 pub mod json;
 pub mod parse;
@@ -199,6 +200,42 @@ impl Engine {
     /// a browser view.
     pub fn query_json(&self, source: &str, from: u32, count: u32) -> String {
         query_json(&self.app, source, from, count)
+    }
+
+    pub fn agent_overview(&self, top: usize) -> serde_json::Value {
+        agent::overview(&self.app, top)
+    }
+
+    pub fn agent_allocation(&self, creator: u32) -> Option<serde_json::Value> {
+        agent::allocation(&self.app, creator)
+    }
+
+    pub fn agent_query(&self, source: &str, order: &str, from: usize, limit: usize) -> Result<serde_json::Value, agent::Error> {
+        agent::query(&self.app, source, order, from, limit)
+    }
+
+    pub fn agent_summarize(&self, source: &str, group_by: &str, limit: usize) -> Result<serde_json::Value, agent::Error> {
+        agent::summarize(&self.app, source, group_by, limit)
+    }
+
+    pub fn agent_timeline(&self, source: &str, domain: &str, from: u64, to: u64, bins: usize) -> Result<serde_json::Value, agent::Error> {
+        agent::timeline(&self.app, source, domain, from, to, bins)
+    }
+
+    pub fn agent_stream_context(&self, source: &str, center: u32, before: u32, after: u32, landmarks: bool) -> Result<serde_json::Value, agent::Error> {
+        agent::stream_context(&self.app, source, center, before, after, landmarks)
+    }
+
+    pub fn agent_filter_check(&self, source: &str) -> Result<(), agent::Error> {
+        agent::check_filter(&self.app, source)
+    }
+
+    pub fn agent_filter_schema(&self, from: usize, count: usize) -> serde_json::Value {
+        filter_eval::schema(&self.app.store, from, count)
+    }
+
+    pub fn apply_tag_query(&mut self, expected: u64, tag_id: &str, source: &str, operation: &str) -> Result<agent::TagQueryResult, agent::TagQueryError> {
+        agent::apply_tag_query(&mut self.app, expected, tag_id, source, operation)
     }
 
     pub fn analysis(&self) -> &analysis::Document { &self.app.analysis }
@@ -483,9 +520,11 @@ fn write_warnings_json(a: &mut App) {
         if i > 0 {
             o.push(',');
         }
-        o.push_str(&format!("{{\"seq\":{},\"code\":{},\"msg\":", w.seq, w.code));
+        o.push_str(&format!("{{\"seq\":{},\"code\":{},\"kind\":", w.seq, w.code));
+        push_json_str(o, store::warn_code_name(w.code));
+        o.push_str(",\"msg\":");
         push_json_str(o, warn_name(w.code));
-        o.push_str(&format!(",\"detail\":{}}}", w.detail as f64));
+        o.push_str(&format!(",\"detail\":{},\"detailExact\":\"{}\"}}", w.detail as f64, w.detail));
     }
     o.push(']');
 }

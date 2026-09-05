@@ -167,6 +167,13 @@ second writable analysis history. The connection control must also let the
 current tab discard its capability and return immediately to standalone; it
 must not stop the server or disconnect any other client.
 
+Possessing a configured capability is itself a mode: while it is connecting or
+unavailable, standalone trace loading and analysis writes must remain disabled.
+The connected analysis adapter becomes active only after the server trace
+identity is installed in the worker. Explicit Disconnect restores the local
+analysis for the retained trace; server-owned analysis must not be copied into
+the standalone autosave as an accidental fork.
+
 The first server process must start with exactly one readable `.heapl` path and
 establish that file as its active trace before listening. Its session response
 must identify the trace by a stable content digest, name its byte length and
@@ -194,6 +201,12 @@ source-span diagnostics or a trace-identified page of creator allocations. A
 query is ephemeral: it must not install filter, view, or selection state in the
 native engine or any connected browser.
 
+The progressive, agent-oriented semantic reads and bounded bulk annotation
+operation extend this same authority; their exact wire contract is
+[12-agent-api](12-agent-api.md). They must call render-free native `Engine`
+capabilities rather than recreate filtering, liveness, realloc, tag, warning,
+or aggregation semantics in HTTP handlers.
+
 Analysis validation and change semantics must have one implementation in the
 Rust core, used by both its WASM and native forms. The browser must issue every
 analysis operation through one analysis-port contract: standalone mode routes
@@ -219,3 +232,13 @@ directory, keyed by trace digest, with an atomic durable replacement before it
 acknowledges the change. A failed write must leave the prior document and engine
 projection active. The session response must advertise the current analysis
 revision.
+
+Connected clients must follow committed analysis without polling snapshots.
+`GET /api/v1/changes` requires `after`, accepts a held-request `wait` from 0
+through 30 seconds, and returns the active `traceId`, current `revision`, a
+bounded ordered list of canonical `{revision, change}` deltas, and `reset`.
+The server retains bounded history; `reset` tells a client whose cursor is
+ahead or expired to reload `GET /api/v1/analysis`. Held requests are cancelled
+when a tab disconnects or replaces its capability. Every received delta must
+be applied through the same worker/core analysis-change path as a local
+gesture—never projected directly by TypeScript.

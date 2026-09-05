@@ -39,6 +39,21 @@ pub fn warn_name(code: u8) -> &'static str {
     }
 }
 
+pub fn warn_code_name(code: u8) -> &'static str {
+    match code {
+        W_MALFORMED => "malformed_line",
+        W_T_DECREASE => "decreasing_time",
+        W_SEQ_MISMATCH => "sequence_mismatch",
+        W_UNKNOWN_ID => "unknown_id",
+        W_DOUBLE_FREE => "double_free",
+        W_DUP_ID => "duplicate_id",
+        W_OVERLAP => "overlap",
+        W_BAD_SIZE => "invalid_size",
+        W_VERSION => "unknown_version",
+        _ => "warning",
+    }
+}
+
 // Observed value shapes for a custom trace field, as a bitmask. A field is
 // filterable only when it resolves to one scalar type (`null` is missingness,
 // not a type of its own, so it never disqualifies a field).

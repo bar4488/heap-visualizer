@@ -16,7 +16,10 @@ import { showPanel } from '../shell/panels.ts';
 import { esc, fmtNum } from '../fmt.ts';
 import { request } from '../rpc.ts';
 import { buildSession, applySession } from '../session.ts';
-import { changeAnalysis, isServerAnalysis, persistentId, readAnalysis, replaceStandaloneAnalysis, type AnalysisDocument } from '../analysis-port.ts';
+import {
+  changeAnalysis, isServerAnalysis, persistentId, readAnalysis, replaceStandaloneAnalysis,
+  subscribeAnalysisDocuments, type AnalysisDocument,
+} from '../analysis-port.ts';
 
 let d = null;
 let canonical: AnalysisDocument | null = null;
@@ -27,6 +30,10 @@ let changeQueue: Promise<AnalysisDocument | null> = Promise.resolve(null);
 export function initAnalysis(deps) {
   d = deps;
   wireAnalysisPanel();
+  subscribeAnalysisDocuments((document) => {
+    canonical = document;
+    projectCanonicalAnalysis();
+  });
 }
 
 export async function loadCanonicalAnalysis() {
@@ -68,6 +75,19 @@ export async function seedStandaloneAnalysis() {
   projectCanonicalAnalysis();
 }
 
+export async function resetStandaloneAnalysis() {
+  canonical = await replaceStandaloneAnalysis({
+    version: 1,
+    revision: 0,
+    allocations: {},
+    tags: {},
+    bookmarks: {},
+    addressMarks: {},
+    savedFilters: {},
+  });
+  projectCanonicalAnalysis();
+}
+
 export function commitCanonicalAnalysis(change) {
   const run = async () => {
     if (!canonical) canonical = await readAnalysis();
@@ -76,8 +96,11 @@ export function commitCanonicalAnalysis(change) {
     } catch (error) {
       if ((error as Error).message === 'analysis revision changed') {
         canonical = await readAnalysis();
-        projectCanonicalAnalysis();
       }
+      // Connected previews are deliberately non-canonical. Re-project the
+      // last accepted document on every failure so a rejected write cannot
+      // remain visible as though the server had committed it.
+      projectCanonicalAnalysis();
       throw error;
     }
     projectCanonicalAnalysis();

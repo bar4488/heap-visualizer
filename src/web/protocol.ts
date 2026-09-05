@@ -109,6 +109,7 @@ export type Command =
   | { type: 'load-chunk'; buffer: ArrayBuffer }
   | { type: 'load-end' }
   | { type: 'load-cancel' }
+  | { type: 'unload' }
   | { type: 'resize'; which: CanvasKey; w: number; h: number; dpr?: number }
   | { type: 'seek'; seq?: number; t?: number }
   | { type: 'play'; mode: 't' | 'seq'; rate: number }
