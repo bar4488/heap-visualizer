@@ -206,7 +206,7 @@ impl Parser {
     }
 
     fn additive(&mut self) -> Result<Expr, ParseError> {
-        let mut expr = self.postfix()?;
+        let mut expr = self.unary_numeric()?;
         loop {
             let op = if self.take(&TokenKind::Plus).is_some() {
                 Some(BinaryOp::Add)
@@ -216,8 +216,37 @@ impl Parser {
                 None
             };
             let Some(op) = op else { break };
-            let right = self.postfix()?;
+            let right = self.unary_numeric()?;
             expr = binary(op, expr, right);
+        }
+        Ok(expr)
+    }
+
+    /// Numeric unary minus binds more tightly than addition and less tightly
+    /// than field access/calls, as in Python. Parse a run iteratively so a
+    /// machine-generated chain cannot consume the Rust stack.
+    fn unary_numeric(&mut self) -> Result<Expr, ParseError> {
+        if self.at(&TokenKind::Plus) {
+            let plus = self.advance();
+            return Err(ParseError::new(
+                "unary plus is not part of this language",
+                plus.span,
+            ));
+        }
+        let mut operators = Vec::new();
+        while let Some(minus) = self.take(&TokenKind::Minus) {
+            operators.push(minus.span);
+        }
+        let mut expr = self.postfix()?;
+        for span in operators.into_iter().rev() {
+            let joined = span.join(expr.span);
+            expr = Expr::new(
+                ExprKind::Unary {
+                    op: UnaryOp::Negate,
+                    expr: Box::new(expr),
+                },
+                joined,
+            );
         }
         Ok(expr)
     }
@@ -370,17 +399,43 @@ impl Parser {
     }
 
     fn constant(&mut self) -> Result<Expr, ParseError> {
+        let minus = self.take(&TokenKind::Minus);
+        if self.at(&TokenKind::Plus) {
+            let plus = self.advance();
+            return Err(ParseError::new(
+                "unary plus is not part of this language",
+                plus.span,
+            ));
+        }
         let token = self.advance();
-        match token.kind {
-            TokenKind::Integer(value) => Ok(Expr::new(ExprKind::Integer(value), token.span)),
-            TokenKind::Float(value) => Ok(Expr::new(ExprKind::Float(value), token.span)),
-            TokenKind::String(value) => Ok(Expr::new(ExprKind::String(value), token.span)),
-            TokenKind::True => Ok(Expr::new(ExprKind::Bool(true), token.span)),
-            TokenKind::False => Ok(Expr::new(ExprKind::Bool(false), token.span)),
-            _ => Err(ParseError::new(
+        let value = match token.kind {
+            TokenKind::Integer(value) => Expr::new(ExprKind::Integer(value), token.span),
+            TokenKind::Float(value) => Expr::new(ExprKind::Float(value), token.span),
+            TokenKind::String(value) => Expr::new(ExprKind::String(value), token.span),
+            TokenKind::True => Expr::new(ExprKind::Bool(true), token.span),
+            TokenKind::False => Expr::new(ExprKind::Bool(false), token.span),
+            _ => return Err(ParseError::new(
                 "set members must be number, string, or boolean constants",
                 token.span,
             )),
+        };
+        if let Some(minus) = minus {
+            if !matches!(value.kind, ExprKind::Integer(_) | ExprKind::Float(_)) {
+                return Err(ParseError::new(
+                    "unary minus requires a number",
+                    minus.span.join(value.span),
+                ));
+            }
+            let span = minus.span.join(value.span);
+            Ok(Expr::new(
+                ExprKind::Unary {
+                    op: UnaryOp::Negate,
+                    expr: Box::new(value),
+                },
+                span,
+            ))
+        } else {
+            Ok(value)
         }
     }
 

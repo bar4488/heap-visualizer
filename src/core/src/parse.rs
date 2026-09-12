@@ -485,7 +485,9 @@ impl Parser {
 
         if op == OP_M || op == OP_R {
             let span = size.max(usable);
-            let end = addr + span;
+            // Malformed geometry is warning-worthy input, not a reason for a
+            // debug build to panic or a release build to wrap back to zero.
+            let end = addr.saturating_add(span);
 
             // duplicate-id check + registration
             if let Some(id) = raw.id {
@@ -510,8 +512,10 @@ impl Parser {
                     break;
                 }
             }
-            if let Some((&(na, _), _)) = self.live.range((addr + 1, 0)..).next() {
-                overlaps |= na < end;
+            if addr != u64::MAX {
+                if let Some((&(na, _), _)) = self.live.range((addr + 1, 0)..).next() {
+                    overlaps |= na < end;
+                }
             }
             if overlaps {
                 s.warn(e, W_OVERLAP, addr);
@@ -658,8 +662,8 @@ fn parse_raw(line: &[u8]) -> Option<Raw> {
                 let (a, b) = sc.string_span()?;
                 raw.op = if b - a == 1 { sc.b[a] } else { 0 };
             }
-            b"id" => raw.id = Some(sc.integer()? as u64),
-            b"old_id" => raw.old_id = Some(sc.integer()? as u64),
+            b"id" => raw.id = Some(sc.unsigned_integer()?),
+            b"old_id" => raw.old_id = Some(sc.unsigned_integer()?),
             b"addr" => {
                 let (a, b) = sc.string_span()?;
                 raw.addr = parse_addr(&sc.b[a..b]);
@@ -672,14 +676,14 @@ fn parse_raw(line: &[u8]) -> Option<Raw> {
                 let (a, b) = sc.string_span()?;
                 raw.arena_base = parse_addr(&sc.b[a..b]);
             }
-            b"size" => raw.size = Some(sc.integer()?.max(0) as u64),
-            b"old_size" => raw.old_size = Some(sc.integer()?.max(0) as u64),
-            b"usable" => raw.usable = Some(sc.integer()?.max(0) as u64),
-            b"t" => raw.t = Some(sc.integer()?.max(0) as u64),
+            b"size" => raw.size = Some(sc.unsigned_integer()?),
+            b"old_size" => raw.old_size = Some(sc.unsigned_integer()?),
+            b"usable" => raw.usable = Some(sc.unsigned_integer()?),
+            b"t" => raw.t = Some(sc.unsigned_integer()?),
             b"seq" => raw.seq = Some(sc.integer()?),
             b"thr" => raw.thr = Some(sc.integer()?),
             b"v" => raw.v = Some(sc.integer()?),
-            b"row_bytes" => raw.row_bytes = Some(sc.integer()?.max(0) as u64),
+            b"row_bytes" => raw.row_bytes = Some(sc.unsigned_integer()?),
             b"site" => {
                 let (a, b) = sc.string_span()?;
                 raw.site = Some(unescape(&sc.b[a..b]));

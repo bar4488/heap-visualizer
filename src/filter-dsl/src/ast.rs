@@ -49,6 +49,7 @@ pub struct FloatLiteral {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UnaryOp {
     Not,
+    Negate,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

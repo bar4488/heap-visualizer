@@ -47,7 +47,7 @@ export const HEAP_SESSION_VERSION = 2;
 // every membership, `range(lo, hi)`, `is None`, and every field reached
 // through `alloc`, `malloc` or `free`. Nothing written before it checks, and
 // there is no translator — E019 says why.
-export const FILTER_LANGUAGE_VERSION = 3;
+export const FILTER_LANGUAGE_VERSION = 4;
 
 export function buildSession() {
   const windows = {};

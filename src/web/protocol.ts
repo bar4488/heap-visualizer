@@ -24,7 +24,7 @@ export type Domain = 0 | 1;
 export type CanvasKey = 'addr' | 'tlt' | 'tls';
 
 /** Engine JSON: an allocation, as `hp_pick` / `hp_alloc_info` render it. */
-export type AllocInfo = { e: number; [field: string]: any };
+export type AllocInfo = { e: number; id: string; [field: string]: any };
 
 /** Engine JSON: one row of the events list. */
 export type EventRow = { seq: number; [field: string]: any };

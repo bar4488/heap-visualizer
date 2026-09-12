@@ -31,8 +31,8 @@
 use heap_visualizer_filter_dsl::{BinaryOp, Expr, ExprKind, UnaryOp};
 
 use crate::filter_eval::{
-    cmp_num, custom_fragment, field_value, float, integer, named_event, ordered, resolve_path, Ctx,
-    EvalError, FieldRoot, FieldValues, Leaf, Ns, Num, Path, Value,
+    cmp_num, custom_fragment, field_value, float, number_literal, ordered, reference_event,
+    resolve_path, Ctx, EvalError, FieldRoot, FieldValues, Leaf, Ns, Num, Path, Value,
 };
 use crate::store::{Store, NONE_U16, NONE_U32, OP_M, OP_R};
 
@@ -63,7 +63,7 @@ impl NumCol {
         Some(match self {
             NumCol::Id => s.id[i] as i128,
             NumCol::Addr => s.addr[i] as i128,
-            NumCol::End => (s.addr[i] + s.span(e)) as i128,
+            NumCol::End => s.addr[i].saturating_add(s.span(e)) as i128,
             NumCol::Size => s.size[i] as i128,
             NumCol::Seq => e as i128,
             NumCol::Time => s.t[i] as i128,
@@ -73,7 +73,7 @@ impl NumCol {
             },
             NumCol::Lifetime => match s.death[i] {
                 NONE_U32 => return None,
-                d => (s.t[d as usize] - s.t[i]) as i128,
+                d => s.t[d as usize] as i128 - s.t[i] as i128,
             },
             NumCol::DeathSeq => match s.death[i] {
                 NONE_U32 => return None,
@@ -236,6 +236,7 @@ enum Scalar {
     Add(Box<(Scalar, Scalar)>),
     Sub(Box<(Scalar, Scalar)>),
     Abs(Box<Scalar>),
+    Neg(Box<Scalar>),
 }
 
 impl Scalar {
@@ -252,6 +253,10 @@ impl Scalar {
                 Num::Int(v) => v.checked_abs().map(Num::Int),
                 Num::Float(v) => Some(Num::Float(v.abs())),
             },
+            Scalar::Neg(inner) => match inner.get(s, fv, e)? {
+                Num::Int(v) => v.checked_neg().map(Num::Int),
+                Num::Float(v) => Some(Num::Float(-v)),
+            },
         }
     }
 
@@ -261,7 +266,7 @@ impl Scalar {
             Scalar::Col(_) => 1,
             Scalar::Dict(_) => 2,
             Scalar::TagLen => 3,
-            Scalar::Abs(inner) => 2 + inner.cost(),
+            Scalar::Abs(inner) | Scalar::Neg(inner) => 2 + inner.cost(),
             Scalar::Add(pair) | Scalar::Sub(pair) => 2 + pair.0.cost() + pair.1.cost(),
         }
     }
@@ -276,7 +281,8 @@ fn arith(a: &Scalar, b: &Scalar, s: &Store, fv: &FieldValues, e: u32, sub: bool)
             .map(Num::Int),
         (a, b) => {
             let (a, b) = (widen(a), widen(b));
-            Some(Num::Float(if sub { a - b } else { a + b }))
+            let value = if sub { a - b } else { a + b };
+            value.is_finite().then_some(Num::Float(value))
         }
     }
 }
@@ -397,6 +403,10 @@ fn pred(expr: &Expr, ctx: &Ctx) -> Result<Pred, EvalError> {
             op: UnaryOp::Not,
             expr: inner,
         } => Ok(not(pred(inner, ctx)?)),
+        ExprKind::Unary {
+            op: UnaryOp::Negate,
+            ..
+        } => Err(EvalError::at(expr, "filter expression must produce bool")),
         ExprKind::IsNone {
             expr: inner,
             negated,
@@ -859,6 +869,10 @@ fn scalar(expr: &Expr, ctx: &Ctx) -> Result<Scalar, EvalError> {
                 _ => Scalar::Sub(pair),
             })
         }
+        ExprKind::Unary {
+            op: UnaryOp::Negate,
+            expr: inner,
+        } => Ok(Scalar::Neg(Box::new(scalar(inner, ctx)?))),
         ExprKind::Call { callee, arguments }
             if matches!(&callee.kind, ExprKind::Identifier(n) if n == "abs")
                 && arguments.len() == 1 =>
@@ -892,7 +906,7 @@ fn range_bounds(expr: &Expr, ctx: &Ctx) -> Result<(Operand, Operand), EvalError>
                 Operand::NumColumn(NumCol::Addr),
                 Operand::NumColumn(NumCol::End),
             )),
-            // and a named allocation's is two constants
+            // and a referenced allocation's is two constants
             Some(Path {
                 subject: Some(subject),
                 leaf: Leaf::Builtin {
@@ -900,11 +914,11 @@ fn range_bounds(expr: &Expr, ctx: &Ctx) -> Result<(Operand, Operand), EvalError>
                     name: "span",
                 },
             }) => {
-                let e = named_target(subject, ctx)?;
+                let e = reference_target(subject, ctx)?;
                 Ok((
                     Operand::Const(Value::Int(ctx.store.addr[e as usize] as i128)),
                     Operand::Const(Value::Int(
-                        (ctx.store.addr[e as usize] + ctx.store.span(e)) as i128,
+                        ctx.store.addr[e as usize].saturating_add(ctx.store.span(e)) as i128,
                     )),
                 ))
             }
@@ -971,11 +985,8 @@ fn own_leaf(expr: &Expr) -> Option<Leaf<'_>> {
     }
 }
 
-fn named_target(expr: &Expr, ctx: &Ctx) -> Result<u32, EvalError> {
-    match &expr.kind {
-        ExprKind::Call { arguments, .. } => named_event(arguments, expr, ctx),
-        _ => Err(EvalError::at(expr, "expected a named allocation")),
-    }
+fn reference_target(expr: &Expr, ctx: &Ctx) -> Result<u32, EvalError> {
+    reference_event(expr, ctx)
 }
 
 fn is_tags(expr: &Expr) -> bool {
@@ -1024,9 +1035,12 @@ fn constant(expr: &Expr, ctx: &Ctx) -> Result<Option<Value>, EvalError> {
     Ok(Some(match &expr.kind {
         ExprKind::Bool(v) => Value::Bool(*v),
         ExprKind::String(v) => Value::String(v.clone()),
-        ExprKind::Integer(v) => {
-            Value::Int(integer(v.value, v.unit, &ctx.store.unit).map_err(err)?)
-        }
+        ExprKind::Integer(v) => match number_literal(v.value, v.unit, &ctx.store.unit, false)
+            .map_err(err)?
+        {
+            Num::Int(value) => Value::Int(value),
+            Num::Float(value) => Value::Float(value),
+        },
         ExprKind::Float(v) => Value::Float(float(v.value, v.unit, &ctx.store.unit).map_err(err)?),
         ExprKind::Set(items) => {
             let mut members = Vec::with_capacity(items.len());
@@ -1045,7 +1059,7 @@ fn constant(expr: &Expr, ctx: &Ctx) -> Result<Option<Value>, EvalError> {
                 subject: Some(subject),
                 leaf,
             }) => {
-                let target = named_target(subject, ctx)?;
+                let target = reference_target(subject, ctx)?;
                 match leaf {
                     Leaf::Builtin { ns, name } => field_value(ns, name, ctx, target, expr)?,
                     Leaf::Custom { root, key } => {
@@ -1076,19 +1090,50 @@ fn constant(expr: &Expr, ctx: &Ctx) -> Result<Option<Value>, EvalError> {
                         None => return Err(err("arithmetic overflows".into())),
                     }
                 }
-                (a, b) => Value::Float(if sub {
-                    widen(a) - widen(b)
-                } else {
-                    widen(a) + widen(b)
-                }),
+                (a, b) => {
+                    let value = if sub {
+                        widen(a) - widen(b)
+                    } else {
+                        widen(a) + widen(b)
+                    };
+                    if !value.is_finite() {
+                        return Err(err("float arithmetic overflows".into()));
+                    }
+                    Value::Float(value)
+                }
             }
         }
+        ExprKind::Unary {
+            op: UnaryOp::Negate,
+            expr: inner,
+        } => match &inner.kind {
+            // Let the signed-literal path admit i128::MIN. The positive
+            // magnitude cannot pass through `integer()` first.
+            ExprKind::Integer(v) => match number_literal(v.value, v.unit, &ctx.store.unit, true)
+                .map_err(err)?
+            {
+                Num::Int(value) => Value::Int(value),
+                Num::Float(value) => Value::Float(value),
+            },
+            _ => match constant(inner, ctx)? {
+                Some(Value::Int(v)) => match v.checked_neg() {
+                    Some(value) => Value::Int(value),
+                    None => return Err(err("arithmetic overflows".into())),
+                },
+                Some(Value::Float(v)) => Value::Float(-v),
+                Some(_) => return Ok(None),
+                None => return Ok(None),
+            },
+        },
         ExprKind::Call { callee, arguments }
             if matches!(&callee.kind, ExprKind::Identifier(n) if n == "abs")
                 && arguments.len() == 1 =>
         {
             match constant(&arguments[0], ctx)? {
-                Some(Value::Int(v)) => Value::Int(v.abs()),
+                Some(Value::Int(v)) => match v.checked_abs() {
+                    Some(value) => Value::Int(value),
+                    None => return Err(err("arithmetic overflows".into())),
+                },
                 Some(Value::Float(v)) => Value::Float(v.abs()),
                 _ => return Ok(None),
             }

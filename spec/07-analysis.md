@@ -107,8 +107,15 @@ The focused editor offers contextual completion from the same core catalog
 that checks the expression: executable fields, type-valid operators and
 members, and observed site/thread/tag values. The attached list opens while
 typing; **Ctrl/⌘+Space** also opens it at an empty source. Up/Down selects,
-Enter or Tab inserts without applying, and Escape closes it. Completion never
-advertises a language surface the evaluator does not implement.
+Tab inserts without applying, Enter inserts after deliberate list navigation,
+and Escape closes it. Completion never advertises a language surface the
+evaluator does not implement.
+
+Because the editor is multiline, an automatically opened list must not steal
+Enter: Enter inserts a newline until the user deliberately navigates the list;
+Tab accepts its first item directly. Completing a named allocation closes the
+call, and completing either allocation-reference form continues through its
+three namespaces.
 
 The core owns checking, evaluation, and one creator-allocation match bitset.
 Rendering, filter-scoped range tagging ([ANL-002](#anl-002-acquiring-tags)),
@@ -165,12 +172,19 @@ Resolution must not be per event. Records with identical custom keys share one
 interned copy, and a filter resolves each referenced key once per distinct
 copy.
 
-## ANL-011: Filtering relative to a named allocation
+## ANL-011: Filtering relative to a specific allocation
 
 `named("<name>")` refers to the one allocation carrying that name
 ([ANL-001](#anl-001-the-analysis-objects)), so a filter can be written relative
 to a specific allocation: `alloc.address >= named("request root").alloc.address`,
 `abs(malloc.seq - named("request root").malloc.seq) <= 10`.
+
+`allocation(<id>)` refers directly to the allocation carrying that
+stream-unique id, so the same comparison can be written without first naming
+it: `alloc.address >= allocation(100).alloc.end`. Its argument must be one
+unsigned, unitless integer constant in the trace format's 64-bit id range.
+Unknown ids are diagnostics; a malformed trace containing the id more than
+once is ambiguous and must also be a diagnostic.
 
 - It is a **reference, not a value**. Reading a field of it —
   `named("x").alloc.size` — yields that field's ordinary type. The bare
@@ -178,8 +192,9 @@ to a specific allocation: `alloc.address >= named("request root").alloc.address`
 - It exposes the same three objects the subject does, so a field is reached the
   same way whoever it is about ([ANL-003](#anl-003-filter)). There is no
   shorter flat spelling.
-- The argument is a string constant. It is resolved while the expression is
-  checked, not while it is evaluated.
+- The `named` argument is a string constant. Both reference forms are resolved
+  while the expression is checked and folded while lowering, not looked up
+  while each allocation is evaluated.
 - Zero allocations with the name, and more than one, must both be diagnostics
   stating which. A filter must never silently pick one of several.
 - Names are owned and persisted by the web layer
@@ -195,7 +210,7 @@ fix.
 
 Only the successfully applied source, dim/hide mode, and filter-language
 version persist in the heap session. An unapplied draft, compiled plan, and
-match bits do not. The persisted language version is **2**; a source stored
+match bits do not. The persisted language version is **4**; a source stored
 under an earlier version is not restored, because it may name a field the
 current language does not have.
 
@@ -210,6 +225,11 @@ the unit suffixes, which multiply the value: `1.5MiB` and `1572864` are the
 same operand. A decimal point is only ever a decimal point when a digit
 follows it, so `0..10` is a range between two integers.
 
+Unary minus applies to numbers and binds after field access but before addition:
+`-2.5`, `-malloc.fields.drift`, and `-(alloc.size - 1)` are numbers. Negative
+constants are valid set and range members. Unary plus is not part of the
+language.
+
 Integer and float operands must mix freely under ordering, equality, `in` a
 range, `in` a set, `contains`, and arithmetic. Where they mix:
 
@@ -220,6 +240,17 @@ range, `in` a set, `contains`, and arithmetic. Where they mix:
 - Arithmetic on two integers stays integral; a float operand makes the result
   a float, with the rounding a double implies.
 - `abs` returns what it was given.
+- A time unit is converted into the trace's unit without integer truncation.
+  Thus `1000ns` is the integer `1` on a microsecond trace, while `1ns` is the
+  float `0.001` there.
+
+Integer literals and constant integer arithmetic that exceed the signed
+128-bit evaluation range are diagnostics. Overflow depending on an
+allocation's value produces missing for that allocation, so its enclosing
+predicate is false rather than wrapping or trapping; `abs` and unary minus use
+the same rule. Non-finite float literals and constant results are diagnostics,
+and a per-allocation float overflow likewise produces missing. Mixed numeric
+comparison never converts its integer operand to a float.
 
 Equality on a float compares the parsed doubles exactly. A value the producer
 wrote and a literal spelled the same way parse to the same double, so

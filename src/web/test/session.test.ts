@@ -133,7 +133,7 @@ test('buildSession captures every field the format promises', () => {
   assert.deepEqual(h.xview, { zoom: 2.5, pan: 0.25 });
   assert.deepEqual(h.crop, { lo: 100, hi: 900 });
   assert.equal(h.playhead, 4321);
-  assert.equal(h.filter.languageVersion, 3);
+  assert.equal(h.filter.languageVersion, 4);
   assert.equal(h.filter.source, 'alloc.size >= 1KiB and alloc.size <= 1MiB');
   assert.equal(h.filter.mode, 2);
   assert.deepEqual(Object.keys(s.windows).sort(), [...PANEL_IDS].sort());

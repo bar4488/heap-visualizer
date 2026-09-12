@@ -94,6 +94,41 @@ impl<'a> Scan<'a> {
         Some(if neg { -v } else { v })
     }
 
+    /// Parse a JSON number into a non-negative u64. This retains the parser's
+    /// tolerant treatment of fractional input (truncate and clamp), while
+    /// avoiding the old signed-i64 bottleneck for valid ids, sizes and times.
+    pub fn unsigned_integer(&mut self) -> Option<u64> {
+        self.ws();
+        let start = self.i;
+        if self.peek() == b'-' {
+            self.i += 1;
+        }
+        let digits = self.i;
+        while self.i < self.b.len() && self.b[self.i].is_ascii_digit() {
+            self.i += 1;
+        }
+        if self.i == digits {
+            return None;
+        }
+        if matches!(self.peek(), b'.' | b'e' | b'E') {
+            while self.i < self.b.len()
+                && matches!(self.b[self.i], b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-')
+            {
+                self.i += 1;
+            }
+            let text = core::str::from_utf8(&self.b[start..self.i]).ok()?;
+            return text.parse::<f64>().ok().map(|value| value as u64);
+        }
+        let text = core::str::from_utf8(&self.b[start..self.i]).ok()?;
+        if text.starts_with('-') {
+            Some(0)
+        } else {
+            text.parse::<u128>()
+                .ok()
+                .map(|value| value.min(u64::MAX as u128) as u64)
+        }
+    }
+
     /// Skip any JSON value, returning its raw span.
     pub fn skip_value(&mut self) -> Option<(usize, usize)> {
         self.ws();

@@ -35,6 +35,7 @@ import {
 } from './session.ts';
 import {
   applyFilterCompletion, utf8Offset,
+  insertAllocationReference,
 } from './filter-completion.ts';
 import { initGuide } from './guide.ts';
 import { initRequest } from './request.ts';
@@ -1107,6 +1108,9 @@ let filterCheckGeneration = 0;
 let filterApplyGeneration = 0;
 let filterCompletions: FilterCompletions | null = null;
 let filterCompletionIndex = 0;
+// Enter belongs to this multiline editor until the user deliberately moves
+// through the popup. Tab may accept the first item directly.
+let filterCompletionNavigated = false;
 
 function setFilterStatus(text, kind = '') {
   const status = $('filter-status');
@@ -1123,14 +1127,16 @@ function hideFilterCompletions() {
   const list = $('filter-completions');
   filterCompletions = null;
   filterCompletionIndex = 0;
+  filterCompletionNavigated = false;
   list.hidden = true;
   list.innerHTML = '';
   input.setAttribute('aria-expanded', 'false');
   input.removeAttribute('aria-activedescendant');
 }
 
-function setActiveFilterCompletion(index) {
+function setActiveFilterCompletion(index, navigated = true) {
   if (!filterCompletions?.items.length) return;
+  filterCompletionNavigated = navigated;
   filterCompletionIndex = (index + filterCompletions.items.length)
     % filterCompletions.items.length;
   $$('[role=option]', $('filter-completions')).forEach((option, i) => {
@@ -1150,9 +1156,10 @@ function showFilterCompletions(completions) {
   const list = $('filter-completions');
   filterCompletions = completions;
   filterCompletionIndex = 0;
+  filterCompletionNavigated = false;
   list.innerHTML = completions.items.map((candidate, index) =>
     `<div id="filter-completion-${index}" class="filter-completion" role="option"
-      aria-selected="${index === 0}" data-completion="${index}">
+      aria-selected="false" data-completion="${index}">
       <span class="filter-completion-label">${esc(candidate.label)}</span>
       <span class="filter-completion-kind">${esc(candidate.kind)}</span>
       ${candidate.detail ? `<span class="filter-completion-detail">${esc(candidate.detail)}</span>` : ''}
@@ -1162,7 +1169,6 @@ function showFilterCompletions(completions) {
       : '');
   list.hidden = false;
   input.setAttribute('aria-expanded', 'true');
-  setActiveFilterCompletion(0);
 }
 
 function acceptFilterCompletion(index = filterCompletionIndex) {
@@ -1399,11 +1405,11 @@ $('filter-source').onkeydown = (e) => {
     scheduleFilterCheck(true);
   } else if (filterCompletions && e.key === 'ArrowDown') {
     e.preventDefault();
-    setActiveFilterCompletion(filterCompletionIndex + 1);
+    setActiveFilterCompletion(filterCompletionNavigated ? filterCompletionIndex + 1 : 0);
   } else if (filterCompletions && e.key === 'ArrowUp') {
     e.preventDefault();
-    setActiveFilterCompletion(filterCompletionIndex - 1);
-  } else if (filterCompletions && (e.key === 'Enter' || e.key === 'Tab')) {
+    setActiveFilterCompletion(filterCompletionNavigated ? filterCompletionIndex - 1 : -1);
+  } else if (filterCompletions && (e.key === 'Tab' || (e.key === 'Enter' && filterCompletionNavigated))) {
     e.preventDefault();
     acceptFilterCompletion();
   } else if (e.key === 'Escape') {
@@ -2104,6 +2110,7 @@ function buildDetailBody(root, info) {
     <button class="d-focus" title="Scroll/pan to this allocation and flash exactly where it is">⌖ focus</button>
     <button class="d-birth">go to birth</button>
     ${info.deathSeq !== null ? '<button class="d-death">go to death</button>' : ''}
+    <button class="d-reference" title="Insert a stable allocation(id) reference at the Filter cursor">use as filter reference</button>
     <button class="d-range" title="Replace the Filter expression with this allocation's address range and apply it">match range</button>
   </div>`;
   root.innerHTML = html;
@@ -2113,6 +2120,19 @@ function buildDetailBody(root, info) {
   q('.d-birth').onclick = () => worker.postMessage({ type: 'jump', seq: info.seq + 1 });
   const dd = q('.d-death');
   if (dd) dd.onclick = () => worker.postMessage({ type: 'jump', seq: info.deathSeq + 1 });
+  q('.d-reference').onclick = () => {
+    showPanel('filter-panel');
+    const input = $('filter-source');
+    const start = input.selectionStart ?? input.value.length;
+    const end = input.selectionEnd ?? start;
+    const edit = insertAllocationReference(input.value, start, end, info.id);
+    input.value = edit.source;
+    input.setSelectionRange(edit.cursor, edit.cursor);
+    filterEdited();
+    input.focus();
+    scheduleFilterCheck(true);
+    $('st-info').textContent = `inserted reference to allocation id ${info.id}`;
+  };
   q('.d-range').onclick = async () => {
     showPanel('filter-panel');
     const applied = await applyFilterSource(

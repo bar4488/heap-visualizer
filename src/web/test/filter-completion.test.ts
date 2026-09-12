@@ -3,9 +3,24 @@ import test from 'node:test';
 
 import {
   applyFilterCompletion,
+  insertAllocationReference,
   utf16Offset,
   utf8Offset,
 } from '../filter-completion.ts';
+
+test('allocation panel references replace the current editor selection', () => {
+  assert.deepEqual(insertAllocationReference('before TARGET after', 7, 13, '100'), {
+    source: 'before allocation(100). after',
+    cursor: 23,
+  });
+});
+
+test('allocation references preserve ids beyond JavaScript integer precision', () => {
+  assert.equal(
+    insertAllocationReference('', 0, 0, '9007199254740993').source,
+    'allocation(9007199254740993).',
+  );
+});
 
 test('filter completion offsets cross the UTF-8 and UTF-16 boundary', () => {
   const source = 'site == "hé😀"';

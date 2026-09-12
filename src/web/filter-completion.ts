@@ -30,3 +30,17 @@ export function applyFilterCompletion(
     cursor: start + item.insertText.length,
   };
 }
+
+/** Insert the stable reference an Allocation window contributes to the DSL. */
+export function insertAllocationReference(
+  source: string,
+  start: number,
+  end: number,
+  id: string | number,
+): { source: string; cursor: number } {
+  const insert = `allocation(${id}).`;
+  return {
+    source: source.slice(0, start) + insert + source.slice(end),
+    cursor: start + insert.length,
+  };
+}

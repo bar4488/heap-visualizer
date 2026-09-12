@@ -82,6 +82,10 @@ Unpinning returns the window's content to the live panel. Pinned windows dock
 like any other window and are restored from the session by creator event
 index.
 
+The window can insert `allocation(<id>).` at the Filter editor's current
+selection and open contextual completion. This writes source only—it neither
+applies a predicate nor introduces browser-selection state into the language.
+
 ## SHELL-006: Specific panels
 
 Panels are split by *what the setting does*, not by what happens to be

@@ -138,7 +138,7 @@ impl View {
         let a = s.addr[e as usize];
         let span = s.span(e);
         let r0 = self.row_of(a);
-        let r1 = self.row_of(a + span - 1);
+        let r1 = self.row_of(a.saturating_add(span).saturating_sub(1));
         // Cap pathological spans so a single terabyte alloc cannot stall us;
         // beyond the cap only the first/last rows are marked (the middle rows
         // belong entirely to this alloc anyway, and get painted directly).
@@ -420,7 +420,7 @@ impl View {
             }
             let a = s.addr[e as usize];
             let r0 = self.row_of(a);
-            let r1 = self.row_of(a + s.span(e) - 1);
+            let r1 = self.row_of(a.saturating_add(s.span(e)).saturating_sub(1));
             if r1 - r0 > 65536 {
                 set.insert(r0);
                 set.insert(r1);

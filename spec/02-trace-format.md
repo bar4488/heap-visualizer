@@ -20,7 +20,9 @@ bytes.
   metadata never breaks old viewers. (The viewer goes further: unrecognized
   fields on events are kept verbatim and shown in the allocation panel, so
   producers can attach domain data like pool names or refcounts for free.)
-- Numbers (`t`, `size`, `seq`, `id`, `thr`) are JSON integers.
+- Numbers (`t`, `size`, `seq`, `id`, `thr`) are JSON integers. Allocation ids,
+  timestamps, and byte sizes occupy their full unsigned 64-bit columns; a
+  browser-facing surface must not round an id through a JavaScript number.
 - **Addresses are strings** (`"0x555555550000"`), because a 64-bit address does
   not fit safely in a JSON double. Hex, `0x`-prefixed, lowercase preferred;
   consumers tolerate uppercase, a missing prefix, and plain decimal.

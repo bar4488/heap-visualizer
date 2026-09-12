@@ -5,7 +5,7 @@ use heap_visualizer_filter_dsl::{
 use crate::json::push_json_str;
 use crate::store::{
     Store, FIELD_BOOL, FIELD_FLOAT, FIELD_INT, FIELD_OTHER, FIELD_SCALARS, FIELD_STRING, NONE_U16,
-    NONE_U32,
+    NONE_U32, OP_M, OP_R,
 };
 
 /// Everything checking and evaluation need besides the expression and the
@@ -41,6 +41,25 @@ impl<'a> Ctx<'a> {
             if label == name {
                 count += 1;
                 found.get_or_insert(*event);
+            }
+        }
+        match (count, found) {
+            (1, Some(event)) => Ok(event),
+            _ => Err(count),
+        }
+    }
+
+    /// Resolve a stream allocation id without retaining a second per-trace id
+    /// index. This is used only while checking/lowering an expression that
+    /// contains `allocation(...)`; the compiled scan sees a constant creator
+    /// event and pays no lookup cost per allocation.
+    fn allocation(&self, id: u64) -> Result<u32, usize> {
+        let mut found = None;
+        let mut count = 0;
+        for (event, (&candidate, &op)) in self.store.id.iter().zip(&self.store.op).enumerate() {
+            if candidate == id && matches!(op, OP_M | OP_R) {
+                count += 1;
+                found.get_or_insert(event as u32);
             }
         }
         match (count, found) {
@@ -218,7 +237,7 @@ pub(crate) struct Path<'a> {
 fn ns_of(expr: &Expr) -> Option<(Ns, Option<&Expr>)> {
     match &expr.kind {
         ExprKind::Identifier(name) => Ns::parse(name).map(|ns| (ns, None)),
-        ExprKind::Field { base, name } if is_named_call(base) => {
+        ExprKind::Field { base, name } if is_reference_call(base) => {
             Ns::parse(name).map(|ns| (ns, Some(&**base)))
         }
         _ => None,
@@ -229,7 +248,7 @@ fn ns_of(expr: &Expr) -> Option<(Ns, Option<&Expr>)> {
 /// call, a literal, arithmetic — is not one, and the caller handles it.
 ///
 /// The shapes are `<ns>.<name>`, `<ns>.fields.<key>`, `<ns>.fields["<key>"]`,
-/// and each of those behind `named("x").`.
+/// and each of those behind an allocation reference.
 pub(crate) fn resolve_path(expr: &Expr) -> Option<Path<'_>> {
     let (base, name) = match &expr.kind {
         ExprKind::Field { base, name } => (base, name.as_str()),
@@ -273,10 +292,11 @@ pub(crate) fn custom_field(expr: &Expr) -> Option<(FieldRoot, &str)> {
     }
 }
 
-/// True for a `named(...)` call, whatever its argument turns out to be.
-fn is_named_call(expr: &Expr) -> bool {
+/// True for either function that resolves one allocation at check time.
+fn is_reference_call(expr: &Expr) -> bool {
     matches!(&expr.kind, ExprKind::Call { callee, .. }
-        if matches!(&callee.kind, ExprKind::Identifier(name) if name == "named"))
+        if matches!(&callee.kind, ExprKind::Identifier(name)
+            if name == "named" || name == "allocation"))
 }
 
 /// True for `<ns>.fields` with no key on it yet — a reference the user has
@@ -361,8 +381,11 @@ pub fn schema(store: &Store, from: usize, count: usize) -> serde_json::Value {
             "next": (end < total).then_some(end)
         },
         "customFieldPaths": ["malloc.fields.<name>", "free.fields.<name>"],
-        "functions": [{ "name": "named", "signature": "named(string) -> allocation" }],
-        "operators": ["and", "or", "not", "==", "!=", "<", "<=", ">", ">=", "in", "is none", "is not none", "+", "-", "*", "/", "%"],
+        "functions": [
+            { "name": "named", "signature": "named(string) -> allocation" },
+            { "name": "allocation", "signature": "allocation(integer-id) -> allocation" }
+        ],
+        "operators": ["and", "or", "not", "==", "!=", "<", "<=", ">", ">=", "in", "is none", "is not none", "+", "-"],
         "literals": ["integer", "float", "string", "bool", "none", "set", "half-open-range"]
     })
 }
@@ -442,13 +465,17 @@ fn resolve_fragment(fragment: &str, keys: &[String]) -> Vec<Value> {
                         Value::Missing,
                         |text| {
                             if text.bytes().any(|c| matches!(c, b'.' | b'e' | b'E')) {
-                                text.parse::<f64>().map_or(Value::Missing, Value::Float)
+                                text.parse::<f64>().map_or(Value::Missing, |value| {
+                                    if value.is_finite() { Value::Float(value) } else { Value::Missing }
+                                })
                             } else {
                                 text.parse::<i128>().map_or_else(
                                     // wider than i128: keep it as the number
                                     // it approximately is rather than dropping
                                     // the field
-                                    |_| text.parse::<f64>().map_or(Value::Missing, Value::Float),
+                                    |_| text.parse::<f64>().map_or(Value::Missing, |value| {
+                                        if value.is_finite() { Value::Float(value) } else { Value::Missing }
+                                    }),
                                     Value::Int,
                                 )
                             }
@@ -589,7 +616,10 @@ fn cmp_int_float(a: i128, b: f64) -> Option<core::cmp::Ordering> {
         return None;
     }
     // beyond the integer range entirely, including the infinities
-    if b > i128::MAX as f64 {
+    // `i128::MAX as f64` rounds up to 2^127, which is already one past the
+    // integer range. Equality at this boundary must therefore still say the
+    // integer is smaller.
+    if b >= i128::MAX as f64 {
         return Some(Ordering::Less);
     }
     if b < i128::MIN as f64 {
@@ -774,6 +804,54 @@ pub(crate) fn named_event(arguments: &[Expr], expr: &Expr, ctx: &Ctx) -> Result<
     })
 }
 
+fn allocation_argument(arguments: &[Expr], expr: &Expr) -> Result<u64, EvalError> {
+    match arguments {
+        [Expr {
+            kind: ExprKind::Integer(value),
+            ..
+        }] if value.unit.is_none() => u64::try_from(value.value).map_err(|_| {
+            EvalError::at(expr, "allocation id is outside the unsigned 64-bit range")
+        }),
+        _ => Err(EvalError::at(
+            expr,
+            "allocation requires one unsigned integer id, as `allocation(100)`",
+        )),
+    }
+}
+
+/// Resolve a direct allocation id. Valid traces make ids unique; retaining the
+/// count check gives a useful diagnostic for the malformed duplicate-id traces
+/// the viewer deliberately still loads.
+pub(crate) fn allocation_event(
+    arguments: &[Expr],
+    expr: &Expr,
+    ctx: &Ctx,
+) -> Result<u32, EvalError> {
+    let id = allocation_argument(arguments, expr)?;
+    ctx.allocation(id).map_err(|count| {
+        EvalError::at(
+            expr,
+            match count {
+                0 => format!("no allocation has id {id}"),
+                _ => format!("{count} allocations have id {id}; the id must be unique"),
+            },
+        )
+    })
+}
+
+pub(crate) fn reference_event(expr: &Expr, ctx: &Ctx) -> Result<u32, EvalError> {
+    match &expr.kind {
+        ExprKind::Call { callee, arguments } => match &callee.kind {
+            ExprKind::Identifier(name) if name == "named" => named_event(arguments, expr, ctx),
+            ExprKind::Identifier(name) if name == "allocation" => {
+                allocation_event(arguments, expr, ctx)
+            }
+            _ => Err(EvalError::at(expr, "expected an allocation reference")),
+        },
+        _ => Err(EvalError::at(expr, "expected an allocation reference")),
+    }
+}
+
 fn shape_list(types: u8) -> String {
     let mut names = Vec::new();
     for (bit, name) in [
@@ -833,9 +911,12 @@ fn check_type(expr: &Expr, ctx: &Ctx) -> Result<CheckedType, EvalError> {
     match &expr.kind {
         ExprKind::Bool(_) => required(Type::Bool),
         ExprKind::Integer(value) => {
-            integer(value.value, value.unit, &ctx.store.unit)
+            let value = number_literal(value.value, value.unit, &ctx.store.unit, false)
                 .map_err(|message| EvalError::at(expr, message))?;
-            required(Type::Int)
+            required(match value {
+                Num::Int(_) => Type::Int,
+                Num::Float(_) => Type::Float,
+            })
         }
         ExprKind::Float(value) => {
             float(value.value, value.unit, &ctx.store.unit)
@@ -870,7 +951,29 @@ fn check_type(expr: &Expr, ctx: &Ctx) -> Result<CheckedType, EvalError> {
             if ty.ty == Type::Bool {
                 required(Type::Bool)
             } else {
-                Err(EvalError::at(expr, "`!` requires bool"))
+                Err(EvalError::at(expr, "`not` requires bool"))
+            }
+        }
+        ExprKind::Unary {
+            op: UnaryOp::Negate,
+            expr: inner,
+        } => {
+            // Permit the one signed integer whose magnitude is not itself an
+            // i128. Checking the positive child first would incorrectly reject
+            // `-170141183460469231731687303715884105728`.
+            if let ExprKind::Integer(value) = &inner.kind {
+                let value = number_literal(value.value, value.unit, &ctx.store.unit, true)
+                    .map_err(|message| EvalError::at(expr, message))?;
+                return required(match value {
+                    Num::Int(_) => Type::Int,
+                    Num::Float(_) => Type::Float,
+                });
+            }
+            let ty = check_type(inner, ctx)?;
+            if ty.numeric() {
+                required(ty.ty)
+            } else {
+                Err(EvalError::at(expr, "unary minus requires a number"))
             }
         }
         ExprKind::IsNone { expr: inner, .. } => {
@@ -914,7 +1017,7 @@ fn check_type(expr: &Expr, ctx: &Ctx) -> Result<CheckedType, EvalError> {
             let Some(path) = resolve_path(expr) else {
                 // the name's own diagnostic first: `named(malloc.site).seq`
                 // is wrong about the argument, not about the namespace
-                if is_named_call(base) {
+                if is_reference_call(base) {
                     check_type(base, ctx)?;
                 }
                 // an unfinished or misspelled path: say which part is wrong
@@ -929,8 +1032,8 @@ fn check_type(expr: &Expr, ctx: &Ctx) -> Result<CheckedType, EvalError> {
                         {
                             "custom fields are on `malloc` and `free`, not on `alloc`".to_string()
                         }
-                        None if is_named_call(base) => format!(
-                            "a named allocation exposes `alloc`, `malloc` and `free`, as `named(\"x\").alloc.{name}`"
+                        None if is_reference_call(base) => format!(
+                            "an allocation reference exposes `alloc`, `malloc` and `free`, as `allocation(100).alloc.{name}`"
                         ),
                         None => "field access is not valid here".to_string(),
                     },
@@ -1006,6 +1109,10 @@ fn check_type(expr: &Expr, ctx: &Ctx) -> Result<CheckedType, EvalError> {
                 named_event(arguments, expr, ctx)?;
                 required(Type::Allocation)
             }
+            ExprKind::Identifier(name) if name == "allocation" => {
+                allocation_event(arguments, expr, ctx)?;
+                required(Type::Allocation)
+            }
             _ => Err(EvalError::at(expr, "unknown function")),
         },
         ExprKind::Index { .. } => match resolve_path(expr) {
@@ -1048,7 +1155,7 @@ fn check_type(expr: &Expr, ctx: &Ctx) -> Result<CheckedType, EvalError> {
                     {
                         Err(EvalError::at(
                             expr,
-                            "a set compares to a set; use `contains` to test one member",
+                            "a set compares to a set; write `value in set` to test one member",
                         ))
                     } else {
                         Err(EvalError::at(
@@ -1205,6 +1312,13 @@ fn expression_items(expected: Option<Type>, ctx: &Ctx) -> Vec<CompletionItem> {
             2,
         ));
     }
+    items.push(item(
+        "allocation",
+        "allocation(",
+        "function",
+        Some("allocation by stream id"),
+        2,
+    ));
     items
 }
 
@@ -1353,7 +1467,7 @@ fn member_items(receiver: &Expr, ctx: &Ctx) -> Vec<CompletionItem> {
     if is_field_root(receiver) {
         return field_key_items(ctx);
     }
-    // `named("x").` exposes the same three objects the subject does
+    // An allocation reference exposes the same three objects the subject does.
     if check_type(receiver, ctx).is_ok_and(|ty| ty.ty == Type::Allocation) {
         return expression_items(None, ctx)
             .into_iter()
@@ -1495,9 +1609,17 @@ fn call_argument_items(callee: &Expr, ctx: &Ctx) -> Vec<CompletionItem> {
             names.dedup();
             names
                 .into_iter()
-                .map(|name| string_item(name, "named allocation", false))
+                .map(|name| {
+                    let mut insert = String::new();
+                    push_json_str(&mut insert, name);
+                    insert.push(')');
+                    item(name, insert, "value", Some("named allocation"), 0)
+                })
                 .collect()
         }
+        // Allocation ids can be numerous, so completion advertises the
+        // function but never builds or sorts an unbounded id catalog.
+        ExprKind::Identifier(name) if name == "allocation" => Vec::new(),
         ExprKind::Identifier(name) if name == "abs" => expression_items(Some(Type::Int), ctx),
         ExprKind::Field { base, name }
             if matches!(name.as_str(), "startswith" | "endswith")
@@ -1543,13 +1665,25 @@ pub fn push_completions_json(out: &mut String, source: &str, cursor: usize, ctx:
             } else if let Ok(ty) = check_type(expression, ctx) {
                 replacement = Span::new(context.replacement.end, context.replacement.end);
                 prefix.clear();
-                operator_items(ty, true)
+                if ty.ty == Type::Allocation {
+                    vec![item(".", ".", "operator", Some("allocation fields"), 0)]
+                } else {
+                    operator_items(ty, true)
+                }
             } else {
                 expression_items(None, ctx)
             }
         }
-        CompletionSite::Operator { expression } => check_type(expression, ctx)
-            .map_or_else(|_| Vec::new(), |ty| operator_items(ty, false)),
+        CompletionSite::Operator { expression } => check_type(expression, ctx).map_or_else(
+            |_| Vec::new(),
+            |ty| {
+                if ty.ty == Type::Allocation {
+                    vec![item(".", ".", "operator", Some("allocation fields"), 0)]
+                } else {
+                    operator_items(ty, false)
+                }
+            },
+        ),
         CompletionSite::Member { receiver } => member_items(receiver, ctx),
         CompletionSite::Operand { left, kind } => operand_items(left, *kind, ctx),
         CompletionSite::CallArgument { callee, index } => {
@@ -1614,54 +1748,88 @@ pub fn push_completions_json(out: &mut String, source: &str, cursor: usize, ctx:
     out.push('}');
 }
 
-pub(crate) fn integer(value: u128, unit: Option<Unit>, time_unit: &str) -> Result<i128, String> {
-    let mul: u128 = match unit {
-        None | Some(Unit::Bytes) => 1,
-        Some(Unit::Kibibytes) => 1024,
-        Some(Unit::Mebibytes) => 1024 * 1024,
-        Some(Unit::Gibibytes) => 1024 * 1024 * 1024,
-        Some(Unit::Nanoseconds) => time_factor(time_unit, 1)?,
-        Some(Unit::Microseconds) => time_factor(time_unit, 1_000)?,
-        Some(Unit::Milliseconds) => time_factor(time_unit, 1_000_000)?,
-        Some(Unit::Seconds) => time_factor(time_unit, 1_000_000_000)?,
-    };
-    value
-        .checked_mul(mul)
-        .and_then(|v| i128::try_from(v).ok())
-        .ok_or_else(|| "integer literal overflows".to_string())
-}
-
-/// A float literal in the trace's own unit. The unit multiplies the value,
-/// exactly as it does for an integer literal, so `size > 1.5MiB` reads the
-/// same as `size > 1572864`.
-pub(crate) fn float(value: f64, unit: Option<Unit>, time_unit: &str) -> Result<f64, String> {
-    let mul: u128 = match unit {
-        None | Some(Unit::Bytes) => 1,
-        Some(Unit::Kibibytes) => 1024,
-        Some(Unit::Mebibytes) => 1024 * 1024,
-        Some(Unit::Gibibytes) => 1024 * 1024 * 1024,
-        Some(Unit::Nanoseconds) => time_factor(time_unit, 1)?,
-        Some(Unit::Microseconds) => time_factor(time_unit, 1_000)?,
-        Some(Unit::Milliseconds) => time_factor(time_unit, 1_000_000)?,
-        Some(Unit::Seconds) => time_factor(time_unit, 1_000_000_000)?,
-    };
-    let scaled = value * mul as f64;
-    if scaled.is_finite() {
-        Ok(scaled)
+pub(crate) fn number_literal(
+    value: u128,
+    unit: Option<Unit>,
+    time_unit: &str,
+    negative: bool,
+) -> Result<Num, String> {
+    let (numerator, denominator) = unit_ratio(unit, time_unit)?;
+    let common = gcd(value, denominator);
+    let reduced_value = value / common;
+    let reduced_denominator = denominator / common;
+    if reduced_denominator != 1 {
+        let mut scaled = value as f64 * numerator as f64 / denominator as f64;
+        if negative {
+            scaled = -scaled;
+        }
+        return scaled
+            .is_finite()
+            .then_some(Num::Float(scaled))
+            .ok_or_else(|| "float literal overflows".to_string());
+    }
+    let magnitude = reduced_value
+        .checked_mul(numerator)
+        .ok_or_else(|| "integer literal overflows".to_string())?;
+    if negative {
+        if magnitude == (i128::MAX as u128) + 1 {
+            Ok(Num::Int(i128::MIN))
+        } else {
+            i128::try_from(magnitude)
+                .ok()
+                .and_then(i128::checked_neg)
+                .map(Num::Int)
+                .ok_or_else(|| "integer literal overflows".to_string())
+        }
     } else {
-        Err("float literal overflows".to_string())
+        i128::try_from(magnitude)
+            .map(Num::Int)
+            .map_err(|_| "integer literal overflows".to_string())
     }
 }
 
-fn time_factor(unit: &str, nanos: u128) -> Result<u128, String> {
-    let per_tick = match unit {
+fn unit_ratio(unit: Option<Unit>, time_unit: &str) -> Result<(u128, u128), String> {
+    let nanos = match unit {
+        None | Some(Unit::Bytes) => return Ok((1, 1)),
+        Some(Unit::Kibibytes) => return Ok((1024, 1)),
+        Some(Unit::Mebibytes) => return Ok((1024 * 1024, 1)),
+        Some(Unit::Gibibytes) => return Ok((1024 * 1024 * 1024, 1)),
+        Some(Unit::Nanoseconds) => 1,
+        Some(Unit::Microseconds) => 1_000,
+        Some(Unit::Milliseconds) => 1_000_000,
+        Some(Unit::Seconds) => 1_000_000_000,
+    };
+    let per_tick = match time_unit {
         "ns" => 1,
         "us" => 1_000,
         "ms" => 1_000_000,
         "s" => 1_000_000_000,
         _ => return Err("time literals are unavailable for a tick trace".into()),
     };
-    Ok(nanos / per_tick)
+    let common = gcd(nanos, per_tick);
+    Ok((nanos / common, per_tick / common))
+}
+
+const fn gcd(mut a: u128, mut b: u128) -> u128 {
+    while b != 0 {
+        let remainder = a % b;
+        a = b;
+        b = remainder;
+    }
+    a
+}
+
+/// A float literal in the trace's own unit. The unit multiplies the value,
+/// exactly as it does for an integer literal, so `size > 1.5MiB` reads the
+/// same as `size > 1572864`.
+pub(crate) fn float(value: f64, unit: Option<Unit>, time_unit: &str) -> Result<f64, String> {
+    let (numerator, denominator) = unit_ratio(unit, time_unit)?;
+    let scaled = value * numerator as f64 / denominator as f64;
+    if scaled.is_finite() {
+        Ok(scaled)
+    } else {
+        Err("float literal overflows".to_string())
+    }
 }
 
 /// The extras fragment a custom field reads for creator event `e`: its own,
@@ -1693,10 +1861,10 @@ pub(crate) fn field_value(
     Ok(match (ns, name) {
         (Ns::Alloc, "id") => Value::Int(s.id[i] as i128),
         (Ns::Alloc, "address") => Value::Int(s.addr[i] as i128),
-        (Ns::Alloc, "end") => Value::Int((s.addr[i] + s.span(e)) as i128),
+        (Ns::Alloc, "end") => Value::Int(s.addr[i].saturating_add(s.span(e)) as i128),
         (Ns::Alloc, "span") => Value::Range(
             Num::Int(s.addr[i] as i128),
-            Num::Int((s.addr[i] + s.span(e)) as i128),
+            Num::Int(s.addr[i].saturating_add(s.span(e)) as i128),
         ),
         (Ns::Alloc, "size") => Value::Int(s.size[i] as i128),
         (Ns::Alloc, "usable") => match s.usable_at(e) {
@@ -1711,7 +1879,9 @@ pub(crate) fn field_value(
                 .collect(),
         ),
         (Ns::Alloc, "freed") => Value::Bool(s.death[i] != NONE_U32),
-        (Ns::Alloc, "lifetime") => death(|s, d, i| Value::Int((s.t[d as usize] - s.t[i]) as i128)),
+        (Ns::Alloc, "lifetime") => {
+            death(|s, d, i| Value::Int(s.t[d as usize] as i128 - s.t[i] as i128))
+        }
         (Ns::Malloc, "seq") => Value::Int(e as i128),
         (Ns::Malloc, "time") => Value::Int(s.t[i] as i128),
         (Ns::Malloc, "site") => match s.site[i] {
@@ -1816,7 +1986,12 @@ fn eval(expr: &Expr, ctx: &Ctx, e: u32) -> Result<Value, EvalError> {
     let err = |m: String| EvalError::at(expr, m);
     Ok(match &expr.kind {
         ExprKind::Bool(v) => Value::Bool(*v),
-        ExprKind::Integer(v) => Value::Int(integer(v.value, v.unit, &ctx.store.unit).map_err(err)?),
+        ExprKind::Integer(v) => match number_literal(v.value, v.unit, &ctx.store.unit, false)
+            .map_err(err)?
+        {
+            Num::Int(value) => Value::Int(value),
+            Num::Float(value) => Value::Float(value),
+        },
         ExprKind::Float(v) => Value::Float(float(v.value, v.unit, &ctx.store.unit).map_err(err)?),
         ExprKind::String(v) => Value::String(v.clone()),
         ExprKind::Identifier(name) => {
@@ -1829,6 +2004,26 @@ fn eval(expr: &Expr, ctx: &Ctx, e: u32) -> Result<Value, EvalError> {
             Value::Bool(v) => Value::Bool(!v),
             Value::Missing => Value::Bool(false),
             _ => return Err(EvalError::at(expr, "`not` requires bool")),
+        },
+        ExprKind::Unary {
+            op: UnaryOp::Negate,
+            expr: inner,
+        } => match &inner.kind {
+            ExprKind::Integer(v) => match number_literal(v.value, v.unit, &ctx.store.unit, true)
+                .map_err(err)?
+            {
+                Num::Int(value) => Value::Int(value),
+                Num::Float(value) => Value::Float(value),
+            },
+            _ => match eval(inner, ctx, e)? {
+                Value::Int(v) => match v.checked_neg() {
+                    Some(value) => Value::Int(value),
+                    None => Value::Missing,
+                },
+                Value::Float(v) => Value::Float(-v),
+                Value::Missing => Value::Missing,
+                _ => return Err(EvalError::at(expr, "unary minus requires a number")),
+            },
         },
         ExprKind::IsNone {
             expr: inner,
@@ -1852,8 +2047,8 @@ fn eval(expr: &Expr, ctx: &Ctx, e: u32) -> Result<Value, EvalError> {
             };
             let subject = match path.subject {
                 Some(call) => match &call.kind {
-                    ExprKind::Call { arguments, .. } => named_event(arguments, call, ctx)?,
-                    _ => return Err(EvalError::at(expr, "expected a named allocation")),
+                    ExprKind::Call { .. } => reference_event(call, ctx)?,
+                    _ => return Err(EvalError::at(expr, "expected an allocation reference")),
                 },
                 None => e,
             };
@@ -1876,7 +2071,10 @@ fn eval(expr: &Expr, ctx: &Ctx, e: u32) -> Result<Value, EvalError> {
                     _ => return Err(EvalError::at(expr, "len takes a set")),
                 },
                 ExprKind::Identifier(name) if name == "abs" && args.len() == 1 => match args[0] {
-                    Value::Int(v) => Value::Int(v.abs()),
+                    Value::Int(v) => match v.checked_abs() {
+                        Some(value) => Value::Int(value),
+                        None => Value::Missing,
+                    },
                     Value::Float(v) => Value::Float(v.abs()),
                     Value::Missing => Value::Missing,
                     _ => return Err(EvalError::at(expr, "abs requires a number")),
@@ -1904,10 +2102,10 @@ fn eval(expr: &Expr, ctx: &Ctx, e: u32) -> Result<Value, EvalError> {
                         }
                     }
                 }
-                ExprKind::Identifier(name) if name == "named" => {
+                ExprKind::Identifier(name) if name == "named" || name == "allocation" => {
                     return Err(EvalError::at(
                         expr,
-                        "`named(...)` is an allocation; read a field of it, as `named(\"x\").alloc.address`",
+                        "an allocation reference is not a value; read one of its fields, as `allocation(100).alloc.address`",
                     ))
                 }
                 _ => return Err(EvalError::at(expr, "unknown function")),
@@ -1938,12 +2136,18 @@ fn eval(expr: &Expr, ctx: &Ctx, e: u32) -> Result<Value, EvalError> {
                     | BinaryOp::Greater
                     | BinaryOp::GreaterEqual => Value::Bool(order(&a, &b, *op).map_err(err)?),
                     BinaryOp::Add | BinaryOp::Subtract => match (a.num(), b.num()) {
-                        (Some(Num::Int(x)), Some(Num::Int(y))) => {
-                            Value::Int(if *op == BinaryOp::Add { x + y } else { x - y })
-                        }
+                        (Some(Num::Int(x)), Some(Num::Int(y))) => match if *op == BinaryOp::Add {
+                            x.checked_add(y)
+                        } else {
+                            x.checked_sub(y)
+                        } {
+                            Some(value) => Value::Int(value),
+                            None => Value::Missing,
+                        },
                         (Some(x), Some(y)) => {
                             let (x, y) = (as_f64(x), as_f64(y));
-                            Value::Float(if *op == BinaryOp::Add { x + y } else { x - y })
+                            let value = if *op == BinaryOp::Add { x + y } else { x - y };
+                            if value.is_finite() { Value::Float(value) } else { Value::Missing }
                         }
                         _ => Value::Missing,
                     },

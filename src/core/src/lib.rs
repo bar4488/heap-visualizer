@@ -1439,7 +1439,7 @@ pub extern "C" fn hp_alloc_info(e: u32, w: u32, scroll: f64) {
 fn live_at_addr(s: &Store, v: &View, addr: u64) -> i32 {
     let floor = addr.saturating_sub(s.max_span.max(1));
     for &(ea, e) in v.live.range((floor, 0)..=(addr, u32::MAX)).rev() {
-        if ea + s.span(e) > addr {
+        if ea.saturating_add(s.span(e)) > addr {
             return e as i32;
         }
     }
@@ -2958,7 +2958,7 @@ not json at all
         a.cfg.x_pan = 0.0;
         // the 64-byte alloc at 0x1000 now spans the first quarter of the width
         let p = render::pick(&a.store, &mut a.view, &a.cfg, 400, 50, 0.0, 0.0);
-        assert!(p.contains("\"id\":1"), "pick got {}", p);
+        assert!(p.contains("\"id\":\"1\""), "pick got {}", p);
         // past the alloc (byte offset 128) there is nothing
         let p = render::pick(&a.store, &mut a.view, &a.cfg, 400, 200, 0.0, 0.0);
         assert_eq!(p, "null");
@@ -3064,7 +3064,7 @@ not json at all
         assert!(has_fill);
         // pick at the first allocation: row for 0x1000, x=0
         let p = render::pick(&a.store, &mut a.view, &a.cfg, 400, 0, 0.0, 0.0);
-        assert!(p.contains("\"id\":1"), "pick got {}", p);
+        assert!(p.contains("\"id\":\"1\""), "pick got {}", p);
         // timeline render smoke
         let mut px = Vec::new();
         timeline::render(&mut a.store, &a.cfg, 1, 100, 40, 0.0, 5.0, &mut px);
@@ -3166,6 +3166,17 @@ not json at all
         // and the death record's own float
         assert_eq!(matches_custom(&a, "free.fields.drift < 0"), vec![0]);
         assert_eq!(matches_custom(&a, "abs(free.fields.drift) > 2"), vec![0]);
+        assert_eq!(matches_custom(&a, "free.fields.drift == -2.5"), vec![0]);
+
+        let mut completions = String::new();
+        let source = "free.fields.drift == ";
+        filter_eval::push_completions_json(
+            &mut completions,
+            source,
+            source.len(),
+            &ctx(&a, &[]),
+        );
+        assert!(completions.contains("\"label\":\"-2.5\""));
     }
 
     #[test]
@@ -3228,6 +3239,47 @@ not json at all
         );
     }
 
+    #[test]
+    fn numeric_boundaries_do_not_round_wrap_or_panic() {
+        use filter_eval::{cmp_num, number_literal, Num};
+        use heap_visualizer_filter_dsl::Unit;
+
+        // i128::MAX rounds to 2^127 as f64. That float is above every i128,
+        // not equal to the maximum integer.
+        assert!(cmp_num(Num::Int(i128::MAX), Num::Float(i128::MAX as f64))
+            .is_some_and(|ordering| ordering.is_lt()));
+        assert!(cmp_num(Num::Int(i128::MIN), Num::Float(i128::MIN as f64))
+            .is_some_and(|ordering| ordering.is_eq()));
+
+        // Units finer than the trace unit retain their fractional value;
+        // exact multiples remain integers and keep exact comparison.
+        assert!(matches!(
+            number_literal(1, Some(Unit::Nanoseconds), "us", false).unwrap(),
+            Num::Float(value) if value == 0.001
+        ));
+        assert!(matches!(
+            number_literal(1_000, Some(Unit::Nanoseconds), "us", false).unwrap(),
+            Num::Int(1)
+        ));
+        assert!(matches!(
+            number_literal(1u128 << 127, None, "ns", true).unwrap(),
+            Num::Int(i128::MIN)
+        ));
+
+        let a = load(&format!(
+            "{{\"op\":\"H\",\"v\":1,\"unit\":\"us\"}}\n\
+             {{\"seq\":0,\"t\":1,\"op\":\"M\",\"id\":1,\"addr\":\"0xffffffffffffffff\",\"size\":10,\"n\":{}}}\n",
+            i128::MAX
+        ));
+        assert_eq!(matching(&a, &[], "malloc.time > 500ns"), vec![0]);
+        assert_eq!(matching(&a, &[], "malloc.time == 1000ns"), vec![0]);
+        assert_eq!(matching(&a, &[], "alloc.end == 0xffffffffffffffff"), vec![0]);
+        // Per-allocation integer overflow is missing/false, never wrapping or
+        // panicking. Constant overflow remains an Apply-time diagnostic.
+        assert!(matching(&a, &[], "malloc.fields.n + 1 > 0").is_empty());
+        assert!(matching(&a, &[], "abs(-malloc.fields.n - 1) >= 0").is_empty());
+    }
+
     /// The scan itself allocates nothing, however many events it looks at.
     ///
     /// This is the property [D008] is about and the one the tree walk broke —
@@ -3261,6 +3313,8 @@ not json at all
             "free.fields.reason is not None",
             "alloc.freed and alloc.lifetime > 10",
             "abs(malloc.seq - named(\"anchor\").malloc.seq) <= 5",
+            "-malloc.seq <= 0",
+            "alloc.address >= allocation(1).alloc.address",
             "malloc.site == \"json_node\" and alloc.size >= 64 and \"hot\" in alloc.tags",
         ] {
             let expr = heap_visualizer_filter_dsl::parse(source).unwrap();
@@ -3407,6 +3461,8 @@ not json at all
             "alloc.address >= named(\"anchor\").alloc.address",
             "named(\"anchor\").alloc.span.overlaps(range(0x0, 0xffffffff))",
             "malloc.site == named(\"anchor\").malloc.site",
+            "alloc.address >= allocation(1).alloc.address",
+            "-alloc.size < -32",
         ];
 
         let mut nonempty = 0;
@@ -3615,6 +3671,44 @@ not json at all
     }
 
     #[test]
+    fn allocation_id_resolves_one_allocation_at_check_time() {
+        let a = load(SAMPLE);
+        let c = ctx(&a, &[]);
+        let source = "alloc.address >= allocation(2).alloc.end";
+        let expr = heap_visualizer_filter_dsl::parse(source).unwrap();
+        assert!(filter_eval::check(&expr, &c).is_ok());
+        assert_eq!(matching(&a, &[], source), vec![3]);
+
+        let unknown = heap_visualizer_filter_dsl::parse("allocation(99).alloc.size > 0").unwrap();
+        assert_eq!(
+            filter_eval::check(&unknown, &c).unwrap_err().message,
+            "no allocation has id 99"
+        );
+        let invalid = heap_visualizer_filter_dsl::parse("allocation(-1).alloc.size > 0").unwrap();
+        assert_eq!(
+            filter_eval::check(&invalid, &c).unwrap_err().message,
+            "allocation requires one unsigned integer id, as `allocation(100)`"
+        );
+    }
+
+    #[test]
+    fn unsigned_trace_numbers_keep_their_full_u64_value() {
+        let mut a = load(
+            r#"{"op":"H","v":1,"unit":"ns"}
+{"seq":0,"t":18446744073709551615,"op":"M","id":9007199254740993,"addr":"0x1000","size":64}
+"#,
+        );
+        assert_eq!(a.store.id[0], 9_007_199_254_740_993);
+        assert_eq!(a.store.t[0], u64::MAX);
+        assert_eq!(
+            matching(&a, &[], "allocation(9007199254740993).alloc.id == alloc.id"),
+            vec![0]
+        );
+        let info = render::alloc_info(&a.store, &mut a.view, &a.cfg, 100, 0x1000, 0, 0.0);
+        assert!(info.contains("\"id\":\"9007199254740993\""));
+    }
+
+    #[test]
     fn named_requires_exactly_one_match() {
         let mut a = load(SAMPLE);
         let parse = |s: &str| heap_visualizer_filter_dsl::parse(s).unwrap();
@@ -3712,10 +3806,14 @@ not json at all
         };
         // with no names, the surface is not advertised
         assert!(!complete(&a, "").contains("\"label\":\"named\""));
+        assert!(complete(&a, "").contains("\"label\":\"allocation\""));
 
         a.names = vec![(0, "request root".into())];
         assert!(complete(&a, "").contains("\"label\":\"named\""));
-        assert!(complete(&a, "named(").contains("request root"));
+        let names = complete(&a, "named(");
+        assert!(names.contains("request root"));
+        assert!(names.contains(r#""insertText":"\"request root\")""#));
+        assert!(complete(&a, r#"named("request root")"#).contains("\"label\":\".\""));
         // a named allocation exposes the same three objects the subject does
         let members = complete(&a, r#"named("request root")."#);
         assert!(members.contains("\"label\":\"alloc\""));
@@ -3723,6 +3821,9 @@ not json at all
         let fields = complete(&a, r#"named("request root").alloc."#);
         assert!(fields.contains("\"label\":\"address\""));
         assert!(fields.contains("\"label\":\"size\""));
+        let direct = complete(&a, "allocation(1).");
+        assert!(direct.contains("\"label\":\"alloc\""));
+        assert!(direct.contains("\"label\":\"malloc\""));
     }
 
     #[test]
@@ -3813,7 +3914,7 @@ not json at all
             filter_eval::check(&parse(r#"alloc.tags == "a""#), &store_ctx(&store))
                 .unwrap_err()
                 .message,
-            "a set compares to a set; use `contains` to test one member"
+            "a set compares to a set; write `value in set` to test one member"
         );
         assert_eq!(
             filter_eval::check(&parse("1 in alloc.tags"), &store_ctx(&store))

@@ -135,7 +135,7 @@ impl Filter {
         }
         if !self.addr_ranges.is_empty() {
             let a = s.addr[ei];
-            let end = a + s.span(e);
+            let end = a.saturating_add(s.span(e));
             if !self.addr_ranges.iter().any(|&(lo, hi)| a < hi && end > lo) {
                 return false;
             }
@@ -531,7 +531,7 @@ fn inside_one_alloc(s: &Store, v: &crate::state::View, ra: u64, rb: u64) -> bool
     v.live
         .range((floor, 0)..=(gap_start, u32::MAX))
         .rev()
-        .any(|&(a, e)| a <= gap_start && a + s.span(e) >= gap_end)
+        .any(|&(a, e)| a <= gap_start && a.saturating_add(s.span(e)) >= gap_end)
 }
 
 /// Render the address-line into `frame`. `scroll` is the virtual-y offset in
@@ -719,7 +719,7 @@ pub fn render_addr(
         let pass = !dim_it;
         let span = s.span(e);
         let size = s.size[e as usize].max(1).min(span);
-        let end = a + span;
+        let end = a.saturating_add(span);
         let r0 = (a - v.base) / rb;
         let r1 = (end - 1 - v.base) / rb;
         let j = v.rows.partition_point(|&r| r < r0);
@@ -879,7 +879,7 @@ pub fn render_addr(
             }
             // insert [a, a + span) into the set, merging what it touches
             let mut s0 = a;
-            let mut s1 = a + s.span(e);
+            let mut s1 = a.saturating_add(s.span(e));
             if let Some((&ps, &pe)) = covered.range(..=s0).next_back() {
                 if pe >= s0 {
                     covered.remove(&ps);
@@ -910,7 +910,7 @@ pub fn render_addr(
             if hide {
                 continue;
             }
-            let end = a + s.span(e);
+            let end = a.saturating_add(s.span(e));
             // dead creators fully inside [a, end) and born after `e` — truly
             // nested in this allocation, not an earlier tenant of reused
             // address space (those died before `e` existed and mean nothing
@@ -1003,7 +1003,7 @@ pub fn pick(
     let floor = addr_at.saturating_sub(s.max_span.max(1));
     let mut found: Option<(u64, u32)> = None;
     for &(a, e) in v.live.range((floor, 0)..=(addr_at, u32::MAX)) {
-        if a + s.span(e) > addr_at && found.map_or(true, |(_, fe)| e > fe) {
+        if a.saturating_add(s.span(e)) > addr_at && found.map_or(true, |(_, fe)| e > fe) {
             found = Some((a, e));
         }
     }
@@ -1029,11 +1029,11 @@ pub fn alloc_info(
     let ei = e as usize;
     let mut out = String::with_capacity(512);
     out.push_str(&format!(
-        "{{\"e\":{},\"id\":{},\"addr\":\"0x{:x}\",\"end\":\"0x{:x}\",\"size\":{},\"usable\":{}",
+        "{{\"e\":{},\"id\":\"{}\",\"addr\":\"0x{:x}\",\"end\":\"0x{:x}\",\"size\":{},\"usable\":{}",
         e,
         s.id[ei],
         a,
-        a + s.size[ei],
+        a.saturating_add(s.size[ei]),
         s.size[ei],
         s.usable_at(e)
     ));
@@ -1114,7 +1114,7 @@ fn region_rects(
 ) -> String {
     let rb = v.row_bytes;
     let (scale, pan) = cfg.x_map(w, rb);
-    let end = a + span.max(1);
+    let end = a.saturating_add(span.max(1));
     let r0 = (a.saturating_sub(v.base)) / rb;
     let r1 = (end - 1).saturating_sub(v.base) / rb;
     let mut out = String::new();

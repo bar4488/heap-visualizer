@@ -30,6 +30,7 @@ fn parses_the_documented_examples() {
         "malloc.fields.pool == \"gfx\" and malloc.fields.refs >= 3",
         "malloc.fields[\"allocator-class\"] == \"small\"",
         "alloc.address >= named(\"request root\").address - 0x100",
+        "alloc.address >= allocation(100).alloc.end",
         "abs(malloc.seq - named(\"request root\").seq) <= 10",
         "malloc.site is None",
         "malloc.site is not None",
@@ -60,6 +61,33 @@ fn precedence_is_postfix_additive_comparison_not_and_or() {
     assert_eq!(binary(comparison).0, BinaryOp::GreaterEqual);
     assert_eq!(binary(binary(comparison).1).0, BinaryOp::Add);
     assert_eq!(binary(site).0, BinaryOp::Equal);
+}
+
+#[test]
+fn unary_minus_binds_after_postfix_and_before_addition() {
+    let expr = parse("-named(\"root\").alloc.size + 2 == -3.5").unwrap();
+    let (_, sum, right) = binary(&expr);
+    let (op, left, _) = binary(sum);
+    assert_eq!(op, BinaryOp::Add);
+    assert!(matches!(
+        left.kind,
+        ExprKind::Unary { op: UnaryOp::Negate, .. }
+    ));
+    assert!(matches!(
+        right.kind,
+        ExprKind::Unary { op: UnaryOp::Negate, .. }
+    ));
+    assert!(parse("+1 == 1").unwrap_err().message.contains("unary plus"));
+}
+
+#[test]
+fn negative_numbers_are_constant_set_members() {
+    let expr = parse("alloc.size in {-1, -2.5}").unwrap();
+    let ExprKind::Set(items) = &binary(&expr).2.kind else { panic!("set") };
+    assert!(items.iter().all(|item| matches!(
+        item.kind,
+        ExprKind::Unary { op: UnaryOp::Negate, .. }
+    )));
 }
 
 /// Python puts `not` looser than the comparisons, so it negates the whole
