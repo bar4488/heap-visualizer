@@ -1,5 +1,5 @@
 use heap_visualizer_filter_dsl::{
-    parse, BinaryOp, Expr, ExprKind, Span, UnaryOp, Unit, MAX_ARGUMENTS, MAX_NESTING,
+    parse, BinaryOp, Expr, ExprKind, Span, UnaryOp, Unit, MAX_ARGUMENTS, MAX_DEPTH, MAX_NESTING,
     MAX_SOURCE_BYTES,
 };
 
@@ -127,6 +127,13 @@ fn the_removed_spellings_name_their_replacement() {
         ("a || b", "`or`"),
         ("!freed", "`not`"),
         ("address in 0x10..0x20", "`range(lo, hi)`"),
+        ("malloc.site contains \"x\"", "`needle in haystack`"),
+        ("(malloc.stack contains \"x\")", "`needle in haystack`"),
+        ("f(alloc.tags contains \"x\")", "`needle in haystack`"),
+        ("alloc.span overlaps range(1, 2)", "`a.overlaps(b)`"),
+        ("range(1, alloc.span overlaps range(1, 2))", "`a.overlaps(b)`"),
+        ("free.time is missing", "`is None`"),
+        ("free.time is not missing", "`is None`"),
     ] {
         let error = parse(source).unwrap_err();
         assert!(
@@ -336,10 +343,108 @@ fn enforces_source_nesting_and_argument_limits() {
         .contains("argument limit"));
 }
 
+/// The tree's depth is bounded whatever shape makes it deep, because every
+/// consumer of the tree recurses over it. Each of these used to parse into a
+/// tree thousands of levels deep and overflow the core's stack.
 #[test]
-fn long_unary_chains_do_not_recurse_in_the_parser() {
-    let source = format!("{}true", "not ".repeat(1_000));
+fn every_shape_of_deep_tree_is_refused() {
+    let deep = [
+        format!("alloc.size == {}1", "-".repeat(8_100)),
+        format!("alloc.size == {}1", "1+".repeat(4_000)),
+        format!("{}true", "not ".repeat(1_000)),
+        format!("{}true", "true and ".repeat(1_000)),
+        format!("{}false", "false or ".repeat(1_000)),
+        format!("{}1", "1 < ".repeat(1_000)),
+        format!("malloc.fields{} == 1", ".a".repeat(1_000)),
+        format!("malloc.fields{} == 1", "[\"a\"]".repeat(1_000)),
+    ];
+    // a small stack, so a recursion this missed would fail here and not only
+    // on a server thread
+    std::thread::Builder::new()
+        .stack_size(256 * 1024)
+        .spawn(move || {
+            for source in deep {
+                assert!(source.len() <= MAX_SOURCE_BYTES, "{}", source.len());
+                let error = parse(&source).unwrap_err();
+                assert!(
+                    error.message.contains("depth limit"),
+                    "{}: {error}",
+                    &source[..40]
+                );
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+
+    // parentheses add no depth, so they cannot hide it either
+    let source = format!(
+        "x == {}1{}",
+        format!("({}", "-".repeat(8)).repeat(MAX_NESTING),
+        ")".repeat(MAX_NESTING)
+    );
+    assert!(parse(&source).unwrap_err().message.contains("depth limit"));
+}
+
+#[test]
+fn the_depth_limit_counts_nodes_and_points_at_the_operator() {
+    // `x` is one level and each `-` one more
+    parse(&format!("{}x", "-".repeat(MAX_DEPTH - 1))).unwrap();
+    let source = format!("{}x", "-".repeat(MAX_DEPTH));
+    let error = parse(&source).unwrap_err();
+    assert_eq!(error.span, Span::new(0, 1));
+
+    // a chain of `or` deepens by one per operator
+    let terms = |count: usize| vec!["x"; count].join(" or ");
+    parse(&terms(MAX_DEPTH)).unwrap();
+    let source = terms(MAX_DEPTH + 1);
+    let error = parse(&source).unwrap_err();
+    assert_eq!(&source[error.span.start..error.span.end], "or");
+    assert_eq!(error.span.end, source.rfind("or").unwrap() + 2);
+
+    // parentheses add no depth
+    parse(&format!(
+        "{}{}x{}",
+        "(".repeat(MAX_NESTING),
+        "-".repeat(MAX_DEPTH - 1),
+        ")".repeat(MAX_NESTING)
+    ))
+    .unwrap();
+
+    // a long list of alternatives fits as a set
+    let members = (0..1_000).map(|n| n.to_string()).collect::<Vec<_>>().join(", ");
+    parse(&format!("malloc.thread in {{{members}}}")).unwrap();
+}
+
+#[test]
+fn the_source_limit_is_sixteen_kibibytes() {
+    assert_eq!(MAX_SOURCE_BYTES, 16 * 1024);
+    let source = format!("malloc.site == \"{}\"", "a".repeat(MAX_SOURCE_BYTES - 17));
+    assert_eq!(source.len(), MAX_SOURCE_BYTES);
     parse(&source).unwrap();
+}
+
+/// An error span always names whole characters, so the caller can slice the
+/// source with it.
+#[test]
+fn error_spans_lie_on_character_boundaries() {
+    let source = "x == \"\\u12€\"";
+    let error = parse(source).unwrap_err();
+    assert!(error.message.contains("four hexadecimal digits"), "{error}");
+    assert_eq!(&source[error.span.start..error.span.end], "12€");
+
+    let mut source = "x".repeat(MAX_SOURCE_BYTES - 1);
+    source.push('é');
+    let error = parse(&source).unwrap_err();
+    assert!(error.message.contains("byte limit"));
+    assert_eq!(error.span, Span::new(MAX_SOURCE_BYTES - 1, source.len()));
+}
+
+#[test]
+fn an_uppercase_hexadecimal_prefix_names_the_spelling() {
+    let error = parse("x == 0X10").unwrap_err();
+    assert!(error.message.contains("lowercase `0x`"), "{error}");
+    assert_eq!(error.span, Span::new(5, 7));
 }
 
 #[test]

@@ -55,6 +55,15 @@ Python's semantics are followed except where three-valued logic requires
 otherwise: an operation on a missing value is false rather than an error, per
 the missing rule below.
 
+**An expression has bounded size and depth.** Source is at most 16 KiB of
+UTF-8, at most 32 parentheses and calls deep, and calls take at most 16
+arguments. Its syntax tree is at most 128 operations deep, counting every
+operator, call, field, index and literal on the longest path from the root —
+so a run of 200 `-`, or `or` joining 200 terms, is a diagnostic rather than a
+tree the checker and evaluator recurse through. Parentheses add no depth, and
+a long list of alternatives is one `in {…}`. Every diagnostic's span covers
+whole characters.
+
 **Every field is reached through one of three objects.** `alloc` is the
 allocation — `id`, `address`, `end`, `span`, `size`, `usable`, `tags`,
 `freed`, `lifetime`. `malloc` is the record that created it — `seq`, `time`,
@@ -223,7 +232,9 @@ An **integer** literal is decimal or `0x` hexadecimal. A **float** literal is
 decimal carrying a fraction or an exponent — `0.5`, `1e-3`, `2.5e6`. Both take
 the unit suffixes, which multiply the value: `1.5MiB` and `1572864` are the
 same operand. A decimal point is only ever a decimal point when a digit
-follows it, so `0..10` is a range between two integers.
+follows it, so `0..10` reads as two integers around the removed `..`, whose
+diagnostic names `range(lo, hi)`. The hexadecimal prefix is lowercase `0x`;
+`0X10` is a diagnostic saying so.
 
 Unary minus applies to numbers and binds after field access but before addition:
 `-2.5`, `-malloc.fields.drift`, and `-(alloc.size - 1)` are numbers. Negative
@@ -231,7 +242,7 @@ constants are valid set and range members. Unary plus is not part of the
 language.
 
 Integer and float operands must mix freely under ordering, equality, `in` a
-range, `in` a set, `contains`, and arithmetic. Where they mix:
+range, `in` a set, and arithmetic. Where they mix:
 
 - **Comparison must be exact.** An integer operand must not be converted to a
   double before comparing. An integer beyond 2^53 has no exact double, and
@@ -282,7 +293,7 @@ has the empty set.
 - `alloc.tags == {}` must match every untagged allocation and nothing else.
 - `alloc.tags == "a"` and `alloc.tags is None` must be diagnostics, not silently true or
   false. There is no scalar `tag` field, and no operation on `tags` may mean
-  "any one membership satisfies this" other than `contains`.
+  "any one membership satisfies this" other than `in`.
 
 The tag legend chip writes `"<name>" in alloc.tags` and the untagged chip
 writes `alloc.tags == {}` ([ANL-003](#anl-003-filter)).
