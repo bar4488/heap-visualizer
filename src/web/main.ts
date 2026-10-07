@@ -9,7 +9,7 @@ import {
   initRpc, request, requestLatest, cancelLatest, handleReply,
 } from './rpc.ts';
 import {
-  $, $$, $1, dpr, setHtml, toCss, toCssLen,
+  $, $$, $1, dpr, onDprChange, setHtml, toCss, toCssLen,
 } from './shell/dom.ts';
 import { raisePanel, showPanel, makePanelWindow } from './shell/panels.ts';
 import { showTooltip, hideTooltip, positionTooltipNearMouse } from './shell/tooltip.ts';
@@ -344,6 +344,14 @@ function sendResizes() {
 }
 new ResizeObserver(sendResizes).observe($('addr-view'));
 new ResizeObserver(sendResizes).observe($('strip-t'));
+new ResizeObserver(sendResizes).observe($('strip-s'));
+// Zoom or a monitor change: re-raster at the new ratio. The worker keeps row
+// height and scroll in device px, so both are re-sent in CSS px with it.
+onDprChange(() => {
+  sendResizes();
+  worker.postMessage({ type: 'set', key: 'rowPx', value: +$('row-px').value });
+  worker.postMessage({ type: 'scroll', y: addrScroll.scrollTop });
+});
 
 // ---------------------------------------------------------------------------
 // loading
@@ -1028,7 +1036,10 @@ async function renamedFilterRefresh() {
   if (usesNamed($('filter-source').value)) filterEdited();
   const source = UI.filterApplied;
   if (!source || !usesNamed(source)) return;
+  // a filter the user applies meanwhile wins: never act on a stale result
+  const generation = filterApplyGeneration;
   const result = await request('filter-apply', { source });
+  if (generation !== filterApplyGeneration || UI.filterApplied !== source) return;
   if (result.success) {
     filterChanged();
     return;
@@ -1036,6 +1047,7 @@ async function renamedFilterRefresh() {
   // Turn filtering off, but leave the editor alone: the source is the thing
   // the user has to fix, and clearing it would delete their work.
   await request('filter-apply', { source: '' });
+  if (generation !== filterApplyGeneration || UI.filterApplied !== source) return;
   UI.filterApplied = '';
   $('btn-filter').classList.remove('active');
   filterChanged();
@@ -1699,7 +1711,7 @@ function updateSelOverlay() {
 function requestSelMirror() {
   if (!UI.sel) { UI.selMirror = null; return; }
   const sel = UI.sel;
-  requestConvert(sel.kind, sel.lo, sel.hi, (lo, hi) => {
+  requestConvert('convert-sel', sel.kind, sel.lo, sel.hi, (lo, hi) => {
     if (UI.sel !== sel) return; // a newer selection superseded this request
     UI.selMirror = { kind: sel.kind === 0 ? 1 : 0, lo, hi };
     updateSelOverlay();
@@ -1736,19 +1748,34 @@ function updateCropIndicator() {
 }
 $('crop-indicator').onclick = clearCrop;
 
+// The crop in the time domain, converted once per crop rather than once per
+// frame: drawCropBands runs on every state message, and the conversion only
+// depends on the crop itself.
+let cropTime: { crop: Range; lo: number; hi: number } | null = null;
+let cropTimeRequested: Range | null = null;
+
 function drawCropBands() {
   const stripS = $('strip-s');
   const bandS = stripS.querySelector('.tl-crop');
-  if (!UI.crop) {
+  const stripT = $('strip-t');
+  const bandT = stripT.querySelector('.tl-crop');
+  const crop = UI.crop;
+  if (!crop) {
     bandS.hidden = true;
-    $('strip-t').querySelector('.tl-crop').hidden = true;
+    bandT.hidden = true;
     return;
   }
-  paintBand(bandS, stripS, 1, UI.crop.lo, UI.crop.hi);
-  requestConvert(1, UI.crop.lo, UI.crop.hi, (lo, hi) => {
-    if (!UI.crop) return; // cleared while the conversion was in flight
-    const stripT = $('strip-t');
-    paintBand(stripT.querySelector('.tl-crop'), stripT, 0, lo, hi);
+  paintBand(bandS, stripS, 1, crop.lo, crop.hi);
+  if (cropTime?.crop === crop) {
+    paintBand(bandT, stripT, 0, cropTime.lo, cropTime.hi);
+    return;
+  }
+  if (cropTimeRequested === crop) return;
+  cropTimeRequested = crop;
+  requestConvert('convert-crop', 1, crop.lo, crop.hi, (lo, hi) => {
+    if (UI.crop !== crop) return; // changed or cleared while in flight
+    cropTime = { crop, lo, hi };
+    paintBand(bandT, stripT, 0, lo, hi);
   });
 }
 
@@ -1778,7 +1805,7 @@ $('sel-crop').onclick = () => {
   if (sel.kind === 1) {
     setCrop(Math.round(sel.lo), Math.round(sel.hi));
   } else {
-    requestConvert(0, sel.lo, sel.hi, (lo, hi) => setCrop(Math.round(lo), Math.round(hi)));
+    requestConvert(null, 0, sel.lo, sel.hi, (lo, hi) => setCrop(Math.round(lo), Math.round(hi)));
   }
   clearSelection();
 };
@@ -1824,7 +1851,7 @@ function setupTimeline(stripId, canvas, kind) {
     worker.postMessage({ type: 'tlview', kind, lo: v.lo, hi: v.hi });
     updateSelOverlay();
     if (mirror) {
-      requestConvert(kind, v.lo, v.hi, (lo, hi) => {
+      requestConvert(`convert-view-${kind}`, kind, v.lo, v.hi, (lo, hi) => {
         UI.setView[kind === 0 ? 1 : 0]({ lo, hi }, false);
       });
     }
@@ -1881,6 +1908,13 @@ function setupTimeline(stripId, canvas, kind) {
     else if (dragging) seekTo(e.clientX);
     queryTlHover(kind, e.clientX - r.left);
   });
+  strip.addEventListener('pointercancel', () => {
+    dragging = false;
+    if (selecting !== null) {
+      selecting = null;
+      clearSelection();
+    }
+  });
   strip.addEventListener('pointerleave', () => {
     hoverline.hidden = true;
     hideTooltip('tl');
@@ -1933,9 +1967,14 @@ function onTlHoverResult(m) {
 // fast drag never queues more than one in-flight request
 // ---------------------------------------------------------------------------
 
-function requestConvert(kind, lo, hi, cb) {
+// `key` names the purpose (one coalescing slot each, so a per-frame crop
+// repaint cannot supersede a selection mirror); null is a one-shot request
+// that nothing supersedes.
+function requestConvert(key: string | null, kind, lo, hi, cb) {
   if (!UI.loaded) return;
-  requestLatest('convert', 'convert', { kind, lo, hi }).then((m) => cb(m.lo, m.hi));
+  const payload = { kind, lo, hi };
+  (key === null ? request('convert', payload) : requestLatest(key, 'convert', payload))
+    .then((m) => cb(m.lo, m.hi));
 }
 
 // ---------------------------------------------------------------------------
@@ -2047,7 +2086,9 @@ addrScroll.addEventListener('click', (e) => {
     return;
   }
   if (!UI.loaded) return;
-  requestLatest('pick', 'pick', {
+  // a plain request, not the hover key: a click must not be superseded by the
+  // next hover, nor dropped when the pointer leaves
+  request('pick', {
     x: e.clientX - r.left, y: e.clientY - r.top, forClick: true,
   }).then(onPickResult);
 });
@@ -2175,7 +2216,10 @@ function buildDetailBody(root, info) {
       $('st-info').textContent = 'cannot create these tags: the 255-tag limit would be exceeded';
       return;
     }
-    const tags = await Promise.all(names.map(tagIdFor));
+    // one at a time: each new tag's color comes from the tag count, which a
+    // parallel create would read before the previous tag landed
+    const tags = [];
+    for (const name of names) tags.push(await tagIdFor(name));
     worker.postMessage({ type: 'tag-event', e: info.e, tags });
     await replaceAllocationTags(info.e, tags);
     info.tags = tags;

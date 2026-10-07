@@ -21,7 +21,27 @@ export const $$ = (sel: string, root: El = document): El[] => [...root.querySele
 /** The first element matching a selector, or null. */
 export const $1 = (sel: string, root: El = document): El => root.querySelector(sel);
 
-export const dpr = window.devicePixelRatio || 1;
+// A live binding: browser zoom and moving the window to another monitor both
+// change the ratio, and every importer reads the current value.
+export let dpr = window.devicePixelRatio || 1;
+
+/**
+ * Call `cb` whenever the device pixel ratio changes, after `dpr` has been
+ * updated. A `resolution` media query matches one ratio only, so it is
+ * re-armed for the new ratio on each change.
+ */
+export function onDprChange(cb: () => void) {
+  if (typeof matchMedia !== 'function') return;
+  const arm = () => {
+    const mq = matchMedia(`(resolution: ${dpr}dppx)`);
+    mq.addEventListener('change', () => {
+      dpr = window.devicePixelRatio || 1;
+      cb();
+      arm();
+    }, { once: true });
+  };
+  arm();
+}
 
 // Every worker state message (i.e. every rendered frame during playback or a
 // drag) used to rebuild innerHTML for the overlay, both strips' bookmark
