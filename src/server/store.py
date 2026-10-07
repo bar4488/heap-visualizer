@@ -53,6 +53,8 @@ def _append(path, obj):
 
 def append_request(path, text, contact=''):
     """Validate and append one request. Returns the stored record."""
+    if not isinstance(text, (str, type(None))) or not isinstance(contact, (str, type(None))):
+        raise Rejected('the request and contact must be text')
     text = (text or '').strip()
     contact = (contact or '').strip()
     if not text:

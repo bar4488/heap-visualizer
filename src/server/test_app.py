@@ -9,6 +9,7 @@ is being tested. It needs no `dist/`: the static branch is `SimpleHTTPRequest-
 Handler`'s own and is not what these assert.
 """
 
+import http.client
 import json
 import os
 import tempfile
@@ -89,6 +90,24 @@ class ServiceTest(unittest.TestCase):
             self.assertEqual(status, 400, text[:20])
             self.assertTrue(body['error'])
         self.assertEqual(store.load_requests(self.path), [])
+
+    def test_non_text_fields_are_rejected_not_a_crash(self):
+        for body in ({'text': 5}, {'text': ['a']}, {'text': 'ok', 'contact': {'a': 1}}):
+            status, reply = call(self.port, '/api/requests', 'POST', body)
+            self.assertEqual(status, 400, body)
+            self.assertTrue(reply['error'])
+        self.assertEqual(store.load_requests(self.path), [])
+
+    def test_a_malformed_content_length_is_400(self):
+        conn = http.client.HTTPConnection('127.0.0.1', self.port)
+        self.addCleanup(conn.close)
+        conn.putrequest('POST', '/api/requests')
+        conn.putheader('Content-Type', 'application/json')
+        conn.putheader('Content-Length', 'abc')
+        conn.endheaders()
+        res = conn.getresponse()
+        self.assertEqual(res.status, 400)
+        self.assertIn('Content-Length', json.loads(res.read())['error'])
 
     def test_requests_read_back_newest_first(self):
         for text in ('first', 'second', 'third'):
@@ -172,7 +191,7 @@ class ServiceTest(unittest.TestCase):
     def test_reads_and_status_writes_require_the_token(self):
         _, body = self.post('visible only to the maintainer')
         rid = body['id']
-        for token in (None, 'wrong'):
+        for token in (None, 'wrong', TOKEN + 'x', TOKEN[:-1], 'tést'):
             code, _ = call(self.port, '/api/requests', token=token)
             self.assertEqual(code, 401)
             code, _ = call(self.port, f'/api/requests/{rid}/status', 'POST',
