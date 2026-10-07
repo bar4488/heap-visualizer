@@ -1469,15 +1469,16 @@ pub extern "C" fn hp_alloc_info(e: u32, w: u32, scroll: f64) {
 }
 
 /// Creator-event index of the live allocation covering `addr`, or -1 if none
-/// is live there. Address-only (no pixel/row layout math).
+/// is live there. Address-only (no pixel/row layout math). Where several
+/// cover it, the newest creator wins, as in `render::pick` (MAP-006/MAP-008).
 fn live_at_addr(s: &Store, v: &View, addr: u64) -> i32 {
-    let floor = addr.saturating_sub(s.max_span.max(1));
-    for &(ea, e) in v.live.range((floor, 0)..=(addr, u32::MAX)).rev() {
-        if ea.saturating_add(s.span(e)) > addr {
-            return e as i32;
-        }
-    }
-    -1
+    let floor = addr.saturating_sub(v.max_live_span().max(1));
+    v.live
+        .range((floor, 0)..=(addr, u32::MAX))
+        .filter(|&&(ea, e)| ea.saturating_add(s.span(e)) > addr)
+        .map(|&(_, e)| e)
+        .max()
+        .map_or(-1, |e| e as i32)
 }
 
 /// Creator-event index of the live allocation covering `addr` (lo/hi u32 halves
@@ -1508,7 +1509,7 @@ pub extern "C" fn hp_addr_at(w: u32, x: u32, y: f64, scroll: f64) {
         let row_start = v.base + v.rows[i] * v.row_bytes;
         let (scale, pan) = a.cfg.x_map(w, v.row_bytes);
         let off = (pan + x as f64 / scale) as u64;
-        let addr = row_start + off.min(v.row_bytes - 1);
+        let addr = row_start.saturating_add(off.min(v.row_bytes - 1));
         r[0] = addr as u32;
         r[1] = (addr >> 32) as u32;
         r[3] = 1;
@@ -2831,6 +2832,36 @@ not json at all
         assert_eq!(live_at_addr(&a.store, &a.view, 0x2000 + 127), 1);
         assert_eq!(live_at_addr(&a.store, &a.view, 0x2000 + 128), -1);
         assert_eq!(live_at_addr(&a.store, &a.view, 0x1000), -1); // id1 already freed
+    }
+
+    #[test]
+    fn live_at_addr_prefers_the_newest_cover_like_pick() {
+        // the newer block starts lower and encloses the older one
+        let input = r#"{"op":"H","v":1,"row_bytes":256}
+{"op":"M","id":1,"addr":"0x1020","size":32,"t":10}
+{"op":"M","id":2,"addr":"0x1000","size":128,"t":20}
+"#;
+        let mut a = load(input);
+        a.view.seek(&a.store, 2);
+        assert_eq!(live_at_addr(&a.store, &a.view, 0x1028), 1);
+        let picked = render::pick(&a.store, &mut a.view, &a.cfg, 256, 0x28, 4.0, 0.0);
+        assert!(picked.starts_with("{\"e\":1,"), "got {}", picked);
+    }
+
+    #[test]
+    fn allocations_at_the_top_of_the_address_space_render_and_pick() {
+        // spans that reach past 2^64 saturate instead of overflowing
+        let input = r#"{"op":"H","v":1,"row_bytes":256}
+{"op":"M","id":1,"addr":"0xffffffffffffff80","size":4096,"usable":8192,"t":10}
+{"op":"M","id":2,"addr":"0xffffffffffffffc0","size":16,"t":20}
+{"op":"F","id":2,"t":30}
+"#;
+        let mut a = load(input);
+        a.view.seek(&a.store, 3);
+        render::render_addr(&a.store, &mut a.view, &a.cfg, &mut a.frame, &mut a.scratch, 256, 100, 0.0);
+        let picked = render::pick(&a.store, &mut a.view, &a.cfg, 256, 0x90, 4.0, 0.0);
+        assert!(picked.starts_with("{\"e\":0,"), "got {}", picked);
+        assert_eq!(live_at_addr(&a.store, &a.view, u64::MAX - 1), 0);
     }
 
     #[test]

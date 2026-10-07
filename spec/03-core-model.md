@@ -109,9 +109,10 @@ rejecting input (goal: *faithful*). Warning codes:
 | version | Header declared a version other than 1. |
 | bad-level | `L` record whose `level` is not a known level name; read as `info` ([LOG-001](13-domains-and-logs.md#log-001-the-log-record-l)). |
 | long-log | `L` record whose `msg` exceeded 16 KiB; truncated, record kept. Detail is the original byte length. |
+| too-many-threads | A record on a thread beyond the first 65,535 distinct `thr` values; its thread is read as absent rather than aliased to another. Detail is the `thr` value. |
 
-The agent API names these `bad_level` and `long_log`; numeric codes are 9
-and 10, after `version` (8).
+The agent API names these `bad_level`, `long_log` and `too_many_threads`;
+numeric codes are 9, 10 and 11, after `version` (8).
 
 Full counts per code are always kept; detailed records are capped (first
 1000) so a pathological trace cannot blow up memory. The UI shows a toolbar

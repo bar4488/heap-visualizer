@@ -30,7 +30,8 @@ pub const W_BAD_SIZE: u8 = 7;
 pub const W_VERSION: u8 = 8;
 pub const W_BAD_LEVEL: u8 = 9;
 pub const W_LONG_LOG: u8 = 10;
-pub const NWARN: usize = 11;
+pub const W_THREADS: u8 = 11;
+pub const NWARN: usize = 12;
 
 pub fn warn_name(code: u8) -> &'static str {
     match code {
@@ -45,6 +46,7 @@ pub fn warn_name(code: u8) -> &'static str {
         W_VERSION => "unknown format version",
         W_BAD_LEVEL => "unknown log level read as info",
         W_LONG_LOG => "log message truncated",
+        W_THREADS => "too many threads; thread dropped",
         _ => "warning",
     }
 }
@@ -62,6 +64,7 @@ pub fn warn_code_name(code: u8) -> &'static str {
         W_VERSION => "unknown_version",
         W_BAD_LEVEL => "bad_level",
         W_LONG_LOG => "long_log",
+        W_THREADS => "too_many_threads",
         _ => "warning",
     }
 }
@@ -261,8 +264,6 @@ pub struct Store {
     pub t_max: u64,
     pub addr_min: u64,
     pub addr_max: u64,
-    /// Largest rendered span (max of size/usable) — bounds pick scans.
-    pub max_span: u64,
     pub peak_live_bytes: u64,
     pub total_alloc_bytes: u64,
     pub n_malloc: u32,
