@@ -6,7 +6,7 @@ everything else is a **window** the user summons, places, and dismisses.
 ## SHELL-001: Layout
 
 - **Toolbar** (top): open/demo, trace title, panel toggles (Play, Layout,
-  Appearance, Filter, Events, Marks), horizontal-zoom pill, crop pill, marks
+  Appearance, Filter, Events, Logs, Marks), horizontal-zoom pill, crop pill, marks
   Save/Load, jump box, warnings badge.
 - **Legend strip** under the toolbar when a color mode needs one.
 - **Workspace**: optional left/right drawers flanking the three stacked views,
@@ -111,6 +111,10 @@ exactly one of those.
   ([MODEL-005](03-core-model.md#model-005-warnings)).
 - **Events**: the virtualized event list, with follow and filtered-only
   toggles ([NAV-005](06-playback-navigation.md#nav-005-the-events-panel)).
+- **Logs**: the trace's log lines as a terminal — virtualized, dimmed past the
+  playhead, following it like `tail -f`, narrowed by minimum level and text
+  search ([LOG-007](13-domains-and-logs.md#log-007-the-logs-panel)). Its
+  toolbar button appears only for a trace with log records.
 
 The **Event** window is per-event rather than a declared panel, as the
 allocation window is: it opens when a custom event is stepped onto or clicked,
@@ -133,7 +137,10 @@ of CSS. With no session to restore, the workspace must open with the panels
 that are consulted continuously already docked and open:
 
 - **Right drawer**, top to bottom: Layout, Appearance, Filter, Marks.
-- **Left drawer**: Events.
+- **Left drawer**, top to bottom: Events, Logs. Logs starts open only when
+  the loaded trace has log records, and closed otherwise
+  ([LOG-007](13-domains-and-logs.md#log-007-the-logs-panel)); the panel
+  table records that condition beside the panel's dock and open state.
 - **Floating and closed**: Play, Warnings, Allocation and its pinned clones.
   Play is a window a user opens for a moment and dismisses; Warnings only
   exists when the trace has any; Allocation follows selection and is placed

@@ -153,6 +153,8 @@ function finishTraceLoad() {
   // the custom field catalog is a per-trace fact, settled by the load pass
   E.hp_fields_json();
   const fields = retJson();
+  // the log domain's summary (LOG-009); null from a core without it
+  meta.logs = typeof E.hp_logs_meta_json === 'function' ? (E.hp_logs_meta_json(), retJson()) : null;
 
   S.loaded = true;
   S.n = n;
@@ -1024,6 +1026,22 @@ onmessage = async (ev: MessageEvent<ToWorker>) => {
       const cv = m.kind === 0 ? canvases.tlt : canvases.tls;
       E.hp_tl_hover(m.kind, cv.width, Math.min(cv.width - 1, Math.round(toDevice(m.x))), view.lo, view.hi);
       postMessage({ type: 'tlhover-result', reqId: m.reqId, kind: m.kind, info: retJson() });
+      break;
+    }
+    // the log domain (LOG-009): answered even with no trace or an older core
+    // without the exports, so a coalesced caller is never left waiting
+    case 'logs-query': {
+      const ok = S.loaded && typeof E.hp_logs_query === 'function';
+      const { reqId, type: _t, ...q } = m;
+      const r = ok ? (E.hp_logs_query(writeBuf(te.encode(JSON.stringify(q)))), retJson()) : null;
+      postMessage({ type: 'logs-query-result', reqId, available: ok, total: r?.total ?? 0, from: r?.from ?? m.from, rows: r?.rows ?? [] });
+      break;
+    }
+    case 'logs-locate': {
+      const ok = S.loaded && typeof E.hp_logs_locate === 'function';
+      const { reqId, type: _t, ...q } = m;
+      const r = ok ? (E.hp_logs_locate(writeBuf(te.encode(JSON.stringify(q)))), retJson()) : null;
+      postMessage({ type: 'logs-locate-result', reqId, available: ok, row: r?.row ?? -1, total: r?.total ?? 0 });
       break;
     }
   }

@@ -33,6 +33,7 @@
   <button id="btn-appearance" title="How the address map is drawn: colors, labels, size format">Appearance</button>
   <button id="btn-filter">Filter</button>
   <button id="btn-events" hidden title="Sequenced list of all events">Events</button>
+  <button id="btn-logs" hidden title="The trace's log lines, as a terminal that follows the playhead">Logs</button>
   <button id="btn-analysis" hidden>Marks</button>
   <button id="crop-indicator" hidden title="Crop is active — click to remove it">✂ <span id="crop-range"></span> ×</button>
 
@@ -342,6 +343,33 @@
     <div id="events-spacer"></div>
     <div id="events-sel-band" hidden title="the current time/events selection"></div>
     <div id="events-rows"></div>
+  </div>
+</div>
+
+<!-- The log domain's terminal (spec LOG-007); src/web/logs/logs-panel.ts. -->
+<div id="logs-panel" class="panel" hidden>
+  <div class="panel-head"><span class="ph-t"></span> <span id="log-count" class="log-count"></span>
+    <span class="head-actions">
+      <label title="Keep the playhead's line in view while stepping / playing, like tail -f. Scrolling by hand turns this off."><input type="checkbox" id="log-follow" checked> follow</label>
+      <button class="panel-close" data-close="logs-panel">×</button>
+    </span>
+  </div>
+  <div class="log-bar">
+    <select id="log-level" title="Minimum level: show this level and everything more severe">
+      <option value="0">trace+</option>
+      <option value="1">debug+</option>
+      <option value="2">info+</option>
+      <option value="3">warn+</option>
+      <option value="4">error+</option>
+      <option value="5">fatal</option>
+    </select>
+    <input id="log-search" type="search" placeholder="search message / logger" autocomplete="off" spellcheck="false"
+      title="Case-insensitive substring of the message or the logger name">
+  </div>
+  <div id="logs-scroll" tabindex="0">
+    <div id="logs-spacer"></div>
+    <div id="logs-rows"></div>
+    <div id="logs-empty" hidden></div>
   </div>
 </div>
 

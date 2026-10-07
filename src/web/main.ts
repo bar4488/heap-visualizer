@@ -30,6 +30,10 @@ import {
   updateEventsPanel, onEvPos, resetEventsPanel, updateEventsSelBand,
 } from './heap/events-panel.ts';
 import {
+  initLogsPanel, logsPresent, resetLogsPanel, updateLogsPanel,
+} from './logs/logs-panel.ts';
+import { OP_LOG, logStatusText, logsHoverText } from './logs/logs-model.ts';
+import {
   initSession, restoreSession,
   restoreMarksAutosave, resetSessionSnapshot,
 } from './session.ts';
@@ -463,6 +467,8 @@ worker.onmessage = (ev) => {
     case 'stepped':
       if (m.event) {
         const e = m.event;
+        // a log line touches no allocation either; the Logs panel follows it
+        if (e.op === OP_LOG) { $('st-info').textContent = logStatusText(e); break; }
         if (e.op === OP_EVENT) {
           // a custom event touches no allocation: the selection stays where it
           // was, and its own window opens instead of the Allocation panel
@@ -642,6 +648,7 @@ function onState(m) {
   setAddrMarkYs(m.addrMarkYs || []);
   renderAddrMarkLines();
   updateEventsPanel();
+  updateLogsPanel();
 }
 
 // ---------------------------------------------------------------------------
@@ -1519,6 +1526,7 @@ const PANELS = heapPanels({
   'analysis-panel': () => buildMarksPanel(),
   'warnings-panel': () => buildWarningsPanel(),
   'events-panel': () => resetEventsPanel(),
+  'logs-panel': () => resetLogsPanel(),
 });
 
 // the shell owns the window/drawer machinery (web/shell/); this is the
@@ -1539,7 +1547,7 @@ function applyDefaultPanelLayout() {
     collapsedLeft: false,
     collapsedRight: false,
   };
-  for (const { id, open } of PANELS) $(id).hidden = !open;
+  for (const { id, open, needs } of PANELS) $(id).hidden = !open || (needs === 'logs' && !logsPresent());
   applyDrawersState(defaults);
 }
 applyDefaultPanelLayout();
@@ -1596,6 +1604,8 @@ initEventsPanel({
   requestSelMirror,
   openSelPopover,
 });
+// the Logs panel (src/web/logs/logs-panel.ts): the log domain's terminal
+initLogsPanel({ ui: UI, post: (msg) => worker.postMessage(msg), requestLatest });
 
 // ---------------------------------------------------------------------------
 // analysis layer (src/web/heap/analysis.ts): tags, names, colors, time marks,
@@ -1915,7 +1925,8 @@ function onTlHoverResult(m) {
     // positioning comes from positionTooltipNearMouse (which tracks the real
     // mouse), so showTooltip takes no coordinates
     showTooltip('tl',
-      `<span class="g">▲ ${fmtNum(i.g)} alloc</span>  <span class="r">▼ ${fmtNum(i.r)} free</span>\n<span class="dim">${range} · events ${fmtNum(i.seqFrom)}–${fmtNum(i.seqTo)}</span>`);
+      `<span class="g">▲ ${fmtNum(i.g)} alloc</span>  <span class="r">▼ ${fmtNum(i.r)} free</span>\n<span class="dim">${range} · events ${fmtNum(i.seqFrom)}–${fmtNum(i.seqTo)}</span>`
+      + (i.logs?.count ? `\n<span class="dim">${esc(logsHoverText(i.logs))}</span>` : ''));
     positionTooltipNearMouse();
   }
 }
