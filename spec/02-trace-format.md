@@ -148,7 +148,8 @@ overlapping allocations, double frees, unknown ids, reused ids, zero sizes,
 and malformed lines are all rendered as best as possible and surfaced as
 warnings ([MODEL-005](03-core-model.md#model-005-warnings)). The only records dropped
 entirely are unparseable lines, records with no/unknown `op`, creator records
-with no `addr`, and `F` with the null id.
+with no `addr`, `F` with the null id, and `L` records without a string `msg`
+([LOG-001](13-domains-and-logs.md#log-001-the-log-record-l)).
 
 ## TRACE-010: Custom event record `E`
 

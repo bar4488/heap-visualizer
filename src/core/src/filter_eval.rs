@@ -56,10 +56,12 @@ impl<'a> Ctx<'a> {
     fn allocation(&self, id: u64) -> Result<u32, usize> {
         let mut found = None;
         let mut count = 0;
-        for (event, (&candidate, &op)) in self.store.id.iter().zip(&self.store.op).enumerate() {
-            if candidate == id && matches!(op, OP_M | OP_R) {
+        let s = self.store;
+        for (row, &candidate) in s.heap.id.iter().enumerate() {
+            let event = s.heap_seq(row);
+            if candidate == id && matches!(s.op[event as usize], OP_M | OP_R) {
                 count += 1;
-                found.get_or_insert(event as u32);
+                found.get_or_insert(event);
             }
         }
         match (count, found) {
@@ -1838,7 +1840,7 @@ pub(crate) fn float(value: f64, unit: Option<Unit>, time_unit: &str) -> Result<f
 pub(crate) fn custom_fragment(root: FieldRoot, s: &Store, e: u32) -> u32 {
     match root {
         FieldRoot::Alloc => s.extra_at(e),
-        FieldRoot::Death => match s.death[e as usize] {
+        FieldRoot::Death => match s.death(e) {
             NONE_U32 => NONE_U32,
             death => s.extra_at(death),
         },
@@ -1854,19 +1856,19 @@ pub(crate) fn field_value(
 ) -> Result<Value, EvalError> {
     let s = ctx.store;
     let i = e as usize;
-    let death = |value: fn(&Store, u32, usize) -> Value| match s.death[i] {
+    let death = |value: fn(&Store, u32, usize) -> Value| match s.death(e) {
         NONE_U32 => Value::Missing,
         d => value(s, d, i),
     };
     Ok(match (ns, name) {
-        (Ns::Alloc, "id") => Value::Int(s.id[i] as i128),
-        (Ns::Alloc, "address") => Value::Int(s.addr[i] as i128),
-        (Ns::Alloc, "end") => Value::Int(s.addr[i].saturating_add(s.span(e)) as i128),
+        (Ns::Alloc, "id") => Value::Int(s.id(e) as i128),
+        (Ns::Alloc, "address") => Value::Int(s.addr(e) as i128),
+        (Ns::Alloc, "end") => Value::Int(s.addr(e).saturating_add(s.span(e)) as i128),
         (Ns::Alloc, "span") => Value::Range(
-            Num::Int(s.addr[i] as i128),
-            Num::Int(s.addr[i].saturating_add(s.span(e)) as i128),
+            Num::Int(s.addr(e) as i128),
+            Num::Int(s.addr(e).saturating_add(s.span(e)) as i128),
         ),
-        (Ns::Alloc, "size") => Value::Int(s.size[i] as i128),
+        (Ns::Alloc, "size") => Value::Int(s.size(e) as i128),
         (Ns::Alloc, "usable") => match s.usable_at(e) {
             0 => Value::Missing,
             v => Value::Int(v as i128),
@@ -1878,13 +1880,13 @@ pub(crate) fn field_value(
                 .map(Value::String)
                 .collect(),
         ),
-        (Ns::Alloc, "freed") => Value::Bool(s.death[i] != NONE_U32),
+        (Ns::Alloc, "freed") => Value::Bool(s.death(e) != NONE_U32),
         (Ns::Alloc, "lifetime") => {
             death(|s, d, i| Value::Int(s.t[d as usize] as i128 - s.t[i] as i128))
         }
         (Ns::Malloc, "seq") => Value::Int(e as i128),
         (Ns::Malloc, "time") => Value::Int(s.t[i] as i128),
-        (Ns::Malloc, "site") => match s.site[i] {
+        (Ns::Malloc, "site") => match s.site(e) {
             NONE_U32 => Value::Missing,
             id => Value::String(s.sites[id as usize].clone()),
         },

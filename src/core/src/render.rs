@@ -104,7 +104,7 @@ impl Filter {
         }
         let ei = e as usize;
         if self.sites_set {
-            let site = s.site[ei];
+            let site = s.site(e);
             if site != NONE_U32 && !Self::bit(&self.sites, site) {
                 return false;
             }
@@ -126,7 +126,7 @@ impl Filter {
                 return false;
             }
         }
-        let sz = s.size[ei];
+        let sz = s.size(e);
         if sz < self.size_min {
             return false;
         }
@@ -134,7 +134,7 @@ impl Filter {
             return false;
         }
         if !self.addr_ranges.is_empty() {
-            let a = s.addr[ei];
+            let a = s.addr(e);
             let end = a.saturating_add(s.span(e));
             if !self.addr_ranges.iter().any(|&(lo, hi)| a < hi && end > lo) {
                 return false;
@@ -452,7 +452,7 @@ pub fn alloc_color(s: &Store, cfg: &Cfg, e: u32, cur_t: u64, age_norm: f64) -> [
     let ei = e as usize;
     match cfg.color_mode {
         MODE_SITE => {
-            let site = s.site[ei];
+            let site = s.site(e);
             if site == NONE_U32 {
                 NO_TAG
             } else {
@@ -469,7 +469,7 @@ pub fn alloc_color(s: &Store, cfg: &Cfg, e: u32, cur_t: u64, age_norm: f64) -> [
         }
         MODE_SIZE => {
             // log2(size) mapped over 4..=24 bits
-            let bits = 64 - s.size[ei].max(1).leading_zeros();
+            let bits = 64 - s.size(e).max(1).leading_zeros();
             ramp((bits.saturating_sub(4)) as f32 / 20.0)
         }
         MODE_AGE => {
@@ -718,7 +718,7 @@ pub fn render_addr(
     for &(e, a, dim_it) in draw.iter() {
         let pass = !dim_it;
         let span = s.span(e);
-        let size = s.size[e as usize].max(1).min(span);
+        let size = s.size(e).max(1).min(span);
         let end = a.saturating_add(span);
         let r0 = (a - v.base) / rb;
         let r1 = (end - 1 - v.base) / rb;
@@ -872,7 +872,7 @@ pub fn render_addr(
                         y,
                         vw,
                         e,
-                        s.size[e as usize]
+                        s.size(e)
                     );
                     n_size_labels += 1;
                 }
@@ -927,7 +927,7 @@ pub fn render_addr(
                 if g <= e {
                     continue;
                 }
-                let d = s.death[g as usize];
+                let d = s.death(g);
                 if d == NONE_U32 || d >= v.cur {
                     continue; // still live (or never freed): not a ghost
                 }
@@ -1031,16 +1031,16 @@ pub fn alloc_info(
     out.push_str(&format!(
         "{{\"e\":{},\"id\":\"{}\",\"addr\":\"0x{:x}\",\"end\":\"0x{:x}\",\"size\":{},\"usable\":{}",
         e,
-        s.id[ei],
+        s.id(e),
         a,
-        a.saturating_add(s.size[ei]),
-        s.size[ei],
+        a.saturating_add(s.size(e)),
+        s.size(e),
         s.usable_at(e)
     ));
     out.push_str(",\"site\":");
-    if s.site[ei] != NONE_U32 {
-        push_json_str(&mut out, &s.sites[s.site[ei] as usize]);
-        out.push_str(&format!(",\"siteIdx\":{}", s.site[ei]));
+    if s.site(e) != NONE_U32 {
+        push_json_str(&mut out, &s.sites[s.site(e) as usize]);
+        out.push_str(&format!(",\"siteIdx\":{}", s.site(e)));
     } else {
         out.push_str("null");
     }
@@ -1066,7 +1066,7 @@ pub fn alloc_info(
         let _ = write!(out, "{tag}");
     }
     out.push(']');
-    let death = s.death[ei];
+    let death = s.death(e);
     if death != NONE_U32 {
         out.push_str(&format!(
             ",\"deathSeq\":{},\"deathT\":{}",
@@ -1162,9 +1162,9 @@ pub fn event_rects(s: &Store, v: &mut View, cfg: &Cfg, w: u32, e: u32, scroll: f
     }
     let ei = e as usize;
     let creator = match s.op[ei] {
-        OP_F => s.target[ei],
+        OP_F => s.target(e),
         // a custom event marks no region of the map
-        OP_E => return "[]".to_string(),
+        OP_E | OP_L => return "[]".to_string(),
         _ => e,
     };
     if creator == NONE_U32 {
@@ -1173,7 +1173,7 @@ pub fn event_rects(s: &Store, v: &mut View, cfg: &Cfg, w: u32, e: u32, scroll: f
     v.ensure_rows();
     format!(
         "[{}]",
-        region_rects(s, v, cfg, w, s.addr[creator as usize], s.span(creator), scroll, 16)
+        region_rects(s, v, cfg, w, s.addr(creator), s.span(creator), scroll, 16)
     )
 }
 
@@ -1189,14 +1189,14 @@ pub fn move_link(s: &Store, v: &mut View, cfg: &Cfg, w: u32, scroll: f64) -> Str
     v.ensure_rows();
     let mut out = String::from("{");
     out.push_str(&format!("\"op\":{},\"seq\":{}", op, e));
-    if op == OP_E {
+    if op == OP_E || op == OP_L {
         // nothing moved, nothing was freed: a landmark draws no link
         out.push_str(",\"old\":[],\"new\":[]}");
         return out;
     }
     if op == OP_M {
         out.push_str(",\"old\":[],\"new\":[");
-        out.push_str(&region_rects(s, v, cfg, w, s.addr[ei], s.span(e), scroll, 4));
+        out.push_str(&region_rects(s, v, cfg, w, s.addr(e), s.span(e), scroll, 4));
         out.push(']');
     } else if op == OP_R {
         let (oa, os) = s.old_geom_at(e);
@@ -1210,7 +1210,7 @@ pub fn move_link(s: &Store, v: &mut View, cfg: &Cfg, w: u32, scroll: f64) -> Str
             v,
             cfg,
             w,
-            s.addr[ei],
+            s.addr(e),
             s.span(e),
             scroll,
             4,
@@ -1218,11 +1218,11 @@ pub fn move_link(s: &Store, v: &mut View, cfg: &Cfg, w: u32, scroll: f64) -> Str
         out.push(']');
     } else {
         // F: flash the freed region
-        let tgt = s.target[ei];
+        let tgt = s.target(e);
         let (fa, fs) = if tgt != NONE_U32 {
-            (s.addr[tgt as usize], s.span(tgt))
+            (s.addr(tgt), s.span(tgt))
         } else {
-            (s.addr[ei], s.size[ei])
+            (s.addr(e), s.size(e))
         };
         out.push_str(",\"old\":[");
         if fs > 0 {
@@ -1244,17 +1244,17 @@ pub fn scroll_for_event(s: &Store, v: &mut View, cfg: &Cfg, h: u32, e: u32) -> f
     let ei = e as usize;
     let creator = match s.op[ei] {
         OP_F => {
-            if s.target[ei] != NONE_U32 {
-                s.target[ei]
+            if s.target(e) != NONE_U32 {
+                s.target(e)
             } else {
                 return -1.0;
             }
         }
         // a custom event sits at no address: leave the viewport where it is
-        OP_E => return -1.0,
+        OP_E | OP_L => return -1.0,
         _ => e,
     };
-    let a = s.addr[creator as usize];
+    let a = s.addr(creator);
     let r = (a.saturating_sub(v.base)) / v.row_bytes;
     let idx = match v.rows.binary_search(&r) {
         Ok(i) => i,
