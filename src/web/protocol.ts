@@ -30,7 +30,24 @@ export type AllocInfo = { e: number; id: string; [field: string]: any };
 export type EventRow = { seq: number; [field: string]: any };
 
 /** Engine JSON: trace metadata from the load pass. */
-export type TraceMeta = { [field: string]: any };
+export type TraceMeta = {
+  /**
+   * `hp_logs_meta_json`, attached by the worker at load (LOG-009): null when
+   * this core has no log domain; a zero `count` means the trace has no logs.
+   */
+  logs?: LogsMeta | null;
+  [field: string]: any;
+};
+
+/** Engine JSON (LOG-009): the log domain's load-time summary. */
+export type LogsMeta = { count: number; byLevel: number[]; loggers: { name: string; count: number }[] };
+
+/** Engine JSON (LOG-009): one row of a log query; `row` indexes the match list. */
+export type LogRow = {
+  row: number; seq: number; t: number; thr: number | null;
+  level: number; logger: string | null; msg: string;
+  fields: Record<string, unknown> | null;
+};
 
 /**
  * Engine JSON: one caller-defined trace field, as `hp_fields_json` renders it.
@@ -152,7 +169,9 @@ export type Query =
   | { type: 'filter-apply'; reqId: number; source: string }
   | { type: 'analysis-get'; reqId: number }
   | { type: 'analysis-change'; reqId: number; expectedRevision: number; change: unknown }
-  | { type: 'analysis-replace'; reqId: number; document: unknown };
+  | { type: 'analysis-replace'; reqId: number; document: unknown }
+  | { type: 'logs-query'; reqId: number; minLevel: number; text: string; seqLo?: number; seqHi?: number; from: number; count: number }
+  | { type: 'logs-locate'; reqId: number; minLevel: number; text: string; seq: number };
 
 export type ToWorker = Command | Query;
 
@@ -193,6 +212,9 @@ export type ReplyTo = {
     change?: unknown; error?: string; message?: string;
   };
   'analysis-replace': { type: 'analysis-replace-result'; reqId: number; ok: boolean; revision?: number; error?: string; message?: string };
+  /** `available` is false with no trace loaded or no log exports in this core. */
+  'logs-query': { type: 'logs-query-result'; reqId: number; available: boolean; total: number; from: number; rows: LogRow[] };
+  'logs-locate': { type: 'logs-locate-result'; reqId: number; available: boolean; row: number; total: number };
 };
 
 export type QueryType = keyof ReplyTo;
