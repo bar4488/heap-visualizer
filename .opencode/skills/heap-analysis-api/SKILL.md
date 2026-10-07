@@ -30,6 +30,8 @@ strings; creator event indices and sequence bounds are JSON integers.
 4. Query compact allocation matches.
 5. Fetch allocation detail for representative or boundary creators.
 6. Request focused stream context only when neighboring events matter.
+7. If the overview reports `logs.records > 0`, read the program's own logs
+   around interesting sequence ranges (see Logs).
 
 Prefer bounded semantic endpoints over paging the entire allocation set.
 `capabilities.limits` in the session response lists every page, body, and
@@ -134,6 +136,18 @@ Custom records appear as `operation:"event"` with their producer-supplied
 `title`; allocation/free/realloc records expose creator identity and operation
 semantics. Custom-record fields beyond the title are not returned by this
 endpoint.
+
+## Logs
+
+`GET /api/v1/logs?minLevel=warn&text=timeout&seqLo=0&seqHi=5000&from=0&count=50`
+pages the trace's structured log records (`L`) in sequence order. Every
+parameter is optional: `minLevel` is `trace`…`fatal` (records at or above it),
+`text` a case-insensitive substring of message or logger (at most 1 KiB),
+`seqLo`/`seqHi` an inclusive sequence range, `count` at most 200. Items carry
+`seq`, `t` (string), `thr`, `level`, `logger`, `msg`, and `fields`; follow
+`next` for the next page. Logs are evidence about what the program was doing
+at a sequence, not proof that it caused a heap event — correlate by sequence
+range, e.g. errors near a growth window found with the timeline.
 
 ## Warnings
 
