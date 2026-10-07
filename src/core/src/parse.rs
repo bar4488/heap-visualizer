@@ -287,6 +287,29 @@ impl Parser {
         members
     }
 
+    /// Append one record to the event spine (DOM-001). The spine -> heap rank
+    /// is materialized the first time a non-heap record arrives — until then
+    /// every record is a heap record and the heap row is the spine index, so
+    /// a heap-only trace never builds the mapping.
+    fn push_spine(&mut self, op: u8, t: u64, thr_idx: u16, heap: bool) {
+        let s = &mut self.store;
+        let e = s.len();
+        if !heap && s.hrank.is_empty() {
+            debug_assert_eq!(s.heap.addr.len(), e as usize);
+            s.hrank = (0..=e).collect();
+            s.heap.seq = (0..e).collect();
+        }
+        s.op.push(op);
+        s.t.push(t);
+        s.thr_idx.push(thr_idx);
+        if let Some(&r) = s.hrank.last() {
+            s.hrank.push(r + heap as u32);
+            if heap {
+                s.heap.seq.push(e);
+            }
+        }
+    }
+
     fn apply(&mut self, mut raw: Raw) {
         if raw.op == b'H' {
             let s = &mut self.store;
@@ -395,7 +418,7 @@ impl Parser {
             let kid = if op == OP_F { raw.id } else { raw.old_id };
             match kid.and_then(|k| self.id_map.get(&k).copied()) {
                 Some(ce) => {
-                    if self.store.death[ce as usize] != NONE_U32 {
+                    if self.store.death(ce) != NONE_U32 {
                         self.store.warn(e, W_DOUBLE_FREE, kid.unwrap_or(0));
                     } else {
                         target = ce;
@@ -435,52 +458,46 @@ impl Parser {
         let (mut o_addr, mut o_size) = (0u64, 0u64);
         if op == OP_R {
             if target != NONE_U32 {
-                o_addr = self.store.addr[target as usize];
-                o_size = self.store.size[target as usize];
+                o_addr = self.store.addr(target);
+                o_size = self.store.size(target);
             } else {
                 o_addr = raw.old_addr.unwrap_or(0);
                 o_size = raw.old_size.unwrap_or(0);
             }
         }
 
-        // ---- push the event row ----
+        // ---- push the spine row, then the heap row ----
+        self.push_spine(op, t, thr_idx, true);
         let s = &mut self.store;
-        s.op.push(op);
-        s.t.push(t);
-        s.id.push(raw.id.unwrap_or(0));
-        s.addr.push(addr);
-        s.size.push(size);
+        let h = s.heap.addr.len();
+        let hc = &mut s.heap;
+        hc.id.push(raw.id.unwrap_or(0));
+        hc.addr.push(addr);
+        hc.size.push(size);
         // lazy columns: materialize (backfilled with the default) only once a
-        // real value appears, so traces without them pay no per-event memory
-        push_lazy(&mut s.usable, e as usize, usable, 0);
-        s.thr_idx.push(thr_idx);
-        s.site.push(site);
-        push_lazy(&mut s.stack, e as usize, stack, NONE_U32);
-        push_lazy(&mut s.label, e as usize, label, NONE_U32);
-        push_lazy(&mut s.extra, e as usize, extra, NONE_U32);
-        s.target.push(target);
+        // real value appears, so traces without them pay no per-row memory
+        push_lazy(&mut hc.usable, h, usable, 0);
+        hc.site.push(site);
+        push_lazy(&mut hc.stack, h, stack, NONE_U32);
+        push_lazy(&mut hc.label, h, label, NONE_U32);
+        push_lazy(&mut hc.extra, h, extra, NONE_U32);
+        hc.target.push(target);
+        hc.death.push(NONE_U32);
+        let gp = hc.green_pre[h];
+        let rp = hc.red_pre[h];
+        hc.green_pre.push(gp + (op == OP_M || op == OP_R) as u32);
+        hc.red_pre.push(rp + (op == OP_F || op == OP_R) as u32);
         if op == OP_R && (o_addr != 0 || o_size != 0) {
             s.old_geom.insert(e, (o_addr, o_size));
         }
-        s.death.push(NONE_U32);
-        let gp = *s.green_pre.last().unwrap_or(&0);
-        let rp = *s.red_pre.last().unwrap_or(&0);
-        if s.green_pre.is_empty() {
-            s.green_pre.push(0);
-            s.red_pre.push(0);
-        }
-        s.green_pre
-            .push(gp + (op == OP_M || op == OP_R) as u32);
-        s.red_pre.push(rp + (op == OP_F || op == OP_R) as u32);
 
         // ---- liveness bookkeeping ----
         if target != NONE_U32 {
-            s.death[target as usize] = e;
-            let ta = s.addr[target as usize];
+            let th = s.heap_rank(target) as usize;
+            s.heap.death[th] = e;
+            let ta = s.addr(target);
             self.live.remove(&(ta, target));
-            self.cur_live_bytes = self
-                .cur_live_bytes
-                .saturating_sub(s.size[target as usize]);
+            self.cur_live_bytes = self.cur_live_bytes.saturating_sub(s.size(target));
         }
 
         if op == OP_M || op == OP_R {
@@ -492,7 +509,7 @@ impl Parser {
             // duplicate-id check + registration
             if let Some(id) = raw.id {
                 if let Some(&prev) = self.id_map.get(&id) {
-                    if s.death[prev as usize] == NONE_U32 {
+                    if s.death(prev) == NONE_U32 {
                         s.warn(e, W_DUP_ID, id);
                     }
                 }
@@ -545,8 +562,10 @@ impl Parser {
         }
 
         // ---- periodic snapshot ----
+        // Cadence counts heap rows, so records of other domains never make
+        // snapshots denser; the position stored is the spine count applied.
         let applied = e + 1;
-        if applied % self.snap_interval == 0 {
+        if (h as u32 + 1) % self.snap_interval == 0 {
             let mut lv: Vec<u32> = self.live.keys().map(|&(_, ev)| ev).collect();
             lv.sort_unstable();
             s.snaps.push((applied, lv));
@@ -570,18 +589,14 @@ impl Default for Store {
         Store {
             op: Vec::new(),
             t: Vec::new(),
-            id: Vec::new(),
-            addr: Vec::new(),
-            size: Vec::new(),
-            usable: Vec::new(),
             thr_idx: Vec::new(),
-            site: Vec::new(),
-            stack: Vec::new(),
-            label: Vec::new(),
-            extra: Vec::new(),
-            target: Vec::new(),
+            hrank: Vec::new(),
+            heap: HeapCols {
+                green_pre: vec![0],
+                red_pre: vec![0],
+                ..HeapCols::default()
+            },
             old_geom: std::collections::HashMap::new(),
-            death: Vec::new(),
             tag_members: Vec::new(),
             tag_any: Vec::new(),
             tag_block: Vec::new(),
@@ -591,8 +606,6 @@ impl Default for Store {
             tag_alloc_idx: Vec::new(),
             tag_free_idx: Vec::new(),
             tag_idx_dirty: false,
-            green_pre: Vec::new(),
-            red_pre: Vec::new(),
             sites: Vec::new(),
             site_count: Vec::new(),
             thrs: Vec::new(),

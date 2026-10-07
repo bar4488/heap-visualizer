@@ -109,18 +109,18 @@ fn tag_values(app: &App, creator: u32) -> Vec<Value> {
 fn compact(app: &App, creator: u32) -> Value {
     let store = &app.store;
     let i = creator as usize;
-    let death = store.death[i];
+    let death = store.death(creator);
     let analysis = app.analysis.allocations.get(&creator);
     json!({
         "creator": creator,
-        "id": store.id[i].to_string(),
-        "address": format!("0x{:x}", store.addr[i]),
-        "size": store.size[i].to_string(),
+        "id": store.id(creator).to_string(),
+        "address": format!("0x{:x}", store.addr(creator)),
+        "size": store.size(creator).to_string(),
         "usable": (store.usable_at(creator) != 0).then(|| store.usable_at(creator).to_string()),
         "birth": { "seq": creator, "time": store.t[i].to_string() },
         "death": (death != NONE_U32).then(|| json!({ "seq": death, "time": store.t[death as usize].to_string() })),
         "lifetime": (death != NONE_U32).then(|| (store.t[death as usize] - store.t[i]).to_string()),
-        "site": (store.site[i] != NONE_U32).then(|| store.sites[store.site[i] as usize].clone()),
+        "site": (store.site(creator) != NONE_U32).then(|| store.sites[store.site(creator) as usize].clone()),
         "thread": (store.thr_idx[i] != NONE_U16).then(|| store.thrs[store.thr_idx[i] as usize].to_string()),
         "name": analysis.and_then(|value| value.name.clone()),
         "color": analysis.and_then(|value| value.color.clone()),
@@ -134,7 +134,7 @@ pub(crate) fn allocation(app: &App, creator: u32) -> Option<Value> {
     }
     let store = &app.store;
     let i = creator as usize;
-    let death = store.death[i];
+    let death = store.death(creator);
     let mut value = compact(app, creator);
     let object = value.as_object_mut().unwrap();
     object.insert("operation".into(), json!(op_name(store.op[i])));
@@ -142,7 +142,7 @@ pub(crate) fn allocation(app: &App, creator: u32) -> Option<Value> {
         "end".into(),
         json!(format!(
             "0x{:x}",
-            store.addr[i].saturating_add(store.size[i])
+            store.addr(creator).saturating_add(store.size(creator))
         )),
     );
     object.insert(
@@ -162,8 +162,8 @@ pub(crate) fn allocation(app: &App, creator: u32) -> Option<Value> {
             extra(store, death)
         },
     );
-    let from = if store.op[i] == OP_R && store.target[i] != NONE_U32 {
-        Some(store.target[i])
+    let from = if store.op[i] == OP_R && store.target(creator) != NONE_U32 {
+        Some(store.target(creator))
     } else {
         None
     };
@@ -174,7 +174,7 @@ pub(crate) fn allocation(app: &App, creator: u32) -> Option<Value> {
     );
     object.insert("creatorEvent".into(), json!({
         "seq": creator, "time": store.t[i].to_string(), "operation": op_name(store.op[i]),
-        "site": (store.site[i] != NONE_U32).then(|| store.sites[store.site[i] as usize].clone()),
+        "site": (store.site(creator) != NONE_U32).then(|| store.sites[store.site(creator) as usize].clone()),
         "thread": (store.thr_idx[i] != NONE_U16).then(|| store.thrs[store.thr_idx[i] as usize].to_string()),
         "stack": (store.stack_at(creator) != NONE_U32).then(|| store.stacks[store.stack_at(creator) as usize].clone()),
         "fields": extra(store, creator),
@@ -242,13 +242,13 @@ pub(crate) fn query(
         "creator-asc" => {}
         "birth-desc" => found.sort_unstable_by_key(|event| Reverse(*event)),
         "size-desc" => {
-            found.sort_unstable_by_key(|event| (Reverse(app.store.size[*event as usize]), *event))
+            found.sort_unstable_by_key(|event| (Reverse(app.store.size(*event)), *event))
         }
         "lifetime-desc" => {
             found.sort_unstable_by_key(|event| (Reverse(lifetime(&app.store, *event)), *event))
         }
         "death-desc" => found.sort_unstable_by_key(|event| {
-            let death = app.store.death[*event as usize];
+            let death = app.store.death(*event);
             (
                 death == NONE_U32,
                 Reverse(if death == NONE_U32 { 0 } else { death }),
@@ -275,7 +275,7 @@ pub(crate) fn query(
     };
     let requested: u128 = found
         .iter()
-        .map(|&event| app.store.size[event as usize] as u128)
+        .map(|&event| app.store.size(event) as u128)
         .sum();
     let usable: u128 = found
         .iter()
@@ -292,7 +292,7 @@ pub(crate) fn query(
 }
 
 fn lifetime(store: &Store, creator: u32) -> u64 {
-    let death = store.death[creator as usize];
+    let death = store.death(creator);
     if death == NONE_U32 {
         u64::MAX
     } else {
@@ -331,8 +331,8 @@ pub(crate) fn summarize(
     for &event in &selected {
         let i = event as usize;
         let keys: Vec<String> = match group_by {
-            "site" => vec![if app.store.site[i] != NONE_U32 {
-                app.store.sites[app.store.site[i] as usize].clone()
+            "site" => vec![if app.store.site(event) != NONE_U32 {
+                app.store.sites[app.store.site(event) as usize].clone()
             } else {
                 "(none)".into()
             }],
@@ -341,13 +341,13 @@ pub(crate) fn summarize(
             } else {
                 "(none)".into()
             }],
-            "freed" => vec![if app.store.death[i] != NONE_U32 {
+            "freed" => vec![if app.store.death(event) != NONE_U32 {
                 "freed".into()
             } else {
                 "live-at-end".into()
             }],
-            "size-bucket" => vec![bucket(app.store.size[i])],
-            "lifetime-bucket" => vec![if app.store.death[i] == NONE_U32 {
+            "size-bucket" => vec![bucket(app.store.size(event))],
+            "lifetime-bucket" => vec![if app.store.death(event) == NONE_U32 {
                 "live-at-end".into()
             } else {
                 bucket(lifetime(&app.store, event))
@@ -376,10 +376,10 @@ pub(crate) fn summarize(
         for key in keys {
             let group = groups.entry(key).or_default();
             group.allocations += 1;
-            group.requested += app.store.size[i] as u128;
+            group.requested += app.store.size(event) as u128;
             group.usable += app.store.usable_at(event) as u128;
             group.usable_known += u64::from(app.store.usable_at(event) != 0);
-            if app.store.death[i] == NONE_U32 {
+            if app.store.death(event) == NONE_U32 {
                 group.live += 1;
             } else {
                 group.freed += 1;
@@ -408,7 +408,7 @@ pub(crate) fn summarize(
     }).collect();
     let requested: u128 = selected
         .iter()
-        .map(|&event| app.store.size[event as usize] as u128)
+        .map(|&event| app.store.size(event) as u128)
         .sum();
     Ok(
         json!({ "matched": { "allocations": selected.len(), "requestedBytes": requested.to_string() }, "groups": rows, "groupsOmitted": omitted }),
@@ -423,11 +423,11 @@ pub(crate) fn overview(app: &App, top: usize) -> Value {
     let mut peak = (0_u128, 0_u32);
     for event in 0..store.len() {
         let i = event as usize;
-        if matches!(store.op[i], OP_F | OP_R) && store.target[i] != NONE_U32 {
-            current = current.saturating_sub(store.size[store.target[i] as usize] as u128);
+        if matches!(store.op[i], OP_F | OP_R) && store.target(event) != NONE_U32 {
+            current = current.saturating_sub(store.size(store.target(event)) as u128);
         }
         if matches!(store.op[i], OP_M | OP_R) {
-            current += store.size[i] as u128;
+            current += store.size(event) as u128;
         }
         if current > peak.0 {
             peak = (current, event + 1);
@@ -435,17 +435,17 @@ pub(crate) fn overview(app: &App, top: usize) -> Value {
     }
     for event in 0..store.len() {
         if matches!(store.op[event as usize], OP_M | OP_R)
-            && store.death[event as usize] == NONE_U32
+            && store.death(event) == NONE_U32
         {
             live_count += 1;
-            live_bytes += store.size[event as usize] as u128;
+            live_bytes += store.size(event) as u128;
         }
     }
     let mut site_bytes = vec![0_u128; store.sites.len()];
     for event in 0..store.len() {
-        if matches!(store.op[event as usize], OP_M | OP_R) && store.site[event as usize] != NONE_U32
+        if matches!(store.op[event as usize], OP_M | OP_R) && store.site(event) != NONE_U32
         {
-            site_bytes[store.site[event as usize] as usize] += store.size[event as usize] as u128;
+            site_bytes[store.site(event) as usize] += store.size(event) as u128;
         }
     }
     let mut sites: Vec<_> = store
@@ -512,24 +512,24 @@ pub(crate) fn timeline(
         match app.store.op[i] {
             OP_M if bit(&bits, event) => {
                 row.0 += 1;
-                row.4 += app.store.size[i] as u128;
+                row.4 += app.store.size(event) as u128;
             }
-            OP_F if app.store.target[i] != NONE_U32 && bit(&bits, app.store.target[i]) => {
+            OP_F if app.store.target(event) != NONE_U32 && bit(&bits, app.store.target(event)) => {
                 row.1 += 1;
-                row.5 += app.store.size[app.store.target[i] as usize] as u128;
+                row.5 += app.store.size(app.store.target(event)) as u128;
             }
             OP_R => {
-                let old = app.store.target[i];
+                let old = app.store.target(event);
                 let old_matches = old != NONE_U32 && bit(&bits, old);
                 let new_matches = bit(&bits, event);
                 if old_matches || new_matches {
                     row.2 += 1;
                 }
                 if new_matches {
-                    row.4 += app.store.size[i] as u128;
+                    row.4 += app.store.size(event) as u128;
                 }
                 if old_matches {
-                    row.5 += app.store.size[old as usize] as u128;
+                    row.5 += app.store.size(old) as u128;
                 }
             }
             OP_E => row.3 += 1,
@@ -557,17 +557,17 @@ fn event_value(app: &App, event: u32) -> Value {
         return json!({ "seq": event, "time": store.t[i].to_string(), "operation": "event", "title": (store.label_at(event) != NONE_U32).then(|| store.ev_labels[store.label_at(event) as usize].clone()) });
     }
     let creator = if store.op[i] == OP_F {
-        store.target[i]
+        store.target(event)
     } else {
         event
     };
     json!({
         "seq": event, "time": store.t[i].to_string(), "operation": op_name(store.op[i]),
         "creator": (creator != NONE_U32).then_some(creator),
-        "replaces": (store.op[i] == OP_R && store.target[i] != NONE_U32).then_some(store.target[i]),
-        "id": store.id[i].to_string(),
-        "size": (creator != NONE_U32).then(|| store.size[creator as usize].to_string()),
-        "site": (creator != NONE_U32 && store.site[creator as usize] != NONE_U32).then(|| store.sites[store.site[creator as usize] as usize].clone())
+        "replaces": (store.op[i] == OP_R && store.target(event) != NONE_U32).then_some(store.target(event)),
+        "id": store.id(event).to_string(),
+        "size": (creator != NONE_U32).then(|| store.size(creator).to_string()),
+        "site": (creator != NONE_U32 && store.site(creator) != NONE_U32).then(|| store.sites[store.site(creator) as usize].clone())
     })
 }
 
@@ -592,14 +592,14 @@ pub(crate) fn stream_context(
             }
             let i = event as usize;
             let creator = if app.store.op[i] == OP_F {
-                app.store.target[i]
+                app.store.target(event)
             } else {
                 event
             };
             (creator != NONE_U32 && bit(&bits, creator))
                 || (app.store.op[i] == OP_R
-                    && app.store.target[i] != NONE_U32
-                    && bit(&bits, app.store.target[i]))
+                    && app.store.target(event) != NONE_U32
+                    && bit(&bits, app.store.target(event)))
         })
         .map(|event| event_value(app, event))
         .collect();

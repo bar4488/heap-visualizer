@@ -647,7 +647,7 @@ pub extern "C" fn hp_center_x_for_event(e: u32) -> f64 {
     }
     let ei = e as usize;
     let creator = match s.op[ei] {
-        OP_F => s.target[ei],
+        OP_F => s.target(e),
         // a custom event has no address to pan to
         OP_E => return a.cfg.x_pan,
         _ => e,
@@ -656,7 +656,7 @@ pub extern "C" fn hp_center_x_for_event(e: u32) -> f64 {
         return a.cfg.x_pan;
     }
     let rb = a.view.row_bytes;
-    let off = s.addr[creator as usize].saturating_sub(a.view.base) % rb;
+    let off = s.addr(creator).saturating_sub(a.view.base) % rb;
     let vis = 1.0 / a.cfg.x_zoom;
     a.cfg.x_pan = (off as f64 / rb as f64 - vis / 2.0).clamp(0.0, 1.0 - vis);
     a.cfg.x_pan
@@ -1130,8 +1130,8 @@ fn tag_seq_range(a: &mut App, lo: u32, hi: u32, tag: u32, by_free: u32) -> u32 {
             .filter_map(|e| {
                 let op = s.op[e as usize];
                 if by_free != 0 {
-                    if (op == OP_F || op == OP_R) && s.target[e as usize] != NONE_U32 {
-                        Some(s.target[e as usize])
+                    if (op == OP_F || op == OP_R) && s.target(e) != NONE_U32 {
+                        Some(s.target(e))
                     } else {
                         None
                     }
@@ -1428,7 +1428,7 @@ pub extern "C" fn hp_alloc_info(e: u32, w: u32, scroll: f64) {
         a.out.clear();
         a.out.push_str("null");
     } else {
-        let addr = a.store.addr[e as usize];
+        let addr = a.store.addr(e);
         a.out = render::alloc_info(&a.store, &mut a.view, &a.cfg, w, addr, e, scroll);
     }
     ret_str(&a.out);
@@ -1555,23 +1555,23 @@ fn push_event_json(o: &mut String, s: &Store, e: u32) {
         return;
     }
     // an F row carries no geometry of its own: report the allocation it kills
-    let gi = if s.op[ei] == OP_F && s.target[ei] != NONE_U32 {
-        s.target[ei] as usize
+    let gi = if s.op[ei] == OP_F && s.target(e) != NONE_U32 {
+        s.target(e)
     } else {
-        ei
+        e
     };
     o.push_str(&format!(
         "{{\"seq\":{},\"op\":{},\"t\":{},\"id\":{},\"e\":{},\"addr\":\"0x{:x}\",\"size\":{}",
-        e, s.op[ei], s.t[ei] as f64, s.id[ei], gi, s.addr[gi], s.size[gi]
+        e, s.op[ei], s.t[ei] as f64, s.id(e), gi, s.addr(gi), s.size(gi)
     ));
     if s.op[ei] == OP_R {
         let (oa, os) = s.old_geom_at(e);
         o.push_str(&format!(",\"oldAddr\":\"0x{:x}\",\"oldSize\":{}", oa, os));
     }
     o.push_str(",\"site\":");
-    let si = if s.site[gi] != NONE_U32 { gi } else { ei };
-    if s.site[si] != NONE_U32 {
-        push_json_str(o, &s.sites[s.site[si] as usize]);
+    let si = if s.site(gi) != NONE_U32 { gi } else { e };
+    if s.site(si) != NONE_U32 {
+        push_json_str(o, &s.sites[s.site(si) as usize]);
     } else {
         o.push_str("null");
     }
@@ -1583,21 +1583,21 @@ fn write_allocation_json(o: &mut String, s: &Store, e: u32) -> bool {
         return false;
     }
     let i = e as usize;
-    let addr = s.addr[i];
+    let addr = s.addr(e);
     o.push_str(&format!(
         "{{\"creator\":{},\"op\":{},\"id\":{},\"addr\":\"0x{:x}\",\"end\":\"0x{:x}\",\"size\":{},\"usable\":{},\"t\":{}",
         e,
         s.op[i],
-        s.id[i],
+        s.id(e),
         addr,
-        addr.saturating_add(s.size[i]),
-        s.size[i],
+        addr.saturating_add(s.size(e)),
+        s.size(e),
         s.usable_at(e),
         s.t[i] as f64
     ));
     o.push_str(",\"site\":");
-    if s.site[i] != NONE_U32 {
-        push_json_str(o, &s.sites[s.site[i] as usize]);
+    if s.site(e) != NONE_U32 {
+        push_json_str(o, &s.sites[s.site(e) as usize]);
     } else {
         o.push_str("null");
     }
@@ -1607,7 +1607,7 @@ fn write_allocation_json(o: &mut String, s: &Store, e: u32) -> bool {
     } else {
         o.push_str("null");
     }
-    let death = s.death[i];
+    let death = s.death(e);
     o.push_str(",\"death\":");
     if death != NONE_U32 {
         o.push_str(&format!(
@@ -1751,7 +1751,7 @@ fn ensure_ev_filtered(a: &mut App) {
             continue;
         }
         let creator = if s.op[e as usize] == OP_F {
-            s.target[e as usize]
+            s.target(e)
         } else {
             e
         };
@@ -1984,12 +1984,12 @@ mod tests {
         assert_eq!(s.t_min, 100);
         assert_eq!(s.t_max, 400);
         // free of id 1 resolves to event 0
-        assert_eq!(s.target[2], 0);
-        assert_eq!(s.death[0], 2);
+        assert_eq!(s.target(2), 0);
+        assert_eq!(s.death(0), 2);
         // realloc kills event 1, creates event 3, freed by event 4
-        assert_eq!(s.target[3], 1);
-        assert_eq!(s.death[1], 3);
-        assert_eq!(s.death[3], 4);
+        assert_eq!(s.target(3), 1);
+        assert_eq!(s.death(1), 3);
+        assert_eq!(s.death(3), 4);
         assert_eq!(s.old_geom_at(3), (0x2000, 128));
         let total: u32 = s.warn_counts.iter().sum();
         assert_eq!(total, 0);
@@ -2023,8 +2023,8 @@ mod tests {
             assert_eq!(s.label_at(1), NONE_U32);
             assert_eq!(s.label_at(7), NONE_U32);
             // and they leave the timelines' alloc/free marks alone
-            assert_eq!(s.green_pre[8] - s.green_pre[7], 0);
-            assert_eq!(s.red_pre[8] - s.red_pre[7], 0);
+            assert_eq!(s.green_before(8) - s.green_before(7), 0);
+            assert_eq!(s.red_before(8) - s.red_before(7), 0);
         }
 
         // at every playhead position the live set equals the same trace with
@@ -2554,8 +2554,8 @@ not json at all
             a.store.extras,
             vec!["\"pool\":\"gfx\",\"refs\":3".to_string()]
         );
-        assert_eq!(a.store.extra[0], 0);
-        assert_eq!(a.store.extra[1], NONE_U32);
+        assert_eq!(a.store.extra_at(0), 0);
+        assert_eq!(a.store.extra_at(1), NONE_U32);
         a.view.seek(&a.store, 2);
         let info = render::alloc_info(&a.store, &mut a.view, &a.cfg, 200, 0x1000, 0, 0.0);
         assert!(info.contains("\"extra\":{\"pool\":\"gfx\",\"refs\":3}"));
@@ -3698,7 +3698,7 @@ not json at all
 {"seq":0,"t":18446744073709551615,"op":"M","id":9007199254740993,"addr":"0x1000","size":64}
 "#,
         );
-        assert_eq!(a.store.id[0], 9_007_199_254_740_993);
+        assert_eq!(a.store.id(0), 9_007_199_254_740_993);
         assert_eq!(a.store.t[0], u64::MAX);
         assert_eq!(
             matching(&a, &[], "allocation(9007199254740993).alloc.id == alloc.id"),

@@ -42,8 +42,8 @@ pub fn bin(s: &Store, kind: u32, w: u32, lo: f64, hi: f64) -> Bins {
     let mut r = vec![0u32; w as usize];
     for c in 0..w as usize {
         let (a, b) = (from[c] as usize, from[c + 1] as usize);
-        g[c] = s.green_pre[b] - s.green_pre[a];
-        r[c] = s.red_pre[b] - s.red_pre[a];
+        g[c] = s.green_before(b as u32) - s.green_before(a as u32);
+        r[c] = s.red_before(b as u32) - s.red_before(a as u32);
     }
     Bins { g, r, from }
 }
@@ -133,7 +133,7 @@ pub fn render(
         let free_c = free_idx
             .get(i)
             .filter(|&&e| e < b)
-            .map(|&e| cfg.tag_color(s.first_tag(s.target[e as usize])));
+            .map(|&e| cfg.tag_color(s.first_tag(s.target(e))));
         if let Some(c) = alloc_c {
             for y in 0..lane {
                 put(x as i64, y, c);
@@ -165,8 +165,8 @@ pub fn hover(s: &Store, kind: u32, w: u32, x: u32, lo: f64, hi: f64) -> String {
     }
     let a = boundary(s, kind, w, x, lo, hi);
     let b = boundary(s, kind, w, x + 1, lo, hi);
-    let g = s.green_pre[b as usize] - s.green_pre[a as usize];
-    let r = s.red_pre[b as usize] - s.red_pre[a as usize];
+    let g = s.green_before(b) - s.green_before(a);
+    let r = s.red_before(b) - s.red_before(a);
     let v0 = lo + (hi - lo) * x as f64 / w as f64;
     let v1 = lo + (hi - lo) * (x + 1) as f64 / w as f64;
     format!(
