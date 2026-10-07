@@ -288,8 +288,7 @@ fn is_creator(store: &Store, e: u32) -> bool {
 }
 
 fn replace_analysis(a: &mut App, document: analysis::Document) -> Result<(), analysis::ApplyError> {
-    document.validate(a.store.len(), |e| is_creator(&a.store, e))?;
-    a.analysis = document;
+    a.analysis = document.normalized(a.store.len(), |e| is_creator(&a.store, e))?;
     project_analysis(a);
     Ok(())
 }
@@ -1460,7 +1459,7 @@ fn push_event_json(o: &mut String, s: &Store, e: u32) {
         e
     };
     o.push_str(&format!(
-        "{{\"seq\":{},\"op\":{},\"t\":{},\"id\":{},\"e\":{},\"addr\":\"0x{:x}\",\"size\":{}",
+        "{{\"seq\":{},\"op\":{},\"t\":{},\"id\":\"{}\",\"e\":{},\"addr\":\"0x{:x}\",\"size\":{}",
         e, s.op[ei], s.t[ei] as f64, s.id(e), gi, s.addr(gi), s.size(gi)
     ));
     if s.op[ei] == OP_R {
@@ -1484,7 +1483,7 @@ fn write_allocation_json(o: &mut String, s: &Store, e: u32) -> bool {
     let i = e as usize;
     let addr = s.addr(e);
     o.push_str(&format!(
-        "{{\"creator\":{},\"op\":{},\"id\":{},\"addr\":\"0x{:x}\",\"end\":\"0x{:x}\",\"size\":{},\"usable\":{},\"t\":{}",
+        "{{\"creator\":{},\"op\":{},\"id\":\"{}\",\"addr\":\"0x{:x}\",\"end\":\"0x{:x}\",\"size\":{},\"usable\":{},\"t\":{}",
         e,
         s.op[i],
         s.id(e),
@@ -1943,8 +1942,11 @@ mod tests {
         let events = engine.events_json(1, 2);
         assert!(events.starts_with("[{\"seq\":1,"));
         assert!(events.contains("},{\"seq\":2,"));
+        // ids are strings on every browser-facing surface (TRACE-001)
+        assert!(events.contains("\"id\":\"2\""), "{events}");
         let allocation = engine.allocation_json(1).unwrap();
         assert!(allocation.contains("\"creator\":1"));
+        assert!(allocation.contains("\"id\":\"2\""), "{allocation}");
         assert!(!allocation.contains("rects"));
         assert!(engine.allocation_json(2).is_none());
 

@@ -361,7 +361,11 @@ Two deliberately different persistence channels:
   names, colors, bookmarks, address marks, saved filters, plus trace
   fingerprint, playhead, and key view settings. Manually exported/imported as **`.heapa.json`** (a
   single JSON object marked `heapVisualizerAnalysis: 1`). Dropping one onto
-  the page restores it; a trace-size mismatch warns but applies anyway.
+  the page restores it; a trace-size mismatch warns but applies anyway. An
+  imported document is stored in the same normalized form the individual
+  edits produce (ids and names trimmed, colors and addresses canonical), so
+  an imported `" root "` is named `root`; two entries normalizing to one id
+  reject the import.
   Anchoring by event index is what makes the file portable — it is only
   meaningful against the same trace.
 - **Session** — working state, not a deliverable: layout settings, filter,
