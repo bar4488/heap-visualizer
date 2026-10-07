@@ -53,7 +53,7 @@ service warns on every start that it is running on it. The service itself has
 no default: `python3 src/server/app.py` with nothing set serves the review
 routes 503 rather than open, which is the rule a hand-run process keeps.
 
-`build.sh` generates `dist/demo.heapl` when it is missing. For a different
+`build.sh` generates `dist/demo.heapl` when it is missing or older than `gen.py`. For a different
 trace:
 
 ```sh
