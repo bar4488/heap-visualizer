@@ -449,6 +449,14 @@ impl Store {
         self.old_geom.get(&e).copied().unwrap_or((0, 0))
     }
 
+    /// Requested end `addr + size` of a creator event (exclusive, saturating)
+    /// — the end every surface shows and `alloc.end` filters on. The slack
+    /// band past it is `usable`, never part of the end.
+    #[inline]
+    pub fn end(&self, e: u32) -> u64 {
+        self.addr(e).saturating_add(self.size(e))
+    }
+
     /// Rendered byte span of a creator event (requested size or usable, whichever
     /// is larger; always at least 1 so zero-size flagged records still show).
     #[inline]

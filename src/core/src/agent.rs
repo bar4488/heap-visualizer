@@ -144,7 +144,7 @@ pub(crate) fn allocation(app: &App, creator: u32) -> Option<Value> {
         "end".into(),
         json!(format!(
             "0x{:x}",
-            store.addr(creator).saturating_add(store.size(creator))
+            store.end(creator)
         )),
     );
     object.insert(

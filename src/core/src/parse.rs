@@ -304,7 +304,7 @@ impl Parser {
             };
             self.store.fields[index as usize].types |= shape;
             // a fragment repeating a key counts once; the value the evaluator
-            // will read is the first, so the duplicate is not a second member
+            // will read is the last, so the duplicate is not a second member
             if !members.contains(&index) {
                 members.push(index);
             }

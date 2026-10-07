@@ -72,6 +72,14 @@ both missing when it was never freed. There are no bare field names and no
 aliases; a bare name that used to be one must be a diagnostic naming its
 object.
 
+`alloc.end` is the **requested** end, `address + size` — the end every
+surface displays ([ANL-006](#anl-006-the-allocation-panel-and-pinned-windows)),
+so a predicate written from a shown value matches it. `alloc.span` is
+`address..end`, half-open. The slack band a producer's `usable` adds is never
+part of either; it is reached through `alloc.usable`. `malloc.site`,
+`malloc.thread` and `malloc.stack` are optional: missing on a record that
+carries none.
+
 `named("x")` yields an allocation exposing those same three objects, so
 `named("x").alloc.address` is how one of its fields is read.
 
