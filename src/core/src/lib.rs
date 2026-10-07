@@ -5,9 +5,12 @@
 
 mod filter_eval;
 mod filter_plan;
+#[cfg(test)]
+mod log_tests;
 pub mod agent;
 pub mod analysis;
 pub mod json;
+pub mod logs;
 pub mod parse;
 pub mod render;
 pub mod state;
@@ -107,6 +110,9 @@ struct App {
     /// copy so `named()` can resolve.
     names: Vec<(u32, String)>,
     analysis: analysis::Document,
+    /// The last log query and its matches, so paging and locate (which the
+    /// Logs panel calls as the playhead moves) do not rescan message bytes.
+    log_cache: Option<(logs::LogQuery, logs::Matches)>,
 }
 
 impl App {
@@ -126,6 +132,7 @@ impl App {
             tag_labels: Vec::new(),
             names: Vec::new(),
             analysis: analysis::Document::default(),
+            log_cache: None,
         }
     }
 }
@@ -224,6 +231,30 @@ impl Engine {
 
     pub fn agent_stream_context(&self, source: &str, center: u32, before: u32, after: u32, landmarks: bool) -> Result<serde_json::Value, agent::Error> {
         agent::stream_context(&self.app, source, center, before, after, landmarks)
+    }
+
+    /// `hp_logs_meta_json`'s document.
+    pub fn logs_meta_json(&mut self) -> String {
+        logs::meta_json(&mut self.app.out, &self.app.store.logs);
+        self.app.out.clone()
+    }
+
+    /// `hp_logs_query`'s document for a JSON request.
+    pub fn logs_query_json(&mut self, request: &str) -> String {
+        write_logs_query(&mut self.app, request.as_bytes());
+        self.app.out.clone()
+    }
+
+    /// `hp_logs_locate`'s document for a JSON request.
+    pub fn logs_locate_json(&mut self, request: &str) -> String {
+        write_logs_locate(&mut self.app, request.as_bytes());
+        self.app.out.clone()
+    }
+
+    /// One bounded page of `GET /api/v1/logs` (LOG-008), without `traceId`,
+    /// which the transport adds as for every other agent response.
+    pub fn agent_logs(&self, params: &agent::LogsParams) -> Result<serde_json::Value, agent::Error> {
+        agent::logs(&self.app, params)
     }
 
     pub fn agent_filter_check(&self, source: &str) -> Result<(), agent::Error> {
@@ -352,6 +383,7 @@ fn parse_begin(a: &mut App) {
     a.tag_labels.clear();
     a.names.clear();
     a.analysis = analysis::Document::default();
+    a.log_cache = None;
 }
 
 #[no_mangle]
@@ -374,6 +406,7 @@ fn parse_end(a: &mut App) -> u32 {
         a.view.reset(&a.store);
         a.ev_filtered = Vec::new();
         a.ev_dirty = true;
+        a.log_cache = None;
     }
     a.store.len()
 }
@@ -395,14 +428,15 @@ fn write_metadata_json(a: &mut App) {
     o.clear();
     o.push('{');
     o.push_str(&format!(
-        "\"n\":{},\"tMin\":{},\"tMax\":{},\"nMalloc\":{},\"nFree\":{},\"nRealloc\":{},\"nCustom\":{}",
+        "\"n\":{},\"tMin\":{},\"tMax\":{},\"nMalloc\":{},\"nFree\":{},\"nRealloc\":{},\"nCustom\":{},\"nLog\":{}",
         s.len(),
         s.t_min as f64,
         s.t_max as f64,
         s.n_malloc,
         s.n_free,
         s.n_realloc,
-        s.n_custom
+        s.n_custom,
+        s.n_log
     ));
     o.push_str(&format!(
         ",\"addrMin\":\"0x{:x}\",\"addrMax\":\"0x{:x}\",\"peakLive\":{},\"totalAlloc\":{}",
@@ -649,7 +683,7 @@ pub extern "C" fn hp_center_x_for_event(e: u32) -> f64 {
     let creator = match s.op[ei] {
         OP_F => s.target(e),
         // a custom event has no address to pan to
-        OP_E => return a.cfg.x_pan,
+        OP_E | OP_L => return a.cfg.x_pan,
         _ => e,
     };
     if creator == NONE_U32 {
@@ -1526,6 +1560,11 @@ fn push_event_json(o: &mut String, s: &Store, e: u32) {
         return;
     }
     let ei = e as usize;
+    // a log row, like a custom event, touches no allocation (LOG-006)
+    if s.op[ei] == OP_L {
+        logs::push_event_json(o, s, e);
+        return;
+    }
     // A custom event touches no allocation, so it reports none: `e` is null
     // rather than its own index, which is what stops every consumer of this
     // record from selecting a non-allocation. It carries a label and its
@@ -1745,9 +1784,10 @@ fn ensure_ev_filtered(a: &mut App) {
     let f = &a.cfg.filter;
     let mut list = Vec::new();
     for e in 0..s.len() {
-        // a custom event has no allocation to pass a filter, so it drops out
-        // of the filtered list exactly as an F of an unknown id does
-        if s.op[e as usize] == OP_E {
+        // a custom event or a log record has no allocation to pass a filter,
+        // so it drops out of the filtered list exactly as an F of an unknown
+        // id does (the filter language is over allocations, DOM-003)
+        if matches!(s.op[e as usize], OP_E | OP_L) {
             continue;
         }
         let creator = if s.op[e as usize] == OP_F {
@@ -1813,6 +1853,106 @@ pub extern "C" fn hp_events_filtered_pos(seq: u32) -> u32 {
     }
     ensure_ev_filtered(a);
     a.ev_filtered.partition_point(|&e| e < seq) as u32
+}
+
+// ---------------------------------------------------------------------------
+// logs (LOG-009)
+// ---------------------------------------------------------------------------
+
+/// A browser log request: `{minLevel, text, seqLo?, seqHi?, from, count}`
+/// for a query, `{minLevel, text, seq}` for locate. `minLevel` is 0–5 or a
+/// level name; numbers are read leniently since they come from JavaScript.
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct LogsRequest {
+    min_level: serde_json::Value,
+    text: Option<String>,
+    seq_lo: Option<f64>,
+    seq_hi: Option<f64>,
+    from: Option<f64>,
+    count: Option<f64>,
+    seq: Option<f64>,
+}
+
+fn clamp_u32(v: f64) -> u32 {
+    if v.is_nan() {
+        0
+    } else {
+        v.clamp(0.0, u32::MAX as f64) as u32
+    }
+}
+
+impl LogsRequest {
+    fn query(&self) -> logs::LogQuery {
+        logs::LogQuery {
+            min_level: logs::level_operand(&self.min_level).unwrap_or(0),
+            text: self.text.clone().unwrap_or_default(),
+            seq_lo: self.seq_lo.map(clamp_u32),
+            seq_hi: self.seq_hi.map(clamp_u32),
+        }
+    }
+}
+
+/// Make `a.log_cache` hold the matches of `q`, scanning only when the query
+/// changed since the last call.
+fn ensure_log_matches(a: &mut App, q: logs::LogQuery) {
+    if !matches!(&a.log_cache, Some((k, _)) if *k == q) {
+        let m = logs::Matches::new(&a.store.logs, &q);
+        a.log_cache = Some((q, m));
+    }
+}
+
+fn write_logs_query(a: &mut App, input: &[u8]) {
+    let Ok(req) = serde_json::from_slice::<LogsRequest>(input) else {
+        a.out = "{\"total\":0,\"from\":0,\"rows\":[],\"error\":\"invalid log query\"}".into();
+        return;
+    };
+    let from = clamp_u32(req.from.unwrap_or(0.0));
+    let count = clamp_u32(req.count.unwrap_or(logs::PAGE_MAX as f64));
+    ensure_log_matches(a, req.query());
+    let mut out = std::mem::take(&mut a.out);
+    let m = &a.log_cache.as_ref().unwrap().1;
+    logs::query_json(&mut out, &a.store, m, from, count);
+    a.out = out;
+}
+
+fn write_logs_locate(a: &mut App, input: &[u8]) {
+    let Ok(req) = serde_json::from_slice::<LogsRequest>(input) else {
+        a.out = "{\"row\":-1,\"total\":0,\"error\":\"invalid log query\"}".into();
+        return;
+    };
+    let seq = clamp_u32(req.seq.unwrap_or(0.0));
+    ensure_log_matches(a, req.query());
+    let m = &a.log_cache.as_ref().unwrap().1;
+    let logs = &a.store.logs;
+    a.out = format!("{{\"row\":{},\"total\":{}}}", m.locate(logs, seq), m.total(logs));
+}
+
+/// `{count, byLevel:[n0..n5], loggers:[{name,count}]}`.
+#[no_mangle]
+pub extern "C" fn hp_logs_meta_json() {
+    let a = unsafe { &mut *app() };
+    logs::meta_json(&mut a.out, &a.store.logs);
+    ret_str(&a.out);
+}
+
+/// One page of log records matching the JSON query in the input buffer.
+#[no_mangle]
+pub extern "C" fn hp_logs_query(len: u32) {
+    let a = unsafe { &mut *app() };
+    let input = a.buf[..len as usize].to_vec();
+    write_logs_query(a, &input);
+    ret_str(&a.out);
+}
+
+/// Index of the last match at or before `seq` — what lets the Logs panel
+/// follow the playhead.
+#[no_mangle]
+pub extern "C" fn hp_logs_locate(len: u32) {
+    let a = unsafe { &mut *app() };
+    let input = a.buf[..len as usize].to_vec();
+    write_logs_locate(a, &input);
+    ret_str(&a.out);
 }
 
 // ---------------------------------------------------------------------------

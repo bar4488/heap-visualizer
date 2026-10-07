@@ -7,7 +7,8 @@ use serde_json::{json, Value};
 use crate::analysis::{ApplyError, Change};
 use crate::filter_eval::{self, Ctx, FieldValues};
 use crate::filter_plan;
-use crate::store::{warn_code_name, Store, NONE_U16, NONE_U32, OP_E, OP_F, OP_M, OP_R};
+use crate::logs::{self as log_domain, LEVEL_NAMES};
+use crate::store::{warn_code_name, Store, NONE_U16, NONE_U32, OP_E, OP_F, OP_L, OP_M, OP_R};
 use crate::{project_analysis, App};
 
 #[derive(Clone, Debug, Serialize)]
@@ -83,6 +84,7 @@ fn op_name(op: u8) -> &'static str {
         OP_F => "free",
         OP_R => "realloc",
         OP_E => "event",
+        OP_L => "log",
         _ => "unknown",
     }
 }
@@ -482,8 +484,84 @@ pub(crate) fn overview(app: &App, top: usize) -> Value {
         },
         "warnings": { "total": store.warn_counts.iter().sum::<u32>(), "byCode": warnings },
         "analysis": { "namedAllocations": app.analysis.allocations.values().filter(|v| v.name.is_some()).count(), "tags": app.analysis.tags.len(), "bookmarks": app.analysis.bookmarks.len(), "addressMarks": app.analysis.address_marks.len(), "savedFilters": app.analysis.saved_filters.len() },
-        "topSites": top_sites, "topSitesOmitted": omitted
+        "topSites": top_sites, "topSitesOmitted": omitted,
+        "logs": log_counts(store)
     })
+}
+
+/// Log records by level for the overview (LOG-008): one prefix-sum read.
+fn log_counts(store: &Store) -> Value {
+    let by_level = store.logs.by_level();
+    let levels: serde_json::Map<String, Value> = LEVEL_NAMES
+        .iter()
+        .zip(by_level)
+        .map(|(name, count)| (name.to_string(), json!(count)))
+        .collect();
+    json!({ "records": store.n_log, "byLevel": levels })
+}
+
+/// Default and maximum page size of `GET /api/v1/logs` (LOG-008).
+pub const LOGS_COUNT_DEFAULT: usize = 50;
+pub const LOGS_COUNT_MAX: usize = 200;
+/// Longest accepted `text` operand, in bytes.
+pub const LOGS_TEXT_MAX: usize = 1024;
+
+/// The query parameters of `GET /api/v1/logs`, as the transport parsed them.
+/// `min_level` is a level name (case-insensitive, with aliases) or `0`–`5`.
+#[derive(Clone, Debug, Default)]
+pub struct LogsParams {
+    pub min_level: Option<String>,
+    pub text: Option<String>,
+    pub seq_lo: Option<u32>,
+    pub seq_hi: Option<u32>,
+    pub from: usize,
+    pub count: Option<usize>,
+}
+
+fn param_error(message: &str) -> Error {
+    Error { message: message.into(), start: 0, end: 0 }
+}
+
+/// One page of log records (LOG-008): `{total, from, items, next}`, ordered
+/// by seq, at most `LOGS_COUNT_MAX` items. The caller adds `traceId`.
+pub(crate) fn logs(app: &App, params: &LogsParams) -> Result<Value, Error> {
+    let min_level = match params.min_level.as_deref() {
+        None | Some("") => 0,
+        Some(name) => match name.parse::<u8>() {
+            Ok(n) if (n as usize) < log_domain::NLEVEL => n,
+            Ok(_) => return Err(param_error("minLevel must be 0 through 5 or a level name")),
+            Err(_) => log_domain::level_from_name(name)
+                .ok_or_else(|| param_error("minLevel must be trace, debug, info, warn, error, or fatal"))?,
+        },
+    };
+    let count = params.count.unwrap_or(LOGS_COUNT_DEFAULT);
+    if count == 0 || count > LOGS_COUNT_MAX {
+        return Err(param_error("count must be from 1 through 200"));
+    }
+    let text = params.text.clone().unwrap_or_default();
+    if text.len() > LOGS_TEXT_MAX {
+        return Err(param_error("text is limited to 1024 bytes"));
+    }
+    let query = log_domain::LogQuery {
+        min_level,
+        text,
+        seq_lo: params.seq_lo,
+        seq_hi: params.seq_hi,
+    };
+    let logs = &app.store.logs;
+    let matched = log_domain::Matches::new(logs, &query);
+    let total = matched.total(logs) as usize;
+    let from = params.from.min(total);
+    let hi = from.saturating_add(count).min(total);
+    let items: Vec<Value> = (from..hi)
+        .map(|k| log_domain::agent_item(&app.store, matched.row(logs, k as u32)))
+        .collect();
+    Ok(json!({
+        "total": total,
+        "from": from,
+        "items": items,
+        "next": (hi < total).then_some(hi),
+    }))
 }
 
 pub(crate) fn timeline(

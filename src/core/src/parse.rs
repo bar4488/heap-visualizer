@@ -32,6 +32,8 @@ pub struct Parser {
     extra_map: HashMap<String, u32>,
     /// Custom field name -> index into `store.fields`.
     field_map: HashMap<String, u32>,
+    logger_map: HashMap<String, u32>,
+    log_frag_map: HashMap<String, u32>,
     seq_warned: bool,
 }
 
@@ -79,6 +81,8 @@ impl Parser {
             label_map: HashMap::new(),
             extra_map: HashMap::new(),
             field_map: HashMap::new(),
+            logger_map: HashMap::new(),
+            log_frag_map: HashMap::new(),
             seq_warned: false,
         }
     }
@@ -140,6 +144,8 @@ impl Parser {
         self.label_map = HashMap::new();
         self.extra_map = HashMap::new();
         self.field_map = HashMap::new();
+        self.logger_map = HashMap::new();
+        self.log_frag_map = HashMap::new();
     }
 
     fn line(&mut self, line: &[u8]) {
@@ -156,8 +162,16 @@ impl Parser {
             return;
         }
         let line = &line[a..b];
-        match parse_raw(line) {
-            Some(raw) => self.apply(raw),
+        // A log line is re-read by its own domain's parser: its keys mean
+        // something else there, and every other key is a custom field. A log
+        // line whose keys the heap reader cannot type (`"size":"x"`) is still
+        // a log line, so a failed heap read gets the same second look.
+        let log = match parse_raw(line) {
+            Some(raw) if raw.op != b'L' => return self.apply(raw),
+            _ => crate::logs::parse_log_line(line),
+        };
+        match log {
+            Some(log) => self.apply_log(log),
             None => {
                 // no event row is produced: attach to the previous event so
                 // "jump to warning" lands where the bad line sat in the stream
@@ -310,7 +324,7 @@ impl Parser {
         }
     }
 
-    fn apply(&mut self, mut raw: Raw) {
+    fn apply(&mut self, raw: Raw) {
         if raw.op == b'H' {
             let s = &mut self.store;
             s.has_header = true;
@@ -337,10 +351,28 @@ impl Parser {
             return;
         }
 
-        let e = self.store.len();
+        let (e, t) = self.stamp(raw.t, raw.seq);
 
-        // timestamp: missing inherits previous; decreasing clamps
-        let t = match raw.t {
+        let op = match raw.op {
+            b'M' => OP_M,
+            b'F' => OP_F,
+            b'R' => OP_R,
+            b'E' => OP_E,
+            _ => {
+                // unknown record type: forward-compat, ignore
+                return;
+            }
+        };
+        self.apply_heap(raw, op, e, t);
+    }
+
+    /// Timestamp and seq checks shared by every domain's records (TRACE-007):
+    /// a missing `t` inherits, a decreasing one clamps, and a `seq` that
+    /// disagrees with stream position is flagged once. Returns the spine
+    /// index the record will take and its timestamp.
+    fn stamp(&mut self, t: Option<u64>, seq: Option<i64>) -> (u32, u64) {
+        let e = self.store.len();
+        let t = match t {
             Some(t) => {
                 if self.saw_t && t < self.prev_t {
                     self.store.warn(e, W_T_DECREASE, t);
@@ -358,23 +390,75 @@ impl Parser {
         self.prev_t = t;
 
         // seq sanity (stream order is authoritative regardless)
-        if let Some(sq) = raw.seq {
+        if let Some(sq) = seq {
             if sq != e as i64 && !self.seq_warned {
                 self.store.warn(e, W_SEQ_MISMATCH, sq as u64);
                 self.seq_warned = true;
             }
         }
+        (e, t)
+    }
 
-        let op = match raw.op {
-            b'M' => OP_M,
-            b'F' => OP_F,
-            b'R' => OP_R,
-            b'E' => OP_E,
-            _ => {
-                // unknown record type: forward-compat, ignore
-                return;
+    /// One `L` record (LOG-001): a spine row and a log row, nothing else.
+    fn apply_log(&mut self, mut log: crate::logs::RawLog) {
+        use crate::logs::{truncate_msg, LevelRead, LEVEL_INFO};
+        let Some(mut msg) = log.msg.take() else {
+            // no event row is produced, as for any other dropped record
+            let seq = self.store.len().saturating_sub(1);
+            self.store.warn(seq, W_MALFORMED, 0);
+            return;
+        };
+        let (e, t) = self.stamp(log.t, log.seq);
+        let level = match log.level() {
+            LevelRead::Known(level) => level,
+            LevelRead::Absent => LEVEL_INFO,
+            LevelRead::Bad => {
+                self.store.warn(e, W_BAD_LEVEL, 0);
+                LEVEL_INFO
             }
         };
+        let full = msg.len();
+        if truncate_msg(&mut msg) {
+            self.store.warn(e, W_LONG_LOG, full as u64);
+        }
+        let thr_idx = match log.thr {
+            Some(v) => self.intern_thr(v),
+            None => NONE_U16,
+        };
+        let logger = match log.logger.take() {
+            Some(name) => match self.logger_map.get(&name) {
+                Some(&i) => i,
+                None => {
+                    let logs = &mut self.store.logs;
+                    let i = logs.loggers.len() as u32;
+                    self.logger_map.insert(name.clone(), i);
+                    logs.loggers.push(name);
+                    logs.logger_count.push(0);
+                    i
+                }
+            },
+            None => NONE_U32,
+        };
+        let fields = if log.extra.is_empty() {
+            NONE_U32
+        } else {
+            match self.log_frag_map.get(&log.extra) {
+                Some(&i) => i,
+                None => {
+                    let logs = &mut self.store.logs;
+                    let i = logs.frags.len() as u32;
+                    self.log_frag_map.insert(log.extra.clone(), i);
+                    logs.frags.push(std::mem::take(&mut log.extra));
+                    i
+                }
+            }
+        };
+        self.push_spine(OP_L, t, thr_idx, false);
+        self.store.logs.push(e, level, logger, &msg, fields);
+        self.store.n_log += 1;
+    }
+
+    fn apply_heap(&mut self, mut raw: Raw, op: u8, e: u32, t: u64) {
 
         // op F with the reserved null id is a no-op record
         if op == OP_F && raw.id == Some(0) {
@@ -596,6 +680,7 @@ impl Default for Store {
                 red_pre: vec![0],
                 ..HeapCols::default()
             },
+            logs: crate::logs::LogStore::default(),
             old_geom: std::collections::HashMap::new(),
             tag_members: Vec::new(),
             tag_any: Vec::new(),
@@ -633,6 +718,7 @@ impl Default for Store {
             n_free: 0,
             n_realloc: 0,
             n_custom: 0,
+            n_log: 0,
             warnings: Vec::new(),
             warn_counts: [0; NWARN],
             overlap_index: Vec::new(),

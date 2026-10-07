@@ -11,6 +11,12 @@ pub const OP_R: u8 = 2;
 /// plus custom fields, and touches no allocation state whatsoever. Every
 /// creator-walking path must skip it — it has no geometry to walk.
 pub const OP_E: u8 = 3;
+/// A structured log line: the log domain's record ([LOG-001]). It occupies a
+/// seq on the spine and has no heap row at all — every heap accessor is for
+/// heap records (`op <= OP_E`) only.
+///
+/// [LOG-001]: ../../../spec/13-domains-and-logs.md#log-001-the-log-record-l
+pub const OP_L: u8 = 4;
 
 // Warning codes.
 pub const W_MALFORMED: u8 = 0;
@@ -22,7 +28,9 @@ pub const W_DUP_ID: u8 = 5;
 pub const W_OVERLAP: u8 = 6;
 pub const W_BAD_SIZE: u8 = 7;
 pub const W_VERSION: u8 = 8;
-pub const NWARN: usize = 9;
+pub const W_BAD_LEVEL: u8 = 9;
+pub const W_LONG_LOG: u8 = 10;
+pub const NWARN: usize = 11;
 
 pub fn warn_name(code: u8) -> &'static str {
     match code {
@@ -35,6 +43,8 @@ pub fn warn_name(code: u8) -> &'static str {
         W_OVERLAP => "allocation overlaps live region",
         W_BAD_SIZE => "size missing or zero",
         W_VERSION => "unknown format version",
+        W_BAD_LEVEL => "unknown log level read as info",
+        W_LONG_LOG => "log message truncated",
         _ => "warning",
     }
 }
@@ -50,6 +60,8 @@ pub fn warn_code_name(code: u8) -> &'static str {
         W_OVERLAP => "overlap",
         W_BAD_SIZE => "invalid_size",
         W_VERSION => "unknown_version",
+        W_BAD_LEVEL => "bad_level",
+        W_LONG_LOG => "long_log",
         _ => "warning",
     }
 }
@@ -171,6 +183,7 @@ pub struct Store {
 
     // ---- domains ----
     pub heap: HeapCols,
+    pub logs: crate::logs::LogStore,
 
     /// For R events only: old geometry (resolved from target, else record
     /// copy), keyed by event index. Side table so non-R events cost nothing.
@@ -258,6 +271,8 @@ pub struct Store {
     /// Custom (E) events. Not an allocation count — kept apart from the three
     /// above so nothing sums them into one.
     pub n_custom: u32,
+    /// Log (L) records — the log domain's row count.
+    pub n_log: u32,
 
     pub warnings: Vec<Warning>,
     pub warn_counts: [u32; NWARN],

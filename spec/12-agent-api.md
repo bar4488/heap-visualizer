@@ -35,7 +35,15 @@ must not embed the potentially unbounded site or thread catalogs.
 time bounds and unit, total allocated bytes, live allocations and bytes at end,
 peak live bytes and position, warning counts by semantic warning name, analysis
 object counts, and the top allocation sites by requested bytes. `top` defaults
-to 10 and is from 1 through 50; `topSitesOmitted` reports omitted groups.
+to 10 and is from 1 through 50; `topSitesOmitted` reports omitted groups. It
+also carries `logs: {records, byLevel:{trace, debug, info, warn, error,
+fatal}}` for the log domain
+([LOG-008](13-domains-and-logs.md#log-008-logs-in-the-agent-api)), which is
+all zeros for a heap-only trace.
+
+`GET /api/v1/logs?minLevel=&text=&seqLo=&seqHi=&from=&count=` pages log
+records under the same bounds (`count` default 50, at most 200); its contract
+is LOG-008.
 
 `GET /api/v1/warnings?from=&count=` retains the existing bounded paging rules.
 Each item includes a stable string `kind` in addition to its legacy numeric

@@ -107,6 +107,11 @@ rejecting input (goal: *faithful*). Warning codes:
 | overlap | A new allocation overlaps a live region. |
 | bad-size | Creator with missing/zero `size` (rendered as 1 byte). |
 | version | Header declared a version other than 1. |
+| bad-level | `L` record whose `level` is not a known level name; read as `info` ([LOG-001](13-domains-and-logs.md#log-001-the-log-record-l)). |
+| long-log | `L` record whose `msg` exceeded 16 KiB; truncated, record kept. Detail is the original byte length. |
+
+The agent API names these `bad_level` and `long_log`; numeric codes are 9
+and 10, after `version` (8).
 
 Full counts per code are always kept; detailed records are capped (first
 1000) so a pathological trace cannot blow up memory. The UI shows a toolbar

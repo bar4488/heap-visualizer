@@ -103,6 +103,11 @@ scanned. "Locate" answers, for a seq, the index within the matched list of
 the last match at or before that seq — the operation that lets a log view
 follow the playhead.
 
+Case folding is ASCII: letters `A`–`Z` match `a`–`z`, and every other byte
+(including non-ASCII text) must match exactly. A query without `text` is
+answered from LOG-003's prefix sums; the browser engine keeps the last text
+query's matches, so paging and locate against the same query do not rescan.
+
 ## LOG-005: Logs on the timelines
 
 Both strips carry a **log lane** when the trace has log records: a thin band
@@ -112,6 +117,11 @@ in which each pixel column is colored by the most severe log level in it
 the same core timeline renderer as the density bars. The strip hover tooltip
 adds the column's log count by level.
 
+The lane is 2–4 px tall and sits directly above the space of the bottom tag
+lane, which stays reserved whether or not anything is tagged so the lane does
+not move when tagging starts. Colors: trace and debug dim grey, info blue,
+warn yellow, error red, fatal magenta-red.
+
 ## LOG-006: Logs in the Events list and stepping
 
 Log records appear in the Events list in stream order: the row shows the
@@ -120,6 +130,19 @@ log row rather than an allocation row. Stepping and playback walk log records
 as they walk every other record. Clicking a log row in the Events list seeks
 there and reveals the row in the Logs panel; it does not change the
 allocation selection.
+
+The engine's Events-list JSON (`hp_events_json`, `hp_events_filtered_json`,
+`hp_event_json`) renders a log record in the style of an `E` row:
+
+```json
+{"seq":120,"op":4,"t":10480,"e":null,"level":3,"logger":"net.http","msg":"retrying request","thr":2,"extra":{"attempt":3}}
+```
+
+`op` 4 is the log op; `level` is 0–5; `logger` and `thr` are `null` when
+absent; `extra` (the custom fields) is present only when the record has any.
+`e` is `null` because a log record touches no allocation. While an
+allocation filter is active the filtered list omits log rows, as it omits `E`
+rows (DOM-003). `hp_meta_json` reports the log record count as `nLog`.
 
 ## LOG-007: The Logs panel
 
@@ -155,6 +178,14 @@ under the bounds of [API-001](12-agent-api.md#api-001-progressive-bounded-eviden
 ([API-002](12-agent-api.md#api-002-discovery-and-overview)) adds log counts
 by level, and session capabilities list the endpoint.
 
+Item `level` is the lowercase level name; `thr` is the thread number or
+`null`; `fields` is the custom-field object or `null`; `next` is the next
+`from`, or `null` on the last page. `minLevel` accepts a level name (aliases
+accepted) or `0`–`5`. `count` of 0 or over 200, an unknown `minLevel`, and
+`text` over 1 KiB are invalid requests. The core provides this as
+`Engine::agent_logs(&LogsParams)` and the overview's `logs: {records,
+byLevel:{trace..fatal}}`; the transport adds `traceId`.
+
 ## LOG-009: Browser ABI
 
 Following the existing JSON-in-buffer convention
@@ -168,4 +199,15 @@ Following the existing JSON-in-buffer convention
 
 The timeline lane (LOG-005) needs no separate export: it is drawn into the
 strip pixels, and its hover counts arrive in the existing `hp_tl_hover` JSON
-as `logs:{count, byLevel:[...]}`.
+as `logs:{count, byLevel:[...]}`. The `logs` key is present only when the
+trace has log records.
+
+Input details: `minLevel` is a number 0–5 or a level name (aliases accepted)
+and defaults to 0; `text` defaults to empty; numbers are read leniently
+(clamped to the unsigned 32-bit range). `seqLo`/`seqHi` are inclusive spine
+indexes; `hp_logs_locate` also honors them. `count` defaults to and is capped
+at 500; `from` past the end yields an empty page with `from = total`. A
+request that is not a JSON object answers `{total:0, from:0, rows:[],
+error}` (query) or `{row:-1, total:0, error}` (locate). The native `Engine`
+exposes the same documents as `logs_meta_json`, `logs_query_json`, and
+`logs_locate_json`.
