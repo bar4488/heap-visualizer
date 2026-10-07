@@ -18,7 +18,7 @@ pub struct View {
     birth_counts: BTreeMap<u64, u32>,
     /// Multiset of live allocations' rendered spans, so the render-time
     /// walk-back is bounded by the widest allocation *currently live* rather
-    /// than Store::max_span, a trace-wide maximum that never decreases.
+    /// than the widest allocation ever seen, a maximum that never decreases.
     span_counts: BTreeMap<u64, u32>,
 
     pub row_bytes: u64,
@@ -203,7 +203,7 @@ impl View {
 
     /// Rendered span of the widest allocation currently live (0 when none) —
     /// the walk-back bound for per-frame live-set range scans. Unlike
-    /// `Store::max_span` it shrinks when the wide allocation is freed, so one
+    /// a trace-wide maximum it shrinks when the wide allocation is freed, so one
     /// early arena block does not tax every later frame.
     pub fn max_live_span(&self) -> u64 {
         self.span_counts.keys().next_back().copied().unwrap_or(0)

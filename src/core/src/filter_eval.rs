@@ -326,7 +326,7 @@ fn ns_fields(ns: Ns) -> &'static [(&'static str, &'static str, Type)] {
         Ns::Malloc => &[
             ("seq", "integer", Type::Int),
             ("site", "string, optional", Type::String),
-            ("stack", "string", Type::String),
+            ("stack", "string, optional", Type::String),
             ("thread", "integer, optional", Type::Int),
             ("time", "time", Type::Int),
         ],
@@ -449,42 +449,41 @@ fn resolve_fragment(fragment: &str, keys: &[String]) -> Vec<Value> {
         let Some((vlo, vhi)) = sc.skip_value() else {
             break;
         };
-        // a repeated key keeps its first value, matching the catalog's count
+        // a repeated key reads as its last value (JSON last-wins, TRACE-001),
+        // as the API and the allocation panel show it
         if let Some(index) = keys.iter().position(|k| *k == name) {
-            if matches!(out[index], Value::Missing) {
-                out[index] = match shape {
-                    b'"' => Value::String(crate::json::unescape(&bytes[vlo + 1..vhi - 1])),
-                    b't' => Value::Bool(true),
-                    b'f' => Value::Bool(false),
-                    // null, objects and arrays are all missing to the
-                    // evaluator; the checker has already rejected the last two
-                    b'n' | b'{' | b'[' => Value::Missing,
-                    // a number: integral text parses as an integer, and
-                    // anything with a fraction or an exponent as a float.
-                    // Parsing everything as i128 is what made a fractional
-                    // field silently missing (T034).
-                    _ => core::str::from_utf8(&bytes[vlo..vhi]).map_or(
-                        Value::Missing,
-                        |text| {
-                            if text.bytes().any(|c| matches!(c, b'.' | b'e' | b'E')) {
-                                text.parse::<f64>().map_or(Value::Missing, |value| {
+            out[index] = match shape {
+                b'"' => Value::String(crate::json::unescape(&bytes[vlo + 1..vhi - 1])),
+                b't' => Value::Bool(true),
+                b'f' => Value::Bool(false),
+                // null, objects and arrays are all missing to the
+                // evaluator; the checker has already rejected the last two
+                b'n' | b'{' | b'[' => Value::Missing,
+                // a number: integral text parses as an integer, and
+                // anything with a fraction or an exponent as a float.
+                // Parsing everything as i128 is what made a fractional
+                // field silently missing (T034).
+                _ => core::str::from_utf8(&bytes[vlo..vhi]).map_or(
+                    Value::Missing,
+                    |text| {
+                        if text.bytes().any(|c| matches!(c, b'.' | b'e' | b'E')) {
+                            text.parse::<f64>().map_or(Value::Missing, |value| {
+                                if value.is_finite() { Value::Float(value) } else { Value::Missing }
+                            })
+                        } else {
+                            text.parse::<i128>().map_or_else(
+                                // wider than i128: keep it as the number
+                                // it approximately is rather than dropping
+                                // the field
+                                |_| text.parse::<f64>().map_or(Value::Missing, |value| {
                                     if value.is_finite() { Value::Float(value) } else { Value::Missing }
-                                })
-                            } else {
-                                text.parse::<i128>().map_or_else(
-                                    // wider than i128: keep it as the number
-                                    // it approximately is rather than dropping
-                                    // the field
-                                    |_| text.parse::<f64>().map_or(Value::Missing, |value| {
-                                        if value.is_finite() { Value::Float(value) } else { Value::Missing }
-                                    }),
-                                    Value::Int,
-                                )
-                            }
-                        },
-                    ),
-                };
-            }
+                                }),
+                                Value::Int,
+                            )
+                        }
+                    },
+                ),
+            };
         }
         if !sc.eat(b',') {
             break;
@@ -697,9 +696,8 @@ fn field_type(ns: Ns, name: &str, expr: &Expr) -> Result<CheckedType, EvalError>
         (Ns::Alloc, "tags") => CheckedType::required(Type::Set(ValueKind::String)),
         (Ns::Alloc, "freed") => CheckedType::required(Type::Bool),
         (Ns::Malloc, "seq" | "time") => CheckedType::required(Type::Int),
-        (Ns::Malloc, "site") => CheckedType::optional(Type::String),
+        (Ns::Malloc, "site" | "stack") => CheckedType::optional(Type::String),
         (Ns::Malloc, "thread") => CheckedType::optional(Type::Int),
-        (Ns::Malloc, "stack") => CheckedType::required(Type::String),
         (Ns::Free, "seq" | "time") => CheckedType::optional(Type::Int),
         (_, "fields") => {
             return Err(EvalError::at(
@@ -1863,10 +1861,10 @@ pub(crate) fn field_value(
     Ok(match (ns, name) {
         (Ns::Alloc, "id") => Value::Int(s.id(e) as i128),
         (Ns::Alloc, "address") => Value::Int(s.addr(e) as i128),
-        (Ns::Alloc, "end") => Value::Int(s.addr(e).saturating_add(s.span(e)) as i128),
+        (Ns::Alloc, "end") => Value::Int(s.end(e) as i128),
         (Ns::Alloc, "span") => Value::Range(
             Num::Int(s.addr(e) as i128),
-            Num::Int(s.addr(e).saturating_add(s.span(e)) as i128),
+            Num::Int(s.end(e) as i128),
         ),
         (Ns::Alloc, "size") => Value::Int(s.size(e) as i128),
         (Ns::Alloc, "usable") => match s.usable_at(e) {

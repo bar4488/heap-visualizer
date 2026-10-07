@@ -63,7 +63,7 @@ impl NumCol {
         Some(match self {
             NumCol::Id => s.id(e) as i128,
             NumCol::Addr => s.addr(e) as i128,
-            NumCol::End => s.addr(e).saturating_add(s.span(e)) as i128,
+            NumCol::End => s.end(e) as i128,
             NumCol::Size => s.size(e) as i128,
             NumCol::Seq => e as i128,
             NumCol::Time => s.t[i] as i128,
@@ -910,7 +910,7 @@ fn range_bounds(expr: &Expr, ctx: &Ctx) -> Result<(Operand, Operand), EvalError>
     match &expr.kind {
         ExprKind::Range { start, end } => Ok((operand(start, ctx)?, operand(end, ctx)?)),
         _ => match resolve_path(expr) {
-            // `alloc.span` is the allocation's half-open rendered range
+            // `alloc.span` is the allocation's half-open requested range
             Some(Path {
                 subject: None,
                 leaf: Leaf::Builtin {
@@ -933,7 +933,7 @@ fn range_bounds(expr: &Expr, ctx: &Ctx) -> Result<(Operand, Operand), EvalError>
                 Ok((
                     Operand::Const(Value::Int(ctx.store.addr(e) as i128)),
                     Operand::Const(Value::Int(
-                        ctx.store.addr(e).saturating_add(ctx.store.span(e)) as i128,
+                        ctx.store.end(e) as i128,
                     )),
                 ))
             }

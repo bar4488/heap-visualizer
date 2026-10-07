@@ -288,8 +288,7 @@ fn is_creator(store: &Store, e: u32) -> bool {
 }
 
 fn replace_analysis(a: &mut App, document: analysis::Document) -> Result<(), analysis::ApplyError> {
-    document.validate(a.store.len(), |e| is_creator(&a.store, e))?;
-    a.analysis = document;
+    a.analysis = document.normalized(a.store.len(), |e| is_creator(&a.store, e))?;
     project_analysis(a);
     Ok(())
 }
@@ -750,147 +749,6 @@ pub extern "C" fn hp_set_pins(count: u32) {
         pins.push(u64::from_le_bytes(b.try_into().unwrap()));
     }
     a.view.set_pins(pins);
-}
-
-/// Parse a filter spec JSON blob:
-/// {"mode":1,"sites":[0,3],"thrs":[1],"sizeMin":0,"sizeMax":0}
-/// An empty array (`"sites":[]`) is a real constraint (nothing selected ->
-/// hide everything with a site), distinct from an absent/null key (no
-/// constraint) — see `Filter::sites_set`.
-fn parse_filter_json(data: &[u8]) -> Filter {
-    let mut f = Filter::default();
-    let mut sc = json::Scan::new(data);
-    if sc.eat(b'{') {
-        loop {
-            let span = match sc.string_span() {
-                Some(s) => s,
-                None => break,
-            };
-            if !sc.eat(b':') {
-                break;
-            }
-            let key = &data[span.0..span.1];
-            match key {
-                b"mode" => {
-                    f.mode = sc.integer().unwrap_or(0) as u8;
-                }
-                b"sizeMin" => {
-                    f.size_min = sc.integer().unwrap_or(0).max(0) as u64;
-                }
-                b"sizeMax" => {
-                    f.size_max = sc.integer().unwrap_or(0).max(0) as u64;
-                }
-                b"addrRanges" => {
-                    // array of [loHex, hiHex] pairs: [["0x1000","0x2000"],...]
-                    sc.ws();
-                    if sc.peek() == b'[' {
-                        sc.i += 1;
-                        loop {
-                            sc.ws();
-                            if sc.peek() == b']' {
-                                sc.i += 1;
-                                break;
-                            }
-                            if sc.peek() == b'[' {
-                                sc.i += 1;
-                                let lo = sc
-                                    .string_span()
-                                    .and_then(|(a, b)| json::parse_addr(&data[a..b]));
-                                sc.ws();
-                                if sc.peek() == b',' {
-                                    sc.i += 1;
-                                }
-                                let hi = sc
-                                    .string_span()
-                                    .and_then(|(a, b)| json::parse_addr(&data[a..b]));
-                                sc.ws();
-                                if sc.peek() == b']' {
-                                    sc.i += 1;
-                                }
-                                if let (Some(lo), Some(hi)) = (lo, hi) {
-                                    if hi > lo {
-                                        f.addr_ranges.push((lo, hi));
-                                    }
-                                }
-                            } else if sc.skip_value().is_none() {
-                                break;
-                            }
-                            sc.ws();
-                            if sc.peek() == b',' {
-                                sc.i += 1;
-                            }
-                        }
-                    } else {
-                        let _ = sc.skip_value();
-                    }
-                }
-                b"sites" | b"thrs" | b"tags" => {
-                    // collect into a scratch Vec first: an empty JSON array is
-                    // a real constraint ("nothing selected" -> hide all), so
-                    // it must still flip the *_set flag even though it never
-                    // touches the bitmask itself, and doing that while `words`
-                    // (a &mut into one of f's fields) is alive would fight the
-                    // borrow checker for no benefit — this runs once per
-                    // filter change, not per allocation, so the extra Vec is free
-                    sc.ws();
-                    if sc.peek() == b'[' {
-                        sc.i += 1;
-                        let mut vals: Vec<u32> = Vec::new();
-                        loop {
-                            sc.ws();
-                            if sc.peek() == b']' {
-                                sc.i += 1;
-                                break;
-                            }
-                            if let Some(v) = sc.integer() {
-                                vals.push(v.max(0) as u32);
-                            } else {
-                                break;
-                            }
-                            sc.ws();
-                            if sc.peek() == b',' {
-                                sc.i += 1;
-                            }
-                        }
-                        let (words, set_flag) = match key {
-                            b"sites" => (&mut f.sites, &mut f.sites_set),
-                            b"thrs" => (&mut f.thrs, &mut f.thrs_set),
-                            _ => (&mut f.tags, &mut f.tags_set),
-                        };
-                        *set_flag = true;
-                        for v in vals {
-                            let w = (v / 64) as usize;
-                            if words.len() <= w {
-                                words.resize(w + 1, 0);
-                            }
-                            words[w] |= 1u64 << (v % 64);
-                        }
-                    } else {
-                        // "null" means no constraint
-                        let _ = sc.skip_value();
-                    }
-                }
-                _ => {
-                    let _ = sc.skip_value();
-                }
-            }
-            sc.ws();
-            if sc.peek() == b',' {
-                sc.i += 1;
-            } else {
-                break;
-            }
-        }
-    }
-    f
-}
-
-#[no_mangle]
-pub extern "C" fn hp_set_filter(len: u32) {
-    let a = unsafe { &mut *app() };
-    let data: Vec<u8> = a.buf[..len as usize].to_vec();
-    a.cfg.filter = parse_filter_json(&data);
-    a.ev_dirty = true;
 }
 
 fn filter_diagnostic_json(out: &mut String, kind: &str, message: &str, start: usize, end: usize) {
@@ -1469,15 +1327,16 @@ pub extern "C" fn hp_alloc_info(e: u32, w: u32, scroll: f64) {
 }
 
 /// Creator-event index of the live allocation covering `addr`, or -1 if none
-/// is live there. Address-only (no pixel/row layout math).
+/// is live there. Address-only (no pixel/row layout math). Where several
+/// cover it, the newest creator wins, as in `render::pick` (MAP-006/MAP-008).
 fn live_at_addr(s: &Store, v: &View, addr: u64) -> i32 {
-    let floor = addr.saturating_sub(s.max_span.max(1));
-    for &(ea, e) in v.live.range((floor, 0)..=(addr, u32::MAX)).rev() {
-        if ea.saturating_add(s.span(e)) > addr {
-            return e as i32;
-        }
-    }
-    -1
+    let floor = addr.saturating_sub(v.max_live_span().max(1));
+    v.live
+        .range((floor, 0)..=(addr, u32::MAX))
+        .filter(|&&(ea, e)| ea.saturating_add(s.span(e)) > addr)
+        .map(|&(_, e)| e)
+        .max()
+        .map_or(-1, |e| e as i32)
 }
 
 /// Creator-event index of the live allocation covering `addr` (lo/hi u32 halves
@@ -1508,7 +1367,7 @@ pub extern "C" fn hp_addr_at(w: u32, x: u32, y: f64, scroll: f64) {
         let row_start = v.base + v.rows[i] * v.row_bytes;
         let (scale, pan) = a.cfg.x_map(w, v.row_bytes);
         let off = (pan + x as f64 / scale) as u64;
-        let addr = row_start + off.min(v.row_bytes - 1);
+        let addr = row_start.saturating_add(off.min(v.row_bytes - 1));
         r[0] = addr as u32;
         r[1] = (addr >> 32) as u32;
         r[3] = 1;
@@ -1600,7 +1459,7 @@ fn push_event_json(o: &mut String, s: &Store, e: u32) {
         e
     };
     o.push_str(&format!(
-        "{{\"seq\":{},\"op\":{},\"t\":{},\"id\":{},\"e\":{},\"addr\":\"0x{:x}\",\"size\":{}",
+        "{{\"seq\":{},\"op\":{},\"t\":{},\"id\":\"{}\",\"e\":{},\"addr\":\"0x{:x}\",\"size\":{}",
         e, s.op[ei], s.t[ei] as f64, s.id(e), gi, s.addr(gi), s.size(gi)
     ));
     if s.op[ei] == OP_R {
@@ -1624,12 +1483,12 @@ fn write_allocation_json(o: &mut String, s: &Store, e: u32) -> bool {
     let i = e as usize;
     let addr = s.addr(e);
     o.push_str(&format!(
-        "{{\"creator\":{},\"op\":{},\"id\":{},\"addr\":\"0x{:x}\",\"end\":\"0x{:x}\",\"size\":{},\"usable\":{},\"t\":{}",
+        "{{\"creator\":{},\"op\":{},\"id\":\"{}\",\"addr\":\"0x{:x}\",\"end\":\"0x{:x}\",\"size\":{},\"usable\":{},\"t\":{}",
         e,
         s.op[i],
         s.id(e),
         addr,
-        addr.saturating_add(s.size(e)),
+        s.end(e),
         s.size(e),
         s.usable_at(e),
         s.t[i] as f64
@@ -2083,8 +1942,11 @@ mod tests {
         let events = engine.events_json(1, 2);
         assert!(events.starts_with("[{\"seq\":1,"));
         assert!(events.contains("},{\"seq\":2,"));
+        // ids are strings on every browser-facing surface (TRACE-001)
+        assert!(events.contains("\"id\":\"2\""), "{events}");
         let allocation = engine.allocation_json(1).unwrap();
         assert!(allocation.contains("\"creator\":1"));
+        assert!(allocation.contains("\"id\":\"2\""), "{allocation}");
         assert!(!allocation.contains("rects"));
         assert!(engine.allocation_json(2).is_none());
 
@@ -2223,8 +2085,8 @@ mod tests {
     fn the_filtered_event_list_drops_custom_events() {
         let mut a = load(SAMPLE_WITH_EVENTS);
         a.cfg.filter.mode = render::FILTER_DIM;
-        a.cfg.filter.sites_set = true;
-        a.cfg.filter.sites = vec![u64::MAX];
+        // every bit set, the custom events' included
+        a.cfg.filter.matches = Some(vec![u64::MAX; (a.store.len() as usize).div_ceil(64)]);
         a.ev_dirty = true;
         ensure_ev_filtered(&mut a);
         assert!(
@@ -2326,17 +2188,6 @@ not json at all
             .unwrap();
         // attached to the event *before* the bad line, so a jump lands there
         assert_eq!(w.seq, 0);
-    }
-
-    #[test]
-    fn addr_range_filter() {
-        let f = parse_filter_json(br#"{"mode":1,"addrRanges":[["0x1000","0x1040"]]}"#);
-        assert_eq!(f.addr_ranges, vec![(0x1000, 0x1040)]);
-        let mut a = load(SAMPLE);
-        a.cfg.filter = f;
-        assert!(a.cfg.filter.pass(&a.store, 0)); // 0x1000+64 intersects
-        assert!(!a.cfg.filter.pass(&a.store, 1)); // 0x2000+128 does not
-        assert!(!a.cfg.filter.pass(&a.store, 3)); // 0x3000+256 does not
     }
 
     #[test]
@@ -2508,7 +2359,9 @@ not json at all
         let mut a = load(SAMPLE);
         // site "a" only (index 0): M(b) drops out; F events follow the
         // allocation they free; the site-less R passes (site-less passes)
-        a.cfg.filter = parse_filter_json(br#"{"mode":1,"sites":[0]}"#);
+        a.cfg.filter.mode = render::FILTER_DIM;
+        a.cfg.filter.matches =
+            Some(match_bits(&a, &[], r#"malloc.site is None or malloc.site == "a""#));
         a.ev_dirty = true;
         ensure_ev_filtered(&mut a);
         assert_eq!(a.ev_filtered, vec![0, 2, 3, 4]);
@@ -2834,46 +2687,43 @@ not json at all
     }
 
     #[test]
-    fn empty_filter_array_hides_everything_selected() {
-        // "sites":[] must mean "nothing selected" (hide/dim every site-tagged
-        // allocation), not "no constraint" — an empty bitmask Vec is
-        // otherwise indistinguishable from an absent/null key, which is what
-        // the *_set flags exist to disambiguate (regression: the "none" link
-        // in the sites/threads/tags filter UI used to send exactly this and
-        // had no effect at all).
-        let f = parse_filter_json(br#"{"mode":1,"sites":[],"thrs":null,"tags":null}"#);
-        assert!(f.sites_set);
-        assert!(!f.thrs_set);
-        assert!(!f.tags_set);
-        assert!(f.sites.is_empty());
+    fn live_at_addr_prefers_the_newest_cover_like_pick() {
+        // the newer block starts lower and encloses the older one
+        let input = r#"{"op":"H","v":1,"row_bytes":256}
+{"op":"M","id":1,"addr":"0x1020","size":32,"t":10}
+{"op":"M","id":2,"addr":"0x1000","size":128,"t":20}
+"#;
+        let mut a = load(input);
+        a.view.seek(&a.store, 2);
+        assert_eq!(live_at_addr(&a.store, &a.view, 0x1028), 1);
+        let picked = render::pick(&a.store, &mut a.view, &a.cfg, 256, 0x28, 4.0, 0.0);
+        assert!(picked.starts_with("{\"e\":1,"), "got {}", picked);
+    }
 
-        let mut a = load(SAMPLE);
-        a.cfg.filter = f;
-        // every creator with a site (0, 1) must now fail; event 3 (realloc,
-        // no site) is unaffected by the site constraint per existing semantics
-        assert!(!a.cfg.filter.pass(&a.store, 0));
-        assert!(!a.cfg.filter.pass(&a.store, 1));
-        assert!(a.cfg.filter.pass(&a.store, 3));
-
-        // same story for an empty tags selection: every creator (all
-        // untagged, tag id 0) must fail once tags_set is true with no bits
-        let f2 = parse_filter_json(br#"{"mode":1,"tags":[]}"#);
-        assert!(f2.tags_set);
-        let mut a2 = load(SAMPLE);
-        a2.cfg.filter = f2;
-        assert!(!a2.cfg.filter.pass(&a2.store, 0));
-        assert!(!a2.cfg.filter.pass(&a2.store, 1));
-        assert!(!a2.cfg.filter.pass(&a2.store, 3));
+    #[test]
+    fn allocations_at_the_top_of_the_address_space_render_and_pick() {
+        // spans that reach past 2^64 saturate instead of overflowing
+        let input = r#"{"op":"H","v":1,"row_bytes":256}
+{"op":"M","id":1,"addr":"0xffffffffffffff80","size":4096,"usable":8192,"t":10}
+{"op":"M","id":2,"addr":"0xffffffffffffffc0","size":16,"t":20}
+{"op":"F","id":2,"t":30}
+"#;
+        let mut a = load(input);
+        a.view.seek(&a.store, 3);
+        render::render_addr(&a.store, &mut a.view, &a.cfg, &mut a.frame, &mut a.scratch, 256, 100, 0.0);
+        let picked = render::pick(&a.store, &mut a.view, &a.cfg, 256, 0x90, 4.0, 0.0);
+        assert!(picked.starts_with("{\"e\":0,"), "got {}", picked);
+        assert_eq!(live_at_addr(&a.store, &a.view, u64::MAX - 1), 0);
     }
 
     #[test]
     fn tag_range_respects_filter() {
         // sites: a (events 0), b (event 1); realloc keeps site b (event 3)
         let mut a = load(SAMPLE);
-        // filter: only site "b" (index 1), hide mode
+        // filter: only site "b" (or no site at all), hide mode
         a.cfg.filter.mode = render::FILTER_HIDE;
-        a.cfg.filter.sites = vec![1u64 << 1];
-        a.cfg.filter.sites_set = true;
+        a.cfg.filter.matches =
+            Some(match_bits(&a, &[], r#"malloc.site is None or malloc.site == "b""#));
         let to_tag: Vec<u32> = {
             let s = &a.store;
             let f = &a.cfg.filter;
@@ -3242,6 +3092,38 @@ not json at all
     fn custom_error(a: &App, source: &str) -> String {
         let expr = heap_visualizer_filter_dsl::parse(source).unwrap();
         filter_eval::check(&expr, &ctx(a, &[])).unwrap_err().message
+    }
+
+    #[test]
+    fn a_repeated_custom_key_filters_on_its_last_value() {
+        let a = load(r#"{"op":"M","id":1,"addr":"0x1000","size":8,"k":1,"k":2}
+"#);
+        assert_eq!(matches_custom(&a, "malloc.fields.k == 2"), vec![0]);
+        assert!(matches_custom(&a, "malloc.fields.k == 1").is_empty());
+    }
+
+    #[test]
+    fn stack_is_optional_and_missing_without_one() {
+        let a = load(r#"{"op":"M","id":1,"addr":"0x1000","size":8,"stack":["main"]}
+{"op":"M","id":2,"addr":"0x2000","size":8}
+"#);
+        assert_eq!(matches_custom(&a, "malloc.stack is None"), vec![1]);
+        assert_eq!(matches_custom(&a, "malloc.stack is not None"), vec![0]);
+        // like every optional field, a comparison on missing is false
+        assert_eq!(matches_custom(&a, r#"malloc.stack != "zzz""#), vec![0]);
+    }
+
+    #[test]
+    fn alloc_end_is_the_displayed_requested_end() {
+        let mut a = load(r#"{"op":"H","v":1,"row_bytes":4096}
+{"op":"M","id":1,"addr":"0x1000","size":16,"usable":32}
+"#);
+        a.view.seek(&a.store, 1);
+        let info = render::alloc_info(&a.store, &mut a.view, &a.cfg, 256, 0x1000, 0, 0.0);
+        assert!(info.contains(r#""end":"0x1010""#), "got {info}");
+        assert_eq!(matches_custom(&a, "alloc.end == 0x1010"), vec![0]);
+        assert!(matches_custom(&a, "alloc.span.overlaps(range(0x1010, 0x1020))").is_empty());
+        assert_eq!(matches_custom(&a, "alloc.usable == 32"), vec![0]);
     }
 
     #[test]

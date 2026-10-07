@@ -71,22 +71,6 @@ pub struct Filter {
     /// Match bits for the applied E010 expression, indexed by creator event.
     /// `None` means the expression is empty/off.
     pub matches: Option<Vec<u64>>,
-    /// bitmask over site indices; meaningful only when `sites_set` (an empty
-    /// *set* bitmask, as opposed to an absent one, means "no site selected"
-    /// — i.e. hide everything with a site).
-    pub sites: Vec<u64>,
-    pub sites_set: bool,
-    /// bitmask over thread indices; see `sites_set`.
-    pub thrs: Vec<u64>,
-    pub thrs_set: bool,
-    /// bitmask over tag ids (bit 0 = untagged); see `sites_set`.
-    pub tags: Vec<u64>,
-    pub tags_set: bool,
-    pub size_min: u64,
-    pub size_max: u64, // 0 = unbounded
-    /// Address ranges [lo, hi): when non-empty, an allocation passes only if
-    /// its rendered span intersects at least one range.
-    pub addr_ranges: Vec<(u64, u64)>,
 }
 
 impl Filter {
@@ -95,52 +79,10 @@ impl Filter {
         w < words.len() && words[w] >> (i % 64) & 1 == 1
     }
 
-    pub fn pass(&self, s: &Store, e: u32) -> bool {
-        if self.mode == FILTER_OFF {
-            return true;
-        }
-        if let Some(bits) = &self.matches {
-            return Self::bit(bits, e);
-        }
-        let ei = e as usize;
-        if self.sites_set {
-            let site = s.site(e);
-            if site != NONE_U32 && !Self::bit(&self.sites, site) {
-                return false;
-            }
-        }
-        if self.thrs_set {
-            let thr = s.thr_idx[ei];
-            if thr != NONE_U16 && !Self::bit(&self.thrs, thr as u32) {
-                return false;
-            }
-        }
-        if self.tags_set {
-            let passes = if s.has_tags(e) {
-                s.tag_ids(e)
-                    .any(|tag| Self::bit(&self.tags, tag as u32))
-            } else {
-                Self::bit(&self.tags, 0)
-            };
-            if !passes {
-                return false;
-            }
-        }
-        let sz = s.size(e);
-        if sz < self.size_min {
-            return false;
-        }
-        if self.size_max > 0 && sz > self.size_max {
-            return false;
-        }
-        if !self.addr_ranges.is_empty() {
-            let a = s.addr(e);
-            let end = a.saturating_add(s.span(e));
-            if !self.addr_ranges.iter().any(|&(lo, hi)| a < hi && end > lo) {
-                return false;
-            }
-        }
-        true
+    /// Does creator `e` pass? Everything does while the filter is off or no
+    /// expression is applied.
+    pub fn pass(&self, _s: &Store, e: u32) -> bool {
+        self.mode == FILTER_OFF || self.matches.as_ref().is_none_or(|bits| Self::bit(bits, e))
     }
 }
 
@@ -686,7 +628,7 @@ pub fn render_addr(
         return;
     }
     // Bound the live-set walk to allocations that can touch the visible rows:
-    // start max_span below the first visible row's address (like `pick`) and
+    // start max_live_span below the first visible row's address (like `pick`) and
     // stop at the last visible row's end. O(visible + log live) instead of a
     // full O(live) scan every frame.
     let addr_lo = v.base + v.rows[vis_lo] * rb;
@@ -694,7 +636,7 @@ pub fn render_addr(
         .base
         .saturating_add(v.rows[vis_hi].saturating_add(1).saturating_mul(rb));
     // Walk-back bound: the widest *currently live* allocation, not
-    // Store::max_span — that global only grows, so one early wide allocation
+    // a trace-wide maximum — that only grows, so one early wide allocation
     // would tax every frame for the rest of the session.
     let floor = addr_lo.saturating_sub(v.max_live_span().max(1));
     // Draw in creation order, not address order: where live allocations
@@ -771,7 +713,7 @@ pub fn render_addr(
             }
             let row_start = v.base + r * rb;
             let lo = a.max(row_start);
-            let hi = end.min(row_start + rb);
+            let hi = end.min(row_start.saturating_add(rb));
             if hi <= lo {
                 continue;
             }
@@ -790,7 +732,7 @@ pub fn render_addr(
                 seams.push((e, a, x0, y, y1));
             }
             // requested part vs slack band
-            let req_end = (a + size).min(hi).max(lo);
+            let req_end = a.saturating_add(size).min(hi).max(lo);
             let xm = if req_end >= hi {
                 x1
             } else if req_end <= lo {
@@ -823,9 +765,9 @@ pub fn render_addr(
                 let vx0 = x0.max(0);
                 let vw = x1.min(w as i64) - vx0;
                 if vw >= 18 {
-                    let a_lo = lo.max(row_start + (pan + vx0 as f64 / scale) as u64);
+                    let a_lo = lo.max(row_start.saturating_add((pan + vx0 as f64 / scale) as u64));
                     let a_hi =
-                        hi.min(row_start + (pan + (vx0 + vw) as f64 / scale).ceil() as u64);
+                        hi.min(row_start.saturating_add((pan + (vx0 + vw) as f64 / scale).ceil() as u64));
                     texts.push((e, a_lo, a_hi, vx0, y, vw));
                 }
             }
@@ -932,7 +874,7 @@ pub fn render_addr(
                     continue; // still live (or never freed): not a ghost
                 }
                 let gspan = s.span(g);
-                let gend = ga + gspan;
+                let gend = ga.saturating_add(gspan);
                 if gend > end {
                     continue; // partial overlap: corruption, not nesting
                 }
@@ -956,7 +898,7 @@ pub fn render_addr(
                     }
                     let row_start = v.base + r * rb;
                     let lo = ga.max(row_start);
-                    let hi = gend.min(row_start + rb);
+                    let hi = gend.min(row_start.saturating_add(rb));
                     if hi <= lo {
                         continue;
                     }
@@ -994,13 +936,13 @@ pub fn pick(
     };
     let row_start = v.base + v.rows[i] * v.row_bytes;
     let (scale, pan) = cfg.x_map(w, v.row_bytes);
-    let addr_at = row_start + ((pan + x as f64 / scale) as u64).min(v.row_bytes - 1);
+    let addr_at = row_start.saturating_add(((pan + x as f64 / scale) as u64).min(v.row_bytes - 1));
 
     // scan live allocs whose start is <= addr_at; when several cover the
     // address (overlap/nesting), the *most recently created* one wins — it
     // is the allocation conceptually on top, and picking by address order
     // instead would make the enclosing block shadow everything inside it
-    let floor = addr_at.saturating_sub(s.max_span.max(1));
+    let floor = addr_at.saturating_sub(v.max_live_span().max(1));
     let mut found: Option<(u64, u32)> = None;
     for &(a, e) in v.live.range((floor, 0)..=(addr_at, u32::MAX)) {
         if a.saturating_add(s.span(e)) > addr_at && found.map_or(true, |(_, fe)| e > fe) {
@@ -1128,7 +1070,7 @@ fn region_rects(
         let y = v.row_y(idx, cfg.row_px, cfg.gap_px) as f64 - scroll;
         let row_start = v.base + r * rb;
         let lo = a.max(row_start);
-        let hi = end.min(row_start + rb);
+        let hi = end.min(row_start.saturating_add(rb));
         idx += 1;
         if hi <= lo {
             continue;

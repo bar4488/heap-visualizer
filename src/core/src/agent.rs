@@ -144,7 +144,7 @@ pub(crate) fn allocation(app: &App, creator: u32) -> Option<Value> {
         "end".into(),
         json!(format!(
             "0x{:x}",
-            store.addr(creator).saturating_add(store.size(creator))
+            store.end(creator)
         )),
     );
     object.insert(
@@ -572,6 +572,10 @@ pub(crate) fn timeline(
     to: u64,
     bins: usize,
 ) -> Result<Value, Error> {
+    // a caller-supplied count: zero bins has no last bin to clamp into
+    if bins == 0 {
+        return Err(param_error("timeline needs at least one bin"));
+    }
     let bits = matches(app, source)?;
     let width = to.saturating_sub(from).max(1);
     let mut rows = vec![(0_u64, 0_u64, 0_u64, 0_u64, 0_u128, 0_u128); bins];
@@ -779,6 +783,7 @@ mod tests {
         let timeline = engine.agent_timeline("", "sequence", 0, 4, 2).unwrap();
         assert_eq!(timeline["bins"].as_array().unwrap().len(), 2);
         assert_eq!(timeline["bins"][1]["customEvents"], 1);
+        assert!(engine.agent_timeline("", "sequence", 0, 4, 0).is_err(), "zero bins is an error, not a panic");
 
         let context = engine
             .agent_stream_context("alloc.size >= 100", 1, 1, 2, true)
