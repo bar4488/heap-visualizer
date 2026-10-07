@@ -18,17 +18,27 @@ if [[ ! -x "$tsc" ]]; then
   exit 1
 fi
 
+# Where cargo puts a crate's build products. Asked of cargo rather than assumed,
+# so CARGO_TARGET_DIR and a configured build.target-dir are respected.
+target_dir() {
+  cargo metadata --format-version 1 --no-deps --manifest-path "$1" |
+    python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])'
+}
+
 mkdir -p dist
 rm -rf dist/shell dist/heap
 
 if (( ! web_only )); then
+  core_target=$(target_dir src/core/Cargo.toml)
+  filter_target=$(target_dir src/filter-dsl/Cargo.toml)
+  server_target=$(target_dir src/local-server/Cargo.toml)
   cargo build --release --target wasm32-unknown-unknown --manifest-path src/core/Cargo.toml
-  cp src/core/target/wasm32-unknown-unknown/release/heap_visualizer_core.wasm dist/
+  cp "$core_target/wasm32-unknown-unknown/release/heap_visualizer_core.wasm" dist/
   # The filter lexer ships a second time, standalone, for the main thread: the
   # editor highlights on every keystroke and the engine is behind a message
   # port. It is small because the crate has no dependencies (T043).
   cargo build --release --target wasm32-unknown-unknown --manifest-path src/filter-dsl/Cargo.toml
-  cp src/filter-dsl/target/wasm32-unknown-unknown/release/heap_visualizer_filter_dsl.wasm \
+  cp "$filter_target/wasm32-unknown-unknown/release/heap_visualizer_filter_dsl.wasm" \
     dist/filter_lexer.wasm
   # heapviz is a separate native companion. It serves only the API,
   # never dist/; building it here keeps one full build path for every product.
@@ -56,7 +66,7 @@ if (( ! web_only )); then
   rm -rf dist/downloads
   mkdir -p dist/downloads
   if [[ "$(uname -s)-$(uname -m)" == "Linux-x86_64" ]]; then
-    cp src/local-server/target/release/heapviz dist/downloads/heapviz-linux-x86_64
+    cp "$server_target/release/heapviz" dist/downloads/heapviz-linux-x86_64
   fi
   python3 - <<'PY'
 import hashlib, json, tomllib
@@ -91,13 +101,17 @@ cp -r src/web/guide dist/guide
 
 # The demo trace is generated, not stored: gen.py is deterministic, so the
 # bundled demo is reproducible from a seed rather than from a file someone
-# happens to have. Only when missing — it is 6.7 MB.
-if [[ ! -f dist/demo.heapl ]]; then
-  python3 gen.py --seed 1 --ops 50000 --threads 4 --out dist/demo.heapl
+# happens to have. Only when missing or older than gen.py — it is several MB.
+# Generated beside the target and renamed into place, so an interrupted run
+# leaves no truncated demo that later builds would keep.
+if [[ ! -f dist/demo.heapl || gen.py -nt dist/demo.heapl ]]; then
+  rm -f dist/demo.heapl.partial
+  python3 gen.py --seed 1 --ops 50000 --threads 4 --out dist/demo.heapl.partial
+  mv -f dist/demo.heapl.partial dist/demo.heapl
 fi
 
 ls -la dist/heap_visualizer_core.wasm dist/filter_lexer.wasm
-(( web_only )) || ls -la src/local-server/target/release/heapviz
+(( web_only )) || ls -la "$server_target/release/heapviz"
 (( web_only )) || ls -la dist/downloads/
 
 echo "serve with: ./serve.py   (http.server sends no Cache-Control, so browsers cache stale js)"
