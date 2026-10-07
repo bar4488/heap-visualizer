@@ -41,6 +41,7 @@ skipped (forward compatibility).
 | `F`  | **Free** — an existing allocation ends. |
 | `R`  | **Realloc** — one allocation ends and a new one begins, atomically. |
 | `E`  | **Custom event** — a producer's own landmark; not an allocation ([TRACE-010](#trace-010-custom-event-record-e)). |
+| `L`  | **Log** — a structured log line; the log evidence domain ([LOG-001](13-domains-and-logs.md#log-001-the-log-record-l)). |
 
 ## TRACE-003: Header record `H`
 
