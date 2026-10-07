@@ -431,6 +431,13 @@ worker.onmessage = (ev) => {
       $('progress-pct').textContent = `${m.pct}%`;
       break;
     case 'error':
+      if (serverStreaming) {
+        // the worker dropped this streamed load: stop the download, and let
+        // the reader loop end quietly so this first error stays the one shown
+        serverLoadGeneration++;
+        serverTraceController?.abort();
+        serverTraceController = null;
+      }
       serverStreaming = false;
       pendingServerTraceId = null;
       UI.loaded = false;
