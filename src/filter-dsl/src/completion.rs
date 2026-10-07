@@ -155,8 +155,9 @@ fn string_at_cursor(source: &str, cursor: usize) -> Option<(Span, String)> {
         while i < bytes.len() {
             let byte = bytes[i];
             if escaped {
+                // the escaped character may be several bytes long
                 escaped = false;
-                i += 1;
+                i += source[i..].chars().next()?.len_utf8();
             } else if byte == b'\\' {
                 escaped = true;
                 i += 1;
@@ -203,102 +204,98 @@ fn after_is(source: &str) -> Option<bool> {
 /// it.
 ///
 /// A receiver used to be one token — `site`, `stack` — and is now a chain:
-/// `malloc.fields`, `named("x").alloc`, `malloc.fields["k"]`. This walks back
-/// over that chain, stepping over a bracketed or parenthesised group as a
-/// unit, and stops at the first token that cannot continue one.
+/// `malloc.fields`, `named("x").alloc`, `malloc.fields["k"]`.
 fn receiver_before_dot(source: &str, dot: usize) -> Option<Expr> {
     let tokens = lex(&source[..dot]).ok()?;
-    let meaningful: Vec<_> = tokens
-        .iter()
-        .filter(|token| !matches!(token.kind, TokenKind::Eof))
-        .collect();
-    let mut end = meaningful.len();
+    let meaningful = &tokens[..tokens.len().saturating_sub(1)];
+    let start = chain_start(meaningful, meaningful.len())?;
+    parse(source[meaningful[start].span.start..dot].trim()).ok()
+}
+
+/// The first token of the postfix chain that ends just before `end`.
+///
+/// This walks back over the chain, stepping over a bracketed or
+/// parenthesised group as a unit, and stops at the first token that cannot
+/// continue one. `None` when no chain ends there.
+fn chain_start(tokens: &[Token], end: usize) -> Option<usize> {
+    let mut end = end;
     let mut start = None;
     while end > 0 {
-        match &meaningful[end - 1].kind {
+        match &tokens[end - 1].kind {
             // a call or an index: step over the whole group, then keep going,
             // because whatever it hangs off precedes it directly
             TokenKind::RightParen | TokenKind::RightBracket => {
-                let closing = meaningful[end - 1].kind.clone();
-                let opening = match closing {
-                    TokenKind::RightParen => TokenKind::LeftParen,
-                    _ => TokenKind::LeftBracket,
-                };
-                let mut depth = 0usize;
-                loop {
-                    if end == 0 {
-                        return None;
-                    }
-                    end -= 1;
-                    if meaningful[end].kind == closing {
-                        depth += 1;
-                    } else if meaningful[end].kind == opening {
-                        depth -= 1;
-                        if depth == 0 {
-                            break;
-                        }
-                    }
-                }
-                start = Some(meaningful[end].span.start);
+                end = group_start(tokens, end - 1)?;
+                start = Some(end);
                 continue;
             }
             TokenKind::Identifier(_) => {
                 end -= 1;
-                start = Some(meaningful[end].span.start);
+                start = Some(end);
             }
             _ => break,
         }
         // a chain continues only through a `.`
-        if end > 0 && matches!(meaningful[end - 1].kind, TokenKind::Dot) {
+        if end > 0 && matches!(tokens[end - 1].kind, TokenKind::Dot) {
             end -= 1;
         } else {
             break;
         }
     }
-    parse(source[start?..dot].trim()).ok()
+    start
+}
+
+/// The index of the bracket that opens the group closed at `close`.
+fn group_start(tokens: &[Token], close: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for index in (0..=close).rev() {
+        if is_closing(&tokens[index].kind) {
+            depth += 1;
+        } else if is_opening(&tokens[index].kind) {
+            depth -= 1;
+            if depth == 0 {
+                return Some(index);
+            }
+        }
+    }
+    None
+}
+
+fn is_opening(kind: &TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::LeftParen | TokenKind::LeftBracket | TokenKind::LeftBrace
+    )
+}
+
+fn is_closing(kind: &TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::RightParen | TokenKind::RightBracket | TokenKind::RightBrace
+    )
+}
+
+/// The innermost bracket still open at the end of `tokens`.
+fn unclosed_bracket(tokens: &[Token]) -> Option<usize> {
+    let mut depth = 0usize;
+    for (index, token) in tokens.iter().enumerate().rev() {
+        if is_closing(&token.kind) {
+            depth += 1;
+        } else if is_opening(&token.kind) {
+            if depth == 0 {
+                return Some(index);
+            }
+            depth -= 1;
+        }
+    }
+    None
 }
 
 fn operand_context(source: &str, value_start: usize) -> Option<CompletionSite> {
     let tokens = lex(&source[..value_start]).ok()?;
     let meaningful = &tokens[..tokens.len().saturating_sub(1)];
-    let op = meaningful.iter().rposition(|token| {
-        matches!(
-            token.kind,
-            TokenKind::EqualEqual
-                | TokenKind::BangEqual
-                | TokenKind::Less
-                | TokenKind::LessEqual
-                | TokenKind::Greater
-                | TokenKind::GreaterEqual
-                | TokenKind::In
-                | TokenKind::Plus
-                | TokenKind::Minus
-        )
-    })?;
-    let after = &meaningful[op + 1..];
-    // `in` and equality can be followed by a set literal, so the cursor may sit
-    // at a member rather than at the operand itself
-    let takes_set = matches!(
-        meaningful[op].kind,
-        TokenKind::In | TokenKind::EqualEqual | TokenKind::BangEqual
-    );
-    if takes_set
-        && after
-            .first()
-            .is_some_and(|token| matches!(token.kind, TokenKind::LeftBrace))
-    {
-        if !after
-            .last()
-            .is_some_and(|token| matches!(token.kind, TokenKind::LeftBrace | TokenKind::Comma))
-        {
-            return None;
-        }
-        return operand_site(source, meaningful, op, OperandKind::SetMember);
-    }
-    if !after.is_empty() {
-        return None;
-    }
-    let kind = match meaningful[op].kind {
+    let last = meaningful.len().checked_sub(1)?;
+    let kind = match meaningful[last].kind {
         TokenKind::EqualEqual => OperandKind::Binary(BinaryOp::Equal),
         TokenKind::BangEqual => OperandKind::Binary(BinaryOp::NotEqual),
         TokenKind::Less => OperandKind::Binary(BinaryOp::Less),
@@ -308,100 +305,99 @@ fn operand_context(source: &str, value_start: usize) -> Option<CompletionSite> {
         TokenKind::Plus => OperandKind::Binary(BinaryOp::Add),
         TokenKind::Minus => OperandKind::Binary(BinaryOp::Subtract),
         TokenKind::In => OperandKind::Binary(BinaryOp::In),
+        // `in` and equality can be followed by a set literal, so the cursor
+        // may sit at a member of one rather than at the operand itself
+        TokenKind::LeftBrace | TokenKind::Comma => {
+            let open = unclosed_bracket(meaningful)?;
+            if !matches!(meaningful[open].kind, TokenKind::LeftBrace) || open == 0 {
+                return None;
+            }
+            let op = open - 1;
+            if !matches!(
+                meaningful[op].kind,
+                TokenKind::In | TokenKind::EqualEqual | TokenKind::BangEqual
+            ) {
+                return None;
+            }
+            return operand_site(source, meaningful, op, OperandKind::SetMember);
+        }
         _ => return None,
     };
-    operand_site(source, meaningful, op, kind)
+    operand_site(source, meaningful, last, kind)
 }
 
 /// The completion site for the operator at `op`, with the left operand parsed
 /// back out of the source that precedes it.
+///
+/// The left operand runs back over postfix chains, bracketed groups and
+/// additive operators — `alloc.size + 1 == ` compares the sum, and
+/// `len(alloc.tags) > ` the call — and stops at what binds more loosely: a
+/// comparison, `not`, `and`, `or`, or the bracket or comma it sits inside.
 fn operand_site(
     source: &str,
     meaningful: &[Token],
     op: usize,
     kind: OperandKind,
 ) -> Option<CompletionSite> {
-    let start = meaningful[..op]
-        .iter()
-        .rposition(|token| {
-            matches!(
-                token.kind,
-                TokenKind::And
-                    | TokenKind::Or
-                    | TokenKind::Not
-                    | TokenKind::EqualEqual
-                    | TokenKind::BangEqual
-                    | TokenKind::Less
-                    | TokenKind::LessEqual
-                    | TokenKind::Greater
-                    | TokenKind::GreaterEqual
-                    | TokenKind::In
-                    | TokenKind::Plus
-                    | TokenKind::Minus
-                    | TokenKind::LeftParen
-                    | TokenKind::LeftBrace
-                    | TokenKind::Comma
-            )
-        })
-        .map_or(0, |index| meaningful[index].span.end);
-    let end = meaningful[op].span.start;
-    let left_source = source[start..end].trim();
-    let left = parse(left_source).ok()?;
+    let mut start = op;
+    while start > 0 {
+        let token = &meaningful[start - 1];
+        if is_closing(&token.kind) {
+            start = group_start(meaningful, start - 1)?;
+            continue;
+        }
+        if matches!(
+            token.kind,
+            TokenKind::And
+                | TokenKind::Or
+                | TokenKind::Not
+                | TokenKind::Is
+                | TokenKind::EqualEqual
+                | TokenKind::BangEqual
+                | TokenKind::Less
+                | TokenKind::LessEqual
+                | TokenKind::Greater
+                | TokenKind::GreaterEqual
+                | TokenKind::In
+                | TokenKind::LeftParen
+                | TokenKind::LeftBracket
+                | TokenKind::LeftBrace
+                | TokenKind::Comma
+        ) {
+            break;
+        }
+        start -= 1;
+    }
+    if start == op {
+        return None;
+    }
+    let left_source = &source[meaningful[start].span.start..meaningful[op].span.start];
+    let left = parse(left_source.trim()).ok()?;
     Some(CompletionSite::Operand { left, kind })
 }
 
 fn call_argument_context(source: &str, value_start: usize) -> Option<CompletionSite> {
     let tokens = lex(&source[..value_start]).ok()?;
     let meaningful = &tokens[..tokens.len().saturating_sub(1)];
-    let mut depth = 0usize;
-    let mut open = None;
-    for (index, token) in meaningful.iter().enumerate().rev() {
-        match token.kind {
-            TokenKind::RightParen => depth += 1,
-            TokenKind::LeftParen if depth > 0 => depth -= 1,
-            TokenKind::LeftParen => {
-                open = Some(index);
-                break;
-            }
-            _ => {}
-        }
-    }
-    let open = open?;
-    if open == 0 {
+    let open = unclosed_bracket(meaningful)?;
+    if !matches!(meaningful[open].kind, TokenKind::LeftParen) {
         return None;
     }
-    let callee_end = meaningful[open].span.start;
-    let callee_start = meaningful[..open]
-        .iter()
-        .rposition(|token| {
-            matches!(
-                token.kind,
-                TokenKind::And
-                    | TokenKind::Or
-                    | TokenKind::Not
-                    | TokenKind::EqualEqual
-                    | TokenKind::BangEqual
-                    | TokenKind::Less
-                    | TokenKind::LessEqual
-                    | TokenKind::Greater
-                    | TokenKind::GreaterEqual
-                    // `in` matters here now that `x in range(lo, hi)` is the
-                    // ordinary form: without it the callee reads back as the
-                    // whole `x in range` rather than as `range`
-                    | TokenKind::In
-                    | TokenKind::Plus
-                    | TokenKind::Minus
-                    | TokenKind::Comma
-                    | TokenKind::LeftBrace
-                    | TokenKind::LeftParen
-            )
-        })
-        .map_or(0, |index| meaningful[index].span.end);
-    let callee = parse(source[callee_start..callee_end].trim()).ok()?;
-    let index = meaningful[open + 1..]
-        .iter()
-        .filter(|token| matches!(token.kind, TokenKind::Comma))
-        .count();
+    let callee_start = chain_start(meaningful, open)?;
+    let callee_source = &source[meaningful[callee_start].span.start..meaningful[open].span.start];
+    let callee = parse(callee_source.trim()).ok()?;
+    // only this call's own commas count, not those inside a nested call
+    let mut depth = 0usize;
+    let mut index = 0;
+    for token in &meaningful[open + 1..] {
+        if is_opening(&token.kind) {
+            depth += 1;
+        } else if is_closing(&token.kind) {
+            depth -= 1;
+        } else if depth == 0 && matches!(token.kind, TokenKind::Comma) {
+            index += 1;
+        }
+    }
     Some(CompletionSite::CallArgument { callee, index })
 }
 
