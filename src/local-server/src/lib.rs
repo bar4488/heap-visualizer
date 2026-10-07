@@ -18,6 +18,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use heap_visualizer_core::agent;
 use tokio::sync::watch;
 use tokio_util::io::ReaderStream;
 use url::Url;
@@ -50,6 +51,13 @@ const MAX_OVERVIEW_TOP: u32 = 50;
 const MAX_REQUEST_ID_BYTES: usize = 64;
 const MAX_CHANGE_HISTORY: usize = 512;
 const MAX_CHANGE_PAGE: usize = 200;
+/// A `replaceTagMembers` with more creators than this is journaled (and kept
+/// for idempotent replay) as a snapshot reset, like a tag query, instead of
+/// verbatim. At ~11 JSON bytes per creator one entry stays under ~11 KiB, so
+/// the whole journal stays near 5 MiB and a full `/changes` page near 2 MiB,
+/// rather than 512 x 32 MiB bodies. Larger replacements are bulk edits where
+/// re-reading the document is no worse than replaying the delta.
+const MAX_JOURNALED_TAG_MEMBERS: usize = 1024;
 const MAX_CHANGE_WAIT_SECS: u64 = 30;
 const MAX_AGENT_RESPONSE_BYTES: usize = 256 << 10;
 
@@ -440,6 +448,7 @@ pub fn router(state: ServerState) -> Router {
             post(filter_check).options(preflight),
         )
         .route("/api/v1/overview", get(overview).options(preflight))
+        .route("/api/v1/logs", get(logs).options(preflight))
         .route(
             "/api/v1/allocations/query",
             post(agent_query).options(preflight),
@@ -568,6 +577,7 @@ async fn session(State(state): State<ServerState>, headers: HeaderMap) -> Respon
             capabilities: serde_json::json!({
                 "endpoints": {
                     "overview": "/api/v1/overview",
+                    "logs": "/api/v1/logs",
                     "allocation": "/api/v1/allocations/{creator}",
                     "allocationQuery": "/api/v1/allocations/query",
                     "allocationSummary": "/api/v1/allocations/summarize",
@@ -604,6 +614,9 @@ fn limits() -> serde_json::Value {
         "maximumContextEvents": MAX_CONTEXT_EVENTS,
         "defaultOverviewTop": DEFAULT_OVERVIEW_TOP,
         "maximumOverviewTop": MAX_OVERVIEW_TOP,
+        "defaultLogPage": agent::LOGS_COUNT_DEFAULT,
+        "maximumLogPage": agent::LOGS_COUNT_MAX,
+        "maximumLogTextBytes": agent::LOGS_TEXT_MAX,
         "maximumFilterBytes": MAX_FILTER_BYTES,
         "maximumRequestIdBytes": MAX_REQUEST_ID_BYTES,
         "maximumRequestBytes": MAX_REQUEST_BYTES,
@@ -611,6 +624,7 @@ fn limits() -> serde_json::Value {
         "maximumChangePage": MAX_CHANGE_PAGE,
         "maximumChangeWaitSeconds": MAX_CHANGE_WAIT_SECS,
         "changeHistory": MAX_CHANGE_HISTORY,
+        "maximumJournaledTagMembers": MAX_JOURNALED_TAG_MEMBERS,
         "maximumAgentResponseBytes": MAX_AGENT_RESPONSE_BYTES
     })
 }
@@ -736,6 +750,68 @@ async fn overview(State(state): State<ServerState>, headers: HeaderMap, uri: Uri
     let mut value = engine.agent_overview(top as usize);
     envelope(&mut value, &state, engine.analysis().revision);
     bounded_json(&value, origin)
+}
+
+/// `GET /api/v1/logs` (LOG-008): one bounded page of log records. The
+/// transport rejects unknown, repeated, or unparseable keys; the core
+/// validates the values. Log reads do not depend on the analysis, so the
+/// envelope carries `traceId` only.
+async fn logs(State(state): State<ServerState>, headers: HeaderMap, uri: Uri) -> Response {
+    let origin = match authorize(&headers, &state) {
+        Ok(origin) => origin,
+        Err(error) => return error.response(),
+    };
+    let params = match logs_query(uri.query(), origin.clone()) {
+        Ok(params) => params,
+        Err(error) => return error.response(),
+    };
+    let result = state
+        .engine
+        .lock()
+        .expect("engine lock poisoned")
+        .agent_logs(&params);
+    let mut value = match result {
+        Ok(value) => value,
+        Err(error) => {
+            return request_error(StatusCode::BAD_REQUEST, error.message, origin).response()
+        }
+    };
+    value
+        .as_object_mut()
+        .expect("agent core response is an object")
+        .insert("traceId".into(), state.trace.id.to_string().into());
+    bounded_json(&value, origin)
+}
+
+fn logs_query(
+    query: Option<&str>,
+    origin: Option<HeaderValue>,
+) -> Result<agent::LogsParams, RequestError> {
+    let invalid = || {
+        request_error(
+            StatusCode::BAD_REQUEST,
+            "invalid query parameters",
+            origin.clone(),
+        )
+    };
+    let mut params = agent::LogsParams::default();
+    let mut seen = Vec::new();
+    for (key, value) in url::form_urlencoded::parse(query.unwrap_or_default().as_bytes()) {
+        if seen.contains(&key) {
+            return Err(invalid());
+        }
+        match key.as_ref() {
+            "minLevel" => params.min_level = Some(value.into_owned()),
+            "text" => params.text = Some(value.into_owned()),
+            "seqLo" => params.seq_lo = Some(value.parse().map_err(|_| invalid())?),
+            "seqHi" => params.seq_hi = Some(value.parse().map_err(|_| invalid())?),
+            "from" => params.from = value.parse().map_err(|_| invalid())?,
+            "count" => params.count = Some(value.parse().map_err(|_| invalid())?),
+            _ => return Err(invalid()),
+        }
+        seen.push(key);
+    }
+    Ok(params)
 }
 
 async fn filter_schema(State(state): State<ServerState>, headers: HeaderMap, uri: Uri) -> Response {
@@ -1549,20 +1625,24 @@ async fn change_analysis(
         }
     }
     let revision = engine.analysis().revision;
-    {
-        let mut changes = state.changes.lock().expect("change log lock poisoned");
-        changes.push_back(ChangeLogEntry {
-            revision,
-            change: Some(change.clone()),
-        });
-        while changes.len() > MAX_CHANGE_HISTORY {
-            changes.pop_front();
-        }
-    }
+    let large = matches!(
+        &change,
+        heap_visualizer_core::analysis::Change::ReplaceTagMembers { creators, .. }
+            if creators.len() > MAX_JOURNALED_TAG_MEMBERS
+    );
+    journal(&state, revision, (!large).then(|| change.clone()));
     state.revision_tx.send_replace(revision);
+    // The committing client still receives the canonical change to apply.
     let response = serde_json::json!({ "traceId": state.trace.id.as_ref(), "revision": revision, "change": change });
     if let Some(request_id) = request.request_id {
-        remember_idempotent(&state, request_id, &body, response.clone());
+        // A replay of a large replacement asks for a snapshot instead of
+        // retaining the creator list.
+        let retained = if large {
+            serde_json::json!({ "traceId": state.trace.id.as_ref(), "revision": revision, "snapshotRequired": true })
+        } else {
+            response.clone()
+        };
+        remember_idempotent(&state, request_id, &body, retained);
     }
     json(StatusCode::OK, &response, origin)
 }
@@ -1627,16 +1707,7 @@ async fn tag_query(State(state): State<ServerState>, headers: HeaderMap, body: B
             .response();
         }
     }
-    {
-        let mut changes = state.changes.lock().expect("change log lock poisoned");
-        changes.push_back(ChangeLogEntry {
-            revision: result.revision,
-            change: None,
-        });
-        while changes.len() > MAX_CHANGE_HISTORY {
-            changes.pop_front();
-        }
-    }
+    journal(&state, result.revision, None);
     state.revision_tx.send_replace(result.revision);
     let response = serde_json::json!({
         "traceId": state.trace.id.as_ref(), "revision": result.revision,
@@ -1646,6 +1717,20 @@ async fn tag_query(State(state): State<ServerState>, headers: HeaderMap, body: B
         remember_idempotent(&state, request_id, &body, response.clone());
     }
     json(StatusCode::OK, &response, origin)
+}
+
+/// Appends one committed revision to the bounded change journal. `None` is a
+/// reset entry: clients behind `revision` must re-read the full document.
+fn journal(
+    state: &ServerState,
+    revision: u64,
+    change: Option<heap_visualizer_core::analysis::Change>,
+) {
+    let mut changes = state.changes.lock().expect("change log lock poisoned");
+    changes.push_back(ChangeLogEntry { revision, change });
+    while changes.len() > MAX_CHANGE_HISTORY {
+        changes.pop_front();
+    }
 }
 
 async fn changes(State(state): State<ServerState>, headers: HeaderMap, uri: Uri) -> Response {
@@ -2144,6 +2229,152 @@ mod tests {
                 .to_string(),
             ))
             .unwrap()
+    }
+
+    /// A router over an in-test trace, and that trace's id.
+    fn app_with(trace: &str) -> (Router, String) {
+        let source = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(source.path(), trace).unwrap();
+        let trace = TraceFile::open(source.path()).unwrap();
+        let id = trace.id.to_string();
+        let engine = trace.parse_engine().unwrap();
+        (router(ServerState::new(TOKEN.into(), 8631, trace, engine)), id)
+    }
+
+    async fn get_json(app: &Router, uri: &str) -> (StatusCode, serde_json::Value) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header(header::HOST, "127.0.0.1:8631")
+                    .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    #[tokio::test]
+    async fn logs_page_through_level_filtered_records() {
+        let mut trace = String::from("{\"op\":\"H\",\"v\":1}\n");
+        trace.push_str("{\"op\":\"M\",\"t\":1,\"id\":1,\"addr\":\"0x1000\",\"size\":8}\n");
+        for (i, level) in ["info", "warn", "error", "debug", "warning"].iter().enumerate() {
+            trace.push_str(&format!(
+                "{{\"op\":\"L\",\"t\":{},\"thr\":2,\"level\":\"{level}\",\"logger\":\"net\",\"msg\":\"line {i}\",\"attempt\":{i}}}\n",
+                i + 2
+            ));
+        }
+        let (app, id) = app_with(&trace);
+
+        let (status, page) = get_json(&app, "/api/v1/logs?minLevel=warn&count=2").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(page["traceId"], id);
+        assert_eq!(page["total"], 3);
+        assert_eq!(page["from"], 0);
+        assert_eq!(page["next"], 2);
+        let items = page["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["level"], "warn");
+        assert_eq!(items[0]["msg"], "line 1");
+        assert_eq!(items[0]["logger"], "net");
+        assert_eq!(items[0]["thr"], 2);
+        assert!(items[0]["t"].is_string());
+        assert_eq!(items[1]["level"], "error");
+
+        let (status, last) = get_json(&app, "/api/v1/logs?minLevel=warn&count=2&from=2").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(last["items"].as_array().unwrap().len(), 1);
+        assert_eq!(last["items"][0]["msg"], "line 4");
+        assert_eq!(last["next"], serde_json::Value::Null);
+
+        let (_, all) = get_json(&app, "/api/v1/logs?text=LINE%203").await;
+        assert_eq!(all["total"], 1);
+        assert_eq!(all["items"][0]["level"], "debug");
+
+        // the overview carries the core's log counts
+        let (_, overview) = get_json(&app, "/api/v1/overview").await;
+        assert_eq!(overview["logs"]["records"], 5);
+        assert_eq!(overview["logs"]["byLevel"]["warn"], 2);
+
+        for bad in [
+            "/api/v1/logs?minLevel=loud",
+            "/api/v1/logs?minLevel=6",
+            "/api/v1/logs?count=0",
+            "/api/v1/logs?count=201",
+            "/api/v1/logs?from=-1",
+            "/api/v1/logs?count=1&count=2",
+            "/api/v1/logs?level=warn",
+        ] {
+            let (status, body) = get_json(&app, bad).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+            assert_eq!(body["error"]["code"], "invalid_request", "{bad}");
+        }
+        let long = format!("/api/v1/logs?text={}", "x".repeat(agent::LOGS_TEXT_MAX + 1));
+        assert_eq!(get_json(&app, &long).await.0, StatusCode::BAD_REQUEST);
+
+        let (_, session) = get_json(&app, "/api/v1/session").await;
+        let capabilities = &session["capabilities"];
+        assert_eq!(capabilities["endpoints"]["logs"], "/api/v1/logs");
+        assert_eq!(capabilities["limits"]["defaultLogPage"], agent::LOGS_COUNT_DEFAULT);
+        assert_eq!(capabilities["limits"]["maximumLogPage"], agent::LOGS_COUNT_MAX);
+        assert_eq!(capabilities["limits"]["maximumLogTextBytes"], agent::LOGS_TEXT_MAX);
+    }
+
+    #[tokio::test]
+    async fn a_large_member_replacement_is_journaled_as_a_reset() {
+        let mut trace = String::from("{\"op\":\"H\",\"v\":1}\n");
+        let n = MAX_JOURNALED_TAG_MEMBERS + 1;
+        for i in 0..n {
+            trace.push_str(&format!(
+                "{{\"op\":\"M\",\"t\":{i},\"id\":{},\"addr\":\"0x{:x}\",\"size\":8}}\n",
+                i + 1,
+                0x1000 + 16 * i
+            ));
+        }
+        let (app, id) = app_with(&trace);
+        let tag = serde_json::json!({ "type": "putTag", "id": "t", "name": "T", "color": "#112233" });
+        let response = app.clone().oneshot(analysis_change(&id, 0, tag)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let (_, first) = get_json(&app, "/api/v1/events?from=0&count=1").await;
+        let base = first["items"][0]["seq"].as_u64().unwrap();
+        let replace = |count: usize| {
+            serde_json::json!({
+                "type": "replaceTagMembers", "tagId": "t",
+                "creators": (0..count as u64).map(|k| base + k).collect::<Vec<_>>()
+            })
+        };
+
+        // at the threshold the delta is still journaled verbatim
+        let response = app
+            .clone()
+            .oneshot(analysis_change(&id, 1, replace(MAX_JOURNALED_TAG_MEMBERS)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let (_, feed) = get_json(&app, "/api/v1/changes?after=1").await;
+        assert_eq!(feed["reset"], false);
+        assert_eq!(
+            feed["changes"][0]["change"]["creators"].as_array().unwrap().len(),
+            MAX_JOURNALED_TAG_MEMBERS
+        );
+
+        // above it the committer still gets the change, others get a reset
+        let response = app.clone().oneshot(analysis_change(&id, 2, replace(n))).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["revision"], 3);
+        assert_eq!(body["change"]["creators"].as_array().unwrap().len(), n);
+        let (_, feed) = get_json(&app, "/api/v1/changes?after=2").await;
+        assert_eq!(feed["reset"], true);
+        assert_eq!(feed["changes"].as_array().unwrap().len(), 0);
+        let (_, feed) = get_json(&app, "/api/v1/changes?after=3").await;
+        assert_eq!(feed["reset"], false);
     }
 
     fn request(method: Method) -> axum::http::request::Builder {

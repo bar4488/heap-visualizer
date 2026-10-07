@@ -182,7 +182,11 @@ Item `level` is the lowercase level name; `thr` is the thread number or
 `null`; `fields` is the custom-field object or `null`; `next` is the next
 `from`, or `null` on the last page. `minLevel` accepts a level name (aliases
 accepted) or `0`–`5`. `count` of 0 or over 200, an unknown `minLevel`, and
-`text` over 1 KiB are invalid requests. The core provides this as
+`text` over 1 KiB are invalid requests, as are unknown, repeated, or
+non-numeric `seqLo`/`seqHi`/`from`/`count` parameters (`400
+invalid_request`). Session capabilities advertise `endpoints.logs` and the
+`defaultLogPage`, `maximumLogPage`, and `maximumLogTextBytes` limits from the
+core's constants. The core provides this as
 `Engine::agent_logs(&LogsParams)` and the overview's `logs: {records,
 byLevel:{trace..fatal}}`; the transport adds `traceId`.
 
