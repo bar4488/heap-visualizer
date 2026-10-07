@@ -14,6 +14,7 @@ a file, and why it never sees trace data.
 Run it directly for a local check, or via docker compose (docs/context.md).
 """
 
+import hmac
 import http.server
 import json
 import os
@@ -64,7 +65,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.wfile.write(body)
 
     def _body(self):
-        length = int(self.headers.get('Content-Length') or 0)
+        try:
+            length = int(self.headers.get('Content-Length') or 0)
+        except ValueError:
+            raise Rejected('invalid Content-Length')
         if length <= 0 or length > MAX_BODY:
             raise Rejected('missing or oversized body')
         try:
@@ -85,7 +89,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self._json(503, {'error': 'HEAP_ADMIN_TOKEN is not configured'})
             return False
         header = self.headers.get('Authorization', '')
-        if header != f'Bearer {ADMIN_TOKEN}':
+        # constant time, so the comparison does not reveal a matching prefix
+        if not hmac.compare_digest(header.encode('utf-8'), f'Bearer {ADMIN_TOKEN}'.encode('utf-8')):
             self._json(401, {'error': 'bad or missing token'})
             return False
         return True

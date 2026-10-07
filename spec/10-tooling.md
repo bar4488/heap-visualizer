@@ -45,7 +45,11 @@ counts, leaks, peak live, address span) prints to stderr.
   web layer, `index.html`/`style.css`, and a generated demo trace. It also builds
   the separate native local-data-server binary; that binary does not enter or
   serve `dist/`.
-  `./build.sh web` skips the cargo build.
+  `./build.sh web` skips the cargo build. Build products are located through
+  `cargo metadata`, so `CARGO_TARGET_DIR` is respected. The demo trace is
+  regenerated when missing or older than `gen.py`, and is written to a
+  temporary name and renamed, so an interrupted generation never leaves a
+  truncated demo behind.
 - **Hand-written files live under `src/`, generated files under `dist/`, and
   nothing crosses.** `dist/` is not in version control; a clean checkout is not
   servable until `build.sh` has run.
@@ -81,8 +85,11 @@ cache, or open a hosted deployment. `heapviz setup opencode` and `heapviz setup
 claude` install the same bundled API skill into those assistants' user skill
 directories without requiring a repository checkout. `heapviz doctor` checks
 the local setup, and `heapviz update` installs a checksum-verified release from
-the release-channel manifest. Ctrl+C stops the companion promptly, cancelling
-held read requests rather than waiting for their long-poll deadlines.
+the release-channel manifest. Ctrl+C, and on Unix also SIGTERM and SIGHUP,
+stops the companion promptly, cancelling held read requests rather than waiting
+for their long-poll deadlines, and removes its temporary trace snapshot. The
+connection string is printed as soon as the server listens; the optional
+update check runs beside the server and never delays it.
 
 The release-channel format is independent of every hosted deployment and names
 only the latest companion version and checksum-bound, same-origin platform
@@ -154,8 +161,10 @@ the status codes and the token check are the feature. It needs no `dist/`.
 
 `cargo test --manifest-path src/local-server/Cargo.toml` runs the local
 data-server suite. Its transport tests exercise the real router: loopback Host
-validation, bearer capability, origin-reflecting CORS, and the private-network
-preflight response.
+validation, bearer capability, origin-reflecting CORS (including on body-limit,
+wrong-method and unknown-route errors), per-route request-body limits,
+advertised limits matching enforced ones, and the private-network preflight
+response.
 
 Rendering, pointer interaction and the real worker round trip are still
 verified by hand — against `dist/`, after a build — and there is no fixed
