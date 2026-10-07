@@ -29,6 +29,8 @@ export const QUERY_FAILURE: { [K in QueryType]: (m: Extract<Query, { type: K }>,
   'analysis-replace': (m, message) => ({
     type: 'analysis-replace-result', reqId: m.reqId, ok: false, error: 'invalid', message,
   }),
+  'logs-query': (m) => ({ type: 'logs-query-result', reqId: m.reqId, available: false, total: 0, from: m.from, rows: [] }),
+  'logs-locate': (m) => ({ type: 'logs-locate-result', reqId: m.reqId, available: false, row: -1, total: 0 }),
 };
 
 /** The failure reply for `m` if it is a query, else null. */

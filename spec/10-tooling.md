@@ -23,9 +23,13 @@ Design decisions that matter:
   live allocation and grow/shrink it; a configurable fraction of allocations
   leak. Remaining live allocations at the end are the intended "leaked at
   exit" picture.
+- **Log records** (`L`, [LOG-001](13-domains-and-logs.md#log-001-the-log-record-l))
+  are interleaved by default — startup, phases, requests, warnings at heap
+  high-water marks — from their own random stream, so the heap records are
+  identical with or without them; `--no-logs` omits them.
 
 Knobs: `--seed --ops --threads --mean-gap --burst-prob --leak-rate
---realloc-rate --arena-base --row-bytes --unit --fields --out`.
+--realloc-rate --arena-base --row-bytes --unit --fields --no-logs --out`.
 
 `--fields` attaches caller-defined custom fields
 ([TRACE-001](02-trace-format.md#trace-001-general-rules)) to records, so the
