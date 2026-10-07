@@ -290,8 +290,11 @@ export function initGuide() {
     const up = () => {
       grip.removeEventListener('pointermove', move);
       grip.removeEventListener('pointerup', up);
+      grip.removeEventListener('pointercancel', up);
+      if (grip.hasPointerCapture?.(ev.pointerId)) grip.releasePointerCapture(ev.pointerId);
     };
     grip.addEventListener('pointermove', move);
     grip.addEventListener('pointerup', up);
+    grip.addEventListener('pointercancel', up);
   });
 }
