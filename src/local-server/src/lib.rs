@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::VecDeque,
     fs::File,
     io::{self, Read, Write},
@@ -8,8 +9,9 @@ use std::{
 
 use axum::{
     body::{Body, Bytes},
-    extract::{DefaultBodyLimit, Path as AxumPath, State},
+    extract::{DefaultBodyLimit, Path as AxumPath, Request, State},
     http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode, Uri},
+    middleware::{self, Next},
     response::Response,
     routing::{get, post},
     Router,
@@ -24,6 +26,32 @@ const REQUEST_PRIVATE_NETWORK: HeaderName =
     HeaderName::from_static("access-control-request-private-network");
 const ALLOW_PRIVATE_NETWORK: HeaderName =
     HeaderName::from_static("access-control-allow-private-network");
+
+// Transport limits. Handlers enforce these constants and `/api/v1/session`
+// advertises the same constants, so the two cannot drift apart.
+/// Request-body limit for every route except analysis changes.
+const MAX_REQUEST_BYTES: usize = 32 << 10;
+/// A connected browser commits full `replaceTagMembers` creator lists through
+/// `/api/v1/analysis/changes`; about 11 bytes per creator admits ~3M members.
+const MAX_ANALYSIS_CHANGE_BYTES: usize = 32 << 20;
+const MAX_FILTER_BYTES: usize = 16 << 10;
+const DEFAULT_AGENT_PAGE: u32 = 20;
+/// Compact allocation queries and the filter-schema custom-field catalog.
+const MAX_AGENT_PAGE: u32 = 100;
+/// `/events`, `/warnings` and `/query`.
+const MAX_PAGE: u32 = 200;
+const DEFAULT_GROUPS: u32 = 20;
+const MAX_GROUPS: u32 = 50;
+const DEFAULT_TIMELINE_BINS: u32 = 50;
+const MAX_TIMELINE_BINS: u32 = 200;
+const MAX_CONTEXT_EVENTS: u32 = 100;
+const DEFAULT_OVERVIEW_TOP: u32 = 10;
+const MAX_OVERVIEW_TOP: u32 = 50;
+const MAX_REQUEST_ID_BYTES: usize = 64;
+const MAX_CHANGE_HISTORY: usize = 512;
+const MAX_CHANGE_PAGE: usize = 200;
+const MAX_CHANGE_WAIT_SECS: u64 = 30;
+const MAX_AGENT_RESPONSE_BYTES: usize = 256 << 10;
 
 #[derive(Clone)]
 pub struct ServerState {
@@ -331,13 +359,13 @@ fn default_order() -> String {
     "creator-asc".into()
 }
 fn default_agent_limit() -> u32 {
-    20
+    DEFAULT_AGENT_PAGE
 }
 fn default_group_limit() -> u32 {
-    20
+    DEFAULT_GROUPS
 }
 fn default_timeline_bins() -> u32 {
-    50
+    DEFAULT_TIMELINE_BINS
 }
 fn default_context_side() -> u32 {
     10
@@ -431,13 +459,71 @@ pub fn router(state: ServerState) -> Router {
         )
         .route("/api/v1/analysis", get(analysis).options(preflight))
         .route(
+            "/api/v1/analysis/summary",
+            get(analysis_summary).options(preflight),
+        )
+        .route(
             "/api/v1/analysis/changes",
-            post(change_analysis).options(preflight),
+            post(change_analysis)
+                .layer(DefaultBodyLimit::max(MAX_ANALYSIS_CHANGE_BYTES))
+                .options(preflight),
         )
         .route("/api/v1/changes", get(changes).options(preflight))
         .fallback(not_found)
-        .layer(DefaultBodyLimit::max(32 << 10))
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
+        .layer(middleware::from_fn_with_state(state.clone(), error_cors))
         .with_state(state)
+}
+
+/// Gives responses generated outside the handlers (body-limit rejections,
+/// method mismatches, the fallback) the same JSON error shape and CORS
+/// treatment as handler errors: an allowed Host plus a syntactically valid
+/// Origin is reflected. Handler responses already carry it and pass through.
+async fn error_cors(State(state): State<ServerState>, request: Request, next: Next) -> Response {
+    let origin = if host_allowed(request.headers(), state.port) {
+        browser_origin(request.headers()).ok().flatten()
+    } else {
+        None
+    };
+    let response = next.run(request).await;
+    let framework_error = match response.status() {
+        StatusCode::PAYLOAD_TOO_LARGE
+            if response.headers().get(header::CONTENT_TYPE)
+                != Some(&HeaderValue::from_static("application/json; charset=utf-8")) =>
+        {
+            Some(("request_too_large", "request body exceeds this route's limit"))
+        }
+        StatusCode::METHOD_NOT_ALLOWED => Some(("method_not_allowed", "method not allowed")),
+        _ => None,
+    };
+    let mut response = match framework_error {
+        Some((code, message)) => {
+            let allow = response.headers().get(header::ALLOW).cloned();
+            let mut replaced = json(
+                response.status(),
+                &ErrorResponse {
+                    error: ErrorDetail {
+                        code,
+                        message,
+                        current_revision: None,
+                    },
+                },
+                None,
+            );
+            if let Some(allow) = allow {
+                replaced.headers_mut().insert(header::ALLOW, allow);
+            }
+            replaced
+        }
+        None => response,
+    };
+    if !response
+        .headers()
+        .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+    {
+        add_cors(response.headers_mut(), origin);
+    }
+    response
 }
 
 pub fn fresh_token() -> Result<String, getrandom::Error> {
@@ -490,16 +576,12 @@ async fn session(State(state): State<ServerState>, headers: HeaderMap) -> Respon
                     "filterSchema": "/api/v1/filter/schema",
                     "filterCheck": "/api/v1/filter/check",
                     "analysis": "/api/v1/analysis",
+                    "analysisSummary": "/api/v1/analysis/summary",
                     "analysisChanges": "/api/v1/analysis/changes",
                     "bulkTagging": "/api/v1/analysis/tag-query",
                     "changeFeed": "/api/v1/changes"
                 },
-                "limits": {
-                    "defaultPage": 20, "maximumPage": 100,
-                    "maximumGroups": 50, "maximumTimelineBins": 200,
-                    "maximumContextEvents": 100, "maximumFilterBytes": 16384,
-                    "maximumAgentResponseBytes": 262144
-                },
+                "limits": limits(),
                 "timelineDomains": ["sequence", "time"],
                 "allocationOrderings": ["creator-asc", "birth-desc", "size-desc", "lifetime-desc", "death-desc"],
                 "summaryGroups": ["site", "thread", "freed", "size-bucket", "lifetime-bucket", "tag"],
@@ -509,13 +591,36 @@ async fn session(State(state): State<ServerState>, headers: HeaderMap) -> Respon
     )
 }
 
+/// Every transport limit, read from the constants the handlers enforce.
+fn limits() -> serde_json::Value {
+    serde_json::json!({
+        "defaultPage": DEFAULT_AGENT_PAGE,
+        "maximumPage": MAX_AGENT_PAGE,
+        "maximumListPage": MAX_PAGE,
+        "defaultGroups": DEFAULT_GROUPS,
+        "maximumGroups": MAX_GROUPS,
+        "defaultTimelineBins": DEFAULT_TIMELINE_BINS,
+        "maximumTimelineBins": MAX_TIMELINE_BINS,
+        "maximumContextEvents": MAX_CONTEXT_EVENTS,
+        "defaultOverviewTop": DEFAULT_OVERVIEW_TOP,
+        "maximumOverviewTop": MAX_OVERVIEW_TOP,
+        "maximumFilterBytes": MAX_FILTER_BYTES,
+        "maximumRequestIdBytes": MAX_REQUEST_ID_BYTES,
+        "maximumRequestBytes": MAX_REQUEST_BYTES,
+        "maximumAnalysisChangeBytes": MAX_ANALYSIS_CHANGE_BYTES,
+        "maximumChangePage": MAX_CHANGE_PAGE,
+        "maximumChangeWaitSeconds": MAX_CHANGE_WAIT_SECS,
+        "changeHistory": MAX_CHANGE_HISTORY,
+        "maximumAgentResponseBytes": MAX_AGENT_RESPONSE_BYTES
+    })
+}
+
 async fn metadata(State(state): State<ServerState>, headers: HeaderMap) -> Response {
     let origin = match authorize(&headers, &state) {
         Ok(origin) => origin,
         Err(error) => return error.response(),
     };
-    json(
-        StatusCode::OK,
+    bounded_json(
         &MetadataResponse {
             trace_id: &state.trace.id,
             metadata: &state.metadata,
@@ -540,8 +645,7 @@ async fn warnings(State(state): State<ServerState>, headers: HeaderMap, uri: Uri
     };
     let hi = from.saturating_add(count).min(retained);
     let items = &state.warnings[from as usize..hi as usize];
-    json(
-        StatusCode::OK,
+    bounded_json(
         &WarningPageResponse {
             trace_id: &state.trace.id,
             from,
@@ -574,8 +678,7 @@ async fn events(State(state): State<ServerState>, headers: HeaderMap, uri: Uri) 
     let items: Vec<serde_json::Value> =
         serde_json::from_str(&encoded).expect("the core produces valid event JSON");
     let hi = from + items.len() as u32;
-    json(
-        StatusCode::OK,
+    bounded_json(
         &PageResponse {
             trace_id: &state.trace.id,
             from,
@@ -619,7 +722,13 @@ async fn overview(State(state): State<ServerState>, headers: HeaderMap, uri: Uri
         Ok(origin) => origin,
         Err(error) => return error.response(),
     };
-    let top = match single_u32_query(uri.query(), "top", 10, 50, origin.clone()) {
+    let top = match single_u32_query(
+        uri.query(),
+        "top",
+        DEFAULT_OVERVIEW_TOP,
+        MAX_OVERVIEW_TOP,
+        origin.clone(),
+    ) {
         Ok(value) => value,
         Err(error) => return error.response(),
     };
@@ -669,7 +778,7 @@ async fn filter_check(
     if let Err(error) = active_trace(&request.trace_id, &state, origin.clone()) {
         return error.response();
     }
-    if request.source.len() > 16 << 10 {
+    if request.source.len() > MAX_FILTER_BYTES {
         return request_error(StatusCode::BAD_REQUEST, "filter is too large", origin).response();
     }
     let engine = state.engine.lock().expect("engine lock poisoned");
@@ -701,10 +810,10 @@ async fn agent_query(
     if let Err(error) = active_trace(&request.trace_id, &state, origin.clone()) {
         return error.response();
     }
-    if request.limit == 0 || request.limit > 100 {
+    if request.limit == 0 || request.limit > MAX_AGENT_PAGE {
         return request_error(
             StatusCode::BAD_REQUEST,
-            "limit must be from 1 through 100",
+            format!("limit must be from 1 through {MAX_AGENT_PAGE}"),
             origin,
         )
         .response();
@@ -776,10 +885,10 @@ async fn summarize(State(state): State<ServerState>, headers: HeaderMap, body: B
     if let Err(error) = active_trace(&request.trace_id, &state, origin.clone()) {
         return error.response();
     }
-    if request.limit == 0 || request.limit > 50 {
+    if request.limit == 0 || request.limit > MAX_GROUPS {
         return request_error(
             StatusCode::BAD_REQUEST,
-            "limit must be from 1 through 50",
+            format!("limit must be from 1 through {MAX_GROUPS}"),
             origin,
         )
         .response();
@@ -834,7 +943,7 @@ async fn agent_timeline(
         .response();
     };
     if request.bins == 0
-        || request.bins > 200
+        || request.bins > MAX_TIMELINE_BINS
         || to <= from
         || !matches!(request.domain.as_str(), "sequence" | "time")
     {
@@ -880,11 +989,11 @@ async fn stream_context(
         .before
         .saturating_add(request.after)
         .saturating_add(1)
-        > 100
+        > MAX_CONTEXT_EVENTS
     {
         return request_error(
             StatusCode::BAD_REQUEST,
-            "stream context is limited to 100 events",
+            format!("stream context is limited to {MAX_CONTEXT_EVENTS} events"),
             origin,
         )
         .response();
@@ -931,7 +1040,7 @@ async fn query(State(state): State<ServerState>, headers: HeaderMap, body: Bytes
     if request.trace_id != state.trace.id.as_ref() {
         return request_error(StatusCode::CONFLICT, "trace identity changed", origin).response();
     }
-    if request.source.len() > 16 << 10 || request.count == 0 || request.count > MAX_PAGE {
+    if request.source.len() > MAX_FILTER_BYTES || request.count == 0 || request.count > MAX_PAGE {
         return request_error(
             StatusCode::BAD_REQUEST,
             "query is outside its bounds",
@@ -965,7 +1074,7 @@ async fn query(State(state): State<ServerState>, headers: HeaderMap, body: Bytes
         result_object.insert("from".into(), serde_json::Value::from(request.from));
         result_object.insert("count".into(), serde_json::Value::from(actual));
     }
-    json(StatusCode::OK, &result, origin)
+    bounded_json(&result, origin)
 }
 
 fn decode<T: serde::de::DeserializeOwned>(
@@ -1027,7 +1136,7 @@ fn resolve_filter(
             ))
         }
     };
-    if source.len() > 16 << 10 {
+    if source.len() > MAX_FILTER_BYTES {
         return Err(request_error(
             StatusCode::BAD_REQUEST,
             "filter is too large",
@@ -1129,7 +1238,7 @@ fn body_digest(body: &[u8]) -> [u8; 32] {
 
 fn valid_request_id(value: &str) -> bool {
     !value.is_empty()
-        && value.len() <= 64
+        && value.len() <= MAX_REQUEST_ID_BYTES
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
@@ -1322,11 +1431,11 @@ fn optional_page(
             }
         }
     }
-    let count = count.unwrap_or(20);
-    if count == 0 || count > 100 {
+    let count = count.unwrap_or(DEFAULT_AGENT_PAGE);
+    if count == 0 || count > MAX_AGENT_PAGE {
         return Err(request_error(
             StatusCode::BAD_REQUEST,
-            "count must be from 1 through 100",
+            format!("count must be from 1 through {MAX_AGENT_PAGE}"),
             origin,
         ));
     }
@@ -1345,6 +1454,41 @@ async fn analysis(State(state): State<ServerState>, headers: HeaderMap) -> Respo
             trace_id: &state.trace.id,
             document: engine.analysis(),
         },
+        origin,
+    )
+}
+
+/// The bounded agent view of the canonical analysis: the revision to write
+/// against, every tag definition (capped by the core at 255), and object
+/// counts. The complete document stays at `GET /api/v1/analysis`, the
+/// connected browser's synchronization snapshot.
+async fn analysis_summary(State(state): State<ServerState>, headers: HeaderMap) -> Response {
+    let origin = match authorize(&headers, &state) {
+        Ok(origin) => origin,
+        Err(error) => return error.response(),
+    };
+    let engine = state.engine.lock().expect("engine lock poisoned");
+    let document = engine.analysis();
+    let tags: Vec<_> = document
+        .tags
+        .iter()
+        .map(|(id, tag)| serde_json::json!({ "id": id, "name": tag.name, "color": tag.color }))
+        .collect();
+    bounded_json(
+        &serde_json::json!({
+            "traceId": state.trace.id.as_ref(),
+            "analysisRevision": document.revision,
+            "counts": {
+                "annotatedAllocations": document.allocations.len(),
+                "namedAllocations": document.allocations.values().filter(|a| a.name.is_some()).count(),
+                "coloredAllocations": document.allocations.values().filter(|a| a.color.is_some()).count(),
+                "tags": document.tags.len(),
+                "bookmarks": document.bookmarks.len(),
+                "addressMarks": document.address_marks.len(),
+                "savedFilters": document.saved_filters.len(),
+            },
+            "tags": tags,
+        }),
         origin,
     )
 }
@@ -1504,10 +1648,6 @@ async fn tag_query(State(state): State<ServerState>, headers: HeaderMap, body: B
     json(StatusCode::OK, &response, origin)
 }
 
-const MAX_CHANGE_HISTORY: usize = 512;
-const MAX_CHANGE_PAGE: usize = 200;
-const MAX_CHANGE_WAIT_SECS: u64 = 30;
-
 async fn changes(State(state): State<ServerState>, headers: HeaderMap, uri: Uri) -> Response {
     let origin = match authorize(&headers, &state) {
         Ok(origin) => origin,
@@ -1602,7 +1742,7 @@ fn changes_query(
 fn bad_changes(origin: Option<HeaderValue>) -> RequestError {
     request_error(
         StatusCode::BAD_REQUEST,
-        "changes require after and wait from 0 through 30",
+        format!("changes require after and wait from 0 through {MAX_CHANGE_WAIT_SECS}"),
         origin,
     )
 }
@@ -1634,8 +1774,6 @@ fn persist_analysis(
     Ok(())
 }
 
-const MAX_PAGE: u32 = 200;
-
 fn page(
     query: Option<&str>,
     total: u32,
@@ -1665,14 +1803,14 @@ fn page(
 fn bad_page(origin: Option<HeaderValue>) -> RequestError {
     request_error(
         StatusCode::BAD_REQUEST,
-        "pagination requires from >= 0 and count from 1 through 200",
+        format!("pagination requires from >= 0 and count from 1 through {MAX_PAGE}"),
         origin,
     )
 }
 
 fn request_error(
     status: StatusCode,
-    error: &'static str,
+    error: impl Into<Cow<'static, str>>,
     origin: Option<HeaderValue>,
 ) -> RequestError {
     let code = match status {
@@ -1686,7 +1824,7 @@ fn request_error(
     };
     RequestError {
         status,
-        error,
+        error: error.into(),
         code,
         origin,
     }
@@ -1727,7 +1865,7 @@ async fn trace(State(state): State<ServerState>, headers: HeaderMap) -> Response
 
 struct RequestError {
     status: StatusCode,
-    error: &'static str,
+    error: Cow<'static, str>,
     code: &'static str,
     origin: Option<HeaderValue>,
 }
@@ -1739,7 +1877,7 @@ impl RequestError {
             &ErrorResponse {
                 error: ErrorDetail {
                     code: self.code,
-                    message: self.error,
+                    message: &self.error,
                     current_revision: None,
                 },
             },
@@ -1755,31 +1893,40 @@ fn authorize(
     if !host_allowed(headers, state.port) {
         return Err(RequestError {
             status: StatusCode::BAD_REQUEST,
-            error: "invalid Host",
+            error: "invalid Host".into(),
             code: "invalid_host",
             origin: None,
         });
     }
     let origin = browser_origin(headers).map_err(|()| RequestError {
         status: StatusCode::FORBIDDEN,
-        error: "origin is not allowed",
+        error: "origin is not allowed".into(),
         code: "origin_forbidden",
         origin: None,
     })?;
-    let expected = format!("Bearer {}", state.token);
-    if headers
+    let presented = headers
         .get(header::AUTHORIZATION)
-        .and_then(|h| h.to_str().ok())
-        != Some(&expected)
-    {
+        .and_then(|value| value.as_bytes().strip_prefix(b"Bearer "));
+    if !presented.is_some_and(|presented| constant_time_eq(presented, state.token.as_bytes())) {
         return Err(RequestError {
             status: StatusCode::UNAUTHORIZED,
-            error: "bad or missing capability",
+            error: "bad or missing capability".into(),
             code: "authentication_failed",
             origin,
         });
     }
     Ok(origin)
+}
+
+/// Compares secrets without an early exit on the first differing byte. The
+/// length is not secret: every capability is 64 hex digits.
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .fold(0_u8, |difference, (a, b)| difference | (a ^ b))
+            == 0
 }
 
 async fn preflight(State(state): State<ServerState>, headers: HeaderMap) -> Response {
@@ -1921,8 +2068,6 @@ fn json<T: Serialize>(status: StatusCode, value: &T, origin: Option<HeaderValue>
     response
 }
 
-const MAX_AGENT_RESPONSE_BYTES: usize = 256 << 10;
-
 fn bounded_json<T: Serialize>(value: &T, origin: Option<HeaderValue>) -> Response {
     let body = serde_json::to_vec(value).expect("response values are serializable");
     if body.len() > MAX_AGENT_RESPONSE_BYTES {
@@ -1931,7 +2076,7 @@ fn bounded_json<T: Serialize>(value: &T, origin: Option<HeaderValue>) -> Respons
             &ErrorResponse {
                 error: ErrorDetail {
                     code: "response_too_large",
-                    message: "response exceeds 256 KiB; request a smaller page or range",
+                    message: "response exceeds the 256 KiB agent response limit; request a smaller page or range",
                     current_revision: None,
                 },
             },
@@ -2043,8 +2188,205 @@ mod tests {
         assert_eq!(body["trace"]["url"], "/api/v1/trace");
         assert!(body["trace"]["id"].as_str().unwrap().starts_with("sha256:"));
         assert!(body["metadata"].get("sites").is_none());
-        assert_eq!(body["capabilities"]["limits"]["maximumPage"], 100);
+        let limits = &body["capabilities"]["limits"];
+        assert_eq!(limits["maximumPage"], MAX_AGENT_PAGE);
+        assert_eq!(limits["maximumListPage"], MAX_PAGE);
+        assert_eq!(limits["maximumChangePage"], MAX_CHANGE_PAGE);
+        assert_eq!(limits["maximumChangeWaitSeconds"], MAX_CHANGE_WAIT_SECS);
+        assert_eq!(limits["maximumRequestBytes"], MAX_REQUEST_BYTES);
+        assert_eq!(limits["maximumAnalysisChangeBytes"], MAX_ANALYSIS_CHANGE_BYTES);
         assert_eq!(body["capabilities"]["endpoints"]["overview"], "/api/v1/overview");
+    }
+
+    #[tokio::test]
+    async fn advertised_list_page_is_the_enforced_one() {
+        for (uri, status) in [
+            (format!("/api/v1/events?count={MAX_PAGE}"), StatusCode::OK),
+            (format!("/api/v1/events?count={}", MAX_PAGE + 1), StatusCode::BAD_REQUEST),
+        ] {
+            let response = app()
+                .oneshot(
+                    Request::builder()
+                        .uri(&uri)
+                        .header(header::HOST, "127.0.0.1:8631")
+                        .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status, "{uri}");
+        }
+    }
+
+    fn json_post(uri: &str, body: impl Into<Body>) -> Request<Body> {
+        Request::builder()
+            .method(Method::POST)
+            .uri(uri)
+            .header(header::HOST, "127.0.0.1:8631")
+            .header(header::ORIGIN, ORIGIN)
+            .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(body.into())
+            .unwrap()
+    }
+
+    async fn error_code(response: Response) -> String {
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        body["error"]["code"].as_str().unwrap().to_owned()
+    }
+
+    #[tokio::test]
+    async fn analysis_changes_accept_large_member_lists_other_routes_stay_small() {
+        let app = app();
+        let id = trace_id();
+        let created = app
+            .clone()
+            .oneshot(analysis_change(
+                &id,
+                0,
+                serde_json::json!({ "type": "putTag", "id": "big", "name": "Big", "color": "#112233" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::OK);
+        // A browser range tag sends every member; padding stands in for the
+        // tens of thousands of creator ids a real large tag carries.
+        let padding = " ".repeat(4 * MAX_REQUEST_BYTES);
+        let body = format!(
+            r#"{{"traceId":"{id}","expectedRevision":1,"change":{{"type":"replaceTagMembers","tagId":"big","creators":[1{padding}]}}}}"#
+        );
+        assert!(body.len() > MAX_REQUEST_BYTES);
+        let response = app
+            .clone()
+            .oneshot(json_post("/api/v1/analysis/changes", body.clone()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .clone()
+            .oneshot(json_post("/api/v1/analysis/tag-query", body))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], ORIGIN);
+        assert_eq!(error_code(response).await, "request_too_large");
+
+        let oversized = vec![b' '; MAX_ANALYSIS_CHANGE_BYTES + 1];
+        let response = app
+            .oneshot(json_post("/api/v1/analysis/changes", oversized))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], ORIGIN);
+        assert_eq!(error_code(response).await, "request_too_large");
+    }
+
+    #[tokio::test]
+    async fn framework_errors_carry_cors_and_the_json_error_shape() {
+        let wrong_method = app()
+            .oneshot(json_post("/api/v1/session", "{}"))
+            .await
+            .unwrap();
+        assert_eq!(wrong_method.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(wrong_method.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], ORIGIN);
+        assert!(wrong_method.headers().contains_key(header::ALLOW));
+        assert_eq!(error_code(wrong_method).await, "method_not_allowed");
+
+        let missing = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/nothing-here")
+                    .header(header::HOST, "127.0.0.1:8631")
+                    .header(header::ORIGIN, ORIGIN)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        assert_eq!(missing.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], ORIGIN);
+        assert_eq!(error_code(missing).await, "not_found");
+
+        // The same rules as handler errors: no reflection for a rebound Host
+        // or a malformed Origin.
+        for (host, origin) in [
+            ("attacker.example", ORIGIN),
+            ("127.0.0.1:8631", "https://viewer.example/path"),
+        ] {
+            let response = app()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/nothing-here")
+                        .header(header::HOST, host)
+                        .header(header::ORIGIN, origin)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            assert!(response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn analysis_summary_is_a_bounded_revision_and_tag_read() {
+        let app = app();
+        let id = trace_id();
+        app.clone()
+            .oneshot(analysis_change(
+                &id,
+                0,
+                serde_json::json!({ "type": "putTag", "id": "suspect", "name": "Suspect", "color": "#d9485f" }),
+            ))
+            .await
+            .unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/analysis/summary")
+                    .header(header::HOST, "127.0.0.1:8631")
+                    .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["traceId"], id);
+        assert_eq!(body["analysisRevision"], 1);
+        assert_eq!(body["counts"]["tags"], 1);
+        assert_eq!(body["tags"][0]["id"], "suspect");
+        assert!(body.get("document").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_capability_with_the_right_prefix_but_wrong_length_is_rejected() {
+        for value in [
+            format!("Bearer {TOKEN}0"),
+            format!("Bearer {}", &TOKEN[..TOKEN.len() - 1]),
+            TOKEN.to_owned(),
+            format!("bearer {TOKEN}"),
+        ] {
+            let response = app()
+                .oneshot(
+                    request(Method::GET)
+                        .header(header::AUTHORIZATION, value.as_str())
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{value}");
+        }
     }
 
     #[tokio::test]

@@ -32,6 +32,9 @@ strings; creator event indices and sequence bounds are JSON integers.
 6. Request focused stream context only when neighboring events matter.
 
 Prefer bounded semantic endpoints over paging the entire allocation set.
+`capabilities.limits` in the session response lists every page, body, and
+response limit. A response over 256 KiB is refused with
+`413 response_too_large`; repeat with a smaller page, limit, or range.
 
 ## Filters
 
@@ -141,8 +144,13 @@ not infer warning positions from later allocation detail. The envelope reports
 
 ## Canonical analysis mutations
 
-First read `GET /api/v1/analysis?traceId=<url-encoded-trace-id>` and use its
-current document revision. Ordinary mutations go to
+First read `GET /api/v1/analysis/summary` and use its `analysisRevision`. It
+also lists every existing tag (`id`, `name`, `color`) and counts the other
+analysis objects; read per-allocation names, colors, and tags through allocation
+query or detail. Do not read `GET /api/v1/analysis`: it is the browser's
+complete synchronization snapshot, grows with tag membership, and is not
+size-bounded. After a successful write, use the returned `revision` for the next
+write instead of rereading. Ordinary mutations go to
 `POST /api/v1/analysis/changes`:
 
 ```json
@@ -181,5 +189,5 @@ After creating a tag, atomically tag a filter result with
 Operations are `add`, `remove`, and `replace`. The tag must already exist.
 Success returns `revision`, `matched`, `changed`, and `snapshotRequired:true`.
 Use the new revision for subsequent writes. A `409 revision_conflict` includes
-`currentRevision`; reread analysis before retrying. Reusing the same request ID
+`currentRevision`; reread `/api/v1/analysis/summary` before retrying. Reusing the same request ID
 with the same body is idempotent.

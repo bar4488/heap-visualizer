@@ -22,14 +22,27 @@ playhead, or layout state. Integer byte counts, addresses, trace times, and
 allocation ids that may exceed JavaScript's exact integer range are strings.
 Every agent semantic response is limited to 256 KiB; a response that cannot fit
 returns `413 response_too_large` and directs the caller to reduce its page or
-range.
+range. The limit covers every `/api/v1` read and write response, including
+`/metadata`, `/events`, `/warnings`, and `/query`, except three synchronization
+transports a connected browser must receive whole: the `/trace` byte stream,
+the canonical analysis snapshot `GET /api/v1/analysis`, and the change feed
+`GET /api/v1/changes`. Agents should not need them; `GET
+/api/v1/analysis/summary` is their bounded analysis read (API-009).
+
+Request bodies are limited to 32 KiB, except `POST /api/v1/analysis/changes`,
+which carries a browser's complete `replaceTagMembers` lists and is limited to
+32 MiB. An oversized body returns `413 request_too_large`.
 
 ## API-002: Discovery and overview
 
 `GET /api/v1/session` returns a compact metadata summary and a `capabilities`
 object containing endpoint paths, accepted allocation orderings, summary
 groups, timeline domains, tag-query operations, and all transport limits. It
-must not embed the potentially unbounded site or thread catalogs.
+must not embed the potentially unbounded site or thread catalogs. The advertised
+limits are read from the same constants the handlers enforce: `maximumPage`
+(allocation query and filter-schema pages), `maximumListPage` (`/events`,
+`/warnings`, `/query`), group, bin, context, overview, filter, request-id,
+request-body, change-page, change-wait, change-history, and response limits.
 
 `GET /api/v1/overview?top=N` returns event/allocation operation counts, trace
 time bounds and unit, total allocated bytes, live allocations and bytes at end,
@@ -140,6 +153,15 @@ analysis snapshot: the response says `snapshotRequired: true` and
 `GET /api/v1/changes` returns `reset: true` to clients behind that revision.
 Persistence must complete before acknowledgement, exactly as for ordinary
 analysis changes.
+
+`GET /api/v1/analysis/summary` is the bounded analysis read for agents. It
+returns `traceId`, `analysisRevision`, every tag definition as `{id, name,
+color}` (at most 255), and counts of annotated, named, and colored allocations,
+tags, bookmarks, address marks, and saved filters. Per-allocation names,
+colors, and tags are read through allocation query and detail. The full
+canonical document at `GET /api/v1/analysis` is unbounded because it grows
+with tag membership; it is the browser's synchronization snapshot, not an
+agent read.
 
 Stale analysis writes return `409 revision_conflict` with `currentRevision`.
 All failures use `{error:{code,message}}`, adding `diagnostic` or
