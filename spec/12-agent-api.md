@@ -42,7 +42,9 @@ must not embed the potentially unbounded site or thread catalogs. The advertised
 limits are read from the same constants the handlers enforce: `maximumPage`
 (allocation query and filter-schema pages), `maximumListPage` (`/events`,
 `/warnings`, `/query`), group, bin, context, overview, filter, request-id,
-request-body, change-page, change-wait, change-history, and response limits.
+request-body, change-page, change-wait, change-history, journaled-tag-member,
+log-page (`defaultLogPage`, `maximumLogPage`, `maximumLogTextBytes`), and
+response limits. `endpoints.logs` names the log endpoint.
 
 `GET /api/v1/overview?top=N` returns event/allocation operation counts, trace
 time bounds and unit, total allocated bytes, live allocations and bytes at end,
@@ -161,6 +163,14 @@ analysis snapshot: the response says `snapshotRequired: true` and
 `GET /api/v1/changes` returns `reset: true` to clients behind that revision.
 Persistence must complete before acknowledgement, exactly as for ordinary
 analysis changes.
+
+A `replaceTagMembers` sent through `POST /api/v1/analysis/changes` with more
+creators than `maximumJournaledTagMembers` (1024) is journaled the same way:
+its response still returns the canonical `change` to the committing client,
+but other clients behind that revision get `reset: true`, and a retained
+`requestId` replays `{traceId, revision, snapshotRequired: true}` instead of
+the creator list. This bounds the change journal and a `/changes` page
+independently of the 32 MiB request-body limit.
 
 `GET /api/v1/analysis/summary` is the bounded analysis read for agents. It
 returns `traceId`, `analysisRevision`, every tag definition as `{id, name,
