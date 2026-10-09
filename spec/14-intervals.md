@@ -192,3 +192,78 @@ name, calls}], cpus:[{cpu, slices}]}`), and `limits` adding `depth`,
   page takes `category`, `thr`, `pid`, `cpu`, `text` and `minDur`.
   `agent_item` of an edge row is its summary plus the `interval` it begins
   or ends.
+
+## IVL-UI: The interval panels
+
+Three panels present the domain in the browser (`src/web/intervals/`), each
+a window of the shell ([SHELL-002](09-ui-shell.md#shell-002-panels-views-and-windows))
+with a toolbar toggle that is shown only when the loaded trace has
+intervals. They start open, for such a trace only, where SHELL-008 places
+them: **Tracks** as a tab of the bottom edge (beside Logs), **Stacks** as a
+tab of the right edge; **Intervals** starts closed in the left edge. Each
+does work only while its tab is in front, and every request goes through
+rpc.ts's coalescing `requestLatest` under its own `intervals-` key, so
+playback or a fast zoom never builds a backlog.
+
+A click on an interval anywhere seeks to one record past its begin, so the
+interval is open at the playhead (IVL-005).
+
+### IVL-UI-001: Durations
+
+Durations are shown in the largest unit that keeps them readable (`850ns`,
+`1.25µs`, `12.5ms`, `3.2s`, `2m05s`), from the trace's `unit`; a trace
+without a known unit shows ticks. An open interval's duration is a lower
+bound and is marked `≥`. On the seq axis a span is a count of records.
+
+### IVL-UI-002: Stacks
+
+The state at the playhead from `domain-state`, asked once per playhead move:
+
+- **Calls**: per thread with an open frame, its name and `pid · thr`, then
+  its stack, outermost at the top and innermost at the bottom (highlighted),
+  each frame with its begin seq. Threads are in the Tracks order.
+- **Spans**: the open spans as a parent tree, children under their parent in
+  begin order. A span whose parent has closed is a root that names the
+  parent's id.
+- **CPUs**: per CPU, the running thread, `idle`, or `unknown`, and the seq
+  its slice began.
+
+### IVL-UI-003: Tracks
+
+A flame chart on a canvas drawn on the main thread, at the device pixel
+ratio, in colors read from the `--ivl-*` CSS tokens.
+
+- **Rows**: per thread with calls or spans (by process, then thread id) a
+  head with its name, one row per call depth, then one row per span depth;
+  then a `CPUs` heading and one row per CPU (by number) of run slices. Calls
+  and spans are colored by name, slices by thread; idle slices are muted. An
+  open interval has a notch at its right end. A track's rows grow as deeper
+  intervals arrive and never shrink while the trace is loaded.
+- **Axis**: the strips' view range on the axis the head selects — time or
+  event index — with ticks, and the playhead as a vertical line.
+- **Data**: only tracks in view are fetched, each by one `interval-window`
+  for the view plus half a view either side, at twice the panel's width,
+  re-asked only when the view leaves that margin, the zoom changes by more
+  than a quarter, or the axis or width changes. Rows hold axis units, so a
+  pan or zoom redraws at once from what is held. Bars narrower than a pixel that
+  start where the previous bar in their row reaches are folded into it.
+- **Vertical**: groups are virtualized; only those in the viewport are drawn
+  and fetched.
+- **Input**: hover shows the name, kind, duration and thread; a click on a
+  bar seeks to its begin and on empty space seeks to the value under the
+  pointer; a drag or shift+wheel (or a horizontal wheel) pans,
+  ctrl/⌘+wheel zooms about the pointer, a plain wheel scrolls the tracks,
+  and a double click shows the whole trace. Zoom and pan drive the strips'
+  view, so the two stay on one x-range.
+
+### IVL-UI-004: Intervals
+
+A virtualized table of every interval from `domain-query`, in start order
+either way (the start column's head flips it): start relative to the trace
+start, duration, kind (`call`, `span`, `cpu`), track, and name (calls
+indented by depth, spans with their id). Filters: category, one thread or
+CPU, text (name or span id), and a minimum duration typed with a unit
+(`250us`, `1.5ms`) or in trace units; an unreadable one is marked and not
+applied. The head shows `shown / total`: matches of the filters, of all
+intervals. Rows open at the playhead are highlighted and rows not yet begun
+are dimmed.
