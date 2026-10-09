@@ -2419,7 +2419,11 @@ mod tests {
             .iter()
             .map(|d| d["id"].as_str().unwrap().to_string())
             .collect();
-        assert_eq!(names, ["heap", "marks", "logs"]);
+        assert_eq!(names, ["heap", "marks", "logs", "intervals"]);
+
+        let (status, ivl) = get_json(&app, "/api/v1/domains/intervals/records").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(ivl["domain"], "intervals");
 
         let (status, logs) =
             get_json(&app, "/api/v1/domains/logs/records?minLevel=warn&count=5").await;
