@@ -335,13 +335,14 @@ impl Parser {
     /// is materialized the first time a non-heap record arrives — until then
     /// every record is a heap record and the heap row is the spine index, so
     /// a heap-only trace never builds the mapping.
-    fn push_spine(&mut self, op: u8, t: u64, thr_idx: u16, heap: bool) {
+    fn push_spine(&mut self, op: u8, t: u64, thr_idx: u16) {
+        let heap = crate::domain::op_domain(op) == crate::domain::HEAP;
         let s = &mut self.store;
         let e = s.len();
         if !heap && s.hrank.is_empty() {
-            debug_assert_eq!(s.heap.addr.len(), e as usize);
+            debug_assert_eq!(s.dom.heap.addr.len(), e as usize);
             s.hrank = (0..=e).collect();
-            s.heap.seq = (0..e).collect();
+            s.dom.heap.seq = (0..e).collect();
         }
         s.op.push(op);
         s.t.push(t);
@@ -349,7 +350,7 @@ impl Parser {
         if let Some(&r) = s.hrank.last() {
             s.hrank.push(r + heap as u32);
             if heap {
-                s.heap.seq.push(e);
+                s.dom.heap.seq.push(e);
             }
         }
     }
@@ -385,15 +386,10 @@ impl Parser {
         // before anything is stamped or interned: a dropped record must leave
         // no trace — no clock movement, no catalogued site or field, and no
         // warning pinned to whichever record comes next.
-        let op = match raw.op {
-            b'M' => OP_M,
-            b'F' => OP_F,
-            b'R' => OP_R,
-            b'E' => OP_E,
-            _ => {
-                // unknown record type: forward-compat, ignore
-                return;
-            }
+        // the op table names every record type; a letter it does not know
+        // (or one another domain's reader owns) is ignored: forward-compat
+        let Some(op) = crate::domain::op_for_letter(raw.op).filter(|&op| op != OP_L) else {
+            return;
         };
         // op F with the reserved null id is a no-op record
         if op == OP_F && raw.id == Some(0) {
@@ -473,7 +469,7 @@ impl Parser {
             Some(name) => match self.logger_map.get(&name) {
                 Some(&i) => i,
                 None => {
-                    let logs = &mut self.store.logs;
+                    let logs = &mut self.store.dom.logs;
                     let i = logs.loggers.len() as u32;
                     self.logger_map.insert(name.clone(), i);
                     logs.loggers.push(name);
@@ -489,7 +485,7 @@ impl Parser {
             match self.log_frag_map.get(&log.extra) {
                 Some(&i) => i,
                 None => {
-                    let logs = &mut self.store.logs;
+                    let logs = &mut self.store.dom.logs;
                     let i = logs.frags.len() as u32;
                     self.log_frag_map.insert(log.extra.clone(), i);
                     logs.frags.push(std::mem::take(&mut log.extra));
@@ -497,8 +493,8 @@ impl Parser {
                 }
             }
         };
-        self.push_spine(OP_L, t, thr_idx, false);
-        self.store.logs.push(e, level, logger, &msg, fields);
+        self.push_spine(OP_L, t, thr_idx);
+        self.store.dom.logs.push(e, level, logger, &msg, fields);
         self.store.n_log += 1;
     }
 
@@ -581,10 +577,10 @@ impl Parser {
         }
 
         // ---- push the spine row, then the heap row ----
-        self.push_spine(op, t, thr_idx, true);
+        self.push_spine(op, t, thr_idx);
         let s = &mut self.store;
-        let h = s.heap.addr.len();
-        let hc = &mut s.heap;
+        let h = s.dom.heap.addr.len();
+        let hc = &mut s.dom.heap;
         hc.id.push(raw.id.unwrap_or(0));
         hc.addr.push(addr);
         hc.size.push(size);
@@ -614,7 +610,7 @@ impl Parser {
         // ---- liveness bookkeeping ----
         if target != NONE_U32 {
             let th = s.heap_rank(target) as usize;
-            s.heap.death[th] = e;
+            s.dom.heap.death[th] = e;
             let ta = s.addr(target);
             if let Some(tend) = self.live.remove(&(ta, target)) {
                 multiset_remove(&mut self.live_spans, tend - ta);
@@ -714,12 +710,7 @@ impl Default for Store {
             t: Vec::new(),
             thr_idx: Vec::new(),
             hrank: Vec::new(),
-            heap: HeapCols {
-                green_pre: vec![0],
-                red_pre: vec![0],
-                ..HeapCols::default()
-            },
-            logs: crate::logs::LogStore::default(),
+            dom: crate::domain::Domains::default(),
             old_geom: std::collections::HashMap::new(),
             tag_members: Vec::new(),
             tag_any: Vec::new(),

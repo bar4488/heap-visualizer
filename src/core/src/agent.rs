@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use crate::analysis::{ApplyError, Change};
 use crate::filter_eval::{self, Ctx, FieldValues};
 use crate::filter_plan;
+use crate::domain::{self, param_error, RecordParams};
 use crate::logs::{self as log_domain, LEVEL_NAMES};
 use crate::store::{warn_code_name, Store, NONE_U16, NONE_U32, OP_E, OP_F, OP_L, OP_M, OP_R};
 use crate::{project_analysis, App};
@@ -37,7 +38,7 @@ pub enum TagQueryError {
 /// with `bit` and `creators`).
 fn matches(app: &App, source: &str) -> Result<Vec<u64>, Error> {
     if source.trim().is_empty() {
-        return Ok(app.store.heap.creators.clone());
+        return Ok(app.store.dom.heap.creators.clone());
     }
     let expr = heap_visualizer_filter_dsl::parse(source).map_err(|error| Error {
         message: error.message,
@@ -429,14 +430,14 @@ pub(crate) fn overview(app: &App, top: usize) -> Value {
             peak = (current, event + 1);
         }
     }
-    for event in creators(store, &store.heap.creators) {
+    for event in creators(store, &store.dom.heap.creators) {
         if store.death(event) == NONE_U32 {
             live_count += 1;
             live_bytes += store.size(event) as u128;
         }
     }
     let mut site_bytes = vec![0_u128; store.sites.len()];
-    for event in creators(store, &store.heap.creators) {
+    for event in creators(store, &store.dom.heap.creators) {
         if store.site(event) != NONE_U32 {
             site_bytes[store.site(event) as usize] += store.size(event) as u128;
         }
@@ -482,7 +483,7 @@ pub(crate) fn overview(app: &App, top: usize) -> Value {
 
 /// Log records by level for the overview (LOG-008): one prefix-sum read.
 fn log_counts(store: &Store) -> Value {
-    let by_level = store.logs.by_level();
+    let by_level = store.dom.logs.by_level();
     let levels: serde_json::Map<String, Value> = LEVEL_NAMES
         .iter()
         .zip(by_level)
@@ -491,11 +492,12 @@ fn log_counts(store: &Store) -> Value {
     json!({ "records": store.n_log, "byLevel": levels })
 }
 
-/// Default and maximum page size of `GET /api/v1/logs` (LOG-008).
-pub const LOGS_COUNT_DEFAULT: usize = 50;
-pub const LOGS_COUNT_MAX: usize = 200;
+/// Default and maximum page size of `GET /api/v1/logs` (LOG-008) — the
+/// limits every domain's records page shares.
+pub const LOGS_COUNT_DEFAULT: usize = domain::RECORDS_COUNT_DEFAULT;
+pub const LOGS_COUNT_MAX: usize = domain::RECORDS_COUNT_MAX;
 /// Longest accepted `text` operand, in bytes.
-pub const LOGS_TEXT_MAX: usize = 1024;
+pub const LOGS_TEXT_MAX: usize = log_domain::TEXT_MAX;
 
 /// The query parameters of `GET /api/v1/logs`, as the transport parsed them.
 /// `min_level` is a level name (case-insensitive, with aliases) or `0`–`5`.
@@ -509,50 +511,43 @@ pub struct LogsParams {
     pub count: Option<usize>,
 }
 
-fn param_error(message: &str) -> Error {
-    Error { message: message.into(), start: 0, end: 0 }
-}
-
 /// One page of log records (LOG-008): `{total, from, items, next}`, ordered
-/// by seq, at most `LOGS_COUNT_MAX` items. The caller adds `traceId`.
+/// by seq, at most `LOGS_COUNT_MAX` items. The caller adds `traceId`. This is
+/// `domain_records` for the log domain.
 pub(crate) fn logs(app: &App, params: &LogsParams) -> Result<Value, Error> {
-    let min_level = match params.min_level.as_deref() {
-        None | Some("") => 0,
-        Some(name) => match name.parse::<u8>() {
-            Ok(n) if (n as usize) < log_domain::NLEVEL => n,
-            Ok(_) => return Err(param_error("minLevel must be 0 through 5 or a level name")),
-            Err(_) => log_domain::level_from_name(name)
-                .ok_or_else(|| param_error("minLevel must be trace, debug, info, warn, error, or fatal"))?,
-        },
-    };
-    let count = params.count.unwrap_or(LOGS_COUNT_DEFAULT);
-    if count == 0 || count > LOGS_COUNT_MAX {
-        return Err(param_error("count must be from 1 through 200"));
-    }
-    let text = params.text.clone().unwrap_or_default();
-    if text.len() > LOGS_TEXT_MAX {
-        return Err(param_error("text is limited to 1024 bytes"));
-    }
-    let query = log_domain::LogQuery {
-        min_level,
-        text,
+    let mut p = RecordParams {
         seq_lo: params.seq_lo,
         seq_hi: params.seq_hi,
+        from: params.from,
+        count: params.count,
+        params: Default::default(),
     };
-    let logs = &app.store.logs;
-    let matched = log_domain::Matches::new(logs, &query);
-    let total = matched.total(logs) as usize;
-    let from = params.from.min(total);
-    let hi = from.saturating_add(count).min(total);
-    let items: Vec<Value> = (from..hi)
-        .map(|k| log_domain::agent_item(&app.store, matched.row(logs, k as u32)))
-        .collect();
-    Ok(json!({
-        "total": total,
-        "from": from,
-        "items": items,
-        "next": (hi < total).then_some(hi),
-    }))
+    if let Some(level) = &params.min_level {
+        p.params.insert("minLevel".into(), level.clone());
+    }
+    if let Some(text) = &params.text {
+        p.params.insert("text".into(), text.clone());
+    }
+    let mut page = domain_records(app, "logs", &p)?;
+    if let Some(object) = page.as_object_mut() {
+        object.remove("domain");
+    }
+    Ok(page)
+}
+
+/// One bounded page of any domain's records, in seq order:
+/// `{domain, total, from, items, next}` — the core of a generic
+/// `GET /api/v1/domains/{d}/records?seqLo=&seqHi=&from=&count=&…`. The
+/// domain's own parameters (`minLevel`, `text` for logs) ride in
+/// `params.params`; an unknown one is an invalid request. The caller adds
+/// `traceId`.
+pub(crate) fn domain_records(app: &App, name: &str, params: &RecordParams) -> Result<Value, Error> {
+    let d = domain::by_name(name)
+        .and_then(|id| domain::get(&app.store, id))
+        .ok_or_else(|| param_error("unknown domain"))?;
+    let mut page = d.agent_records(params)?;
+    page["domain"] = json!(d.name());
+    Ok(page)
 }
 
 pub(crate) fn timeline(

@@ -123,9 +123,9 @@ fn heap_only_trace_builds_no_mapping() {
     let (heap, _) = gen(7, 500, 0);
     let a = load_app(&heap);
     assert!(a.store.hrank.is_empty());
-    assert!(a.store.heap.seq.is_empty());
+    assert!(a.store.dom.heap.seq.is_empty());
     assert_eq!(a.store.heap_len(), a.store.len());
-    assert!(a.store.logs.is_empty());
+    assert!(a.store.dom.logs.is_empty());
 }
 
 #[test]
@@ -135,12 +135,12 @@ fn log_records_get_no_heap_rows_and_heap_records_no_log_rows() {
     let s = &m.store;
     assert!(s.n_log > 0);
     assert_eq!(s.heap_len(), h.store.len(), "one heap row per heap record");
-    assert_eq!(s.logs.len(), s.n_log);
-    assert_eq!(s.len(), s.heap_len() + s.logs.len());
-    for col in [s.heap.id.len(), s.heap.size.len(), s.heap.site.len(), s.heap.target.len(), s.heap.death.len()] {
+    assert_eq!(s.dom.logs.len(), s.n_log);
+    assert_eq!(s.len(), s.heap_len() + s.dom.logs.len());
+    for col in [s.dom.heap.id.len(), s.dom.heap.size.len(), s.dom.heap.site.len(), s.dom.heap.target.len(), s.dom.heap.death.len()] {
         assert_eq!(col, s.heap_len() as usize);
     }
-    assert_eq!(s.heap.green_pre.len(), s.heap_len() as usize + 1);
+    assert_eq!(s.dom.heap.green_pre.len(), s.heap_len() as usize + 1);
     // the mapping round-trips
     for e in 0..s.len() {
         match s.heap_row(e) {
@@ -315,7 +315,7 @@ fn log_records_parse_with_defaults_warnings_and_fields() {
     assert_eq!(s.warn_counts[W_SEQ_MISMATCH as usize], 0);
     // the M keeps "msg" as its own custom field
     assert_eq!(s.extras[s.extra_at(0) as usize], r#""msg":"heap custom field""#);
-    let logs = &s.logs;
+    let logs = &s.dom.logs;
     assert_eq!(logs.level, vec![3, 2, 2, 2, 4, 2]);
     assert_eq!(logs.seq, vec![1, 2, 3, 4, 5, 6]);
     assert_eq!(logs.msg(0), "retrying \"x\"");
@@ -357,7 +357,7 @@ fn log_only_trace_loads_seeks_and_renders() {
 // ------------------------------------------------------------- LOG-003/004
 
 fn brute(s: &Store, q: &LogQuery) -> Vec<u32> {
-    let logs = &s.logs;
+    let logs = &s.dom.logs;
     let needle = q.text.to_ascii_lowercase();
     (0..logs.len())
         .filter(|&r| {
@@ -390,16 +390,16 @@ fn queries_match_a_brute_force_oracle() {
             seq_hi: hi,
         };
         let want = brute(s, &q);
-        let m = Matches::new(&s.logs, &q);
-        assert_eq!(m.total(&s.logs) as usize, want.len(), "query {i}: {q:?}");
+        let m = Matches::new(&s.dom.logs, &q);
+        assert_eq!(m.total(&s.dom.logs) as usize, want.len(), "query {i}: {q:?}");
         for (k, &row) in want.iter().enumerate() {
-            assert_eq!(m.row(&s.logs, k as u32), row, "query {i} match {k}");
+            assert_eq!(m.row(&s.dom.logs, k as u32), row, "query {i} match {k}");
         }
         // locate at a few seqs
         for _ in 0..5 {
             let seq = r.below(len as u64 + 2) as u32;
-            let expect = want.iter().filter(|&&row| s.logs.seq[row as usize] <= seq).count() as i64 - 1;
-            assert_eq!(m.locate(&s.logs, seq), expect, "query {i} locate {seq}");
+            let expect = want.iter().filter(|&&row| s.dom.logs.seq[row as usize] <= seq).count() as i64 - 1;
+            assert_eq!(m.locate(&s.dom.logs, seq), expect, "query {i} locate {seq}");
         }
     }
 }
@@ -452,12 +452,12 @@ fn query_json_pages_and_reports_totals() {
 fn text_scan_allocates_nothing_per_row() {
     let (_, mixed) = gen(31, 20_000, 50);
     let a = load_app(&mixed);
-    assert!(a.store.logs.len() > 10_000);
+    assert!(a.store.dom.logs.len() > 10_000);
     let q = LogQuery { min_level: 0, text: "no such text anywhere".into(), seq_lo: None, seq_hi: None };
     let before = crate::counting_alloc::count();
-    let m = Matches::new(&a.store.logs, &q);
+    let m = Matches::new(&a.store.dom.logs, &q);
     let after = crate::counting_alloc::count();
-    assert_eq!(m.total(&a.store.logs), 0);
+    assert_eq!(m.total(&a.store.dom.logs), 0);
     assert!(after - before <= 3, "{} allocations for one scan", after - before);
 }
 
@@ -507,15 +507,15 @@ fn lane_bins_from_prefix_sums() {
         let y = r.below(s.len() as u64 + 1) as u32;
         let (lo, hi) = (x.min(y), x.max(y));
         let mut want = [0u32; NLEVEL];
-        for row in 0..s.logs.len() as usize {
-            let seq = s.logs.seq[row];
+        for row in 0..s.dom.logs.len() as usize {
+            let seq = s.dom.logs.seq[row];
             if seq >= lo && seq < hi {
-                want[s.logs.level[row] as usize] += 1;
+                want[s.dom.logs.level[row] as usize] += 1;
             }
         }
-        assert_eq!(s.logs.counts(lo, hi), want, "[{lo}, {hi})");
+        assert_eq!(s.dom.logs.counts(lo, hi), want, "[{lo}, {hi})");
         let max = (0..NLEVEL).rev().find(|&l| want[l] > 0).map(|l| l as u8);
-        assert_eq!(s.logs.max_level(lo, hi), max, "[{lo}, {hi})");
+        assert_eq!(s.dom.logs.max_level(lo, hi), max, "[{lo}, {hi})");
     }
 }
 

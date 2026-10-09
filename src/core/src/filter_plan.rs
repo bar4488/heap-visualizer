@@ -69,7 +69,7 @@ impl NumCol {
     #[inline]
     fn get(self, s: &Store, h: u32) -> Option<i128> {
         let r = h as usize;
-        let hc = &s.heap;
+        let hc = &s.dom.heap;
         Some(match self {
             NumCol::Id => hc.id[r] as i128,
             NumCol::Addr => hc.addr[r] as i128,
@@ -130,10 +130,10 @@ impl U64Col {
     /// `heap_seq` otherwise.
     fn slice(self, s: &Store) -> Option<&[u64]> {
         Some(match self {
-            U64Col::Id => &s.heap.id,
-            U64Col::Addr => &s.heap.addr,
-            U64Col::Size => &s.heap.size,
-            U64Col::Time if s.heap.seq.is_empty() => &s.t,
+            U64Col::Id => &s.dom.heap.id,
+            U64Col::Addr => &s.dom.heap.addr,
+            U64Col::Size => &s.dom.heap.size,
+            U64Col::Time if s.dom.heap.seq.is_empty() => &s.t,
             _ => return None,
         })
     }
@@ -142,9 +142,9 @@ impl U64Col {
     fn at(self, s: &Store, h: u32) -> u64 {
         let r = h as usize;
         match self {
-            U64Col::Id => s.heap.id[r],
-            U64Col::Addr => s.heap.addr[r],
-            U64Col::Size => s.heap.size[r],
+            U64Col::Id => s.dom.heap.id[r],
+            U64Col::Addr => s.dom.heap.addr[r],
+            U64Col::Size => s.dom.heap.size[r],
             U64Col::Time => s.t[s.heap_seq(r) as usize],
             U64Col::Seq => u64::from(s.heap_seq(r)),
         }
@@ -207,7 +207,7 @@ impl DictCol {
     #[inline]
     fn str_at<'a>(self, s: &'a Store, fv: &'a FieldValues, h: u32) -> Option<&'a str> {
         match self {
-            DictCol::Site => match s.heap.site[h as usize] {
+            DictCol::Site => match s.dom.heap.site[h as usize] {
                 NONE_U32 => None,
                 id => Some(&s.sites[id as usize]),
             },
@@ -238,7 +238,7 @@ fn custom_fragment_of(col: DictCol, s: &Store, h: u32) -> u32 {
 fn fragment_row(root: FieldRoot, s: &Store, h: usize) -> u32 {
     match root {
         FieldRoot::Alloc => extra_row(s, h),
-        FieldRoot::Death => match s.heap.death[h] {
+        FieldRoot::Death => match s.dom.heap.death[h] {
             NONE_U32 => NONE_U32,
             death => custom_fragment(FieldRoot::Alloc, s, death),
         },
@@ -248,17 +248,17 @@ fn fragment_row(root: FieldRoot, s: &Store, h: usize) -> u32 {
 // Lazy heap columns read by row: empty means no record carried the value.
 #[inline]
 fn extra_row(s: &Store, h: usize) -> u32 {
-    s.heap.extra.get(h).copied().unwrap_or(NONE_U32)
+    s.dom.heap.extra.get(h).copied().unwrap_or(NONE_U32)
 }
 
 #[inline]
 fn stack_row(s: &Store, h: usize) -> u32 {
-    s.heap.stack.get(h).copied().unwrap_or(NONE_U32)
+    s.dom.heap.stack.get(h).copied().unwrap_or(NONE_U32)
 }
 
 #[inline]
 fn usable_row(s: &Store, h: usize) -> u64 {
-    s.heap.usable.get(h).copied().unwrap_or(0)
+    s.dom.heap.usable.get(h).copied().unwrap_or(0)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1250,7 +1250,7 @@ pub fn scan(plan: &Plan, ctx: &Ctx, out: &mut [u64]) -> u32 {
     let fv = ctx.fields;
     let mut matches = 0;
     for (block, slot) in out.iter_mut().enumerate() {
-        let active = s.heap.creators.get(block).copied().unwrap_or(0);
+        let active = s.dom.heap.creators.get(block).copied().unwrap_or(0);
         if active == 0 {
             *slot = 0;
             continue;
@@ -1340,13 +1340,13 @@ fn word_of(p: &Pred, s: &Store, fv: &FieldValues, block: usize, active: u64) -> 
         // general numeric read
         Pred::Present { col, want } => match col {
             NumCol::DeathSeq | NumCol::DeathTime | NumCol::Lifetime => {
-                let death = &s.heap.death;
+                let death = &s.dom.heap.death;
                 each(active, block, |h| {
                     (death[h as usize] != NONE_U32) == *want
                 })
             }
-            NumCol::Usable if !s.heap.usable.is_empty() => {
-                let usable = &s.heap.usable;
+            NumCol::Usable if !s.dom.heap.usable.is_empty() => {
+                let usable = &s.dom.heap.usable;
                 each(active, block, |h| (usable[h as usize] != 0) == *want)
             }
             NumCol::Usable => each(active, block, |_| !*want),
@@ -1391,19 +1391,19 @@ fn dict_word(
     };
     match col {
         DictCol::Site => {
-            let ids = &s.heap.site;
+            let ids = &s.dom.heap.site;
             each(active, block, |h| hit(ids[h as usize]))
         }
-        DictCol::Thread if s.heap.seq.is_empty() => {
+        DictCol::Thread if s.dom.heap.seq.is_empty() => {
             let ids = &s.thr_idx;
             each(active, block, |h| thread(ids[h as usize]))
         }
         DictCol::Thread => {
-            let (ids, seq) = (&s.thr_idx, &s.heap.seq);
+            let (ids, seq) = (&s.thr_idx, &s.dom.heap.seq);
             each(active, block, |h| thread(ids[seq[h as usize] as usize]))
         }
-        DictCol::Stack if !s.heap.stack.is_empty() => {
-            let ids = &s.heap.stack;
+        DictCol::Stack if !s.dom.heap.stack.is_empty() => {
+            let ids = &s.dom.heap.stack;
             each(active, block, |h| hit(ids[h as usize]))
         }
         // a lazy column the trace never materialized: every row is missing
@@ -1411,8 +1411,8 @@ fn dict_word(
         DictCol::Field {
             root: FieldRoot::Alloc,
             ..
-        } if !s.heap.extra.is_empty() => {
-            let ids = &s.heap.extra;
+        } if !s.dom.heap.extra.is_empty() => {
+            let ids = &s.dom.heap.extra;
             each(active, block, |h| hit(ids[h as usize]))
         }
         DictCol::Field { root, .. } => {

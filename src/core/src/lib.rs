@@ -9,6 +9,7 @@ mod filter_plan;
 mod log_tests;
 pub mod agent;
 pub mod analysis;
+pub mod domain;
 pub mod json;
 pub mod logs;
 pub mod parse;
@@ -110,9 +111,10 @@ struct App {
     /// copy so `named()` can resolve.
     names: Vec<(u32, String)>,
     analysis: analysis::Document,
-    /// The last log query and its matches, so paging and locate (which the
-    /// Logs panel calls as the playhead moves) do not rescan message bytes.
-    log_cache: Option<(logs::LogQuery, logs::Matches)>,
+    /// The last point-domain query and its matches, so paging and locate
+    /// (which the Logs panel calls as the playhead moves) do not rescan
+    /// message bytes.
+    query_cache: domain::QueryCache,
 }
 
 impl App {
@@ -132,7 +134,7 @@ impl App {
             tag_labels: Vec::new(),
             names: Vec::new(),
             analysis: analysis::Document::default(),
-            log_cache: None,
+            query_cache: domain::QueryCache::default(),
         }
     }
 }
@@ -235,7 +237,7 @@ impl Engine {
 
     /// `hp_logs_meta_json`'s document.
     pub fn logs_meta_json(&mut self) -> String {
-        logs::meta_json(&mut self.app.out, &self.app.store.logs);
+        logs::meta_json(&mut self.app.out, &self.app.store.dom.logs);
         self.app.out.clone()
     }
 
@@ -382,7 +384,7 @@ fn parse_begin(a: &mut App) {
     a.tag_labels.clear();
     a.names.clear();
     a.analysis = analysis::Document::default();
-    a.log_cache = None;
+    a.query_cache = domain::QueryCache::default();
 }
 
 #[no_mangle]
@@ -405,7 +407,7 @@ fn parse_end(a: &mut App) -> u32 {
         a.view.reset(&a.store);
         a.ev_filtered = Vec::new();
         a.ev_dirty = true;
-        a.log_cache = None;
+        a.query_cache = domain::QueryCache::default();
     }
     a.store.len()
 }
@@ -681,9 +683,9 @@ pub extern "C" fn hp_center_x_for_event(e: u32) -> f64 {
     let ei = e as usize;
     let creator = match s.op[ei] {
         OP_F => s.target(e),
-        // a custom event has no address to pan to
-        OP_E | OP_L => return a.cfg.x_pan,
-        _ => e,
+        OP_M | OP_R => e,
+        // any other record has no address to pan to
+        _ => return a.cfg.x_pan,
     };
     if creator == NONE_U32 {
         return a.cfg.x_pan;
@@ -1561,7 +1563,7 @@ fn query_json(a: &App, source: &str, from: u32, count: u32) -> String {
     // the scan is already intersected with the creators
     let matches: Vec<u32> = a
         .store
-        .row_bits_events(bits.as_deref().unwrap_or(&a.store.heap.creators))
+        .row_bits_events(bits.as_deref().unwrap_or(&a.store.dom.heap.creators))
         .collect();
     let lo = (from as usize).min(matches.len());
     let hi = lo.saturating_add(count as usize).min(matches.len());
@@ -1646,7 +1648,7 @@ fn ensure_ev_filtered(a: &mut App) {
     // pass a filter (the filter language is over allocations, DOM-003), so
     // the walk never visits another domain's records, and the record kind is
     // read off the heap prefix sums rather than the spine's op column.
-    let (green, red) = (&s.heap.green_pre, &s.heap.red_pre);
+    let (green, red) = (&s.dom.heap.green_pre, &s.dom.heap.red_pre);
     let pass = |h: usize| {
         f.mode == render::FILTER_OFF
             || f.matches.as_ref().is_none_or(|bits| {
@@ -1661,7 +1663,7 @@ fn ensure_ev_filtered(a: &mut App) {
         let creator = if green[h + 1] != green[h] {
             Some(h)
         } else if red[h + 1] != red[h] {
-            match s.heap.target[h] {
+            match s.dom.heap.target[h] {
                 NONE_U32 => None,
                 t => Some(s.heap_rank(t) as usize),
             }
@@ -1732,80 +1734,47 @@ pub extern "C" fn hp_events_filtered_pos(seq: u32) -> u32 {
 // logs (LOG-009)
 // ---------------------------------------------------------------------------
 
-/// A browser log request: `{minLevel, text, seqLo?, seqHi?, from, count}`
-/// for a query, `{minLevel, text, seq}` for locate. `minLevel` is 0–5 or a
-/// level name; numbers are read leniently since they come from JavaScript.
-#[derive(serde::Deserialize, Default)]
-#[serde(rename_all = "camelCase", default)]
-struct LogsRequest {
-    min_level: serde_json::Value,
-    text: Option<String>,
-    seq_lo: Option<f64>,
-    seq_hi: Option<f64>,
-    from: Option<f64>,
-    count: Option<f64>,
-    seq: Option<f64>,
-}
-
-fn clamp_u32(v: f64) -> u32 {
-    if v.is_nan() {
-        0
-    } else {
-        v.clamp(0.0, u32::MAX as f64) as u32
-    }
-}
-
-impl LogsRequest {
-    fn query(&self) -> logs::LogQuery {
-        logs::LogQuery {
-            min_level: logs::level_operand(&self.min_level).unwrap_or(0),
-            text: self.text.clone().unwrap_or_default(),
-            seq_lo: self.seq_lo.map(clamp_u32),
-            seq_hi: self.seq_hi.map(clamp_u32),
-        }
-    }
-}
-
-/// Make `a.log_cache` hold the matches of `q`, scanning only when the query
-/// changed since the last call.
-fn ensure_log_matches(a: &mut App, q: logs::LogQuery) {
-    if !matches!(&a.log_cache, Some((k, _)) if *k == q) {
-        let m = logs::Matches::new(&a.store.logs, &q);
-        a.log_cache = Some((q, m));
-    }
+/// Run `f` on domain `id` with the engine's query cache, after reading the
+/// JSON request `input`. `None` when the input is not a request object.
+fn with_domain_request(
+    a: &mut App,
+    input: &[u8],
+    id: Option<domain::DomainId>,
+    f: impl FnOnce(&dyn domain::Domain, &domain::Request, &mut domain::QueryCache, &mut String),
+) -> Result<(), &'static str> {
+    let req: domain::Request = serde_json::from_slice(input).map_err(|_| "invalid request")?;
+    let id = match id {
+        Some(id) => id,
+        None => req
+            .domain
+            .as_deref()
+            .and_then(domain::by_name)
+            .ok_or("unknown domain")?,
+    };
+    let d = domain::get(&a.store, id).ok_or("unknown domain")?;
+    let mut out = std::mem::take(&mut a.out);
+    f(d.as_ref(), &req, &mut a.query_cache, &mut out);
+    a.out = out;
+    Ok(())
 }
 
 fn write_logs_query(a: &mut App, input: &[u8]) {
-    let Ok(req) = serde_json::from_slice::<LogsRequest>(input) else {
+    if with_domain_request(a, input, Some(domain::LOGS), |d, req, cache, out| d.query_json(req, cache, out)).is_err() {
         a.out = "{\"total\":0,\"from\":0,\"rows\":[],\"error\":\"invalid log query\"}".into();
-        return;
-    };
-    let from = clamp_u32(req.from.unwrap_or(0.0));
-    let count = clamp_u32(req.count.unwrap_or(logs::PAGE_MAX as f64));
-    ensure_log_matches(a, req.query());
-    let mut out = std::mem::take(&mut a.out);
-    let m = &a.log_cache.as_ref().unwrap().1;
-    logs::query_json(&mut out, &a.store, m, from, count);
-    a.out = out;
+    }
 }
 
 fn write_logs_locate(a: &mut App, input: &[u8]) {
-    let Ok(req) = serde_json::from_slice::<LogsRequest>(input) else {
+    if with_domain_request(a, input, Some(domain::LOGS), |d, req, cache, out| d.locate_json(req, cache, out)).is_err() {
         a.out = "{\"row\":-1,\"total\":0,\"error\":\"invalid log query\"}".into();
-        return;
-    };
-    let seq = clamp_u32(req.seq.unwrap_or(0.0));
-    ensure_log_matches(a, req.query());
-    let m = &a.log_cache.as_ref().unwrap().1;
-    let logs = &a.store.logs;
-    a.out = format!("{{\"row\":{},\"total\":{}}}", m.locate(logs, seq), m.total(logs));
+    }
 }
 
 /// `{count, byLevel:[n0..n5], loggers:[{name,count}]}`.
 #[no_mangle]
 pub extern "C" fn hp_logs_meta_json() {
     let a = unsafe { &mut *app() };
-    logs::meta_json(&mut a.out, &a.store.logs);
+    logs::meta_json(&mut a.out, &a.store.dom.logs);
     ret_str(&a.out);
 }
 

@@ -472,7 +472,7 @@ fn push_fields(o: &mut String, logs: &LogStore, row: u32) -> bool {
 /// The Events-list row for log record `seq` (LOG-006): the shape of an `E`
 /// row, with level, logger and message in place of a title.
 pub fn push_event_json(o: &mut String, s: &Store, seq: u32) {
-    let logs = &s.logs;
+    let logs = &s.dom.logs;
     let row = logs.row_at_or_after(seq);
     o.push_str(&format!(
         "{{\"seq\":{},\"op\":{},\"t\":{},\"e\":null,\"level\":{},\"logger\":",
@@ -532,7 +532,7 @@ pub fn push_levels(o: &mut String, levels: &[u32; NLEVEL]) {
 
 /// One page of `hp_logs_query` (LOG-009): `{total, from, rows:[...]}`.
 pub fn query_json(o: &mut String, s: &Store, m: &Matches, from: u32, count: u32) {
-    let logs = &s.logs;
+    let logs = &s.dom.logs;
     let total = m.total(logs);
     let from = from.min(total);
     let hi = from.saturating_add(count.min(PAGE_MAX)).min(total);
@@ -567,7 +567,7 @@ pub fn query_json(o: &mut String, s: &Store, m: &Matches, from: u32, count: u32)
 
 /// The agent page item (LOG-008): exact time as a string, level by name.
 pub fn agent_item(s: &Store, row: u32) -> serde_json::Value {
-    let logs = &s.logs;
+    let logs = &s.dom.logs;
     let seq = logs.seq[row as usize];
     let fields = match logs.fields[row as usize] {
         NONE_U32 => serde_json::Value::Null,
@@ -583,4 +583,136 @@ pub fn agent_item(s: &Store, row: u32) -> serde_json::Value {
         "msg": logs.msg(row),
         "fields": fields,
     })
+}
+
+// ------------------------------------------------------------- the domain
+
+/// Longest accepted agent `text` operand, in bytes (LOG-008).
+pub const TEXT_MAX: usize = 1024;
+
+/// The log domain's cold surface ([`crate::domain::Domain`]).
+pub struct LogsView<'a>(pub &'a Store);
+
+impl LogsView<'_> {
+    fn query(req: &crate::domain::Request) -> LogQuery {
+        LogQuery {
+            min_level: level_operand(&req.min_level).unwrap_or(0),
+            text: req.text.clone().unwrap_or_default(),
+            seq_lo: req.seq_lo(),
+            seq_hi: req.seq_hi(),
+        }
+    }
+
+    /// The cached matches of `q`, scanning only when the query changed.
+    fn matches<'c>(&self, cache: &'c mut crate::domain::QueryCache, q: LogQuery) -> &'c Matches {
+        if !matches!(&cache.logs, Some((k, _)) if *k == q) {
+            let m = Matches::new(&self.0.dom.logs, &q);
+            cache.logs = Some((q, m));
+        }
+        &cache.logs.as_ref().unwrap().1
+    }
+}
+
+impl crate::domain::Domain for LogsView<'_> {
+    fn id(&self) -> crate::domain::DomainId {
+        crate::domain::LOGS
+    }
+
+    fn descriptor(&self) -> serde_json::Value {
+        use crate::domain::*;
+        serde_json::json!({
+            "id": self.name(),
+            "name": "Logs",
+            "kinds": kinds_value(LOGS),
+            "shape": "point",
+            "count": self.count(),
+            "categories": LEVEL_NAMES,
+            "lanes": [],
+            "fields": [],
+            "query": {
+                "params": [
+                    { "name": "minLevel", "type": "level" },
+                    { "name": "text", "type": "text" },
+                    { "name": "seqLo", "type": "seq" },
+                    { "name": "seqHi", "type": "seq" },
+                ],
+            },
+            "limits": { "page": PAGE_MAX, "agentPage": RECORDS_COUNT_MAX, "agentDefault": RECORDS_COUNT_DEFAULT, "textBytes": TEXT_MAX },
+        })
+    }
+
+    fn count(&self) -> u32 {
+        self.0.dom.logs.len()
+    }
+
+    fn seq_of(&self, row: u32) -> u32 {
+        self.0.dom.logs.seq[row as usize]
+    }
+
+    fn row_of(&self, seq: u32) -> Option<u32> {
+        let logs = &self.0.dom.logs;
+        let row = logs.row_at_or_after(seq);
+        (logs.seq.get(row as usize) == Some(&seq)).then_some(row)
+    }
+
+    fn summary(&self, row: u32) -> crate::domain::Summary<'_> {
+        let logs = &self.0.dom.logs;
+        let level = logs.level[row as usize];
+        crate::domain::Summary {
+            seq: logs.seq[row as usize],
+            domain: crate::domain::LOGS,
+            kind: "log",
+            title: Some(logs.msg(row).to_string()),
+            level: Some((level, LEVEL_NAMES[level as usize])),
+            source: logs.logger_name(row),
+            fields: match logs.fields[row as usize] {
+                NONE_U32 => None,
+                f => Some(logs.frags[f as usize].as_str()),
+            },
+        }
+    }
+
+    fn record_json(&self, row: u32, out: &mut String) {
+        self.summary(row).push_json(self.0, out);
+    }
+
+    fn query_json(&self, req: &crate::domain::Request, cache: &mut crate::domain::QueryCache, out: &mut String) {
+        let m = self.matches(cache, Self::query(req));
+        query_json(out, self.0, m, req.from(), req.count(PAGE_MAX));
+    }
+
+    fn locate_json(&self, req: &crate::domain::Request, cache: &mut crate::domain::QueryCache, out: &mut String) {
+        let m = self.matches(cache, Self::query(req));
+        let logs = &self.0.dom.logs;
+        *out = format!("{{\"row\":{},\"total\":{}}}", m.locate(logs, req.seq()), m.total(logs));
+    }
+
+    fn agent_item(&self, row: u32) -> serde_json::Value {
+        agent_item(self.0, row)
+    }
+
+    fn agent_records(&self, p: &crate::domain::RecordParams) -> Result<serde_json::Value, crate::agent::Error> {
+        use crate::domain::param_error;
+        p.only(&["minLevel", "text"])?;
+        let min_level = match p.params.get("minLevel").map(String::as_str) {
+            None | Some("") => 0,
+            Some(name) => match name.parse::<u8>() {
+                Ok(n) if (n as usize) < NLEVEL => n,
+                Ok(_) => return Err(param_error("minLevel must be 0 through 5 or a level name")),
+                Err(_) => level_from_name(name)
+                    .ok_or_else(|| param_error("minLevel must be trace, debug, info, warn, error, or fatal"))?,
+            },
+        };
+        let count = p.page_count()?;
+        let text = p.params.get("text").cloned().unwrap_or_default();
+        if text.len() > TEXT_MAX {
+            return Err(param_error("text is limited to 1024 bytes"));
+        }
+        let query = LogQuery { min_level, text, seq_lo: p.seq_lo, seq_hi: p.seq_hi };
+        let logs = &self.0.dom.logs;
+        let m = Matches::new(logs, &query);
+        Ok(crate::domain::agent_page(m.total(logs) as usize, p.from, count, |k| {
+            self.agent_item(m.row(logs, k as u32))
+        }))
+    }
 }

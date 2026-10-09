@@ -139,10 +139,10 @@ pub fn render(
     // colored by the most severe log level in each column. Two binary
     // searches per column over the log store's prefix sums; a trace without
     // logs skips it.
-    if !s.logs.is_empty() {
+    if !s.dom.logs.is_empty() {
         let (y0, y1) = log_lane_rows(h);
         for x in 0..w as usize {
-            if let Some(level) = s.logs.max_level(bins.from[x], bins.from[x + 1]) {
+            if let Some(level) = s.dom.logs.max_level(bins.from[x], bins.from[x + 1]) {
                 for y in y0..y1 {
                     put(x as i64, y, LOG_COLORS[level as usize]);
                 }
@@ -214,8 +214,8 @@ pub fn hover(s: &Store, kind: u32, w: u32, x: u32, lo: f64, hi: f64) -> String {
         g, r, v0, v1, a, b
     );
     // the column's log records by level (LOG-005), only when the trace has any
-    if !s.logs.is_empty() {
-        let by_level = s.logs.counts(a, b);
+    if !s.dom.logs.is_empty() {
+        let by_level = s.dom.logs.counts(a, b);
         out.push_str(&format!(
             ",\"logs\":{{\"count\":{},\"byLevel\":",
             by_level.iter().sum::<u32>()

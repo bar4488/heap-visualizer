@@ -57,7 +57,7 @@ impl<'a> Ctx<'a> {
         let mut found = None;
         let mut count = 0;
         let s = self.store;
-        for (row, &candidate) in s.heap.id.iter().enumerate() {
+        for (row, &candidate) in s.dom.heap.id.iter().enumerate() {
             let event = s.heap_seq(row);
             if candidate == id && matches!(s.op[event as usize], OP_M | OP_R) {
                 count += 1;
