@@ -235,7 +235,9 @@ In a v2 trace:
   `thr`.
 - Documents that show a record's thread add `pid` beside `thr` for a record
   on a v2 track, and show `thr: null` on a process track; v1 documents keep
-  their shape.
+  their shape. A process track has no thread anywhere: the filter's
+  `malloc.thread` is `None` there and the address map's thread label is
+  null.
 
 Not yet implemented from [E023](../docs/explorations/E023-trace-format-v2.md):
 the clock contract, user kinds, and per-process heap scoping (heap ids and

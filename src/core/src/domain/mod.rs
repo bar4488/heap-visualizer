@@ -331,6 +331,11 @@ pub trait Domain {
     /// `{id, name, ops, kinds, shape, count, lanes, fields, query, limits}`.
     fn descriptor(&self) -> Value;
 
+    /// Names of the domain's own browser query parameters — the
+    /// descriptor's `query.params`. A browser query or locate naming any
+    /// other key (besides `domain`, `from`, `count` and `seq`) is refused.
+    fn query_params(&self) -> &'static [&'static str];
+
     /// Rows in the domain's store.
     fn count(&self) -> u32;
 
@@ -486,10 +491,13 @@ pub fn write_page(out: &mut String, total: u32, from: u32, count: u32, max: u32,
 
 pub mod heap;
 pub mod interval;
+pub mod interval_window;
 pub mod marks;
 pub mod point;
 
 #[cfg(test)]
 mod interval_tests;
+#[cfg(test)]
+mod interval_window_tests;
 #[cfg(test)]
 mod tests;

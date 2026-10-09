@@ -235,13 +235,13 @@ impl Engine {
     /// `omitted.logs` rather than returned.
     pub fn agent_stream_context(&self, source: &str, center: u32, before: u32, after: u32, landmarks: bool) -> Result<serde_json::Value, agent::Error> {
         let options = agent::ContextOptions { landmarks, logs: false };
-        agent::stream_context(&self.app, source, center, before, after, options)
+        agent::stream_context(&self.app, source, center, before, after, options.into())
     }
 
     /// API-008 with every option: landmarks and log records each included
     /// or not.
-    pub fn agent_stream_context_with(&self, source: &str, center: u32, before: u32, after: u32, options: agent::ContextOptions) -> Result<serde_json::Value, agent::Error> {
-        agent::stream_context(&self.app, source, center, before, after, options)
+    pub fn agent_stream_context_with(&self, source: &str, center: u32, before: u32, after: u32, options: impl Into<agent::ContextInclude>) -> Result<serde_json::Value, agent::Error> {
+        agent::stream_context(&self.app, source, center, before, after, options.into())
     }
 
     /// `hp_logs_meta_json`'s document.
@@ -289,6 +289,25 @@ impl Engine {
     /// `hp_record_json`'s document: spine record `seq`'s generic summary.
     pub fn record_json(&mut self, seq: u32) -> String {
         write_record_json(&mut self.app, seq);
+        self.app.out.clone()
+    }
+
+    /// `hp_interval_window`'s document for a JSON request (IVL-008).
+    pub fn interval_window_json(&mut self, request: &str) -> String {
+        write_interval_window(&mut self.app, request.as_bytes());
+        self.app.out.clone()
+    }
+
+    /// The interval window as data (IVL-008): the drawn intervals with
+    /// their lanes, the culled count, and whether the cap was hit.
+    pub fn interval_window(&self, request: &serde_json::Value) -> Result<domain::interval::Window, String> {
+        let req = domain::interval::WindowRequest::parse(&self.app.store, request)?;
+        Ok(domain::interval_window::window(&self.app.store, &req))
+    }
+
+    /// `hp_tracks_json`'s document: `{threads, cpus}` (IVL-008).
+    pub fn tracks_json(&mut self) -> String {
+        write_tracks_json(&mut self.app);
         self.app.out.clone()
     }
 
@@ -1803,9 +1822,11 @@ fn with_domain_request(
     a: &mut App,
     input: &[u8],
     id: Option<domain::DomainId>,
+    check_params: bool,
     f: impl FnOnce(&dyn domain::Domain, &domain::Request, &mut domain::QueryCache, &mut String),
-) -> Result<(), &'static str> {
-    let req: domain::Request = serde_json::from_slice(input).map_err(|_| "invalid request")?;
+) -> Result<(), String> {
+    let raw: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(input).map_err(|_| "invalid request")?;
+    let req: domain::Request = serde_json::from_value(serde_json::Value::Object(raw.clone())).map_err(|_| "invalid request")?;
     let id = match id {
         Some(id) => id,
         None => req
@@ -1815,6 +1836,13 @@ fn with_domain_request(
             .ok_or("unknown domain")?,
     };
     let d = domain::get(&a.store, id).ok_or("unknown domain")?;
+    if check_params {
+        let known = d.query_params();
+        let shared = ["domain", "from", "count", "seq"];
+        if let Some(k) = raw.keys().find(|k| !shared.contains(&k.as_str()) && !known.contains(&k.as_str())) {
+            return Err(format!("unknown parameter {k}"));
+        }
+    }
     let mut out = std::mem::take(&mut a.out);
     f(d.as_ref(), &req, &mut a.query_cache, &mut out);
     a.out = out;
@@ -1822,13 +1850,13 @@ fn with_domain_request(
 }
 
 fn write_logs_query(a: &mut App, input: &[u8]) {
-    if with_domain_request(a, input, Some(domain::LOGS), |d, req, cache, out| d.query_json(req, cache, out)).is_err() {
+    if with_domain_request(a, input, Some(domain::LOGS), true, |d, req, cache, out| d.query_json(req, cache, out)).is_err() {
         a.out = "{\"total\":0,\"from\":0,\"rows\":[],\"error\":\"invalid log query\"}".into();
     }
 }
 
 fn write_logs_locate(a: &mut App, input: &[u8]) {
-    if with_domain_request(a, input, Some(domain::LOGS), |d, req, cache, out| d.locate_json(req, cache, out)).is_err() {
+    if with_domain_request(a, input, Some(domain::LOGS), true, |d, req, cache, out| d.locate_json(req, cache, out)).is_err() {
         a.out = "{\"row\":-1,\"total\":0,\"error\":\"invalid log query\"}".into();
     }
 }
@@ -1843,23 +1871,23 @@ fn write_domains_json(a: &mut App) {
 }
 
 fn write_domain_query(a: &mut App, input: &[u8]) {
-    if let Err(error) = with_domain_request(a, input, None, |d, req, cache, out| d.query_json(req, cache, out)) {
-        a.out = format!("{{\"total\":0,\"from\":0,\"rows\":[],\"error\":\"{error}\"}}");
+    if let Err(error) = with_domain_request(a, input, None, true, |d, req, cache, out| d.query_json(req, cache, out)) {
+        a.out = serde_json::json!({ "total": 0, "from": 0, "rows": [], "error": error }).to_string();
     }
 }
 
 fn write_domain_locate(a: &mut App, input: &[u8]) {
-    if let Err(error) = with_domain_request(a, input, None, |d, req, cache, out| d.locate_json(req, cache, out)) {
-        a.out = format!("{{\"row\":-1,\"total\":0,\"error\":\"{error}\"}}");
+    if let Err(error) = with_domain_request(a, input, None, true, |d, req, cache, out| d.locate_json(req, cache, out)) {
+        a.out = serde_json::json!({ "row": -1, "total": 0, "error": error }).to_string();
     }
 }
 
 fn write_domain_state(a: &mut App, input: &[u8]) {
-    let state = with_domain_request(a, input, None, |d, req, _, out| {
+    let state = with_domain_request(a, input, None, false, |d, req, _, out| {
         *out = d.state_at(req.seq()).map_or_else(|| "null".to_string(), |v| v.to_string());
     });
     if let Err(error) = state {
-        a.out = format!("{{\"error\":\"{error}\"}}");
+        a.out = serde_json::json!({ "error": error }).to_string();
     }
 }
 
@@ -1871,6 +1899,17 @@ fn write_record_json(a: &mut App, seq: u32) {
         Some((row, d)) => d.record_json(row, &mut a.out),
         None => a.out.push_str("null"),
     }
+}
+
+fn write_interval_window(a: &mut App, input: &[u8]) {
+    match serde_json::from_slice::<serde_json::Value>(input) {
+        Ok(request) => domain::interval::view(&a.store).window_json(&request, &mut a.out),
+        Err(_) => a.out = r#"{"rows":[],"culled":0,"truncated":false,"error":"invalid request"}"#.into(),
+    }
+}
+
+fn write_tracks_json(a: &mut App) {
+    a.out = domain::interval::view(&a.store).tracks_value().to_string();
 }
 
 fn write_lanes_json(a: &mut App) {
@@ -1896,6 +1935,27 @@ pub extern "C" fn hp_domain_query(len: u32) {
     let a = unsafe { &mut *app() };
     let input = a.buf[..len as usize].to_vec();
     write_domain_query(a, &input);
+    ret_str(&a.out);
+}
+
+/// The interval window (IVL-008): the input buffer holds `{track: {thr,
+/// pid?} | {cpu}, axis: "seq"|"t", lo, hi, width, category?}`; the result is
+/// `{rows:[{ivl, name, category, lane, depth, start, end, open, thr, …}],
+/// culled, truncated}`, or the same with `error`.
+#[no_mangle]
+pub extern "C" fn hp_interval_window(len: u32) {
+    let a = unsafe { &mut *app() };
+    let input = a.buf[..len as usize].to_vec();
+    write_interval_window(a, &input);
+    ret_str(&a.out);
+}
+
+/// The interval tracks: `{threads:[{thr, pid?, name, calls, spans}],
+/// cpus:[{cpu, slices}]}`.
+#[no_mangle]
+pub extern "C" fn hp_tracks_json() {
+    let a = unsafe { &mut *app() };
+    write_tracks_json(a);
     ret_str(&a.out);
 }
 

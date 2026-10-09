@@ -123,14 +123,19 @@ field object or `null`. In the agent's form `t` is an exact string and
 | `hp_record_json(seq)` | — | the generic summary of spine record `seq`, or `null` |
 | `hp_lanes_json()` | — | the lanes the loaded trace draws, bottom first |
 | `hp_domain_state(len)` | `{domain, seq}` | the domain's state with `seq` records applied, or `null` for a domain without one |
+| `hp_interval_window(len)` | `{track, axis, lo, hi, width, category?}` | one track's intervals in a viewport, culled ([IVL-008](14-intervals.md#ivl-008-the-window)) |
+| `hp_tracks_json()` | — | the interval tracks, `{threads, cpus}` (IVL-008) |
 
 A point domain's query is LOG-004's (`minLevel` only where it has
 categories, `text`, `seqLo`/`seqHi`); the heap's query takes only
 `seqLo`/`seqHi` — its selection language is the allocation filter. An
-unknown `domain` or a request that is not a JSON object answers the empty
-document with an `error`. The native `Engine` exposes the same documents
+unknown `domain`, a request that is not a JSON object, or a query or locate
+naming a parameter outside the domain's `query.params` (besides `domain`,
+`from`, `count` and `seq`) answers the empty document with an `error`
+(`unknown parameter <name>`), as an agent page refuses one. The native `Engine` exposes the same documents
 (`domains_json`, `domain_query_json`, `domain_locate_json`, `record_json`,
-`lanes_json`, `domain_state_json`) and `domain_state(domain, seq)` — the
+`lanes_json`, `domain_state_json`, `interval_window_json`, `tracks_json`)
+and `domain_state(domain, seq)` — the
 marks domain's state is the last mark at or before the playhead, the
 interval domain's its open call stacks, spans and CPUs
 ([IVL-005](14-intervals.md#ivl-005-state-at-the-playhead)). The interval

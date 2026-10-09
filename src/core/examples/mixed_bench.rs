@@ -285,6 +285,9 @@ fn main() {
         ("agent timeline: 1% range, 100 bins", "ms"),
         ("interval state at a random seq", "us"),
         ("interval query: calls >= 40 ns", "ms"),
+        ("interval window: thread, whole trace", "us"),
+        ("interval window: thread, 1% of time", "us"),
+        ("interval window: cpu, whole trace", "us"),
     ];
     let mixes: Vec<Mix> = ratios
         .iter()
@@ -433,9 +436,33 @@ fn main() {
                 black_box(engine.domain_query_json(r#"{"domain":"intervals","count":1}"#));
             });
             rows[16].values.push(ms(query));
+            // the flame chart's data at 1600 device pixels: zoomed out, where
+            // nearly everything is culled, and zoomed in to 1% of the trace
+            let t_max = t_max as u64;
+            let win = |track: &str, lo: u64, hi: u64| {
+                format!(r#"{{"track":{track},"axis":"t","lo":{lo},"hi":{hi},"width":1600}}"#)
+            };
+            let requests = [
+                vec![win(r#"{"thr":0}"#, 0, t_max)],
+                (0..20).map(|k| win(r#"{"thr":1}"#, t_max * k / 20, t_max * k / 20 + t_max / 100)).collect(),
+                vec![win(r#"{"cpu":2}"#, 0, t_max)],
+            ];
+            for (k, reqs) in requests.iter().enumerate() {
+                let mut drawn = 0usize;
+                let d = time(5, || {}, || {
+                    for r in reqs {
+                        let out = engine.interval_window_json(r);
+                        drawn = out.matches("\"ivl\"").count();
+                        black_box(out);
+                    }
+                });
+                rows[17 + k].values.push(us(d) / reqs.len() as f64);
+                eprintln!("  window {k}: {drawn} rows drawn (last request)");
+            }
         } else {
-            rows[15].values.push(f64::NAN);
-            rows[16].values.push(f64::NAN);
+            for row in &mut rows[15..] {
+                row.values.push(f64::NAN);
+            }
         }
         drop(engine);
     }

@@ -48,9 +48,10 @@ Warnings are numbered 12–20 and carry a domain (`warn_domain`,
 - `trace.too_many_records`, and the `title`, `stack` and custom-fragment
   limits of the hard-limits table.
 - Browser and transport surfaces: the web Events list, lanes per track,
-  a state panel, and the local server's `/api/v1/domains/{d}/records`.
-- The filter's `alloc.thread` and the address map's thread label read a
-  process track's placeholder `thr` (0) rather than null.
+  a state panel, and the local server's `/api/v1/domains/{d}/records`
+  and `includeIntervals` on `/stream/context`. The core side of a flame
+  chart — the culled per-track window and the tracks list — is
+  [IVL-008](../../spec/14-intervals.md#ivl-008-the-window).
 
 ## Scope
 

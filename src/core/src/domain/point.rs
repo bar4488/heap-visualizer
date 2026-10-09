@@ -459,6 +459,14 @@ impl<const N: usize> Domain for PointView<'_, N> {
         })
     }
 
+    fn query_params(&self) -> &'static [&'static str] {
+        if self.spec.category_key.is_some() {
+            &["minLevel", "text", "seqLo", "seqHi"]
+        } else {
+            &["text", "seqLo", "seqHi"]
+        }
+    }
+
     fn count(&self) -> u32 {
         self.p.len()
     }
