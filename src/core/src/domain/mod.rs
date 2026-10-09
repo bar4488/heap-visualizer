@@ -105,7 +105,7 @@ pub struct Domains {
 pub fn get(s: &Store, id: DomainId) -> Option<Box<dyn Domain + '_>> {
     Some(match id {
         HEAP => Box::new(heap::HeapView(s)),
-        LOGS => Box::new(crate::logs::LogsView(s)),
+        LOGS => Box::new(crate::logs::view(s)),
         _ => return None,
     })
 }
@@ -241,9 +241,7 @@ impl Request {
 /// The engine's one cached query: a text query's matches, kept so that
 /// paging and locate against the same query do not rescan (LOG-004).
 #[derive(Default)]
-pub struct QueryCache {
-    pub logs: Option<(crate::logs::LogQuery, crate::logs::Matches)>,
-}
+pub struct QueryCache(pub Option<(DomainId, point::PointQuery, point::Matches)>);
 
 /// Parameters of an agent records page (`/api/v1/domains/{d}/records`):
 /// the shared paging bounds plus the domain's own named parameters, as the
@@ -456,6 +454,7 @@ pub fn write_page(out: &mut String, total: u32, from: u32, count: u32, max: u32,
 }
 
 pub mod heap;
+pub mod point;
 
 #[cfg(test)]
 mod tests;

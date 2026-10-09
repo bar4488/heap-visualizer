@@ -316,7 +316,7 @@ fn log_records_parse_with_defaults_warnings_and_fields() {
     // the M keeps "msg" as its own custom field
     assert_eq!(s.extras[s.extra_at(0) as usize], r#""msg":"heap custom field""#);
     let logs = &s.dom.logs;
-    assert_eq!(logs.level, vec![3, 2, 2, 2, 4, 2]);
+    assert_eq!(logs.cat, vec![3, 2, 2, 2, 4, 2]);
     assert_eq!(logs.seq, vec![1, 2, 3, 4, 5, 6]);
     assert_eq!(logs.msg(0), "retrying \"x\"");
     assert_eq!(logs.logger_name(0), Some("net.http"));
@@ -362,7 +362,7 @@ fn brute(s: &Store, q: &LogQuery) -> Vec<u32> {
     (0..logs.len())
         .filter(|&r| {
             let seq = logs.seq[r as usize];
-            logs.level[r as usize] >= q.min_level
+            logs.cat[r as usize] >= q.min_cat
                 && q.seq_lo.is_none_or(|lo| seq >= lo)
                 && q.seq_hi.is_none_or(|hi| seq <= hi)
                 && (needle.is_empty()
@@ -384,7 +384,7 @@ fn queries_match_a_brute_force_oracle() {
         let lo = (r.below(3) == 0).then(|| r.below(len as u64) as u32);
         let hi = (r.below(3) == 0).then(|| r.below(len as u64) as u32);
         let q = LogQuery {
-            min_level: r.below(NLEVEL as u64) as u8,
+            min_cat: r.below(NLEVEL as u64) as u8,
             text: texts[r.below(texts.len() as u64) as usize].to_string(),
             seq_lo: lo,
             seq_hi: hi,
@@ -438,7 +438,7 @@ fn query_json_pages_and_reports_totals() {
         from += rows.len() as u64;
     }
     assert!(seen.windows(2).all(|w| w[0] < w[1]));
-    let q = LogQuery { min_level: 3, text: "REQ".into(), seq_lo: Some(10), seq_hi: None };
+    let q = LogQuery { min_cat: 3, text: "REQ".into(), seq_lo: Some(10), seq_hi: None };
     assert_eq!(seen.len(), brute(&e.app.store, &q).len());
     // from past the end clamps; garbage input answers with an error object
     let past: Value = serde_json::from_str(&e.logs_query_json(r#"{"minLevel":5,"text":"","from":999999,"count":5}"#)).unwrap();
@@ -453,7 +453,7 @@ fn text_scan_allocates_nothing_per_row() {
     let (_, mixed) = gen(31, 20_000, 50);
     let a = load_app(&mixed);
     assert!(a.store.dom.logs.len() > 10_000);
-    let q = LogQuery { min_level: 0, text: "no such text anywhere".into(), seq_lo: None, seq_hi: None };
+    let q = LogQuery { min_cat: 0, text: "no such text anywhere".into(), seq_lo: None, seq_hi: None };
     let before = crate::counting_alloc::count();
     let m = Matches::new(&a.store.dom.logs, &q);
     let after = crate::counting_alloc::count();
@@ -510,7 +510,7 @@ fn lane_bins_from_prefix_sums() {
         for row in 0..s.dom.logs.len() as usize {
             let seq = s.dom.logs.seq[row];
             if seq >= lo && seq < hi {
-                want[s.dom.logs.level[row] as usize] += 1;
+                want[s.dom.logs.cat[row] as usize] += 1;
             }
         }
         assert_eq!(s.dom.logs.counts(lo, hi), want, "[{lo}, {hi})");

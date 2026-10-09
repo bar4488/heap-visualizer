@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use crate::domain::point::PointStore;
 use crate::json::{parse_addr, push_json_str, unescape, Scan};
 use crate::store::*;
 
@@ -466,32 +467,13 @@ impl Parser {
             None => NONE_U16,
         };
         let logger = match log.logger.take() {
-            Some(name) => match self.logger_map.get(&name) {
-                Some(&i) => i,
-                None => {
-                    let logs = &mut self.store.dom.logs;
-                    let i = logs.loggers.len() as u32;
-                    self.logger_map.insert(name.clone(), i);
-                    logs.loggers.push(name);
-                    logs.logger_count.push(0);
-                    i
-                }
-            },
+            Some(name) => intern_label(&mut self.logger_map, &mut self.store.dom.logs, name),
             None => NONE_U32,
         };
         let fields = if log.extra.is_empty() {
             NONE_U32
         } else {
-            match self.log_frag_map.get(&log.extra) {
-                Some(&i) => i,
-                None => {
-                    let logs = &mut self.store.dom.logs;
-                    let i = logs.frags.len() as u32;
-                    self.log_frag_map.insert(log.extra.clone(), i);
-                    logs.frags.push(std::mem::take(&mut log.extra));
-                    i
-                }
-            }
+            intern_frag(&mut self.log_frag_map, &mut self.store.dom.logs, std::mem::take(&mut log.extra))
         };
         self.push_spine(OP_L, t, thr_idx);
         self.store.dom.logs.push(e, level, logger, &msg, fields);
@@ -754,6 +736,29 @@ impl Default for Store {
             snaps: Vec::new(),
         }
     }
+}
+
+/// Intern `name` in a point store's label dictionary (a logger, a title).
+fn intern_label<const N: usize>(map: &mut HashMap<String, u32>, p: &mut PointStore<N>, name: String) -> u32 {
+    if let Some(&i) = map.get(&name) {
+        return i;
+    }
+    let i = p.labels.len() as u32;
+    map.insert(name.clone(), i);
+    p.labels.push(name);
+    p.label_count.push(0);
+    i
+}
+
+/// Intern a custom-field fragment in a point store's own fragment table.
+fn intern_frag<const N: usize>(map: &mut HashMap<String, u32>, p: &mut PointStore<N>, frag: String) -> u32 {
+    if let Some(&i) = map.get(&frag) {
+        return i;
+    }
+    let i = p.frags.len() as u32;
+    map.insert(frag.clone(), i);
+    p.frags.push(frag);
+    i
 }
 
 /// Drop one occurrence of `key` from a counted multiset.
