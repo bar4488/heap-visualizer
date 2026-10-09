@@ -133,12 +133,15 @@ input { font-family: ui-monospace, monospace; }
 /* ---------- views ---------- */
 
 #workspace { flex: 1; display: flex; flex-direction: row; min-height: 0; min-width: 0; }
-#views { flex: 1; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+/* the views keep MIN_VIEWS_WIDTH (shell/drawers.ts): drawers are clamped to
+   leave it, and shrink rather than squeeze the views past it */
+#views { flex: 1; display: flex; flex-direction: column; min-height: 0; min-width: 320px; }
 
 /* ---------- dockable drawers ---------- */
 
 .drawer {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 30px;
   width: 300px;
   display: flex; flex-direction: column;
   background: var(--bg2);
@@ -161,15 +164,36 @@ input { font-family: ui-monospace, monospace; }
   width: 22px; height: 22px; padding: 0;
   font-size: 16px; line-height: 20px;
 }
-.drawer.collapsed { width: 30px !important; }
+.drawer.collapsed { width: 30px !important; flex-shrink: 0; }
 .drawer.collapsed .panel,
 .drawer.collapsed .drawer-vresize,
 .drawer.collapsed .drawer-resize { display: none !important; }
 .drawer.collapsed .drawer-bar {
   flex: 1 1 auto;
   padding: 2px 3px;
-  align-items: flex-start;
-  justify-content: center;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  overflow: hidden;
+}
+/* the collapsed rail names what is docked there, top to bottom */
+.drawer-rail { display: none; }
+.drawer.collapsed .drawer-rail {
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  min-height: 0; overflow: hidden;
+}
+.drawer-rail-item {
+  writing-mode: vertical-rl;
+  max-height: 140px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  padding: 6px 2px;
+  background: none; border: 1px solid transparent; border-radius: 4px;
+  color: var(--fg-dim); font-size: 11px;
+}
+.drawer-rail-item:hover { color: var(--fg); border-color: var(--border); }
+.drawer-resize:focus-visible, .drawer-vresize:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: -2px;
 }
 /* width-resize handle on the drawer's inner edge (against #views) */
 .drawer-resize {
@@ -196,16 +220,26 @@ input { font-family: ui-monospace, monospace; }
   background: var(--border);
 }
 .drawer.drop-target { outline: 2px dashed var(--accent); outline-offset: -2px; }
+/* Windows stack in one band, z 10–45 (shell/panels.ts), below every overlay
+   (tooltip 50 and up). The drag previews and the window in hand sit at the
+   band's top: zone 46, line 47, dragged window 48. */
 #dnd-indicator {
   position: fixed; height: 2px; background: var(--accent);
-  z-index: 200; pointer-events: none;
+  z-index: 47; pointer-events: none;
   box-shadow: 0 0 4px var(--accent);
+}
+/* where an empty or collapsed drawer will open, drawn over the workspace so
+   previewing it reflows nothing */
+#dnd-zone {
+  position: fixed; z-index: 46; pointer-events: none;
+  background: rgba(88,166,255,0.08);
+  outline: 2px dashed var(--accent); outline-offset: -2px;
 }
 /* the "in your hand" state while dragging a window (docked or floating) —
    applied after undocking, so it's always the plain floating .panel look
    plus this on top; makes it unmistakable that it's detached and moving */
 .panel.dragging {
-  z-index: 300 !important;
+  z-index: 48 !important;
   opacity: 0.88;
   cursor: grabbing;
   box-shadow: 0 20px 50px rgba(0,0,0,0.75);
@@ -337,7 +371,7 @@ input { font-family: ui-monospace, monospace; }
 /* ---------- panels ---------- */
 
 .panel {
-  position: fixed; z-index: 40;
+  position: fixed; z-index: 10;
   top: 52px; right: 10px;
   width: 320px;
   max-height: 70vh;
@@ -377,6 +411,22 @@ button.d-pin.pinned {
   touch-action: none;
 }
 .panel-close { padding: 0 7px; }
+/* a window takes focus when opened from the toolbar (so Escape closes it);
+   only keyboard focus draws a ring */
+.panel:focus { outline: none; }
+.panel:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+
+/* the toolbar's overflow menu */
+#more-menu {
+  position: fixed; z-index: 70;
+  display: flex; flex-direction: column; gap: 2px;
+  min-width: 160px; padding: 4px;
+  background: #161b22f8;
+  border: 1px solid var(--border); border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.6);
+}
+#more-menu button { text-align: left; background: none; border-color: transparent; }
+#more-menu button:hover, #more-menu button:focus-visible { background: var(--bg3); border-color: var(--border); }
 .panel-body { overflow-y: auto; padding: 8px 10px; font-size: 12px; }
 
 .filter-row { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }

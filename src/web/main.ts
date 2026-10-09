@@ -11,7 +11,7 @@ import {
 import {
   $, $$, $1, dpr, onDprChange, setHtml, toCss, toCssLen,
 } from './shell/dom.ts';
-import { raisePanel, showPanel, makePanelWindow } from './shell/panels.ts';
+import { layout } from './shell/layout.ts';
 import { showTooltip, hideTooltip, positionTooltipNearMouse } from './shell/tooltip.ts';
 import { heapPanels } from './heap/panels.ts';
 import {
@@ -54,9 +54,7 @@ import {
   initLocalServerMode, setLocalServerRuntimeHealth, type LocalServerConfig,
   hostedMinimumVersion,
 } from './local-server.ts';
-import {
-  applyDrawersState, drawersState, dock, initDrawers, drawerEl, refreshDrawerDividers,
-} from './shell/drawers.ts';
+import { initDrawers } from './shell/drawers.ts';
 import type {
   AllocInfo, Domain, FilterCompletions, FromWorker, Range, TraceField, TraceMeta,
 } from './protocol.ts';
@@ -127,7 +125,6 @@ type UIState = {
   detailInfo?: AllocInfo | null;
   /** When the user last zoomed a strip locally; see onState. */
   tlLocalAt?: number;
-  drawers?: typeof drawersState;
   detailWasPinned?: boolean;
 };
 
@@ -610,14 +607,18 @@ function onLoaded(m) {
 
   // every panel refills itself from the new trace, in table order — the UI
   // fields each one reads were all reset above
-  for (const { build } of PANELS) build?.();
+  for (const { refill } of PANELS) refill?.();
 
-  $('detail-panel').hidden = true;
-  $('event-panel').hidden = true;
+  layout.close('detail-panel');
+  layout.close('event-panel');
   UI.detailInfo = null;
   // pinned allocation windows reference events of the previous trace
-  $$('.pinned-detail').forEach((w) => w.remove());
-  applyDefaultPanelLayout();
+  layout.closeAll('pinned-detail');
+  // The domain declares the first-visit workspace. Reapply it for every newly
+  // loaded trace before attempting a trace-scoped restore: a layout from the
+  // previous trace must not become the accidental default for one with no
+  // save. Floating windows stay where the user left them.
+  layout.resetLayout({ keepFloating: true });
   // the marks autosave embeds its own session snapshot, so applying both
   // would run applySession twice back-to-back (double seeks, double
   // filter/layout messages, pinned windows torn down and rebuilt) — prefer
@@ -1011,12 +1012,12 @@ function sendAllocSizeFormat() {
 }
 
 function refreshAllocSizeDisplays() {
-  if (UI.detailInfo && !$('detail-panel').hidden) {
+  if (UI.detailInfo && layout.isOpen('detail-panel')) {
     buildDetailBody($('detail-body'), UI.detailInfo);
   }
-  $$('.pinned-detail').forEach((win) => {
-    if (win._allocInfo) buildDetailBody(win.querySelector('.panel-body'), win._allocInfo);
-  });
+  for (const { el } of layout.instancesOf('pinned-detail')) {
+    if (el._allocInfo) buildDetailBody(el.querySelector('.panel-body'), el._allocInfo);
+  }
   refreshEventsPanel();
 }
 
@@ -1438,7 +1439,9 @@ $('filter-source').onkeydown = (e) => {
   } else if (filterCompletions && (e.key === 'Tab' || (e.key === 'Enter' && filterCompletionNavigated))) {
     e.preventDefault();
     acceptFilterCompletion();
-  } else if (e.key === 'Escape') {
+  } else if (e.key === 'Escape' && filterCompletions) {
+    // the completion list used this Escape; the next one closes the panel
+    e.preventDefault();
     hideFilterCompletions();
   }
 };
@@ -1529,12 +1532,14 @@ $$('input[name=fmode]').forEach((radio) => {
 
 // ---------------------------------------------------------------------------
 // panel wiring. The windowing itself — dragging, the z-stack, docking into
-// the left/right drawers — lives in web/shell/ and knows nothing about heaps.
+// the left/right drawers, visibility, placement and persistence — lives in
+// web/shell/ and knows nothing about heaps; this file only declares panels to
+// it (shell/layout.ts) and asks it to open and close them.
 // ---------------------------------------------------------------------------
 
 // which panels exist, and what refills each from a loaded trace. The table
-// itself is src/web/heap/panels.ts; the build functions are this file's, so they
-// are attached here where they are in scope.
+// itself is src/web/heap/panels.ts; the refill functions are this file's, so
+// they are attached here where they are in scope.
 const PANELS = heapPanels({
   'play-panel': () => buildSpeedSelect(),
   // the row size comes from the trace header, with the default left visible
@@ -1548,49 +1553,53 @@ const PANELS = heapPanels({
   'logs-panel': () => resetLogsPanel(),
 });
 
-// the shell owns the window/drawer machinery (web/shell/); this is the
-// domain side of the handoff: the panel table, and the startup wiring.
-UI.drawers = drawersState;
-$$('.panel').forEach((p) => makePanelWindow(p, dock));
 initDrawers();
-
-// The domain declares the first-visit workspace. Reapply it for every newly
-// loaded trace before attempting a trace-scoped restore: a layout from the
-// previous trace must not become the accidental default for one with no save.
-function applyDefaultPanelLayout() {
-  const defaults = {
-    left: PANELS.filter((p) => p.dock === 'left').map((p) => p.id),
-    right: PANELS.filter((p) => p.dock === 'right').map((p) => p.id),
-    widthLeft: 300,
-    widthRight: 300,
-    collapsedLeft: false,
-    collapsedRight: false,
-  };
-  for (const { id, open, needs } of PANELS) $(id).hidden = !open || (needs === 'logs' && !logsPresent());
-  applyDrawersState(defaults);
+layout.init();
+for (const p of PANELS) {
+  layout.register(p.id, {
+    title: p.title,
+    singleton: !p.multi,
+    persist: p.persist !== false,
+    toggle: p.toggle,
+    autoPlace: p.autoPlace || null,
+    // read when applied: whether Logs starts open depends on the loaded trace
+    defaultLocation: () => ({ dock: p.dock, open: p.open && (p.needs !== 'logs' || logsPresent()) }),
+    build: p.multi ? (_key, info) => buildPinnedWindow(info) : () => $(p.id),
+  });
 }
-applyDefaultPanelLayout();
+layout.resetLayout({ keepFloating: true });
 
-// panel titles and open/close plumbing, both from the table. The events panel
-// wires its own button (opening it also refreshes the virtualized list), which
-// is why its record carries no toggle.
-for (const { id, title, toggle } of PANELS) {
-  $(id).querySelector('.ph-t').textContent = title;
-  if (!toggle) continue;
-  $(toggle).onclick = () => {
-    const p = $(id);
-    p.hidden = !p.hidden;
-    if (!p.hidden) raisePanel(p);
-    if (p.dataset.dockSide) refreshDrawerDividers(p.dataset.dockSide);
+// the toolbar's overflow menu: shell actions that are not panels
+{
+  const btn = $('btn-more');
+  const menu = $('more-menu');
+  const setMenu = (on) => {
+    menu.hidden = !on;
+    btn.setAttribute('aria-expanded', String(on));
+    if (on) {
+      const r = btn.getBoundingClientRect();
+      menu.style.top = `${r.bottom + 4}px`;
+      menu.style.left = `${Math.max(4, Math.min(r.left, innerWidth - 200))}px`;
+      menu.querySelector('button')?.focus();
+    }
+  };
+  btn.onclick = () => setMenu(menu.hidden);
+  document.addEventListener('pointerdown', (e) => {
+    if (!menu.hidden && !menu.contains(e.target) && !btn.contains(e.target)) setMenu(false);
+  });
+  menu.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    e.preventDefault();
+    e.stopPropagation();
+    setMenu(false);
+    btn.focus();
+  });
+  $('btn-reset-layout').onclick = () => {
+    setMenu(false);
+    layout.resetLayout();
+    $('st-info').textContent = 'layout reset — windows, drawers and sizes are back to the default';
   };
 }
-$$('.panel-close').forEach((b) => {
-  b.onclick = () => {
-    const p = $(b.dataset.close);
-    p.hidden = true;
-    if (p.dataset.dockSide) refreshDrawerDividers(p.dataset.dockSide);
-  };
-});
 
 // ---------------------------------------------------------------------------
 // warnings panel
@@ -1656,7 +1665,6 @@ initAnalysis({
 initSession({
   ui: UI,
   post: (msg) => worker.postMessage(msg),
-  panels: PANELS,
   allocSizeFormat,
   rowBytesValue,
   sendCollapseMin,
@@ -2180,7 +2188,7 @@ function buildDetailBody(root, info) {
   const dd = q('.d-death');
   if (dd) dd.onclick = () => worker.postMessage({ type: 'jump', seq: info.deathSeq + 1 });
   q('.d-reference').onclick = () => {
-    showPanel('filter-panel');
+    layout.reveal('filter-panel');
     const input = $('filter-source');
     const start = input.selectionStart ?? input.value.length;
     const end = input.selectionEnd ?? start;
@@ -2193,7 +2201,7 @@ function buildDetailBody(root, info) {
     $('st-info').textContent = `inserted reference to allocation id ${info.id}`;
   };
   q('.d-range').onclick = async () => {
-    showPanel('filter-panel');
+    layout.reveal('filter-panel');
     const applied = await applyFilterSource(
       `alloc.span.overlaps(range(${info.addr}, ${info.end}))`,
     );
@@ -2204,7 +2212,7 @@ function buildDetailBody(root, info) {
   // one gesture, like the legend chips: write the predicate and apply it
   for (const button of root.querySelectorAll('.cf-filter[data-predicate]')) {
     button.onclick = async () => {
-      showPanel('filter-panel');
+      layout.reveal('filter-panel');
       const predicate = button.dataset.predicate;
       if (await applyFilterSource(predicate)) {
         $('st-info').textContent = `filtering ${predicate}`;
@@ -2263,100 +2271,44 @@ function detailTitle(info) {
   return name ? `Allocation · ${name}` : 'Allocation';
 }
 
-function panelHasManualPosition(panel) {
-  return !!(panel.style.left || panel.style.top || panel.style.right || panel.style.bottom);
-}
-
-// When the live panel (re)opens, keep it in the usable workspace beside any
-// open drawer. After pinning, start from the default bottom-left spot and
-// cascade up-right past any pinned windows sitting there.
-function placeLivePanel(panel, reset = false) {
-  if (reset) {
-  panel.style.left = '';
-  panel.style.top = '';
-  panel.style.right = '';
-  panel.style.bottom = '';
-  }
-  const r = panel.getBoundingClientRect();
-  let x = r.left;
-  let y = r.top;
-  const gap = 10;
-  const leftDr = drawerEl('left');
-  const rightDr = drawerEl('right');
-  let minX = gap;
-  let maxX = Math.max(gap, innerWidth - r.width - gap);
-  if (!leftDr.hidden) minX = Math.max(minX, leftDr.getBoundingClientRect().right + gap);
-  if (!rightDr.hidden) maxX = Math.min(maxX, rightDr.getBoundingClientRect().left - r.width - gap);
-  if (maxX < minX) {
-    // Very narrow layouts may not have enough room between two drawers; keep
-    // the panel visible and prefer the space nearest the left drawer.
-    const visibleMax = Math.max(gap, innerWidth - r.width - gap);
-    minX = Math.min(minX, visibleMax);
-    maxX = visibleMax;
-  }
-  const clampX = (v) => Math.min(maxX, Math.max(minX, v));
-  const nx = clampX(x);
-  let moved = Math.abs(nx - x) > 0.5;
-  x = nx;
-  const pins = $$('.pinned-detail').map((w) => w.getBoundingClientRect());
-  const clash = () => pins.some((p) => Math.abs(p.left - x) < 48 && Math.abs(p.top - y) < 48);
-  while (clash() && y > 40) {
-    x = clampX(x + 28);
-    y -= 28;
-    moved = true;
-  }
-  if (moved) {
-    panel.style.left = `${x}px`;
-    panel.style.top = `${y}px`;
-    panel.style.right = 'auto';
-    panel.style.bottom = 'auto';
-  }
-}
-
 // The Event window: the same chrome as the Allocation panel, for a record
-// that is not an allocation (TRACE-010). It is not pinnable and not part of
-// the panel table — like the allocation window it is opened per event, and
-// unlike it there is nothing per-allocation to restore.
+// that is not an allocation (TRACE-010). It is not pinnable and not persisted
+// — like the allocation window it is opened per event (the panel table
+// declares it as such), and unlike it there is nothing per-allocation to
+// restore.
 function fillEventPanel(event) {
   const panel = $('event-panel');
   panel.querySelector('.ph-t').textContent = eventWindowTitle(event);
   $('event-body').innerHTML = eventWindowBody(event, fmtTime);
-  const wasHidden = panel.hidden;
-  panel.hidden = false;
-  if (wasHidden && !panelHasManualPosition(panel)) placeLivePanel(panel, true);
-  raisePanel(panel);
+  layout.open('event-panel');
 }
 
-function fillDetailPanel(info) {
+// `at`: float the live panel there (where a window being unpinned stood)
+function fillDetailPanel(info, at = null) {
   const panel = $('detail-panel');
-  if (!info) { panel.hidden = true; return; }
+  if (!info) { layout.close('detail-panel'); return; }
   // never two windows for the same allocation: if it is already pinned,
   // bring that window to the front instead of opening a duplicate
-  const dup = document.querySelector(`.pinned-detail[data-e="${info.e}"]`);
-  if (dup) {
-    panel.hidden = true;
-    raisePanel(dup);
+  if (layout.isOpen('pinned-detail', String(info.e))) {
+    layout.close('detail-panel');
+    layout.reveal('pinned-detail', String(info.e));
     return;
   }
   UI.detailInfo = info;
   panel.querySelector('.ph-t').textContent = detailTitle(info);
   buildDetailBody($('detail-body'), info);
-  const wasHidden = panel.hidden;
-  panel.hidden = false;
   // only reset/cascade position when the live panel was just vacated by a
   // pin (so a fresh window doesn't land on the pinned one); a plain close
   // (× or Escape) leaves the window where the user left it unless that spot is
   // now covered by an open drawer
-  if (wasHidden) placeLivePanel(panel, UI.detailWasPinned || !panelHasManualPosition(panel));
+  layout.open('detail-panel', '', at ? { at } : { freshPosition: UI.detailWasPinned });
   UI.detailWasPinned = false;
-  raisePanel(panel);
 }
 
-// Build a standalone pinned-allocation window for `info`, optionally placed
-// at a floating `rect` ({left,top,right,bottom} css strings). Shared by the
-// interactive pin button and by session restore (see applySession).
-function createPinnedWindow(info, rect) {
-  const live = $('detail-panel');
+// A pinned-allocation window's element: the shell calls this when
+// `layout.open('pinned-detail', creatorEvent, { data: info })` creates one,
+// and owns it from then on — placement, docking, close, its dock slot.
+function buildPinnedWindow(info) {
   const win = document.createElement('div');
   win.className = 'panel pinned-detail';
   win.dataset.e = info.e;
@@ -2367,34 +2319,20 @@ function createPinnedWindow(info, rect) {
         <button class="panel-close">×</button>
       </span></div>
     <div class="panel-body detail-body"></div>`;
-  document.body.appendChild(win);
   buildDetailBody(win.querySelector('.panel-body'), info);
-  if (rect) {
-    win.style.left = `${rect.left}px`;
-    win.style.top = `${rect.top}px`;
-    win.style.right = 'auto';
-    win.style.bottom = 'auto';
-  }
-  $1('.panel-close', win).onclick = () => {
-    const side = win.dataset.dockSide;
-    win.remove();
-    if (side) refreshDrawerDividers(side);
-  };
   $1('.d-pin', win).onclick = () => {
-    const side = win.dataset.dockSide;
     const rr = win.getBoundingClientRect();
-    win.remove();
-    if (side) refreshDrawerDividers(side);
-    fillDetailPanel(info);
-    live.style.left = `${rr.left}px`;
-    live.style.top = `${rr.top}px`;
-    live.style.right = 'auto';
-    live.style.bottom = 'auto';
-    placeLivePanel(live);
+    layout.close('pinned-detail', String(info.e));
+    fillDetailPanel(info, { left: rr.left, top: rr.top });
   };
-  makePanelWindow(win, dock);
-  raisePanel(win);
   return win;
+}
+
+// Open a pinned-allocation window for `info`. `place` says where: floating
+// `at` a spot, or docked (`dock`, with `restoring` from a session). Shared by
+// the interactive pin button and by session restore (see applySession).
+function createPinnedWindow(info, place = {}) {
+  return layout.open('pinned-detail', String(info.e), { data: info, ...place });
 }
 
 // Pin the current allocation window: it stays exactly where it is (as a
@@ -2404,9 +2342,9 @@ function createPinnedWindow(info, rect) {
 $('d-pin').onclick = () => {
   const info = UI.detailInfo;
   if (!info) return;
-  const live = $('detail-panel');
+  const r = $('detail-panel').getBoundingClientRect();
   // identical chrome to the live panel — the orange pin is the only tell
-  createPinnedWindow(info, live.getBoundingClientRect());
+  createPinnedWindow(info, { at: { left: r.left, top: r.top } });
   UI.detailWasPinned = true;
-  live.hidden = true;
+  layout.close('detail-panel');
 };

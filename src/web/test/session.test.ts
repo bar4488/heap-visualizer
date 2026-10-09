@@ -17,10 +17,18 @@ const {
   drawersState, dockPanel, dockPanelAt, refreshDrawerDividers, setDrawerCollapsed,
 } = await import('../shell/drawers.ts');
 const { heapPanels } = await import('../heap/panels.ts');
+const { layout } = await import('../shell/layout.ts');
 
 // the panel list comes from the domain's table, not a copy of it
 const PANELS = heapPanels();
-const PANEL_IDS = PANELS.map((p) => p.id);
+// the windows the session persists: the table's, less the per-selection ones
+const PANEL_IDS = PANELS.filter((p) => p.persist !== false).map((p) => p.id);
+
+function pinnedEl() {
+  const el = new El('div');
+  el.classList.add('panel', 'pinned-detail');
+  return el;
+}
 
 // --- fixture ---------------------------------------------------------------
 
@@ -54,18 +62,25 @@ function buildFixture() {
     fp.appendChild(r);
   }
 
-  // panels as windows, with a couple carrying explicit float geometry
-  for (const id of PANEL_IDS) {
-    const p = doc.getElementById(id);
-    p.classList.add('panel');
+  // drawers
+  doc.getElementById('drawer-left').classList.add('drawer');
+  doc.getElementById('drawer-right').classList.add('drawer');
+
+  // panels as windows, declared to the shell the way main.ts does, with a
+  // couple carrying explicit float geometry
+  for (const p of PANELS) {
+    if (!p.multi) doc.getElementById(p.id).classList.add('panel');
+    layout.register(p.id, {
+      title: p.title,
+      singleton: !p.multi,
+      persist: p.persist !== false,
+      defaultLocation: { dock: p.dock, open: p.open },
+      build: p.multi ? pinnedEl : () => doc.getElementById(p.id),
+    });
   }
   Object.assign(doc.getElementById('play-panel').style,
     { left: '12px', top: '34px', right: 'auto', bottom: 'auto' });
   doc.getElementById('warnings-panel').hidden = true;
-
-  // drawers
-  doc.getElementById('drawer-left').classList.add('drawer');
-  doc.getElementById('drawer-right').classList.add('drawer');
 }
 
 function makeDeps(ui, posted) {
@@ -106,7 +121,6 @@ function makeUI() {
     filterApplied: 'alloc.size >= 1KiB and alloc.size <= 1MiB',
     filterMode: 2,
     marksDirty: false,
-    drawers: drawersState,
   };
 }
 
@@ -255,7 +269,8 @@ test('applySession restores drawer docking and widths', () => {
     left: ['filter-panel'], right: ['events-panel'],
     widthLeft: 420, widthRight: 260,
     collapsedLeft: true, collapsedRight: false,
-  };
+    // written before drawers carried `sizes`: still reads, heights even
+  } as any;
   applySession(s);
 
   assert.equal(doc.getElementById('drawer-left').style.width, '420px');
@@ -287,7 +302,7 @@ test('a saved drawer layout wholly overrides panels docked by default', () => {
     left: ['events-panel'], right: [],
     widthLeft: 300, widthRight: 300,
     collapsedLeft: false, collapsedRight: false,
-  };
+  } as any;
   applySession(s);
 
   assert.equal(doc.getElementById('layout-panel').dataset.dockSide, undefined);
