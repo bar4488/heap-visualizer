@@ -1,6 +1,6 @@
-// The boundary module: it serializes shell state (window geometry, drawer
-// layout) *and* heap state (view, crop, filters, playhead) into the one
-// per-trace session blob, and reads it back.
+// The boundary module: it serializes shell state (the dock layout: views,
+// windows, edge groups, floating windows) *and* heap state (view, crop,
+// filters, playhead) into the one per-trace session blob, and reads it back.
 //
 // Everything it needs from the heap layer arrives through initSession(deps)
 // rather than by import — main.ts still owns those functions, and injecting
@@ -8,12 +8,14 @@
 // is also what makes the round-trip testable without a browser: a test
 // supplies a fake `deps` and a stub DOM.
 //
-// The blob's top level is shell-owned workspace state — panel window geometry
-// and drawer layout. Everything whose meaning comes from a heap trace lives
-// under the `heap` key, which carries its own `version` so heap state can
-// change shape without the shell's envelope moving. Blobs written in the old
-// flat shape (every field at the top level, no `heap` key) still read, and
-// there is one read path for that one old shape — not a migration framework.
+// The blob's top level is an envelope: workspace state under `shell` (the
+// shell's own serialization, with its own `version`), and everything whose
+// meaning comes from a heap trace under `heap`, which carries its own
+// `version` so heap state can change shape without the envelope moving. Two
+// old shapes still read, each through one read path rather than a migration
+// framework: the flat shape (every heap field at the top level, no `heap`
+// key), and the pre-dock shell (`windows` and `drawers` at the top level),
+// which the shell converts into a dock layout.
 
 import { $, $1 } from './shell/dom.ts';
 import { layout } from './shell/layout.ts';
@@ -49,15 +51,13 @@ export const HEAP_SESSION_VERSION = 2;
 // there is no translator — E019 says why.
 export const FILTER_LANGUAGE_VERSION = 4;
 
-// The top level's `windows` and `drawers` are the shell's own serialization
-// (shell/layout.ts) — this module puts them in the envelope and hands them
-// back, and does not read inside them.
+// The top level's `shell` is the shell's own serialization (shell/layout.ts)
+// — this module puts it in the envelope and hands it back, and does not read
+// inside it.
 export function buildSession() {
-  const { windows, drawers } = layout.serialize();
   return {
     heapVisualizerSession: 1,
-    windows,
-    drawers,
+    shell: layout.serialize(),
     heap: buildHeapSession(),
   };
 }
@@ -84,32 +84,26 @@ function buildHeapSession() {
     playhead: d.ui.state ? d.ui.state.seq : 0,
     // pinned allocation windows: re-fetched by creator event index on
     // restore (see applySession), since only the trace — not the info blob
-    // itself — is worth persisting
-    // (their slot within a drawer is in the shell's drawer order, under the
-    // instance id `pinned-detail:<e>`)
-    pinned: layout.instancesOf('pinned-detail').map(({ key }) => {
-      const at = layout.location('pinned-detail', key);
-      return {
-        e: +key,
-        dockSide: at.dock,
-        left: at.left, top: at.top, right: at.right, bottom: at.bottom,
-      };
-    }),
+    // itself — is worth persisting. Where each one sits is in the shell's
+    // saved dock, under the instance id `pinned-detail:<e>`. (Entries written
+    // before the dock also carry `dockSide` and floating `left`/`top`.)
+    pinned: layout.instancesOf('pinned-detail').map(({ key }) => ({ e: +key })),
   };
 }
 
-// The interleaving below is deliberate: heap settings, then window geometry,
-// then crop and playhead, then drawers, then pinned windows. That is the order
-// the flat shape was applied in, and docking a drawer resizes the canvas, so
-// it must keep happening after the view messages rather than before them.
+// The order below is deliberate: heap settings, then crop and playhead, then
+// the layout, then pinned windows. Rearranging the dock resizes the canvases,
+// so it must keep happening after the view messages rather than before them.
 export function applySession(obj) {
   if (!obj || obj.heapVisualizerSession !== 1) return;
   const h = readHeapSection(obj);
   if (h) applyHeapSettings(h);
-  layout.restoreWindows(obj.windows);
   if (h) applyHeapView(h);
-  layout.restoreDrawers(obj.drawers);
+  // a blob written before the dock has the shell's `windows` and `drawers`
+  // at the top level instead of a `shell` section
+  layout.restore(obj.shell ?? { windows: obj.windows, drawers: obj.drawers });
   if (h) restorePinnedWindows(h.pinned);
+  else layout.dropPlaceholders();
 }
 
 // the heap section, or null when there is none to trust. A blob in the old
@@ -188,21 +182,28 @@ function applyHeapView(obj) {
 // than letting it recreate windows for events of a trace no longer shown.
 let pinnedRestoreGeneration = 0;
 
+// The restored layout already holds a placeholder in each saved pinned
+// window's slot; recreating the window fills it, and whatever is left
+// unfilled at the end (an event this trace does not have) is dropped. Windows
+// pinned now that the session does not list were closed by the restore.
 async function restorePinnedWindows(pinned) {
   const generation = ++pinnedRestoreGeneration;
-  if (!pinned || !pinned.length) return;
+  if (!pinned || !pinned.length) {
+    layout.dropPlaceholders();
+    return;
+  }
   const meta = d.ui.meta;
-  layout.closeAll('pinned-detail'); // avoid dupes on repeated restore
   for (const pw of pinned) {
     const info = await d.requestAllocInfo(pw.e);
     if (generation !== pinnedRestoreGeneration || d.ui.meta !== meta || !d.ui.loaded) return;
     if (!info) continue; // stale/unknown event (e.g. mismatched trace): skip
     d.createPinnedWindow(info, {
-      at: { left: pw.left, top: pw.top, right: pw.right, bottom: pw.bottom },
-      dock: pw.dockSide === 'left' || pw.dockSide === 'right' ? pw.dockSide : null,
+      at: pw.left ? { left: pw.left, top: pw.top } : undefined,
+      dock: pw.dockSide === 'left' || pw.dockSide === 'right' ? pw.dockSide : undefined,
       restoring: true,
     });
   }
+  layout.dropPlaceholders();
 }
 
 let lastSessionJson = null;

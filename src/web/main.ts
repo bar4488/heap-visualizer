@@ -12,6 +12,7 @@ import {
   $, $$, $1, dpr, onDprChange, setHtml, toCss, toCssLen,
 } from './shell/dom.ts';
 import { layout } from './shell/layout.ts';
+import { createDockview, themeDark } from 'dockview-core';
 import { showTooltip, hideTooltip, positionTooltipNearMouse } from './shell/tooltip.ts';
 import { heapPanels } from './heap/panels.ts';
 import {
@@ -54,7 +55,6 @@ import {
   initLocalServerMode, setLocalServerRuntimeHealth, type LocalServerConfig,
   hostedMinimumVersion,
 } from './local-server.ts';
-import { initDrawers } from './shell/drawers.ts';
 import type {
   AllocInfo, Domain, FilterCompletions, FromWorker, Range, TraceField, TraceMeta,
 } from './protocol.ts';
@@ -334,6 +334,9 @@ const overlay = $('addr-overlay');
 function sendResizes() {
   const send = (which, el) => {
     const r = el.getBoundingClientRect();
+    // a view that is parked (closed) or in a tab behind another measures 0×0;
+    // keep its last raster rather than shrinking the canvas to nothing
+    if (r.width < 1 || r.height < 1) return;
     worker.postMessage({ type: 'resize', which, w: r.width * dpr, h: r.height * dpr, dpr });
   };
   // measure the addr canvas box itself (addr-view), not the scroll container:
@@ -404,7 +407,11 @@ $('file-input').onchange = (ev) => {
 };
 $('btn-demo').onclick = () => loadURL('demo.heapl');
 
+// Only a drag carrying files is a trace being dropped: a panel's tab dragged
+// around the dock is a drag too, and must not raise the overlay.
+const isFileDrag = (e) => !!e.dataTransfer && [...e.dataTransfer.types].includes('Files');
 document.addEventListener('dragover', (e) => {
+  if (!isFileDrag(e)) return;
   e.preventDefault();
   $('drop-overlay').hidden = false;
 });
@@ -415,8 +422,9 @@ document.addEventListener('dragleave', (e) => {
 });
 document.addEventListener('dragend', () => { $('drop-overlay').hidden = true; });
 document.addEventListener('drop', (e) => {
-  e.preventDefault();
   $('drop-overlay').hidden = true;
+  if (!isFileDrag(e)) return;
+  e.preventDefault();
   const f = e.dataTransfer.files[0];
   if (f) handleFile(f);
 });
@@ -1531,10 +1539,10 @@ $$('input[name=fmode]').forEach((radio) => {
 });
 
 // ---------------------------------------------------------------------------
-// panel wiring. The windowing itself — dragging, the z-stack, docking into
-// the left/right drawers, visibility, placement and persistence — lives in
-// web/shell/ and knows nothing about heaps; this file only declares panels to
-// it (shell/layout.ts) and asks it to open and close them.
+// panel wiring. The windowing itself — the dock (Dockview, D014), tabs,
+// splits, edge groups, floating, visibility, placement and persistence —
+// lives in web/shell/ and knows nothing about heaps; this file only declares
+// panels to it (shell/layout.ts) and asks it to open and close them.
 // ---------------------------------------------------------------------------
 
 // which panels exist, and what refills each from a loaded trace. The table
@@ -1553,14 +1561,16 @@ const PANELS = heapPanels({
   'logs-panel': () => resetLogsPanel(),
 });
 
-initDrawers();
-layout.init();
+layout.init($('dock'), { createDockview, theme: themeDark });
 for (const p of PANELS) {
   layout.register(p.id, {
     title: p.title,
     singleton: !p.multi,
     persist: p.persist !== false,
+    closable: p.closable !== false,
     toggle: p.toggle,
+    size: p.size,
+    floatSize: p.float,
     autoPlace: p.autoPlace || null,
     // read when applied: whether Logs starts open depends on the loaded trace
     defaultLocation: () => ({ dock: p.dock, open: p.open && (p.needs !== 'logs' || logsPresent()) }),
@@ -1597,7 +1607,7 @@ layout.resetLayout({ keepFloating: true });
   $('btn-reset-layout').onclick = () => {
     setMenu(false);
     layout.resetLayout();
-    $('st-info').textContent = 'layout reset — windows, drawers and sizes are back to the default';
+    $('st-info').textContent = 'layout reset — views, windows, docks and sizes are back to the default';
   };
 }
 
@@ -2283,8 +2293,9 @@ function fillEventPanel(event) {
   layout.open('event-panel');
 }
 
-// `at`: float the live panel there (where a window being unpinned stood)
-function fillDetailPanel(info, at = null) {
+// `place`: open the live panel there (where a window being unpinned stood —
+// `layout.placeOf`)
+function fillDetailPanel(info, place = null) {
   const panel = $('detail-panel');
   if (!info) { layout.close('detail-panel'); return; }
   // never two windows for the same allocation: if it is already pinned,
@@ -2299,9 +2310,8 @@ function fillDetailPanel(info, at = null) {
   buildDetailBody($('detail-body'), info);
   // only reset/cascade position when the live panel was just vacated by a
   // pin (so a fresh window doesn't land on the pinned one); a plain close
-  // (× or Escape) leaves the window where the user left it unless that spot is
-  // now covered by an open drawer
-  layout.open('detail-panel', '', at ? { at } : { freshPosition: UI.detailWasPinned });
+  // (× or Escape) reopens the window where the user left it
+  layout.open('detail-panel', '', place ? { place } : { freshPosition: UI.detailWasPinned });
   UI.detailWasPinned = false;
 }
 
@@ -2321,16 +2331,17 @@ function buildPinnedWindow(info) {
     <div class="panel-body detail-body"></div>`;
   buildDetailBody(win.querySelector('.panel-body'), info);
   $1('.d-pin', win).onclick = () => {
-    const rr = win.getBoundingClientRect();
+    const place = layout.placeOf('pinned-detail', String(info.e));
     layout.close('pinned-detail', String(info.e));
-    fillDetailPanel(info, { left: rr.left, top: rr.top });
+    fillDetailPanel(info, place);
   };
   return win;
 }
 
-// Open a pinned-allocation window for `info`. `place` says where: floating
-// `at` a spot, or docked (`dock`, with `restoring` from a session). Shared by
-// the interactive pin button and by session restore (see applySession).
+// Open a pinned-allocation window for `info`. `place` says where: in the
+// live window's place (`place`), floating `at` a spot, or docked (`dock`,
+// with `restoring` from a session). Shared by the interactive pin button and
+// by session restore (see applySession).
 function createPinnedWindow(info, place = {}) {
   return layout.open('pinned-detail', String(info.e), { data: info, ...place });
 }
@@ -2342,9 +2353,9 @@ function createPinnedWindow(info, place = {}) {
 $('d-pin').onclick = () => {
   const info = UI.detailInfo;
   if (!info) return;
-  const r = $('detail-panel').getBoundingClientRect();
-  // identical chrome to the live panel — the orange pin is the only tell
-  createPinnedWindow(info, { at: { left: r.left, top: r.top } });
+  // identical chrome to the live panel, in its place — the orange pin is the
+  // only tell
+  createPinnedWindow(info, { place: layout.placeOf('detail-panel') });
   UI.detailWasPinned = true;
   layout.close('detail-panel');
 };

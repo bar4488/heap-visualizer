@@ -26,7 +26,7 @@ target_dir() {
 }
 
 mkdir -p dist
-rm -rf dist/shell dist/heap
+rm -rf dist/shell dist/heap dist/logs
 
 if (( ! web_only )); then
   core_target=$(target_dir src/core/Cargo.toml)
@@ -54,6 +54,22 @@ fi
 # tests, which are never emitted (node runs the .ts sources directly).
 "$tsc" -p tsconfig.json
 "$tsc" -p tsconfig.test.json
+
+# The dock engine, vendored from the exact version package.json pins (D014).
+# There is no bundler: index.html's import map points the bare specifier
+# `dockview-core` at this one self-contained ES module. The npm ESM build ships
+# no stylesheet — the CSS exists only as a string the UMD build injects — so it
+# is lifted out of that string.
+rm -rf dist/vendor
+mkdir -p dist/vendor
+cp node_modules/dockview-core/dist/package/main.esm.min.mjs dist/vendor/dockview-core.esm.min.mjs
+node -e '
+const fs = require("fs");
+const s = fs.readFileSync("node_modules/dockview-core/dist/dockview-core.js", "utf8");
+const m = s.match(/s\.textContent = ("(?:[^"\\]|\\.)*")/);
+if (!m) { console.error("error: dockview CSS not found in its UMD build"); process.exit(1); }
+fs.writeFileSync("dist/vendor/dockview.css", JSON.parse(m[1]));
+'
 
 # index.html and style.css compile to nothing, so they are copied. This is the
 # one part of the loop the build step costs you: a CSS tweak needs ./build.sh web.
