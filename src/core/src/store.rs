@@ -17,6 +17,14 @@ pub const OP_E: u8 = 3;
 ///
 /// [LOG-001]: ../../../spec/13-domains-and-logs.md#log-001-the-log-record-l
 pub const OP_L: u8 = 4;
+/// Interval edges (v2 only, [IVL-001]): `B` begins a call or a span, `X`
+/// ends one, and `C` switches a CPU to a thread. Each occupies a seq and has
+/// a row in the interval domain's store only.
+///
+/// [IVL-001]: ../../../spec/14-intervals.md
+pub const OP_B: u8 = 5;
+pub const OP_X: u8 = 6;
+pub const OP_C: u8 = 7;
 
 // Ops index `domain::OPS`, which maps each to its domain and kind.
 
@@ -33,7 +41,29 @@ pub const W_VERSION: u8 = 8;
 pub const W_BAD_LEVEL: u8 = 9;
 pub const W_LONG_LOG: u8 = 10;
 pub const W_THREADS: u8 = 11;
-pub const NWARN: usize = 12;
+// interval domain (IVL-006)
+pub const W_UNMATCHED_END: u8 = 12;
+pub const W_IMPLICIT_CLOSE: u8 = 13;
+pub const W_UNCLOSED: u8 = 14;
+pub const W_DUP_SPAN: u8 = 15;
+pub const W_UNKNOWN_PARENT: u8 = 16;
+pub const W_DEPTH_LIMIT: u8 = 17;
+pub const W_TOO_MANY_OPEN: u8 = 18;
+pub const W_DOUBLE_RUN: u8 = 19;
+pub const W_LONG_FIELD: u8 = 20;
+pub const NWARN: usize = 21;
+
+/// The domain a warning code belongs to: its canonical name is
+/// `<domain>.<warn_code_name>`. Bare names are unique across domains.
+pub fn warn_domain(code: u8) -> &'static str {
+    match code {
+        W_MALFORMED | W_T_DECREASE | W_SEQ_MISMATCH | W_VERSION | W_THREADS | W_LONG_FIELD => "trace",
+        W_UNKNOWN_ID | W_DOUBLE_FREE | W_DUP_ID | W_OVERLAP | W_BAD_SIZE => "heap",
+        W_BAD_LEVEL | W_LONG_LOG => "log",
+        W_DOUBLE_RUN => "sched",
+        _ => "interval",
+    }
+}
 
 pub fn warn_name(code: u8) -> &'static str {
     match code {
@@ -49,6 +79,15 @@ pub fn warn_name(code: u8) -> &'static str {
         W_BAD_LEVEL => "unknown log level read as info",
         W_LONG_LOG => "log message truncated",
         W_THREADS => "too many threads; thread dropped",
+        W_UNMATCHED_END => "interval end matches no open interval",
+        W_IMPLICIT_CLOSE => "call frame closed by an outer end",
+        W_UNCLOSED => "interval still open at trace end",
+        W_DUP_SPAN => "span id already open",
+        W_UNKNOWN_PARENT => "span parent unknown; span is a root",
+        W_DEPTH_LIMIT => "interval depth limit reached",
+        W_TOO_MANY_OPEN => "too many open spans",
+        W_DOUBLE_RUN => "thread running on two CPUs",
+        W_LONG_FIELD => "field truncated",
         _ => "warning",
     }
 }
@@ -67,6 +106,15 @@ pub fn warn_code_name(code: u8) -> &'static str {
         W_BAD_LEVEL => "bad_level",
         W_LONG_LOG => "long_log",
         W_THREADS => "too_many_threads",
+        W_UNMATCHED_END => "unmatched_end",
+        W_IMPLICIT_CLOSE => "implicit_close",
+        W_UNCLOSED => "unclosed",
+        W_DUP_SPAN => "duplicate_span",
+        W_UNKNOWN_PARENT => "unknown_parent",
+        W_DEPTH_LIMIT => "depth_limit",
+        W_TOO_MANY_OPEN => "too_many_open",
+        W_DOUBLE_RUN => "double_run",
+        W_LONG_FIELD => "long_field",
         _ => "warning",
     }
 }
@@ -257,6 +305,14 @@ pub struct Store {
     pub site_count: Vec<u32>,
     pub thrs: Vec<i64>,
     pub thr_count: Vec<u32>,
+    /// v2 only (empty in a v1 trace), parallel to `thrs`: the track's
+    /// process. A v2 track is `(pid, thr?)`; `thrs` holds its `thr`.
+    pub track_pid: Vec<u32>,
+    /// v2 only, parallel to `thrs`: the track is its process's thread-less
+    /// **process track** (its `thrs` entry is a placeholder 0).
+    pub track_proc: Vec<bool>,
+    /// v2 `T` names, by `(pid, thr?)`; the last name wins.
+    pub track_names: std::collections::BTreeMap<(u32, Option<i64>), String>,
     pub stacks: Vec<String>,
     pub extras: Vec<String>,
     /// Catalog of the caller-defined top-level fields seen anywhere in the
@@ -271,6 +327,8 @@ pub struct Store {
     // header
     pub has_header: bool,
     pub version: i64,
+    /// The trace is read as v2: its first record is a header with `v` ≥ 2.
+    pub v2: bool,
     pub unit: String,
     pub title: String,
     pub hdr_row_bytes: u64,
@@ -309,6 +367,27 @@ pub struct Store {
 impl Store {
     pub fn len(&self) -> u32 {
         self.op.len() as u32
+    }
+
+    /// The `thr` of track `idx`: `None` for no track or a process track.
+    #[inline]
+    pub fn track_thr(&self, idx: u16) -> Option<i64> {
+        if idx == NONE_U16 || self.track_proc.get(idx as usize) == Some(&true) {
+            return None;
+        }
+        Some(self.thrs[idx as usize])
+    }
+
+    /// The `pid` of track `idx`, in a v2 trace.
+    #[inline]
+    pub fn track_pid_of(&self, idx: u16) -> Option<u32> {
+        self.track_pid.get(idx as usize).copied()
+    }
+
+    /// The `T` name of track `idx`, if it has one.
+    pub fn track_name(&self, idx: u16) -> Option<&str> {
+        let pid = self.track_pid_of(idx)?;
+        self.track_names.get(&(pid, self.track_thr(idx))).map(String::as_str)
     }
 
     pub fn warn(&mut self, seq: u32, code: u8, detail: u64) {

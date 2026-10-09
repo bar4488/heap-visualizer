@@ -110,7 +110,7 @@ fn the_generic_abi_answers_for_every_domain() {
 
     let all: Value = serde_json::from_str(&engine.domains_json()).unwrap();
     let ids: Vec<&str> = all.as_array().unwrap().iter().map(|d| d["id"].as_str().unwrap()).collect();
-    assert_eq!(ids, ["heap", "marks", "logs"]);
+    assert_eq!(ids, ["heap", "marks", "logs", "intervals"]);
     assert_eq!(all[2]["count"], 2);
     assert_eq!(engine.domain_state("marks", 5).unwrap()["last"]["seq"], 2);
 }

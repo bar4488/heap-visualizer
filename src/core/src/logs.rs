@@ -65,6 +65,8 @@ pub struct RawLog {
     pub t: Option<u64>,
     pub seq: Option<i64>,
     pub thr: Option<i64>,
+    /// v2 only: the record's process.
+    pub pid: Option<u32>,
     pub level: Option<LevelRead>,
     pub logger: Option<String>,
     pub msg: Option<String>,
@@ -86,7 +88,10 @@ impl RawLog {
 /// Everything but `op`, `t`, `seq`, `thr`, `level`, `logger` and `msg` is a
 /// custom field of the log — including names the heap reads (`site`, `id`,
 /// …), which mean nothing on a log record.
-pub fn parse_log_line(line: &[u8]) -> Option<RawLog> {
+///
+/// In a v2 trace `pid` is read too (a wrong shape makes the line
+/// unreadable, as a bad `thr` does); in v1 it is a custom field.
+pub fn parse_log_line(line: &[u8], v2: bool) -> Option<RawLog> {
     let mut sc = Scan::new(line);
     if !sc.eat(b'{') {
         return None;
@@ -112,6 +117,7 @@ pub fn parse_log_line(line: &[u8]) -> Option<RawLog> {
             b"t" => raw.t = Some(sc.unsigned_integer()?),
             b"seq" => raw.seq = Some(sc.integer()?),
             b"thr" => raw.thr = Some(sc.integer()?),
+            b"pid" if v2 => raw.pid = Some(u32::try_from(sc.unsigned_integer()?).ok()?),
             b"level" => {
                 raw.level = Some(if head == b'"' {
                     let (a, b) = sc.string_span()?;
