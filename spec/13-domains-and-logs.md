@@ -23,6 +23,10 @@ thread. `seq` stays the one canonical coordinate
 [TRACE-007](02-trace-format.md#trace-007-ordering-seq-and-timestamps) apply to
 every domain's records identically.
 
+A domain's records are read only from its own store: a reader handed a
+record of another domain never reads its columns (an `L` or `E` record has
+no `size` to read).
+
 One playhead, one view range, one crop, and one selected range coordinate
 every domain's views.
 
@@ -55,6 +59,83 @@ Each domain provides, within the core:
 Domain-specific behavior is implemented once, in the core
 ([D011](../docs/decisions/D011-analysis-changes-have-one-core-implementation.md));
 the worker and DOM present it.
+
+## DOM-004: The domain registry
+
+The core keeps one registry of domains — today `heap`, `marks` (the `E`
+landmarks) and `logs` — so that a new domain is added in one place rather
+than threaded through the engine:
+
+- **One op table** maps every record type to its domain and kind
+  (`M`/`F`/`R` → heap, `E` → marks, `L` → logs). Nothing decides a record's
+  domain by comparing op numbers.
+- **Concrete stores.** Each domain's payload store is a field of one
+  struct, so hot paths (replay, filter scans, density bars, the address
+  map) read their columns directly and pay nothing for the registry.
+- **One cold surface.** Every domain answers the same questions: its
+  descriptor, its record count and row ↔ seq mapping, a generic record
+  summary, a paged query and locate, its timeline lanes and their hover,
+  an optional state at a seq, and agent pages. The generic exports below
+  and the agent's records page are written once against it.
+- **Point stores.** A domain whose records are instants (logs, landmarks)
+  reuses one columnar point store: a category per row with prefix sums, an
+  interned label, a text arena, interned custom-field fragments with the
+  domain's own field catalog, and LOG-004's query and locate. Logs are the
+  six-level instance; marks have one category, and their label is the
+  title.
+
+A **descriptor** is `{id, name, kinds:[{op, kind}], shape, count, lanes,
+fields, query:{params}, limits}`, plus `categories` and `keys` (the JSON
+keys its rows use: `{category, label, text}`) for a point domain. `shape`
+is `allocation` (heap) or `point`. `fields` is the domain's field catalog
+in `hp_fields_json`'s shape: the log domain catalogues its own custom keys
+(they never enter the allocation filter's catalog); the marks domain lists
+its keys from the trace-wide catalog it shares with the heap. `lanes` is
+`[{id, domain, title, categories, colors}]`; `limits` gives `page` (rows
+per browser page, 500), `agentPage` (200), `agentDefault` (50) and, for a
+point domain, `textBytes` (1024).
+
+**Lanes** come from descriptors: each domain's lanes are stacked upward
+from just above the bottom tag lane in registry order, each cell colored by
+the highest category in its column, and a domain without records draws
+none. Today only the log lane exists, so the strip's pixels are those of
+LOG-005.
+
+**Generic record summary**: `{seq, t, thr, domain, kind, title, level?,
+source?, fields}` — `title` is a log's message, a landmark's title, or an
+allocation event's one-line description (`malloc 64 B at 0x1000`);
+`level` (0–5) is present for a domain with categories; `source` is a log's
+logger or an allocation's site, when there is one; `fields` is the custom
+field object or `null`. In the agent's form `t` is an exact string and
+`level` a name.
+
+**Generic browser ABI** (JSON in the shared buffer, as ARCH-006):
+
+| Export | Input | Result |
+|--------|-------|--------|
+| `hp_domains_json()` | — | `[descriptor, …]` in registry order |
+| `hp_domain_query(len)` | `{domain, …query, from, count}` | `{total, from, rows}` — each row `{row, …}` in the domain's own keys: LOG-009's for logs, `{row, seq, t, thr, title, fields}` for marks, the generic summary for heap |
+| `hp_domain_locate(len)` | `{domain, …query, seq}` | `{row, total}` |
+| `hp_record_json(seq)` | — | the generic summary of spine record `seq`, or `null` |
+| `hp_lanes_json()` | — | the lanes the loaded trace draws, bottom first |
+
+A point domain's query is LOG-004's (`minLevel` only where it has
+categories, `text`, `seqLo`/`seqHi`); the heap's query takes only
+`seqLo`/`seqHi` — its selection language is the allocation filter. An
+unknown `domain` or a request that is not a JSON object answers the empty
+document with an `error`. The native `Engine` exposes the same documents
+(`domains_json`, `domain_query_json`, `domain_locate_json`, `record_json`,
+`lanes_json`) and `domain_state(domain, seq)` — today the marks domain's
+state is the last mark at or before the playhead.
+
+**Agent records**: the core provides one bounded page of any domain's
+records, `Engine::agent_domain_records(domain, params)` →
+`{domain, total, from, items, next}`, with `seqLo`/`seqHi`/`from`/`count`
+bounded as LOG-008 (`count` 1–200, default 50) plus the domain's own
+parameters (for logs `minLevel` and `text`; for marks `text`); an unknown
+parameter is an invalid request. It is the core of a future
+`GET /api/v1/domains/{d}/records`; `GET /api/v1/logs` is this page for
+`logs`.
 
 ## LOG-001: The log record `L`
 
@@ -214,7 +295,13 @@ Following the existing JSON-in-buffer convention
 The timeline lane (LOG-005) needs no separate export: it is drawn into the
 strip pixels, and its hover counts arrive in the existing `hp_tl_hover` JSON
 as `logs:{count, byLevel:[...]}`. The `logs` key is present only when the
-trace has log records.
+trace has log records. It is listed by `hp_lanes_json` as `logs.level`.
+
+These exports are the log domain's instance of the generic ABI
+([DOM-004](#dom-004-the-domain-registry)): `hp_logs_query` and
+`hp_logs_locate` are `hp_domain_query` / `hp_domain_locate` with
+`domain: "logs"` and answer identical documents. They stay for the browser
+until it moves to the generic exports.
 
 Input details: `minLevel` is a number 0–5 or a level name (aliases accepted)
 and defaults to 0; `text` defaults to empty; numbers are read leniently
