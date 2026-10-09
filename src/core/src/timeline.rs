@@ -10,29 +10,24 @@ const BASELINE: [u8; 3] = [0x30, 0x36, 0x3d];
 const GREEN_DIM: [u8; 3] = [0x1c, 0x4a, 0x28];
 const RED_DIM: [u8; 3] = [0x58, 0x2b, 0x28];
 
-/// Log lane colors by level (LOG-002 order): trace and debug dim, info
-/// neutral blue, warn yellow, error red, fatal bright magenta-red.
-pub const LOG_COLORS: [[u8; 3]; crate::logs::NLEVEL] = [
-    [0x44, 0x4c, 0x56],
-    [0x6e, 0x76, 0x81],
-    [0x58, 0xa6, 0xff],
-    [0xd2, 0x99, 0x22],
-    [0xf8, 0x51, 0x49],
-    [0xff, 0x3d, 0x9a],
-];
+pub use crate::logs::LOG_COLORS;
 
 /// Height of the tag lanes along each strip edge.
 fn tag_lane_px(h: u32) -> i64 {
     ((h / 14) as i64).clamp(2, 5)
 }
 
-/// Pixel rows `[y0, y1)` of the log lane: directly above the bottom tag
-/// lane's space, which stays reserved whether or not anything is tagged so
-/// the lane does not jump when tagging starts.
+/// Bottom edge of the domain lanes: directly above the bottom tag lane's
+/// space, which stays reserved whether or not anything is tagged so the
+/// lanes do not jump when tagging starts.
+fn lanes_bottom(h: u32) -> i64 {
+    h as i64 - tag_lane_px(h)
+}
+
+/// Pixel rows `[y0, y1)` of the log lane — the first (bottom) domain lane.
 pub fn log_lane_rows(h: u32) -> (i64, i64) {
-    let y1 = h as i64 - tag_lane_px(h);
-    let lane = ((h / 20) as i64).clamp(2, 4);
-    (y1 - lane, y1)
+    let y1 = lanes_bottom(h);
+    (y1 - (crate::logs::LOG_LANE.height)(h), y1)
 }
 
 /// Event-index boundary for pixel column edge `c` of `w`, view [lo, hi).
@@ -135,17 +130,23 @@ pub fn render(
         put(x, mid, BASELINE);
     }
 
-    // --- log lane (LOG-005): a thin band just above the bottom tag lane,
-    // colored by the most severe log level in each column. Two binary
-    // searches per column over the log store's prefix sums; a trace without
-    // logs skips it.
-    if !s.dom.logs.is_empty() {
-        let (y0, y1) = log_lane_rows(h);
-        for x in 0..w as usize {
-            if let Some(level) = s.dom.logs.max_level(bins.from[x], bins.from[x + 1]) {
-                for y in y0..y1 {
-                    put(x as i64, y, LOG_COLORS[level as usize]);
+    // --- domain lanes (DOM-003): each domain's lanes, from its descriptor,
+    // stacked upward from just above the bottom tag lane in registry order
+    // (today: the log lane, LOG-005). A cell is two binary searches over the
+    // domain's prefix sums; a domain with no records draws no lane.
+    {
+        let mut y1 = lanes_bottom(h);
+        for d in crate::domain::all(s) {
+            for (i, lane) in d.lanes().iter().enumerate() {
+                let y0 = y1 - (lane.height)(h);
+                for x in 0..w as usize {
+                    if let Some(c) = d.lane_cell(i, bins.from[x], bins.from[x + 1]) {
+                        for y in y0..y1 {
+                            put(x as i64, y, c);
+                        }
+                    }
                 }
+                y1 = y0;
             }
         }
     }
@@ -213,15 +214,10 @@ pub fn hover(s: &Store, kind: u32, w: u32, x: u32, lo: f64, hi: f64) -> String {
         "{{\"g\":{},\"r\":{},\"from\":{},\"to\":{},\"seqFrom\":{},\"seqTo\":{}",
         g, r, v0, v1, a, b
     );
-    // the column's log records by level (LOG-005), only when the trace has any
-    if !s.dom.logs.is_empty() {
-        let by_level = s.dom.logs.counts(a, b);
-        out.push_str(&format!(
-            ",\"logs\":{{\"count\":{},\"byLevel\":",
-            by_level.iter().sum::<u32>()
-        ));
-        crate::logs::push_levels(&mut out, &by_level);
-        out.push('}');
+    // each lane-drawing domain's counts for the column (for logs, LOG-005's
+    // `logs:{count, byLevel}`), only when the trace has its records
+    for d in crate::domain::all(s) {
+        d.lane_hover(a, b, &mut out);
     }
     out.push('}');
     out

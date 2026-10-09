@@ -572,6 +572,40 @@ fn lane_is_drawn_and_hover_reports_log_counts() {
     assert!(hover.get("logs").is_none());
 }
 
+/// The lane is registry-driven now; its pixels must still be exactly
+/// LOG-005's: rows `log_lane_rows(h)`, each column the most severe level's
+/// color, at every strip size. Marks draw no lane and add no hover key.
+#[test]
+fn registry_lanes_keep_the_log_lane_pixels() {
+    let (_, mixed) = gen(41, 3000, 40);
+    let mixed = mixed + "{\"op\":\"E\",\"title\":\"end\"}\n";
+    let mut a = load_app(&mixed);
+    let n = a.store.len() as f64;
+    for (w, h) in [(300u32, 40u32), (1200, 60), (77, 100), (5, 6)] {
+        let mut px = Vec::new();
+        crate::timeline::render(&mut a.store, &a.cfg, 1, w, h, 0.0, n, &mut px);
+        let bins = crate::timeline::bin(&a.store, 1, w, 0.0, n);
+        let (y0, y1) = crate::timeline::log_lane_rows(h);
+        assert_eq!(y1 - y0, ((h / 20) as i64).clamp(2, 4));
+        for x in 0..w as usize {
+            if let Some(level) = a.store.dom.logs.max_level(bins.from[x], bins.from[x + 1]) {
+                for y in y0..y1 {
+                    let p = ((y as u32 * w + x as u32) * 4) as usize;
+                    assert_eq!(px[p..p + 3], crate::timeline::LOG_COLORS[level as usize], "{w}x{h} at ({x}, {y})");
+                }
+            }
+        }
+    }
+    let hover: Value = serde_json::from_str(&crate::timeline::hover(&a.store, 1, 10, 9, 0.0, n)).unwrap();
+    assert!(hover.get("logs").is_some() && hover.get("marks").is_none());
+    let mut e = engine(&mixed);
+    let lanes: Value = serde_json::from_str(&e.lanes_json()).unwrap();
+    assert_eq!(lanes.as_array().unwrap().len(), 1);
+    assert_eq!(lanes[0]["id"], "logs.level");
+    assert_eq!(lanes[0]["colors"][4], "#f85149");
+    assert_eq!(engine("{\"op\":\"M\",\"t\":1,\"id\":1,\"addr\":\"0x10\",\"size\":1}\n").lanes_json(), "[]");
+}
+
 // ------------------------------------------------------------- LOG-006
 
 #[test]

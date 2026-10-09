@@ -19,7 +19,7 @@
 use crate::json::{push_json_str, unescape, Scan};
 pub use crate::domain::point::{contains_ci, Matches, PointQuery, PointStore};
 use crate::domain::point::{PointSpec, PointView};
-use crate::domain::{push_thr, Domain};
+use crate::domain::{push_thr, Domain, Lane};
 use crate::store::Store;
 
 /// Number of severity levels (LOG-002), `trace` = 0 through `fatal` = 5.
@@ -202,6 +202,27 @@ impl PointStore<NLEVEL> {
     }
 }
 
+/// Log lane colors by level (LOG-002 order): trace and debug dim, info
+/// neutral blue, warn yellow, error red, fatal bright magenta-red.
+pub const LOG_COLORS: [[u8; 3]; NLEVEL] = [
+    [0x44, 0x4c, 0x56],
+    [0x6e, 0x76, 0x81],
+    [0x58, 0xa6, 0xff],
+    [0xd2, 0x99, 0x22],
+    [0xf8, 0x51, 0x49],
+    [0xff, 0x3d, 0x9a],
+];
+
+/// The log lane (LOG-005): each column colored by its most severe level,
+/// 2–4 px tall.
+pub const LOG_LANE: Lane = Lane {
+    id: "logs.level",
+    title: "Log severity",
+    categories: &LEVEL_NAMES,
+    colors: &LOG_COLORS,
+    height: |h| ((h / 20) as i64).clamp(2, 4),
+};
+
 /// The log domain ([`crate::domain::point::PointSpec`]): LOG-009's keys.
 pub static SPEC: PointSpec = PointSpec {
     id: crate::domain::LOGS,
@@ -211,7 +232,7 @@ pub static SPEC: PointSpec = PointSpec {
     category_key: Some("level"),
     label_key: "logger",
     text_key: Some("msg"),
-    lanes: &[],
+    lanes: &[LOG_LANE],
     shared_frags: false,
     page_max: PAGE_MAX,
     text_max: TEXT_MAX,

@@ -523,7 +523,7 @@ impl<const N: usize> Domain for PointView<'_, N> {
     }
 
     fn lane_hover(&self, a: u32, b: u32, out: &mut String) {
-        if self.p.is_empty() {
+        if self.lanes().is_empty() {
             return;
         }
         let counts = self.p.counts(a, b);
