@@ -16,8 +16,7 @@
 // The arithmetic is in logs-model.ts and tested there; this file is the DOM.
 
 import { $ } from '../shell/dom.ts';
-import { raisePanel } from '../shell/panels.ts';
-import { refreshDrawerDividers } from '../shell/drawers.ts';
+import { layout as windows } from '../shell/layout.ts';
 import { esc } from '../fmt.ts';
 import type { LogRow, LogsMeta, QueryPayload, QueryType, ReplyTo } from '../protocol.ts';
 import {
@@ -55,9 +54,8 @@ const st = {
   revealSeq: -1,
 };
 
-const panel = () => $('logs-panel');
 const scroller = () => $('logs-scroll');
-const visible = () => !panel().hidden;
+const visible = () => windows.isOpen('logs-panel');
 
 /** Whether the loaded trace has any log record — the panel's default-open rule. */
 export function logsPresent(): boolean {
@@ -200,11 +198,7 @@ function relocate() {
  */
 export function revealLogSeq(seq: number) {
   if (!d.ui.loaded || !logsPresent()) return;
-  if (!visible()) {
-    panel().hidden = false;
-    raisePanel(panel());
-    if (panel().dataset.dockSide) refreshDrawerDividers(panel().dataset.dockSide);
-  }
+  windows.reveal('logs-panel');
   // the flash is one animation, not a state: lines re-render as the playhead
   // moves, and a class that stayed would replay it on every render
   st.revealSeq = seq;
@@ -277,17 +271,13 @@ function wire() {
   };
   $('log-follow').onchange = () => { if (following()) relocate(); };
 
-  $('btn-logs').onclick = () => {
-    const p = panel();
-    p.hidden = !p.hidden;
-    if (!p.hidden) {
-      raisePanel(p);
-      st.locatedSeq = NaN;
-      updateHeading();
-      refreshLogsPanel();
-      updateLogsPanel();
-    }
-    if (p.dataset.dockSide) refreshDrawerDividers(p.dataset.dockSide);
-  };
+  // the shell shows the window (its toolbar toggle is in the panel table);
+  // the terminal was not kept current while closed, so it catches up on opening
+  windows.onOpen('logs-panel', () => {
+    st.locatedSeq = NaN;
+    updateHeading();
+    refreshLogsPanel();
+    updateLogsPanel();
+  });
 }
 

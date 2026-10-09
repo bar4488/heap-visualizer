@@ -19,6 +19,10 @@
   <button id="btn-connect" title="Paste a connection from the heapviz local companion">Connect…</button>
   <button id="btn-setup" title="Install or troubleshoot the local companion">Setup</button>
   <button id="btn-request" title="Ask for a feature">Request…</button>
+  <button id="btn-more" title="More: workspace actions" aria-haspopup="menu" aria-expanded="false" aria-controls="more-menu" aria-label="More">⋯</button>
+  <div id="more-menu" role="menu" aria-label="Workspace" hidden>
+    <button id="btn-reset-layout" role="menuitem" title="Put every window, drawer and size back to the default layout">Reset layout</button>
+  </div>
   <span id="trace-title" class="title"></span>
 
   <span class="sep"></span>
@@ -163,7 +167,7 @@
 </div>
 
 <div id="play-panel" class="panel" hidden>
-  <div class="panel-head"><span class="ph-t"></span> <button class="panel-close" data-close="play-panel">×</button></div>
+  <div class="panel-head"><span class="ph-t"></span> <button class="panel-close">×</button></div>
   <div class="panel-body">
     <div class="filter-row">
       <button id="btn-step-back" title="Step back one event (←, shift = ×100)">⏮</button>
@@ -179,7 +183,7 @@
 </div>
 
 <div id="layout-panel" class="panel" hidden>
-  <div class="panel-head"><span class="ph-t"></span> <button class="panel-close" data-close="layout-panel">×</button></div>
+  <div class="panel-head"><span class="ph-t"></span> <button class="panel-close">×</button></div>
   <div class="panel-body">
     <div class="filter-row"><label>row bytes <input id="row-bytes" size="7" placeholder="0x1000"
       title="Bytes per address-line row (e.g. 4k or 0x1000; defaults to 0x1000)"></label></div>
@@ -205,7 +209,7 @@
 </div>
 
 <div id="appearance-panel" class="panel" hidden>
-  <div class="panel-head"><span class="ph-t"></span> <button class="panel-close" data-close="appearance-panel">×</button></div>
+  <div class="panel-head"><span class="ph-t"></span> <button class="panel-close">×</button></div>
   <div class="panel-body">
     <div class="filter-row"><label>color <select id="color-mode">
       <option value="0">live</option>
@@ -228,7 +232,7 @@
 </div>
 
 <div id="filter-panel" class="panel" hidden>
-  <div class="panel-head"><span class="ph-t"></span> <button class="panel-close" data-close="filter-panel">×</button></div>
+  <div class="panel-head"><span class="ph-t"></span> <button class="panel-close">×</button></div>
   <div class="panel-body filter-editor">
     <div class="filter-row">
       <label><input type="radio" name="fmode" value="1" checked> dim others</label>
@@ -275,7 +279,7 @@
   <div class="panel-head"><span class="ph-t"></span>
     <span class="head-actions">
       <button id="btn-mark" hidden title="Bookmark the current playhead position (m)">＋ mark</button>
-      <button class="panel-close" data-close="analysis-panel">×</button>
+      <button class="panel-close">×</button>
     </span>
   </div>
   <div class="panel-body">
@@ -295,7 +299,7 @@
 </div>
 
 <div id="warnings-panel" class="panel" hidden>
-  <div class="panel-head"><span class="ph-t"></span> <button class="panel-close" data-close="warnings-panel">×</button></div>
+  <div class="panel-head"><span class="ph-t"></span> <button class="panel-close">×</button></div>
   <div class="panel-body" id="warnings-list"></div>
 </div>
 
@@ -303,7 +307,7 @@
   <div class="panel-head"><span class="ph-t">Allocation</span>
     <span class="head-actions">
       <button id="d-pin" class="d-pin" title="Pin: keep this window as-is; new selections open in a fresh Allocation panel">📌</button>
-      <button class="panel-close" data-close="detail-panel">×</button>
+      <button class="panel-close">×</button>
     </span>
   </div>
   <div class="panel-body detail-body" id="detail-body"></div>
@@ -312,7 +316,7 @@
 <div id="event-panel" class="panel" hidden>
   <div class="panel-head"><span class="ph-t">Event</span>
     <span class="head-actions">
-      <button class="panel-close" data-close="event-panel">×</button>
+      <button class="panel-close">×</button>
     </span>
   </div>
   <div class="panel-body detail-body" id="event-body"></div>
@@ -336,7 +340,7 @@
     <span class="head-actions">
       <label title="Only list events whose allocation passes the current Filter (an F follows the allocation it frees)"><input type="checkbox" id="ev-filtered"> filtered</label>
       <label title="Keep the current event in view while stepping / playing"><input type="checkbox" id="ev-follow" checked> follow</label>
-      <button class="panel-close" data-close="events-panel">×</button>
+      <button class="panel-close">×</button>
     </span>
   </div>
   <div id="events-scroll" tabindex="0">
@@ -351,7 +355,7 @@
   <div class="panel-head"><span class="ph-t"></span> <span id="log-count" class="log-count"></span>
     <span class="head-actions">
       <label title="Keep the playhead's line in view while stepping / playing, like tail -f. Scrolling by hand turns this off."><input type="checkbox" id="log-follow" checked> follow</label>
-      <button class="panel-close" data-close="logs-panel">×</button>
+      <button class="panel-close">×</button>
     </span>
   </div>
   <div class="log-bar">
@@ -374,10 +378,10 @@
 </div>
 
 <!-- Not in the panel table (heap/panels.ts): it is not heap-shaped and there is
-     nothing per-trace to restore. It is still a .panel, so it drags and docks
-     like the rest, and its title is written here rather than by the table. -->
+     nothing per-trace to restore. request.ts declares it to the shell itself,
+     so it drags, docks, toggles and closes like the rest. -->
 <div id="request-panel" class="panel" hidden>
-  <div class="panel-head"><span class="ph-t">Request a feature</span> <button class="panel-close" data-close="request-panel">×</button></div>
+  <div class="panel-head"><span class="ph-t">Request a feature</span> <button class="panel-close">×</button></div>
   <div class="panel-body">
     <div class="request-hint">What would make this more useful? Only what you type here is sent.</div>
     <textarea id="request-text" rows="6" placeholder="e.g. let me open two traces side by side"

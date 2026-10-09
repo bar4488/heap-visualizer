@@ -10,8 +10,7 @@
 // What it needs from main.ts arrives through initEventsPanel(deps).
 
 import { $, $$, toCss } from '../shell/dom.ts';
-import { raisePanel } from '../shell/panels.ts';
-import { refreshDrawerDividers } from '../shell/drawers.ts';
+import { layout } from '../shell/layout.ts';
 import { esc, fmtNum } from '../fmt.ts';
 import { OP_LOG, levelBadge, levelIndex } from '../logs/logs-model.ts';
 import { revealLogSeq } from '../logs/logs-panel.ts';
@@ -53,7 +52,7 @@ function evLayout() {
 }
 
 export function refreshEventsPanel() {
-  if (!d.ui.loaded || $('events-panel').hidden) return;
+  if (!d.ui.loaded || !layout.isOpen('events-panel')) return;
   const L = evLayout();
   $('events-spacer').style.height = `${L.spacerH}px`;
   const sc = $('events-scroll');
@@ -147,7 +146,7 @@ export function flashRects(rects) {
 // keep the highlight (and, with follow on, the scroll position) on the
 // current event as the playhead moves
 export function updateEventsPanel() {
-  if (!d.ui.loaded || $('events-panel').hidden || !d.ui.state) return;
+  if (!d.ui.loaded || !layout.isOpen('events-panel') || !d.ui.state) return;
   const cur = d.ui.state.seq - 1;
   if (cur === evState.lastSeq) return;
   evState.lastSeq = cur;
@@ -218,7 +217,7 @@ export function updateEventsSelBand() {
   const band = $('events-sel-band');
   if (!d.ui.sel) { band.hidden = true; return; }
   const seqRange = d.ui.sel.kind === 1 ? d.ui.sel : d.ui.selMirror;
-  if (!seqRange || $('events-panel').hidden) { band.hidden = true; return; }
+  if (!seqRange || !layout.isOpen('events-panel')) { band.hidden = true; return; }
   const L = evLayout();
   const sc = $('events-scroll');
   // viewport-relative y, from the currently-visible row window (evState.from)
@@ -253,7 +252,7 @@ export function resetEventsPanel() {
   evState.seqs = [];
   $('events-scroll').scrollTop = 0;
   $('events-rows').innerHTML = '';
-  if (!$('events-panel').hidden) refreshEventsPanel();
+  if (layout.isOpen('events-panel')) refreshEventsPanel();
 }
 
 function wireEventsPanel() {
@@ -318,17 +317,13 @@ function wireEventsPanel() {
     });
   }
 
-  $('btn-events').onclick = () => {
-    const p = $('events-panel');
-    p.hidden = !p.hidden;
-    if (!p.hidden) {
-      raisePanel(p);
-      evState.lastSeq = -1;
-      refreshEventsPanel();
-      updateEventsPanel();
-    }
-    if (p.dataset.dockSide) refreshDrawerDividers(p.dataset.dockSide);
-  };
+  // the shell shows the window (its toolbar toggle is in the panel table);
+  // the list was not kept current while closed, so it catches up on opening
+  layout.onOpen('events-panel', () => {
+    evState.lastSeq = -1;
+    refreshEventsPanel();
+    updateEventsPanel();
+  });
   $('ev-follow').onchange = () => {
     evState.lastSeq = -1;
     updateEventsPanel();

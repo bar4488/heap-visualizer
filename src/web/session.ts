@@ -15,12 +15,12 @@
 // flat shape (every field at the top level, no `heap` key) still read, and
 // there is one read path for that one old shape — not a migration framework.
 
-import { $, $$, $1 } from './shell/dom.ts';
-import { applyDrawersState, dockPanelAt } from './shell/drawers.ts';
+import { $, $1 } from './shell/dom.ts';
+import { layout } from './shell/layout.ts';
 
 let d = null;
 
-// deps: { ui, post, panels, allocSizeFormat, rowBytesValue, sendCollapseMin,
+// deps: { ui, post, allocSizeFormat, rowBytesValue, sendCollapseMin,
 //         buildLegend, sendAllocSizeFormat, resetEventsPanel, sendXView,
 //         applyFilterSource, setCrop, requestAllocInfo,
 //         createPinnedWindow, buildMarks, applyMarks }
@@ -49,16 +49,15 @@ export const HEAP_SESSION_VERSION = 2;
 // there is no translator — E019 says why.
 export const FILTER_LANGUAGE_VERSION = 4;
 
+// The top level's `windows` and `drawers` are the shell's own serialization
+// (shell/layout.ts) — this module puts them in the envelope and hands them
+// back, and does not read inside them.
 export function buildSession() {
-  const windows = {};
-  for (const { id } of d.panels) {
-    const p = $(id);
-    windows[id] = { hidden: p.hidden, left: p.style.left, top: p.style.top, right: p.style.right, bottom: p.style.bottom };
-  }
+  const { windows, drawers } = layout.serialize();
   return {
     heapVisualizerSession: 1,
     windows,
-    drawers: d.ui.drawers || null,
+    drawers,
     heap: buildHeapSession(),
   };
 }
@@ -86,11 +85,16 @@ function buildHeapSession() {
     // pinned allocation windows: re-fetched by creator event index on
     // restore (see applySession), since only the trace — not the info blob
     // itself — is worth persisting
-    pinned: $$('.pinned-detail').map((win) => ({
-      e: +win.dataset.e,
-      dockSide: win.dataset.dockSide || null,
-      left: win.style.left, top: win.style.top, right: win.style.right, bottom: win.style.bottom,
-    })),
+    // (their slot within a drawer is in the shell's drawer order, under the
+    // instance id `pinned-detail:<e>`)
+    pinned: layout.instancesOf('pinned-detail').map(({ key }) => {
+      const at = layout.location('pinned-detail', key);
+      return {
+        e: +key,
+        dockSide: at.dock,
+        left: at.left, top: at.top, right: at.right, bottom: at.bottom,
+      };
+    }),
   };
 }
 
@@ -102,9 +106,9 @@ export function applySession(obj) {
   if (!obj || obj.heapVisualizerSession !== 1) return;
   const h = readHeapSection(obj);
   if (h) applyHeapSettings(h);
-  applyWindows(obj);
+  layout.restoreWindows(obj.windows);
   if (h) applyHeapView(h);
-  applyDrawersState(obj.drawers);
+  layout.restoreDrawers(obj.drawers);
   if (h) restorePinnedWindows(h.pinned);
 }
 
@@ -118,17 +122,6 @@ function readHeapSection(obj) {
   if (obj.heap === undefined) return obj;
   if (!obj.heap || obj.heap.version !== HEAP_SESSION_VERSION) return null;
   return obj.heap;
-}
-
-function applyWindows(obj) {
-  if (!obj.windows) return;
-  for (const { id } of d.panels) {
-    const w = obj.windows[id];
-    const p = $(id);
-    if (!w || !p) continue;
-    p.hidden = w.hidden;
-    if (w.left) { p.style.left = w.left; p.style.top = w.top; p.style.right = w.right; p.style.bottom = w.bottom; }
-  }
 }
 
 function applyHeapSettings(obj) {
@@ -199,14 +192,16 @@ async function restorePinnedWindows(pinned) {
   const generation = ++pinnedRestoreGeneration;
   if (!pinned || !pinned.length) return;
   const meta = d.ui.meta;
-  $$('.pinned-detail').forEach((w) => w.remove()); // avoid dupes on repeated restore
+  layout.closeAll('pinned-detail'); // avoid dupes on repeated restore
   for (const pw of pinned) {
     const info = await d.requestAllocInfo(pw.e);
     if (generation !== pinnedRestoreGeneration || d.ui.meta !== meta || !d.ui.loaded) return;
     if (!info) continue; // stale/unknown event (e.g. mismatched trace): skip
-    const win = d.createPinnedWindow(info, null);
-    win.style.left = pw.left; win.style.top = pw.top; win.style.right = pw.right; win.style.bottom = pw.bottom;
-    if (pw.dockSide) dockPanelAt(win, pw.dockSide, null, false);
+    d.createPinnedWindow(info, {
+      at: { left: pw.left, top: pw.top, right: pw.right, bottom: pw.bottom },
+      dock: pw.dockSide === 'left' || pw.dockSide === 'right' ? pw.dockSide : null,
+      restoring: true,
+    });
   }
 }
 
