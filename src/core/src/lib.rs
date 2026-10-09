@@ -231,8 +231,17 @@ impl Engine {
         agent::timeline(&self.app, source, domain, from, to, bins)
     }
 
+    /// API-008 with landmarks as asked and log records counted in
+    /// `omitted.logs` rather than returned.
     pub fn agent_stream_context(&self, source: &str, center: u32, before: u32, after: u32, landmarks: bool) -> Result<serde_json::Value, agent::Error> {
-        agent::stream_context(&self.app, source, center, before, after, landmarks)
+        let options = agent::ContextOptions { landmarks, logs: false };
+        agent::stream_context(&self.app, source, center, before, after, options)
+    }
+
+    /// API-008 with every option: landmarks and log records each included
+    /// or not.
+    pub fn agent_stream_context_with(&self, source: &str, center: u32, before: u32, after: u32, options: agent::ContextOptions) -> Result<serde_json::Value, agent::Error> {
+        agent::stream_context(&self.app, source, center, before, after, options)
     }
 
     /// `hp_logs_meta_json`'s document.

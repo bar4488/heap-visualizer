@@ -354,6 +354,14 @@ fn log_records_parse_with_defaults_warnings_and_fields() {
     assert_eq!(long_warn.detail as usize, long.len());
     // log keys never enter the heap's custom-field catalog
     assert!(s.fields.iter().all(|f| f.name == "msg"));
+    // ... they enter the log domain's own catalog, with types and counts
+    let catalog: Vec<(&str, u8, u32)> = logs.catalog.iter().map(|f| (f.name.as_str(), f.types, f.events)).collect();
+    assert_eq!(
+        catalog,
+        [("attempt", FIELD_INT, 1), ("site", FIELD_STRING, 1), ("size", FIELD_STRING, 1), ("id", FIELD_STRING, 1)]
+    );
+    let d = crate::domain::get(s, crate::domain::LOGS).unwrap().descriptor();
+    assert_eq!(d["fields"][0], serde_json::json!({"name":"attempt","type":"int","optional":false,"events":1}));
     // a decreasing t on a log is clamped like any record's
     let b = load_app("{\"op\":\"M\",\"t\":10,\"id\":1,\"addr\":\"0x10\",\"size\":1}\n{\"op\":\"L\",\"t\":3,\"msg\":\"m\"}\n");
     assert_eq!(b.store.t, vec![10, 10]);

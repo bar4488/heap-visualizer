@@ -641,11 +641,27 @@ pub(crate) fn timeline(
     Ok(json!({ "domain": domain, "range": range, "bins": rows }))
 }
 
+/// One stream-context event in API-008's shape. Each domain's records are
+/// read from that domain's store: a record without a heap row never reaches
+/// a heap column.
 fn event_value(app: &App, event: u32) -> Value {
     let store = &app.store;
     let i = event as usize;
-    if store.op[i] == OP_E {
-        return json!({ "seq": event, "time": store.t[i].to_string(), "operation": "event", "title": domain::marks::title(store, event) });
+    match store.domain_of(event) {
+        domain::HEAP => {}
+        domain::MARKS => {
+            return json!({ "seq": event, "time": store.t[i].to_string(), "operation": "event", "title": domain::marks::title(store, event) });
+        }
+        domain::LOGS => {
+            let logs = &store.dom.logs;
+            let row = logs.row_at_or_after(event);
+            let item = log_domain::agent_item(store, row);
+            return json!({
+                "seq": event, "time": store.t[i].to_string(), "operation": "log",
+                "level": item["level"], "logger": item["logger"], "msg": item["msg"], "fields": item["fields"],
+            });
+        }
+        _ => return json!({ "seq": event, "time": store.t[i].to_string(), "operation": op_name(store.op[i]) }),
     }
     let creator = if store.op[i] == OP_F {
         store.target(event)
@@ -662,39 +678,68 @@ fn event_value(app: &App, event: u32) -> Value {
     })
 }
 
+/// Which records of the non-heap domains `/stream/context` returns besides
+/// the events touching matching allocations (API-008).
+#[derive(Clone, Copy, Debug)]
+pub struct ContextOptions {
+    /// `E` landmarks (`includeLandmarks`, default true).
+    pub landmarks: bool,
+    /// Log records (`includeLogs`, default false). Excluded logs are never
+    /// dropped silently: the response counts them in `omitted.logs`.
+    pub logs: bool,
+}
+
+impl Default for ContextOptions {
+    fn default() -> Self {
+        ContextOptions { landmarks: true, logs: false }
+    }
+}
+
 pub(crate) fn stream_context(
     app: &App,
     source: &str,
     center: u32,
     before: u32,
     after: u32,
-    landmarks: bool,
+    options: ContextOptions,
 ) -> Result<Value, Error> {
     let bits = matches(app, source)?;
+    let store = &app.store;
     let from = center.saturating_sub(before);
     let to = center
         .saturating_add(after)
         .saturating_add(1)
-        .min(app.store.len());
+        .min(store.len());
+    let mut omitted_logs = 0u32;
     let events: Vec<_> = (from..to)
         .filter(|&event| {
-            if app.store.op[event as usize] == OP_E {
-                return landmarks;
-            }
             let i = event as usize;
-            let creator = if app.store.op[i] == OP_F {
-                app.store.target(event)
+            match store.domain_of(event) {
+                domain::HEAP => {}
+                domain::MARKS => return options.landmarks,
+                domain::LOGS => {
+                    omitted_logs += (!options.logs) as u32;
+                    return options.logs;
+                }
+                _ => return false,
+            }
+            let creator = if store.op[i] == OP_F {
+                store.target(event)
             } else {
                 event
             };
-            (creator != NONE_U32 && bit(&app.store, &bits, creator))
-                || (app.store.op[i] == OP_R
-                    && app.store.target(event) != NONE_U32
-                    && bit(&app.store, &bits, app.store.target(event)))
+            (creator != NONE_U32 && bit(store, &bits, creator))
+                || (store.op[i] == OP_R
+                    && store.target(event) != NONE_U32
+                    && bit(store, &bits, store.target(event)))
         })
         .map(|event| event_value(app, event))
         .collect();
-    Ok(json!({ "range": { "from": from, "to": to }, "events": events }))
+    let mut value = json!({ "range": { "from": from, "to": to }, "events": events });
+    if omitted_logs > 0 {
+        value["omitted"] = json!({ "logs": omitted_logs });
+    }
+    Ok(value)
 }
 
 pub(crate) fn apply_tag_query(
@@ -799,6 +844,33 @@ mod tests {
             .unwrap();
         assert_eq!(context["events"].as_array().unwrap().len(), 2);
         assert_eq!(context["events"][1]["operation"], "event");
+        assert!(context.get("omitted").is_none(), "no logs, nothing omitted");
+    }
+
+    /// Log records in a context window are never dropped silently: they are
+    /// counted as omitted, or returned when asked for, and reading one never
+    /// touches a heap column (the debug build asserts heap reads).
+    #[test]
+    fn stream_context_counts_or_includes_log_records() {
+        let mut engine = Engine::new();
+        engine.parse_begin();
+        engine.parse_chunk(br#"{"op":"M","id":1,"addr":"0x1000","size":64,"t":10}
+{"op":"L","t":11,"level":"error","logger":"db","msg":"boom","code":7}
+{"op":"E","t":12,"title":"phase"}
+{"op":"F","id":1,"t":13}
+"#);
+        engine.parse_end();
+        let quiet = engine.agent_stream_context("", 1, 1, 2, true).unwrap();
+        assert_eq!(quiet["events"].as_array().unwrap().len(), 3);
+        assert_eq!(quiet["omitted"]["logs"], 1);
+        let options = ContextOptions { landmarks: false, logs: true };
+        let full = engine.agent_stream_context_with("", 1, 1, 2, options).unwrap();
+        let ops: Vec<&str> = full["events"].as_array().unwrap().iter().map(|e| e["operation"].as_str().unwrap()).collect();
+        assert_eq!(ops, ["malloc", "log", "free"]);
+        assert_eq!(full["events"][1]["level"], "error");
+        assert_eq!(full["events"][1]["fields"]["code"], 7);
+        assert!(full["events"][1].get("id").is_none());
+        assert!(full.get("omitted").is_none());
     }
 
     #[test]
