@@ -9,7 +9,7 @@ use crate::filter_eval::{self, Ctx, FieldValues};
 use crate::filter_plan;
 use crate::domain::{self, param_error, RecordParams};
 use crate::logs::{self as log_domain, LEVEL_NAMES};
-use crate::store::{warn_code_name, Store, NONE_U16, NONE_U32, OP_E, OP_F, OP_L, OP_M, OP_R};
+use crate::store::{warn_code_name, Store, NONE_U16, NONE_U32, OP_F, OP_M, OP_R};
 use crate::{project_analysis, App};
 
 #[derive(Clone, Debug, Serialize)]
@@ -73,15 +73,9 @@ fn creators<'a>(store: &'a Store, bits: &'a [u64]) -> impl Iterator<Item = u32> 
     store.row_bits_events(bits)
 }
 
+/// An op's string operation name — its kind in the op table.
 fn op_name(op: u8) -> &'static str {
-    match op {
-        OP_M => "malloc",
-        OP_F => "free",
-        OP_R => "realloc",
-        OP_E => "event",
-        OP_L => "log",
-        _ => "unknown",
-    }
+    domain::op_kind(op)
 }
 
 fn tag_values(app: &App, creator: u32) -> Vec<Value> {

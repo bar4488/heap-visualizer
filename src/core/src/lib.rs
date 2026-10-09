@@ -1507,6 +1507,20 @@ fn push_event_json(o: &mut String, s: &Store, e: u32) {
         o.push('}');
         return;
     }
+    // Any other domain's record touches no allocation either: without a
+    // bespoke row it is listed by its generic summary, with `op` and a null
+    // `e` added — never by reading heap columns it does not have.
+    if !s.is_heap(e) {
+        let mut one = String::new();
+        if let Some((row, d)) = domain::get(s, s.domain_of(e)).and_then(|d| Some((d.row_of(e)?, d))) {
+            d.record_json(row, &mut one);
+        }
+        match one.strip_prefix('{') {
+            Some(rest) => o.push_str(&format!("{{\"op\":{},\"e\":null,{rest}", s.op[ei])),
+            None => o.push_str("null"),
+        }
+        return;
+    }
     // an F row carries no geometry of its own: report the allocation it kills
     let gi = if s.op[ei] == OP_F && s.target(e) != NONE_U32 {
         s.target(e)
