@@ -112,7 +112,7 @@ fn compact(app: &App, creator: u32) -> Value {
         "death": (death != NONE_U32).then(|| json!({ "seq": death, "time": store.t[death as usize].to_string() })),
         "lifetime": (death != NONE_U32).then(|| (store.t[death as usize] - store.t[i]).to_string()),
         "site": (store.site(creator) != NONE_U32).then(|| store.sites[store.site(creator) as usize].clone()),
-        "thread": (store.thr_idx[i] != NONE_U16).then(|| store.thrs[store.thr_idx[i] as usize].to_string()),
+        "thread": store.track_thr(store.thr_idx[i]).map(|t| t.to_string()),
         "name": analysis.and_then(|value| value.name.clone()),
         "color": analysis.and_then(|value| value.color.clone()),
         "tags": tag_values(app, creator),
@@ -166,7 +166,7 @@ pub(crate) fn allocation(app: &App, creator: u32) -> Option<Value> {
     object.insert("creatorEvent".into(), json!({
         "seq": creator, "time": store.t[i].to_string(), "operation": op_name(store.op[i]),
         "site": (store.site(creator) != NONE_U32).then(|| store.sites[store.site(creator) as usize].clone()),
-        "thread": (store.thr_idx[i] != NONE_U16).then(|| store.thrs[store.thr_idx[i] as usize].to_string()),
+        "thread": store.track_thr(store.thr_idx[i]).map(|t| t.to_string()),
         "stack": (store.stack_at(creator) != NONE_U32).then(|| store.stacks[store.stack_at(creator) as usize].clone()),
         "fields": extra(store, creator),
     }));

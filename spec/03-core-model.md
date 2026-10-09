@@ -32,6 +32,14 @@ The store is split along the domain boundary of
   the **log** domain the `L` records
   ([LOG-003](13-domains-and-logs.md#log-003-the-log-store)). Both are
   point stores ([DOM-004](13-domains-and-logs.md#dom-004-the-domain-registry)).
+  The **interval** domain holds the v2 `B`/`X`/`C` edges and the calls,
+  spans and run slices they pair into
+  ([IVL-003](14-intervals.md#ivl-003-the-interval-store)).
+
+In a v2 trace the spine's thread column holds a `(pid, thr?)` track
+([TRACE-011](02-trace-format.md#trace-011-version-2-and-process-identity)):
+the thread table gains a parallel `pid` and process-track flag, and `T`
+names sit in a side map; a v1 trace allocates neither.
 
 Which domain a record belongs to is decided by one table from op to
 (domain, kind) — never by op numbering — and the domain stores sit side by
@@ -56,7 +64,8 @@ reads (tagging a seq range, the agent timeline) visit only the heap records
 inside the range. The cost of these operations follows the heap record
 count, not the spine length: `cargo run --release --example mixed_bench
 --manifest-path src/core/Cargo.toml` compares heap-only against the same
-heap records with 10× and 100× as many log lines, and the mixed columns
+heap records with 10× and 100× as many log lines and (a v2 trace) with
+10× as many interval edges, and the mixed columns
 should match the heap-only one within noise. What still grows with the spine
 is per-record load cost, the timeline's per-column binary searches and log
 lane (O(width · log n)), and a few percent on random seeks, whose replay
@@ -136,10 +145,18 @@ rejecting input (goal: *faithful*). Warning codes:
 | version | Header declared a version other than 1. |
 | bad-level | `L` record whose `level` is not a known level name; read as `info` ([LOG-001](13-domains-and-logs.md#log-001-the-log-record-l)). |
 | long-log | `L` record whose `msg` exceeded 16 KiB; truncated, record kept. Detail is the original byte length. |
-| too-many-threads | A record on a thread beyond the first 65,535 distinct `thr` values; its thread is read as absent rather than aliased to another. Detail is the `thr` value. |
+| too-many-threads | A record on a thread beyond the first 65,535 distinct `thr` values (v2: `(pid, thr)` tracks); its thread is read as absent rather than aliased to another. Detail is the `thr` value. |
+| interval warnings | Codes 12–20: unmatched or implicitly closed interval ends, unclosed intervals, duplicate spans, unknown span parents, depth and open-span limits, a thread running on two CPUs, and a truncated field ([IVL-006](14-intervals.md#ivl-006-warnings)). |
 
 The agent API names these `bad_level`, `long_log` and `too_many_threads`;
 numeric codes are 9, 10 and 11, after `version` (8).
+
+Every warning belongs to a domain — `trace` (malformed, t-decrease,
+seq-mismatch, version, too-many-threads, `long_field`), `heap`
+(unknown-id … bad-size), `log` (bad-level, long-log), `interval` or
+`sched` — and its canonical name is `domain.kind`; bare kinds are unique
+across domains. `hp_warnings_json` gives each warning's `domain` beside its
+`kind`.
 
 Full counts per code are always kept; detailed records are capped (first
 1000) so a pathological trace cannot blow up memory. The UI shows a toolbar

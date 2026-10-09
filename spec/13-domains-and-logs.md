@@ -63,11 +63,13 @@ the worker and DOM present it.
 ## DOM-004: The domain registry
 
 The core keeps one registry of domains — today `heap`, `marks` (the `E`
-landmarks) and `logs` — so that a new domain is added in one place rather
-than threaded through the engine:
+landmarks), `logs`, and `intervals` (calls, spans and run slices,
+[spec/14](14-intervals.md)) — so that a new domain is added in one place
+rather than threaded through the engine:
 
 - **One op table** maps every record type to its domain and kind
-  (`M`/`F`/`R` → heap, `E` → marks, `L` → logs). Nothing decides a record's
+  (`M`/`F`/`R` → heap, `E` → marks, `L` → logs, `B`/`X`/`C` →
+  intervals). Nothing decides a record's
   domain by comparing op numbers.
 - **Concrete stores.** Each domain's payload store is a field of one
   struct, so hot paths (replay, filter scans, density bars, the address
@@ -87,7 +89,9 @@ than threaded through the engine:
 A **descriptor** is `{id, name, kinds:[{op, kind}], shape, count, lanes,
 fields, query:{params}, limits}`, plus `categories` and `keys` (the JSON
 keys its rows use: `{category, label, text}`) for a point domain. `shape`
-is `allocation` (heap) or `point`. `fields` is the domain's field catalog
+is `allocation` (heap), `point`, or `interval`
+([IVL-007](14-intervals.md#ivl-007-the-domain-on-the-registry)), whose
+descriptor adds its own keys. `fields` is the domain's field catalog
 in `hp_fields_json`'s shape: the log domain catalogues its own custom keys
 (they never enter the allocation filter's catalog); the marks domain lists
 its keys from the trace-wide catalog it shares with the heap. `lanes` is
@@ -98,8 +102,8 @@ point domain, `textBytes` (1024).
 **Lanes** come from descriptors: each domain's lanes are stacked upward
 from just above the bottom tag lane in registry order, each cell colored by
 the highest category in its column, and a domain without records draws
-none. Today only the log lane exists, so the strip's pixels are those of
-LOG-005.
+none. Today the log lane and the interval activity lane exist; a trace
+without interval records draws LOG-005's pixels exactly.
 
 **Generic record summary**: `{seq, t, thr, domain, kind, title, level?,
 source?, fields}` — `title` is a log's message, a landmark's title, or an
@@ -118,6 +122,7 @@ field object or `null`. In the agent's form `t` is an exact string and
 | `hp_domain_locate(len)` | `{domain, …query, seq}` | `{row, total}` |
 | `hp_record_json(seq)` | — | the generic summary of spine record `seq`, or `null` |
 | `hp_lanes_json()` | — | the lanes the loaded trace draws, bottom first |
+| `hp_domain_state(len)` | `{domain, seq}` | the domain's state with `seq` records applied, or `null` for a domain without one |
 
 A point domain's query is LOG-004's (`minLevel` only where it has
 categories, `text`, `seqLo`/`seqHi`); the heap's query takes only
@@ -125,14 +130,18 @@ categories, `text`, `seqLo`/`seqHi`); the heap's query takes only
 unknown `domain` or a request that is not a JSON object answers the empty
 document with an `error`. The native `Engine` exposes the same documents
 (`domains_json`, `domain_query_json`, `domain_locate_json`, `record_json`,
-`lanes_json`) and `domain_state(domain, seq)` — today the marks domain's
-state is the last mark at or before the playhead.
+`lanes_json`, `domain_state_json`) and `domain_state(domain, seq)` — the
+marks domain's state is the last mark at or before the playhead, the
+interval domain's its open call stacks, spans and CPUs
+([IVL-005](14-intervals.md#ivl-005-state-at-the-playhead)). The interval
+query's parameters are IVL-007's.
 
 **Agent records**: the core provides one bounded page of any domain's
 records, `Engine::agent_domain_records(domain, params)` →
 `{domain, total, from, items, next}`, with `seqLo`/`seqHi`/`from`/`count`
 bounded as LOG-008 (`count` 1–200, default 50) plus the domain's own
-parameters (for logs `minLevel` and `text`; for marks `text`); an unknown
+parameters (for logs `minLevel` and `text`; for marks `text`; for
+intervals IVL-007's); an unknown
 parameter is an invalid request. It is the core of a future
 `GET /api/v1/domains/{d}/records`; `GET /api/v1/logs` is this page for
 `logs`.

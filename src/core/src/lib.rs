@@ -1503,11 +1503,7 @@ fn push_event_json(o: &mut String, s: &Store, e: u32) {
             None => o.push_str("null"),
         }
         o.push_str(",\"thr\":");
-        if s.thr_idx[ei] != NONE_U16 {
-            o.push_str(&format!("{}", s.thrs[s.thr_idx[ei] as usize]));
-        } else {
-            o.push_str("null");
-        }
+        domain::push_thr(o, s, e);
         if let Some(fields) = domain::marks::fields(s, e) {
             o.push_str(",\"extra\":");
             domain::push_fields(o, Some(fields));
@@ -1577,11 +1573,7 @@ fn write_allocation_json(o: &mut String, s: &Store, e: u32) -> bool {
         o.push_str("null");
     }
     o.push_str(",\"thread\":");
-    if s.thr_idx[i] != NONE_U16 {
-        o.push_str(&s.thrs[s.thr_idx[i] as usize].to_string());
-    } else {
-        o.push_str("null");
-    }
+    domain::push_thr(o, s, e);
     let death = s.death(e);
     o.push_str(",\"death\":");
     if death != NONE_U32 {

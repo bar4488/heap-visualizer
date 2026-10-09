@@ -1,20 +1,56 @@
 ---
 id: E023
 title: Trace format v2 — processes, clocks, kinds, and intervals
-status: proposed
+status: partly implemented
 updated: 2026-10-09
 ---
 
 # E023: Trace Format v2
 
-> **Status:** proposed spec, not implemented. It applies
+> **Status:** partly implemented. It applies
 > [D013](../decisions/D013-hybrid-record-types.md) and the user's decisions of
-> 2026-10-09. When it is implemented, the wire rules move to
-> [spec/02](../../spec/02-trace-format.md) (`TRACE-`) and the interval domain
-> to a new `spec/14-intervals.md` (`IVL-`). Identifiers are assigned at that
-> point, each taking the next free number for its prefix
-> ([spec/README](../../spec/README.md)). Headings here are unnumbered for that
-> reason.
+> 2026-10-09. The implemented parts now live in the spec, which wins where
+> the two differ: the v2 gate, `pid` and `(pid, thr)` tracks, and `T` in
+> [spec/02](../../spec/02-trace-format.md) (TRACE-011, TRACE-012), and the
+> interval domain in [spec/14](../../spec/14-intervals.md) (IVL-001…007).
+> Headings here stay unnumbered.
+
+## Implementation status
+
+**Implemented (core only)**: the `v:2` first-record gate; `pid` on every
+record and the header default; `(pid, thr?)` track interning with process
+tracks; `T` names; `B`/`X` calls and spans and `C` run slices with every
+pairing rule, limit and warning below; state at the playhead; the
+`intervals` registry domain (descriptor, edges as rows, interval query and
+locate, lane, hover, state, agent records) and an `hp_domain_state` export.
+Warnings are numbered 12–20 and carry a domain (`warn_domain`,
+`hp_warnings_json`'s `domain`).
+
+**Deviations from the text below:**
+
+- Open spans at a playhead come from a max-end segment tree over the span
+  list (O((k + 1) log n) for k open), not from load-time checkpoints plus
+  replay. No replay and no snapshots are needed for any part of the state.
+- A `C`'s custom fields are both the end fields of the slice it closes and
+  the begin fields of the slice it opens (the edge has one fragment).
+- Span ids written as an integer are read as their decimal text, so `7` and
+  `"7"` are one id.
+- `long_field` is raised only for a truncated interval `name`.
+
+**Not implemented (TODO):**
+
+- The clock contract (`clock.*`, `clock_conflict`, wall-time display).
+- User kinds: the header `kinds` schema, `E` with `kind`/`ph`, the kinds
+  store, and every `kind.*` warning. `E` with `kind` is still a plain
+  landmark whose `kind` is a custom field.
+- Per-process heap scoping (`(pid, id)`, `(pid, addr)`, one process's
+  address space at a time). Heap ids and addresses are still trace-wide.
+- `trace.too_many_records`, and the `title`, `stack` and custom-fragment
+  limits of the hard-limits table.
+- Browser and transport surfaces: the web Events list, lanes per track,
+  a state panel, and the local server's `/api/v1/domains/{d}/records`.
+- The filter's `alloc.thread` and the address map's thread label read a
+  process track's placeholder `thr` (0) rather than null.
 
 ## Scope
 
@@ -484,6 +520,10 @@ nothing. `cache_miss` is catalogued as an undeclared kind with the field
 `key: string`.
 
 ## Open questions
+
+Defaults implemented while these are unanswered: 16-bit tracks (Q1); calls
+carry a name only (Q3); `v:2` header required (Q5); span ids trace-wide
+(Q6).
 
 1. **Track width.** Are 65,535 `(pid, thr)` tracks per trace enough? A
    system-wide sched capture over hours can exceed that. Widening the spine
