@@ -33,18 +33,11 @@ pub enum TagQueryError {
     Filter(Error),
 }
 
+/// The allocations `source` selects, as a bitset over heap rows (read it
+/// with `bit` and `creators`).
 fn matches(app: &App, source: &str) -> Result<Vec<u64>, Error> {
-    let creators = || {
-        let mut bits = vec![0_u64; (app.store.len() as usize).div_ceil(64)];
-        for event in 0..app.store.len() {
-            if matches!(app.store.op[event as usize], OP_M | OP_R) {
-                bits[event as usize / 64] |= 1_u64 << (event % 64);
-            }
-        }
-        bits
-    };
     if source.trim().is_empty() {
-        return Ok(creators());
+        return Ok(app.store.heap.creators.clone());
     }
     let expr = heap_visualizer_filter_dsl::parse(source).map_err(|error| Error {
         message: error.message,
@@ -64,18 +57,19 @@ fn matches(app: &App, source: &str) -> Result<Vec<u64>, Error> {
         start: error.span.start,
         end: error.span.end,
     })?;
-    let mut bits = vec![0_u64; (app.store.len() as usize).div_ceil(64)];
+    let mut bits = vec![0_u64; app.store.row_words()];
     filter_plan::scan(&plan, &context, &mut bits);
     Ok(bits)
 }
 
-fn bit(bits: &[u64], event: u32) -> bool {
-    bits.get(event as usize / 64)
-        .is_some_and(|word| word & (1_u64 << (event % 64)) != 0)
+/// Is creator `event` (a spine index) in the match set?
+fn bit(store: &Store, bits: &[u64], event: u32) -> bool {
+    store.row_bit(bits, event)
 }
 
+/// The matched creators' spine indexes, ascending.
 fn creators<'a>(store: &'a Store, bits: &'a [u64]) -> impl Iterator<Item = u32> + 'a {
-    (0..store.len()).filter(|&event| bit(bits, event))
+    store.row_bits_events(bits)
 }
 
 fn op_name(op: u8) -> &'static str {
@@ -423,7 +417,7 @@ pub(crate) fn overview(app: &App, top: usize) -> Value {
     let mut live_count = 0_u64;
     let mut current = 0_u128;
     let mut peak = (0_u128, 0_u32);
-    for event in 0..store.len() {
+    for event in store.heap_events(0, store.len()) {
         let i = event as usize;
         if matches!(store.op[i], OP_F | OP_R) && store.target(event) != NONE_U32 {
             current = current.saturating_sub(store.size(store.target(event)) as u128);
@@ -435,18 +429,15 @@ pub(crate) fn overview(app: &App, top: usize) -> Value {
             peak = (current, event + 1);
         }
     }
-    for event in 0..store.len() {
-        if matches!(store.op[event as usize], OP_M | OP_R)
-            && store.death(event) == NONE_U32
-        {
+    for event in creators(store, &store.heap.creators) {
+        if store.death(event) == NONE_U32 {
             live_count += 1;
             live_bytes += store.size(event) as u128;
         }
     }
     let mut site_bytes = vec![0_u128; store.sites.len()];
-    for event in 0..store.len() {
-        if matches!(store.op[event as usize], OP_M | OP_R) && store.site(event) != NONE_U32
-        {
+    for event in creators(store, &store.heap.creators) {
+        if store.site(event) != NONE_U32 {
             site_bytes[store.site(event) as usize] += store.size(event) as u128;
         }
     }
@@ -579,7 +570,17 @@ pub(crate) fn timeline(
     let bits = matches(app, source)?;
     let width = to.saturating_sub(from).max(1);
     let mut rows = vec![(0_u64, 0_u64, 0_u64, 0_u64, 0_u128, 0_u128); bins];
-    for event in 0..app.store.len() {
+    // only the heap records inside the requested range: the spine bounds are
+    // two binary searches (time) or the range itself (seq), and the walk
+    // never visits another domain's records
+    let store = &app.store;
+    let (lo, hi) = if domain == "time" {
+        (store.lower_bound_t(from), store.lower_bound_t(to))
+    } else {
+        (from.min(u64::from(u32::MAX)) as u32, to.min(u64::from(u32::MAX)) as u32)
+    };
+    let bit = |event| bit(store, &bits, event);
+    for event in store.heap_events(lo, hi) {
         let i = event as usize;
         let coordinate = if domain == "time" {
             app.store.t[i]
@@ -592,18 +593,18 @@ pub(crate) fn timeline(
         let bin = ((coordinate - from) as u128 * bins as u128 / width as u128) as usize;
         let row = &mut rows[bin.min(bins - 1)];
         match app.store.op[i] {
-            OP_M if bit(&bits, event) => {
+            OP_M if bit(event) => {
                 row.0 += 1;
                 row.4 += app.store.size(event) as u128;
             }
-            OP_F if app.store.target(event) != NONE_U32 && bit(&bits, app.store.target(event)) => {
+            OP_F if app.store.target(event) != NONE_U32 && bit(app.store.target(event)) => {
                 row.1 += 1;
                 row.5 += app.store.size(app.store.target(event)) as u128;
             }
             OP_R => {
                 let old = app.store.target(event);
-                let old_matches = old != NONE_U32 && bit(&bits, old);
-                let new_matches = bit(&bits, event);
+                let old_matches = old != NONE_U32 && bit(old);
+                let new_matches = bit(event);
                 if old_matches || new_matches {
                     row.2 += 1;
                 }
@@ -678,10 +679,10 @@ pub(crate) fn stream_context(
             } else {
                 event
             };
-            (creator != NONE_U32 && bit(&bits, creator))
+            (creator != NONE_U32 && bit(&app.store, &bits, creator))
                 || (app.store.op[i] == OP_R
                     && app.store.target(event) != NONE_U32
-                    && bit(&bits, app.store.target(event)))
+                    && bit(&app.store, &bits, app.store.target(event)))
         })
         .map(|event| event_value(app, event))
         .collect();

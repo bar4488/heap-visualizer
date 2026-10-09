@@ -168,13 +168,29 @@ impl Parser {
             return;
         }
         let line = &line[a..b];
-        // A log line is re-read by its own domain's parser: its keys mean
-        // something else there, and every other key is a custom field. A log
-        // line whose keys the heap reader cannot type (`"size":"x"`) is still
-        // a log line, so a failed heap read gets the same second look.
-        let log = match parse_raw(line) {
-            Some(raw) if raw.op != b'L' => return self.apply(raw),
-            _ => crate::logs::parse_log_line(line),
+        // A log line is read by its own domain's parser: its keys mean
+        // something else there, and every other key is a custom field. The
+        // record's `op` is peeked first so each line is normally read once.
+        //
+        // The peek only picks which reader goes first. The outcome is the
+        // same whichever does: a heap read naming any op but `L` is a heap
+        // record, else a log read naming `L` is a log record (a log line
+        // whose keys the heap reader cannot type, `"size":"x"`, included),
+        // else the line is malformed. The second reader runs only on the rare
+        // line the first rejects — a malformed one, or one repeating `op`.
+        let log = if peek_op(line) == Some(b"L") {
+            match crate::logs::parse_log_line(line) {
+                Some(log) => Some(log),
+                None => match parse_raw(line) {
+                    Some(raw) if raw.op != b'L' => return self.apply(raw),
+                    _ => None,
+                },
+            }
+        } else {
+            match parse_raw(line) {
+                Some(raw) if raw.op != b'L' => return self.apply(raw),
+                _ => crate::logs::parse_log_line(line),
+            }
         };
         match log {
             Some(log) => self.apply_log(log),
@@ -584,6 +600,12 @@ impl Parser {
         let gp = hc.green_pre[h];
         let rp = hc.red_pre[h];
         hc.green_pre.push(gp + (op == OP_M || op == OP_R) as u32);
+        if h.is_multiple_of(64) {
+            hc.creators.push(0);
+        }
+        if op == OP_M || op == OP_R {
+            hc.creators[h / 64] |= 1 << (h % 64);
+        }
         hc.red_pre.push(rp + (op == OP_F || op == OP_R) as u32);
         if op == OP_R && (o_addr != 0 || o_size != 0) {
             s.old_geom.insert(e, (o_addr, o_size));
@@ -841,6 +863,31 @@ impl OpKey {
     }
 }
 
+/// The raw text of the first top-level `op` value, when the line is an object
+/// that gets that far. The values before it are skipped, never decoded, so
+/// this costs a fraction of either reader; `Parser::line` uses it only to
+/// choose which reader to try first.
+fn peek_op(line: &[u8]) -> Option<&[u8]> {
+    let mut sc = Scan::new(line);
+    if !sc.eat(b'{') {
+        return None;
+    }
+    loop {
+        let (ks, ke) = sc.string_span()?;
+        if !sc.eat(b':') {
+            return None;
+        }
+        if &line[ks..ke] == b"op" {
+            let (a, b) = sc.string_span()?;
+            return Some(&line[a..b]);
+        }
+        sc.skip_value()?;
+        if !sc.eat(b',') {
+            return None;
+        }
+    }
+}
+
 fn parse_raw(line: &[u8]) -> Option<Raw> {
     let mut sc = Scan::new(line);
     if !sc.eat(b'{') {
@@ -980,6 +1027,23 @@ mod tests {
             s.extras[s.extra_at(0) as usize],
             r#""title":"t","meta":{"k":1},"v":"two","unit":3,"old_id":5"#
         );
+    }
+
+    /// The `op` peek only orders the two readers; a line whose first `op`
+    /// disagrees with its last (the one both readers act on) still reads as
+    /// the last says, and a log line the heap reader cannot type stays a log.
+    #[test]
+    fn the_op_peek_never_changes_which_domain_reads_a_line() {
+        assert_eq!(peek_op(br#"{"t":3,"seq":{"op":"M"},"op":"L"}"#), Some(&b"L"[..]));
+        assert_eq!(peek_op(br#"{"t":3}"#), None);
+        let s = load(concat!(
+            r#"{"op":"L","op":"M","id":1,"addr":"0x10","size":4,"msg":"m"}"#, "\n",
+            r#"{"op":"M","op":"L","id":2,"addr":"0x20","size":4,"msg":"m"}"#, "\n",
+            r#"{"t":5,"size":"x","op":"L","msg":"untypable for the heap"}"#, "\n",
+            r#"{"op":"L","msg":7}"#, "\n",
+        ));
+        assert_eq!(s.op, [OP_M, OP_L, OP_L]);
+        assert_eq!(s.warn_counts[W_MALFORMED as usize], 1);
     }
 
     #[test]

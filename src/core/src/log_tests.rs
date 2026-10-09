@@ -237,6 +237,43 @@ fn filters_tags_and_timelines_agree_with_and_without_logs() {
     assert_eq!(sh.red_before(sh.len()), sm.red_before(sm.len()));
 }
 
+/// The agent timeline walks only the heap records inside its spine range, so
+/// the range's two ends are converted to heap rows: a seq range covering the
+/// same heap records must count the same activity in both traces, and so
+/// must the time range spanning them.
+#[test]
+fn agent_timeline_ranges_convert_at_the_heap_boundary() {
+    let (heap, mixed) = gen(23, 3000, 60);
+    let (h, m) = (engine(&heap), engine(&mixed));
+    let sm = &m.app.store;
+    let src = "alloc.size >= 32";
+    let counts = |v: &Value| -> Vec<Value> {
+        v["bins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| serde_json::json!([b["allocations"], b["frees"], b["reallocations"], b["customEvents"], b["allocatedBytes"], b["freedBytes"]]))
+            .collect()
+    };
+    for (a, b) in [(0usize, 3000usize), (0, 1), (17, 18), (500, 2400), (2999, 3000)] {
+        // spine range [first heap record a, last heap record b - 1]
+        let lo = sm.heap_seq(a);
+        let hi = sm.heap_seq(b - 1) + 1;
+        let th = h.agent_timeline(src, "seq", a as u64, b as u64, 1).unwrap();
+        let tm = m.agent_timeline(src, "seq", u64::from(lo), u64::from(hi), 1).unwrap();
+        assert_eq!(counts(&th), counts(&tm), "seq [{a}, {b})");
+        // by time: every record with t in [t0, t1), which is the spine range
+        // the two binary searches find — equal timestamps included
+        let (t0, t1) = (sm.t[lo as usize], sm.t[hi as usize - 1] + 1);
+        let by_time = m.agent_timeline(src, "time", t0, t1, 1).unwrap();
+        let spine: Vec<u32> = (0..sm.len()).filter(|&e| (t0..t1).contains(&sm.t[e as usize])).collect();
+        let (slo, shi) = (spine[0], spine[spine.len() - 1] + 1);
+        assert_eq!(shi - slo, spine.len() as u32, "t is monotonic");
+        let by_seq = m.agent_timeline(src, "seq", u64::from(slo), u64::from(shi), 1).unwrap();
+        assert_eq!(counts(&by_time), counts(&by_seq), "time [{t0}, {t1})");
+    }
+}
+
 // ------------------------------------------------------------- LOG-001
 
 #[test]
