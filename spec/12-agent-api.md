@@ -43,8 +43,11 @@ limits are read from the same constants the handlers enforce: `maximumPage`
 (allocation query and filter-schema pages), `maximumListPage` (`/events`,
 `/warnings`, `/query`), group, bin, context, overview, filter, request-id,
 request-body, change-page, change-wait, change-history, journaled-tag-member,
-log-page (`defaultLogPage`, `maximumLogPage`, `maximumLogTextBytes`), and
-response limits. `endpoints.logs` names the log endpoint.
+log-page (`defaultLogPage`, `maximumLogPage`, `maximumLogTextBytes`),
+record-page (`defaultRecordPage`, `maximumRecordPage`), and response limits.
+`endpoints.logs` names the log endpoint; `endpoints.domains` and
+`endpoints.domainRecords` (`/api/v1/domains/{domain}/records`) name the
+domain endpoints.
 
 `GET /api/v1/overview?top=N` returns event/allocation operation counts, trace
 time bounds and unit, total allocated bytes, live allocations and bytes at end,
@@ -56,9 +59,24 @@ fatal}}` for the log domain
 ([LOG-008](13-domains-and-logs.md#log-008-logs-in-the-agent-api)), which is
 all zeros for a heap-only trace.
 
-`GET /api/v1/logs?minLevel=&text=&seqLo=&seqHi=&from=&count=` pages log
-records under the same bounds (`count` default 50, at most 200); its contract
-is LOG-008.
+`GET /api/v1/domains` returns `{traceId, domains}`: every evidence domain's
+descriptor from the core's registry
+([DOM-004](13-domains-and-logs.md#dom-004-the-domain-registry)) — today
+`heap`, `marks`, and `logs`. A descriptor's `query.params` names the
+domain's own record parameters.
+
+`GET /api/v1/domains/{domain}/records?seqLo=&seqHi=&from=&count=&…` pages
+one domain's records in seq order as `{traceId, domain, total, from, items,
+next}` (`count` default 50, at most 200; `next` is `null` on the last page).
+The transport parses `seqLo`, `seqHi`, `from`, and `count` as unsigned
+integers and passes every other key to the core as a domain parameter (for
+`logs`, `minLevel` and `text`; for `marks`, `text`). The core validates them
+([D011](../docs/decisions/D011-analysis-changes-have-one-core-implementation.md)): an
+unregistered domain is `404 unknown_domain`; an unknown, repeated, or
+non-numeric parameter or an out-of-range value is `400 invalid_request`.
+
+`GET /api/v1/logs?minLevel=&text=&seqLo=&seqHi=&from=&count=` is the `logs`
+records page without the `domain` key; its contract is LOG-008.
 
 `GET /api/v1/warnings?from=&count=` retains the existing bounded paging rules.
 Each item includes a stable string `kind` in addition to its legacy numeric
@@ -150,9 +168,7 @@ Log records are temporal context, not allocation evidence: they are returned
 only when `includeLogs` is true (default false), as `{seq, time,
 operation:"log", level, logger, msg, fields}`. Excluded log records are never
 dropped silently — when the window holds any, the response adds `omitted:
-{logs: n}`. (The core provides both through
-`Engine::agent_stream_context_with`; the transport's `includeLogs` field is
-a pending follow-up, and until then it always omits and counts them.)
+{logs: n}`.
 
 ## API-009: Canonical and bulk analysis changes
 
