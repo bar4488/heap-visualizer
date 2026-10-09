@@ -311,3 +311,9 @@ test('restoring a pre-dock session through the shell docks and floats as it said
   assert.equal(layout.serialize().version, 2, 'and it is written back as a dock layout');
   layout.closeAll('pin');
 });
+
+test('the bottom edge group reads top-down: its tab strip sits above its content', () => {
+  assert.equal(api.getGroup('edge-bottom').api.getHeaderPosition(), 'top');
+  // the side edges keep the engine's placement
+  assert.equal(api.getGroup('edge-left').api.getHeaderPosition(), 'left');
+});

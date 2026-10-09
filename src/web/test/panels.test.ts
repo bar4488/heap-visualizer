@@ -7,6 +7,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { heapPanels } from '../heap/panels.ts';
+import { domainPanels, domainPresent } from '../panels.ts';
 
 test('every record carries an id, a title, a default layout, and a refill slot', () => {
   const panels = heapPanels();
@@ -65,4 +66,35 @@ test('refills attach by panel id, and an unknown id throws', () => {
   assert.equal(panels.filter((p) => p.refill).length, 1);
 
   assert.throws(() => heapPanels({ 'no-such-panel': refill }), /no such panel/);
+});
+
+test('a domain module declares its panels through the hook, each needing its domain', () => {
+  const ui = { meta: { domains: [{ id: 'intervals', count: 3 }, { id: 'logs', count: 0 }] } };
+  const base = {
+    layout: {}, post() {}, request: null, requestLatest: null, ui,
+    onState: () => () => {}, onView: () => () => {}, setView() {}, onLoad: () => () => {},
+  };
+  const seen: any[] = [];
+  const added: string[] = [];
+  const panels = domainPanels([{
+    needs: 'intervals',
+    register(ctx) {
+      seen.push(ctx.domain, ctx.present());
+      ctx.addPanel({ id: 'flame-panel', title: 'Flame', toggle: true, dock: 'bottom', open: true, build: () => ({}) });
+      ctx.addPanel({ id: 'cpu-panel', title: 'CPUs', dock: null, open: false, build: () => ({}) });
+    },
+  }], base, ['events-panel'], (p) => added.push(p.id));
+  assert.deepEqual(seen, ['intervals', true]);
+  assert.deepEqual(added, ['flame-panel', 'cpu-panel'], 'each is handed over as it is declared');
+  assert.deepEqual(panels.map((p) => [p.id, p.needs, p.toggle, !!p.ownToggle]), [
+    ['flame-panel', 'intervals', 'btn-flame-panel', true],
+    ['cpu-panel', 'intervals', null, false],
+  ]);
+  assert.equal(domainPresent(ui.meta.domains as any, 'logs'), false);
+  assert.equal(domainPresent(null, 'intervals'), false);
+  // an id the table already holds is an error, as a typo'd refill id is
+  assert.throws(() => domainPanels([{
+    needs: 'intervals',
+    register: (ctx) => ctx.addPanel({ id: 'events-panel', title: 'X', dock: null, open: false, build: () => ({}) }),
+  }], base, ['events-panel']), /declared twice/);
 });

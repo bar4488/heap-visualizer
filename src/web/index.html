@@ -13,6 +13,7 @@
 </script>
 <link rel="stylesheet" href="vendor/dockview.css">
 <link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="intervals/intervals.css">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect x='1' y='6' width='5' height='4' fill='%233fb950'/><rect x='7' y='6' width='3' height='4' fill='%23f85149'/><rect x='11' y='6' width='4' height='4' fill='%233fb950'/></svg>">
 </head>
 <body>
@@ -46,6 +47,7 @@
   <button id="btn-filter">Filter</button>
   <button id="btn-events" hidden title="Sequenced list of all events">Events</button>
   <button id="btn-logs" hidden title="The trace's log lines, as a terminal that follows the playhead">Logs</button>
+  <span id="domain-toggles" class="domain-toggles"></span>
   <button id="btn-analysis" hidden>Marks</button>
   <button id="crop-indicator" hidden title="Crop is active — click to remove it">✂ <span id="crop-range"></span> ×</button>
 
@@ -352,6 +354,7 @@
       <button class="panel-close">×</button>
     </span>
   </div>
+  <div id="ev-domains" class="ev-domains" hidden title="Domains listed: click one to leave its records out"></div>
   <div id="events-scroll" tabindex="0">
     <div id="events-spacer"></div>
     <div id="events-sel-band" hidden title="the current time/events selection"></div>

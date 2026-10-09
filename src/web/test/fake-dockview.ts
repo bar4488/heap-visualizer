@@ -40,7 +40,11 @@ class FakeGroup {
       isMaximized: () => false,
       onDidCollapsedChange: this.collapsedChange.event,
       onDidLocationChange: new Emitter().event,
+      // like the engine: an edge group's tab strip starts on its own side
+      getHeaderPosition: () => g.headerPosition,
+      setHeaderPosition(p) { g.headerPosition = p; },
     };
+    this.headerPosition = loc.type === 'edge' ? (loc as any).position : 'top';
   }
 
   setActive(p: FakePanel | null) {

@@ -22,7 +22,9 @@
 //           null to start floating
 //   open    whether it starts visible
 //   needs   optional: the evidence domain the panel presents ('logs'); it then
-//           starts open only when the loaded trace has records of that domain
+//           starts open only when the loaded trace has records of that domain.
+//           Another domain's panels are declared by its own module through
+//           the registration hook in src/web/panels.ts, not in this table
 //   persist optional, default true: false for a window that is opened per
 //           selection or event and has no session-restored geometry of its own
 //   multi   optional: one window per key (pinned allocation windows, keyed by
@@ -58,24 +60,13 @@
 // and opened on demand. Pinned windows are restored by the heap section of the
 // session (by creator event), and their slot by the shell's saved dock.
 
-type PanelRecord = {
-  id: string;
-  title: string;
-  toggle: string | null;
-  dock: 'left' | 'right' | 'bottom' | 'center' | null;
-  open: boolean;
-  needs?: 'logs';
-  persist?: boolean;
-  multi?: boolean;
-  closable?: boolean;
-  size?: number;
-  float?: { width: number; height: number };
-  autoPlace?: { avoid: string[] };
-};
+import type { PanelRecord } from '../panels.ts';
+
+type HeapPanel = Omit<PanelRecord, 'refill'>;
 
 // Table order is also the top-to-bottom order of the center views and the
 // tab order within each edge group.
-const PANELS: PanelRecord[] = [
+const PANELS: HeapPanel[] = [
   { id: 'strip-t', title: 'Time', toggle: 'btn-view-time', dock: 'center', open: true, size: 96 },
   { id: 'strip-s', title: 'Event index', toggle: 'btn-view-seq', dock: 'center', open: true, size: 96 },
   { id: 'addr-scroll', title: 'Address map', toggle: null, dock: 'center', open: true, closable: false },
@@ -105,7 +96,7 @@ const PANELS: PanelRecord[] = [
 // by panel id; a panel with no entry has no refill step. An unknown key is a
 // typo'd id and throws here rather than silently never being called — the
 // whole point of the table is that the ids agree.
-export function heapPanels(refills: Record<string, () => void> = {}) {
+export function heapPanels(refills: Record<string, () => void> = {}): PanelRecord[] {
   for (const id of Object.keys(refills)) {
     if (!PANELS.some((p) => p.id === id)) throw new Error(`no such panel: ${id}`);
   }

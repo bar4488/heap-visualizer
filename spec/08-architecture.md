@@ -96,7 +96,10 @@ answers.
 | | |
 |---|---|
 | `src/web/shell/` | `dom.ts` (`$`, `$$`, `setHtml`, `delegate`, device↔CSS px), `layout.ts` (the panel API domain code uses: register, open/close/toggle/reveal, hooks, reset, the layout half of the session — [SHELL-003](09-ui-shell.md#shell-003-panels-are-declared-as-data); the only module that talks to the dock engine, Dockview — [D014](../docs/decisions/D014-dockview-for-windowing.md)), `layout-plan.ts` (the default layout and the pre-dock session read path, as engine-free data), `tooltip.ts`. **No domain identifiers.** |
-| `src/web/heap/` | `analysis.ts` (tags, names, colors, marks, `.heapa`), `panels.ts` (the panel table: the views and the windows), `events-panel.ts`, `addr.ts` |
+| `src/web/heap/` | `analysis.ts` (tags, names, colors, marks, `.heapa`), `panels.ts` (the heap's panel table: the views and the windows), `addr.ts` |
+| `src/web/panels.ts` | The panel table's assembly: the heap's table plus each domain module's panels, declared through its registration hook (`PanelContext`) |
+| `src/web/stream/` | The Events list over every domain's records: `events-panel.ts` (DOM), `stream-model.ts` (rows, domain toggles, the position ↔ seq map) |
+| `src/web/logs/`, `src/web/intervals/` | A domain's own panels: the Logs terminal; the interval panels (`registerIntervalPanels`) |
 | `src/web/session.ts` | The boundary: puts the shell's layout serialization (the dock layout, from `shell/layout.ts`) *and* heap state (view, crop, filters, playhead) into the one per-trace session blob |
 | `src/web/main.ts` | Trace/worker/toolbar wiring and the three coordinated views. Owns `UIState`, the shared main-thread state every other module receives as `deps.ui` |
 | `src/web/fmt.ts`, `src/web/rpc.ts` | Shared with the worker; the request/response layer |

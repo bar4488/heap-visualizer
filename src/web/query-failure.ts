@@ -29,9 +29,24 @@ export const QUERY_FAILURE: { [K in QueryType]: (m: Extract<Query, { type: K }>,
   'analysis-replace': (m, message) => ({
     type: 'analysis-replace-result', reqId: m.reqId, ok: false, error: 'invalid', message,
   }),
-  'logs-query': (m) => ({ type: 'logs-query-result', reqId: m.reqId, available: false, total: 0, from: m.from, rows: [] }),
-  'logs-locate': (m) => ({ type: 'logs-locate-result', reqId: m.reqId, available: false, row: -1, total: 0 }),
+  domains: (m) => ({ type: 'domains-result', reqId: m.reqId, available: false, domains: [], lanes: [] }),
+  'domain-query': (m) => ({
+    type: 'domain-query-result', reqId: m.reqId, available: false, result: { total: 0, from: fromOf(m.query), rows: [] },
+  }),
+  'domain-locate': (m) => ({ type: 'domain-locate-result', reqId: m.reqId, available: false, result: { row: -1, total: 0 } }),
+  'domain-state': (m) => ({ type: 'domain-state-result', reqId: m.reqId, available: false, result: null }),
+  record: (m) => ({ type: 'record-result', reqId: m.reqId, available: false, result: null }),
+  tracks: (m) => ({ type: 'tracks-result', reqId: m.reqId, available: false, result: null }),
+  'interval-window': (m) => ({
+    type: 'interval-window-result', reqId: m.reqId, available: false, result: { rows: [], culled: 0, truncated: false },
+  }),
 };
+
+/** A domain query's `from`, as the engine would echo it for an empty page. */
+function fromOf(query: Record<string, unknown> | undefined): number {
+  const from = Number(query?.from);
+  return Number.isFinite(from) && from > 0 ? Math.floor(from) : 0;
+}
 
 /** The failure reply for `m` if it is a query, else null. */
 export function queryFailureReply(m: ToWorker, message: string): FromWorker | null {

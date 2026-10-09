@@ -333,6 +333,7 @@ function init(hostEl: any, eng: Engine) {
     g.onDidCollapsedChange?.(later);
     api.setEdgeGroupVisible(e, false);
   }
+  bottomTabsOnTop();
   api.onDidAddPanel(later);
   api.onDidRemovePanel(later);
   api.onDidLayoutChange?.(later);
@@ -419,6 +420,15 @@ class GroupActions {
 
 function edgeGroup(e: Edge) {
   return api.getGroup(edgeGroupId(e));
+}
+
+// The engine puts an edge group's tab strip on that edge's side, so the
+// bottom group's tabs would sit under its content. Every other group reads
+// top-down; so does this one. Applied at creation and after a restore, which
+// may carry the engine's side placement in an older saved layout.
+function bottomTabsOnTop() {
+  const g = edgeGroup('bottom');
+  if (g?.api?.getHeaderPosition?.() !== 'top') g?.api?.setHeaderPosition?.('top');
 }
 
 function edgeCount(e: Edge) {
@@ -960,6 +970,7 @@ function restore(snapshot) {
         if (!api.getPanel(inst.id)) addTo(inst.id, inst.type, titleOf(inst), { float: defaultFloat(inst, spec(inst.type)) });
       }
       ensureFixed();
+      bottomTabsOnTop();
       slots.clear();
       for (const [id, s] of Object.entries(snapshot.homes || {})) {
         if (instances.has(id) && s && typeof s === 'object') slots.set(id, s as Slot);
