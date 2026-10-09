@@ -47,6 +47,10 @@ even when the tagged allocations are a tiny fraction of events.
 | Shift+drag | Range selection → popover with Zoom / Crop / Tag actions ([07-analysis](07-analysis.md)). |
 | Hover | Tooltip: alloc/free counts and the `t`/`seq` range under the column. |
 
+The same gestures, from the same code (`src/web/timeline-interaction.ts`),
+drive every view on the timeline's x-axis: the Tracks panel uses them too
+([IVL-UI-003](14-intervals.md#ivl-ui-003-tracks)).
+
 Zoom/pan state is clamped engine-consistently on both sides (the main thread
 mirrors the worker's clamp so optimistic local updates agree with it, keeping
 wheel zoom responsive without waiting a round-trip).

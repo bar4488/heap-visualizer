@@ -3,8 +3,11 @@
 
 import {
   fmtBytes, fmtHexSize, fmtAllocSize as fmtAllocSizeMode, fmtNum, parseSize,
-  esc, clampView,
+  esc,
 } from './fmt.ts';
+import {
+  SELECT_MIN_PX, axisBounds, clampAxis, selectionRange, valAt as axisValAt, wheelView,
+} from './timeline-interaction.ts';
 import {
   initRpc, request, requestLatest, cancelLatest, handleReply,
 } from './rpc.ts';
@@ -1646,6 +1649,11 @@ domainPanels(PANEL_MODULES, {
   onState: (fn) => stateListeners.add(fn),
   onView: (fn) => viewListeners.add(fn),
   setView: (axis, range) => UI.setView[axis === 't' ? 0 : 1]?.(range),
+  select: (axis, range, at) => {
+    if (!range) { clearSelection(); return; }
+    setSelection(axis === 't' ? 0 : 1, range.lo, range.hi);
+    if (at) openSelPopover(at.x, at.y);
+  },
   onLoad: (fn) => loadListeners.add(fn),
 }, HEAP_PANELS.map((p) => p.id), (p) => {
   PANELS.push(p);
@@ -1946,17 +1954,27 @@ document.addEventListener('keydown', (e) => {
 // timeline interaction
 // ---------------------------------------------------------------------------
 
+// A range selection on either axis (kind 0 = time, 1 = events), from a strip
+// or another timeline view (the Tracks panel, via PanelContext.select): the
+// band, its mirror on the other strip, and on release the popover.
+function setSelection(kind, lo, hi) {
+  UI.sel = { kind, lo, hi };
+  updateSelOverlay();
+  requestSelMirror();
+}
+
+// The gestures and their math are timeline-interaction.ts's (TL-004), shared
+// with the Tracks panel.
 function setupTimeline(stripId, canvas, kind) {
   const strip = $(stripId);
   const hoverline = strip.querySelector('.tl-hoverline');
+  const axis = kind === 0 ? 't' : 'seq';
   const view = () => (kind === 0 ? UI.tlT : UI.tlS);
   // `mirror` is internal: false when this call is itself the mirrored
   // update for the *other* strip's zoom, so it doesn't bounce back and forth
   const setView = (raw, mirror = true) => {
     if (!UI.meta) return;
-    const v = kind === 0
-      ? clampView(raw, UI.meta.tMin, Math.max(UI.meta.tMax, UI.meta.tMin + 1), 1e-9)
-      : clampView(raw, 0, Math.max(UI.meta.n, 1), 4);
+    const v = clampAxis(raw, axisBounds(axis, UI.meta));
     if (kind === 0) UI.tlT = v; else UI.tlS = v;
     UI.tlLocalAt = performance.now();
     emitView();
@@ -1970,8 +1988,7 @@ function setupTimeline(stripId, canvas, kind) {
   };
   const valAt = (x) => {
     const r = canvas.getBoundingClientRect();
-    const v = view();
-    return v.lo + ((x - r.left) / r.width) * (v.hi - v.lo);
+    return axisValAt(x - r.left, view(), r.width);
   };
   UI.setView[kind] = setView;
   let dragging = false;
@@ -1983,11 +2000,9 @@ function setupTimeline(stripId, canvas, kind) {
   };
 
   const updateSelection = (x) => {
-    const a = valAt(Math.min(selecting, x));
-    const b = valAt(Math.max(selecting, x));
-    UI.sel = { kind, lo: a, hi: b };
-    updateSelOverlay();
-    requestSelMirror();
+    const r = canvas.getBoundingClientRect();
+    const s = selectionRange(view(), r.width, selecting - r.left, x - r.left);
+    setSelection(kind, s.lo, s.hi);
   };
 
   strip.addEventListener('pointerdown', (e) => {
@@ -2006,7 +2021,7 @@ function setupTimeline(stripId, canvas, kind) {
   strip.addEventListener('pointerup', (e) => {
     dragging = false;
     if (selecting !== null) {
-      const moved = Math.abs(e.clientX - selecting) > 3;
+      const moved = Math.abs(e.clientX - selecting) > SELECT_MIN_PX;
       selecting = null;
       if (moved && UI.sel) openSelPopover(e.clientX, e.clientY);
       else clearSelection();
@@ -2033,22 +2048,12 @@ function setupTimeline(stripId, canvas, kind) {
   });
   strip.addEventListener('dblclick', () => {
     if (!UI.meta) return;
-    setView(kind === 0
-      ? { lo: UI.meta.tMin, hi: Math.max(UI.meta.tMax, UI.meta.tMin + 1) }
-      : { lo: 0, hi: Math.max(UI.meta.n, 1) });
+    setView(axisBounds(axis, UI.meta));
   });
   strip.addEventListener('wheel', (e) => {
     e.preventDefault();
-    const v = view();
-    const span = v.hi - v.lo;
-    if (e.shiftKey) {
-      const d = span * (e.deltaY > 0 ? 0.15 : -0.15);
-      setView({ lo: v.lo + d, hi: v.hi + d });
-    } else {
-      const f = Math.exp(e.deltaY * 0.0015);
-      const c = valAt(e.clientX);
-      setView({ lo: c - (c - v.lo) * f, hi: c + (v.hi - c) * f });
-    }
+    const r = canvas.getBoundingClientRect();
+    setView(wheelView(view(), e, e.clientX - r.left, r.width));
   }, { passive: false });
 }
 

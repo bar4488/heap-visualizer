@@ -31,6 +31,9 @@
 //                   with both ranges; returns an unsubscribe function
 //   setView(axis, range)  zoom/pan a strip: axis 't' (time) or 'seq' (event
 //                   index), range {lo, hi}; the other strip follows (mirrored)
+//   select(axis, range, at?)  the strips' range selection (TL-004 shift+drag):
+//                   a range sets it (band and mirror), null clears it, and
+//                   `at` {x, y} (client px) ends it and opens its popover
 //   onLoad(fn)      fn(meta) at the end of every trace load, after `ui.meta`
 //                   is the new trace's and every panel's refill has run, and
 //                   after the default layout is applied; returns an
@@ -97,6 +100,7 @@ export type PanelContext = {
   onState: (fn: (state: any) => void) => () => void;
   onView: (fn: (view: ViewRanges) => void) => () => void;
   setView: (axis: 't' | 'seq', range: Range) => void;
+  select?: (axis: 't' | 'seq', range: Range | null, at?: { x: number; y: number }) => void;
   onLoad: (fn: (meta: any) => void) => () => void;
   domain: string;
   present: () => boolean;

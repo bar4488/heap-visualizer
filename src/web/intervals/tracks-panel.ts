@@ -1,7 +1,10 @@
 // Interval domain: the Tracks panel (IVL-UI-003) — a flame chart drawn on the
-// main thread. One group per thread (its calls by depth, then its span lane)
-// and one row per CPU (run slices colored by thread), on the timeline's
-// x-axis: the strips' time or seq view range, by the head's axis toggle.
+// main thread. A `Threads` section with one group per thread (its calls by
+// depth, then its span lane) and a `CPUs` section with one row per CPU (run
+// slices colored by thread), on the timeline's x-axis: the strips' time or
+// seq view range, by the head's axis toggle. The plot spans the panel's full
+// width with no inset, as the strips do, so a time lines up with them; the
+// track names sit in a translucent gutter laid over its left edge.
 //
 // Nothing is fetched whole. Each *visible* track asks `interval-window` for
 // the view (with half a view of margin either side, so a short pan needs no
@@ -15,8 +18,11 @@
 // groups in view. A group grows as deeper calls arrive (never shrinks), so
 // the stack does not jump while the view moves.
 //
-// Wheel: ctrl/⌘ zooms about the pointer, shift (or a horizontal wheel) pans,
-// a plain wheel scrolls the tracks; a drag pans. These drive the strips' own
+// Input is the strips' (TL-004, timeline-interaction.ts): click or drag
+// seeks, wheel zooms about the pointer, shift+wheel pans, double-click shows
+// the whole axis, shift+drag selects a range (the strips' own selection and
+// popover, through ctx.select). The tracks scroll vertically by the
+// scrollbar or a wheel over the name gutter. Zoom and pan drive the strips'
 // view through ctx.setView when main.ts provides it, else a local view that
 // yields to the strips again as soon as they move. The geometry is
 // flame-model.ts and tested there; this file is the canvas and the events.
@@ -25,18 +31,22 @@ import { esc } from '../fmt.ts';
 import { dpr } from '../shell/dom.ts';
 import { hideTooltip, positionTooltipNearMouse, showTooltip } from '../shell/tooltip.ts';
 import {
-  HEAD_H, ROW_H, axisBounds, axisTicks, clampAxis, colorKey, colorSlot, depthsOf, groupAt, hitBar,
-  laneAt, layoutBars, layoutGroups, mergeDepths, panBy, valAt, visibleGroups, windowCovers, windowFor, xOf, zoomAt,
+  PLAYHEAD, SELECT_MIN_PX, axisBounds, clampAxis, paintPlayhead, selectionRange, valAt, wheelView, xOf,
+} from '../timeline-interaction.ts';
+import {
+  GROUP_GAP, GUTTER_W, HEAD_H, ROW_H, axisTicks, colorKey, colorSlot, depthsOf, groupAt, hitBar,
+  laneAt, layoutBars, layoutGroups, mergeDepths, visibleGroups, windowCovers, windowFor,
   type Bar, type Depths, type Fetched, type Group,
 } from './flame-model.ts';
-import { fmtDur, fmtRecords, orderTracks, seekSeqFor } from './intervals-model.ts';
+import { fmtDur, fmtRecords, orderTracks } from './intervals-model.ts';
 import { panelElement, present, shown, token, type Shared } from './shared.ts';
 import type { Axis, Range, Views, WindowQuery, WindowRow } from './types.ts';
 
 const TYPE = 'intervals-tracks';
-const AXIS_H = 18;
+const AXIS_H = 20;
 const PALETTE_N = 12;
 const OWNER = 'intervals-tracks';
+const MONO = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
 
 type Held = { win: Fetched; rows: WindowRow[]; truncated: boolean; culled: number };
 
@@ -67,6 +77,8 @@ export function createTracksPanel(sh: Shared) {
   const bars = new Map<string, Bar[]>();
   let colors: { [k: string]: any } | null = null;
   let frame = 0;
+  /** The pointer's x while it is over the panel (the hover line), else null. */
+  let hoverX: number | null = null;
 
   const W = () => canvas.clientWidth;
   const H = () => canvas.clientHeight;
@@ -89,14 +101,18 @@ export function createTracksPanel(sh: Shared) {
     for (let i = 0; i < PALETTE_N; i++) pal.push(token(el, `--ivl-c${i}`, `hsl(${(i * 360) / PALETTE_N} 45% 45%)`));
     colors = {
       pal,
-      bg: token(el, '--ivl-bg', '#0d1117'),
+      bg: token(el, '--ivl-track-bg', '#0d1117'),
       fg: token(el, '--ivl-fg', '#e6edf3'),
       dim: token(el, '--ivl-dim', '#8b949e'),
       grid: token(el, '--ivl-grid', '#30363d'),
+      tick: token(el, '--ivl-tick', '#ffffff0a'),
       head: token(el, '--ivl-head', '#161b22'),
-      idle: token(el, '--ivl-idle', '#30363d'),
-      playhead: token(el, '--ivl-playhead', '#f85149'),
+      section: token(el, '--ivl-section', '#161b22'),
+      gutter: token(el, '--ivl-gutter', '#0d1117d0'),
+      idle: token(el, '--ivl-idle', '#8b949e'),
       text: token(el, '--ivl-bar-fg', '#0d1117'),
+      sel: token(el, '--ivl-sel', '#58a6ff2e'),
+      accent: token(el, '--accent', '#58a6ff'),
     };
   }
 
@@ -169,8 +185,12 @@ export function createTracksPanel(sh: Shared) {
     g.fillRect(0, 0, w, h);
     const v = view();
     const top = sc.scrollTop;
-    g.font = '11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+    const ticks = axisTicks(v, w);
     g.textBaseline = 'middle';
+
+    // faint tick lines down the plot, under everything
+    g.fillStyle = c.tick;
+    for (const tv of ticks) g.fillRect(Math.round(xOf(tv, v, w)), AXIS_H, 1, h - AXIS_H);
 
     // the tracks, clipped below the axis
     g.save();
@@ -178,15 +198,10 @@ export function createTracksPanel(sh: Shared) {
     g.rect(0, AXIS_H, w, h - AXIS_H);
     g.clip();
     bars.clear();
-    for (const gr of visibleGroups(groups, top, h - AXIS_H)) {
-      const y0 = gr.top - top + AXIS_H;
-      if (gr.kind === 'heading' || gr.kind === 'thread') {
-        g.fillStyle = c.head;
-        g.fillRect(0, y0, w, HEAD_H);
-        g.fillStyle = gr.kind === 'heading' ? c.dim : c.fg;
-        g.fillText(gr.label, 6, y0 + HEAD_H / 2);
-        if (gr.kind === 'heading') continue;
-      }
+    const shownGroups = visibleGroups(groups, top, h - AXIS_H);
+    g.font = `11px ${MONO}`;
+    for (const gr of shownGroups) {
+      if (gr.kind === 'heading') continue;
       const hd = held.get(gr.key);
       if (!hd) continue;
       const laid = layoutBars(hd.rows, v, w).bars;
@@ -194,68 +209,152 @@ export function createTracksPanel(sh: Shared) {
       for (const b of laid) {
         const by = (b.lane === 'span' ? gr.spanTop : gr.callTop) + b.depth * ROW_H - top + AXIS_H;
         if (by + ROW_H < AXIS_H || by > h) continue;
-        const idle = b.row.idle;
-        const ck = colorKey(b.row);
-        g.fillStyle = idle ? c.idle : c.pal[colorSlot(ck, PALETTE_N)];
-        g.globalAlpha = b.lane === 'span' ? 0.75 : 1;
-        g.fillRect(b.x, by + 1, Math.max(1, b.w - (b.w > 3 ? 1 : 0)), ROW_H - 2);
-        g.globalAlpha = 1;
-        if (b.row.open && b.w > 6) { // an open interval: a notch at its right end
-          g.fillStyle = c.bg;
-          g.fillRect(b.x + b.w - 3, by + 1, 2, ROW_H - 2);
-        }
-        if (b.w > 28 && !idle) {
-          const x = Math.max(b.x, 0) + 3;
-          const room = Math.min(b.x + b.w, w) - x - 3;
-          if (room > 12) {
-            g.fillStyle = c.text;
-            g.fillText(fit(g, b.row.name ?? '', room), x, by + ROW_H / 2);
-          }
-        }
+        paintBar(g, b, by, w);
       }
-      if (gr.kind === 'cpu') { // the CPU's name over its row, legible on any bar
-        const y = gr.callTop - top + AXIS_H;
-        const tw = g.measureText(gr.label).width + 8;
-        g.fillStyle = c.head;
-        g.globalAlpha = 0.85;
-        g.fillRect(0, y, tw, ROW_H);
-        g.globalAlpha = 1;
-        g.fillStyle = c.dim;
-        g.fillText(gr.label, 4, y + ROW_H / 2);
-      }
+    }
+
+    // the name gutter over the plot's left edge, then the heads across it
+    for (const gr of shownGroups) paintGutter(g, gr, gr.top - top + AXIS_H, w);
+    // the thread scrolled into keeps its head pinned on top, pushed up by the next
+    const first = shownGroups[0];
+    if (first?.kind === 'thread' && first.top < top) {
+      paintHead(g, first, Math.min(AXIS_H, first.top + first.height - GROUP_GAP - HEAD_H - top + AXIS_H), w);
     }
     g.restore();
 
+    // the selection: the strips' own, or its mirror, on this axis
+    const want = axis === 't' ? 0 : 1;
+    const ui = sh.ctx.ui;
+    const sel = ui.sel?.kind === want ? ui.sel : ui.selMirror?.kind === want ? ui.selMirror : null;
+    if (sel) {
+      const x0 = xOf(sel.lo, v, w);
+      const x1 = xOf(sel.hi, v, w);
+      if (x1 >= 0 && x0 <= w) {
+        g.fillStyle = c.sel;
+        g.fillRect(x0, AXIS_H, x1 - x0, h - AXIS_H);
+        g.fillStyle = c.accent;
+        g.fillRect(x0, AXIS_H, 1, h - AXIS_H);
+        g.fillRect(x1 - 1, AXIS_H, 1, h - AXIS_H);
+      }
+    }
+
     // the axis
-    g.fillStyle = c.head;
+    g.fillStyle = c.section;
     g.fillRect(0, 0, w, AXIS_H);
     g.fillStyle = c.grid;
     g.fillRect(0, AXIS_H - 1, w, 1);
+    g.font = `10px ${MONO}`;
     const unit = meta()?.unit;
     const t0 = meta()?.tMin ?? 0;
-    for (const tv of axisTicks(v, w)) {
-      const x = Math.round(xOf(tv, v, w)) + 0.5;
+    for (const tv of ticks) {
+      const x = Math.round(xOf(tv, v, w));
       g.fillStyle = c.grid;
       g.fillRect(x, AXIS_H - 5, 1, 5);
       g.fillStyle = c.dim;
       g.fillText(axis === 't' ? fmtDur(tv - t0, unit) : Math.round(tv).toLocaleString('en-US'), x + 3, AXIS_H / 2);
     }
 
-    // the playhead: records applied on the seq axis, its time on the t axis
+    // the hover line, then the playhead (records applied on the seq axis,
+    // its time on the t axis) in the strips' own look
+    if (hoverX !== null) {
+      g.fillStyle = PLAYHEAD.hover;
+      g.fillRect(Math.round(hoverX), 0, 1, h);
+    }
     const p = sh.playhead;
-    if (p) {
-      const pv = axis === 't' ? p.t : p.seq;
-      if (Number.isFinite(pv)) {
-        const x = Math.round(xOf(pv, v, w)) + 0.5;
-        if (x >= 0 && x <= w) {
-          g.fillStyle = c.playhead;
-          g.fillRect(x - 0.5, 0, 1, h);
-        }
+    const pv = p ? (axis === 't' ? p.t : p.seq) : NaN;
+    if (Number.isFinite(pv)) {
+      const x = xOf(pv, v, w);
+      if (x >= -2 && x <= w + 2) {
+        g.setTransform(1, 0, 0, 1, 0, 0);
+        paintPlayhead(g, x * dpr, 0, ph, dpr);
       }
     }
   }
 
-  // --- interaction ---------------------------------------------------------
+  /** A section heading (THREADS, CPUS) across the panel. */
+  function paintSection(g: CanvasRenderingContext2D, label: string, y: number, w: number) {
+    const c = colors;
+    g.fillStyle = c.section;
+    g.fillRect(0, y, w, HEAD_H);
+    g.fillStyle = c.grid;
+    g.fillRect(0, y + HEAD_H - 1, w, 1);
+    g.font = `600 10px ${MONO}`;
+    g.fillStyle = c.dim;
+    g.fillText(label.toUpperCase(), 9, y + HEAD_H / 2 + 0.5);
+    g.font = `11px ${MONO}`;
+  }
+
+  /** One bar: a call or span colored by name, a CPU's slice by thread; idle slices muted. */
+  function paintBar(g: CanvasRenderingContext2D, b: Bar, by: number, w: number) {
+    const c = colors;
+    const bw = Math.max(1, b.w - (b.w > 3 ? 1 : 0));
+    if (b.row.idle) { // a thin, dim stroke: the CPU ran nothing
+      g.fillStyle = c.idle;
+      g.globalAlpha = 0.35;
+      g.fillRect(b.x, by + ROW_H / 2 - 1, bw, 2);
+      g.globalAlpha = 1;
+      return;
+    }
+    g.fillStyle = c.pal[colorSlot(colorKey(b.row), PALETTE_N)];
+    g.globalAlpha = b.lane === 'span' ? 0.7 : 0.92;
+    g.fillRect(b.x, by + 1, bw, ROW_H - 2);
+    g.globalAlpha = 1;
+    if (b.row.open && b.w > 6) { // an open interval: a notch at its right end
+      g.fillStyle = c.bg;
+      g.fillRect(b.x + b.w - 3, by + 1, 2, ROW_H - 2);
+    }
+    // the name, where the bar is out from under the gutter and has room for a few letters
+    const x = Math.max(b.x, GUTTER_W) + 4;
+    const room = Math.min(b.x + b.w, w) - x - 3;
+    if (room >= 26) {
+      g.fillStyle = c.text;
+      g.fillText(fit(g, b.row.name ?? '', room), x, by + ROW_H / 2 + 0.5);
+    }
+  }
+
+  /**
+   * A group's gutter and names: a section heading or a thread's head across
+   * the panel (the thread's color and name), then a translucent gutter over
+   * its rows with their lane names, or a CPU's number.
+   */
+  function paintGutter(g: CanvasRenderingContext2D, gr: Group, y0: number, w: number) {
+    const c = colors;
+    if (gr.kind === 'heading') { paintSection(g, gr.label, y0, w); return; }
+    const rowsTop = gr.kind === 'thread' ? y0 + HEAD_H : y0;
+    const rowsH = (gr.callRows + gr.spanRows) * ROW_H;
+    g.fillStyle = c.gutter;
+    g.fillRect(0, rowsTop, GUTTER_W, rowsH);
+    g.fillStyle = c.grid;
+    g.fillRect(GUTTER_W, rowsTop, 1, rowsH);
+    if (gr.kind === 'thread') {
+      paintHead(g, gr, y0, w);
+      g.font = `10px ${MONO}`;
+      g.fillStyle = c.dim;
+      if (gr.callRows) g.fillText('calls', 9, gr.callTop - gr.top + y0 + ROW_H / 2);
+      if (gr.spanRows) g.fillText('spans', 9, gr.spanTop - gr.top + y0 + ROW_H / 2);
+    } else {
+      g.fillStyle = c.fg;
+      g.fillText(fit(g, gr.label, GUTTER_W - 16), 9, y0 + ROW_H / 2 + 0.5);
+    }
+    g.font = `11px ${MONO}`;
+  }
+
+  /** A thread's head across the panel: its color and its name. */
+  function paintHead(g: CanvasRenderingContext2D, gr: Group, y: number, w: number) {
+    const c = colors;
+    g.fillStyle = c.head;
+    g.fillRect(0, y, w, HEAD_H);
+    g.fillStyle = c.grid;
+    g.fillRect(0, y, w, 1);
+    g.fillRect(0, y + HEAD_H - 1, w, 1);
+    g.fillStyle = c.pal[colorSlot(`thr:${gr.thr}`, PALETTE_N)];
+    g.fillRect(0, y + 1, 3, HEAD_H - 2);
+    g.font = `600 11px ${MONO}`;
+    g.fillStyle = c.fg;
+    g.fillText(fit(g, gr.label, w - 16), 9, y + HEAD_H / 2 + 0.5);
+  }
+
+  // --- interaction: the strips' gestures (TL-004) ---------------------------
 
   function setView(r: Range) {
     const v = clampAxis(r, axisBounds(axis, meta()));
@@ -265,23 +364,41 @@ export function createTracksPanel(sh: Shared) {
     scheduleFetch();
   }
 
+  /** The pointer's x and content y in the plot, from client coordinates. */
+  function at(cx: number, cy: number) {
+    const r = body.getBoundingClientRect();
+    return { x: cx - r.left, y: cy - r.top - AXIS_H + sc.scrollTop, inBody: cy - r.top >= AXIS_H };
+  }
+
   /** The bar under a pointer at client (x, y), with its group. */
   function hit(cx: number, cy: number): { bar: Bar; group: Group } | null {
-    const r = body.getBoundingClientRect();
-    const x = cx - r.left;
-    const y = cy - r.top - AXIS_H;
-    if (y < 0) return null;
-    const gr = groupAt(groups, y + sc.scrollTop);
+    const p = at(cx, cy);
+    if (!p.inBody) return null;
+    const gr = groupAt(groups, p.y);
     if (!gr) return null;
-    const lane = laneAt(gr, y + sc.scrollTop);
+    const lane = laneAt(gr, p.y);
     if (!lane) return null;
-    const b = hitBar(bars.get(gr.key) || [], lane.lane, lane.depth, x);
+    const b = hitBar(bars.get(gr.key) || [], lane.lane, lane.depth, p.x);
     return b ? { bar: b, group: gr } : null;
   }
 
   function tooltip(cx: number, cy: number) {
+    const p = at(cx, cy);
     const h = hit(cx, cy);
-    if (!h) { hideTooltip(OWNER); return; }
+    if (!h) {
+      // over the gutter: the track's whole name; over the plot: where the pointer is
+      const gr = p.inBody && p.x < GUTTER_W ? groupAt(groups, p.y) : null;
+      if (gr) {
+        showTooltip(OWNER, `<b>${esc(gr.label)}</b>`);
+      } else {
+        const val = valAt(p.x, view(), W());
+        showTooltip(OWNER, axis === 't'
+          ? `<span class="dim">t</span> ${esc(fmtDur(val - (meta()?.tMin ?? 0), meta()?.unit))}`
+          : `<span class="dim">seq</span> ${Math.floor(val).toLocaleString('en-US')}`);
+      }
+      positionTooltipNearMouse();
+      return;
+    }
     const r = h.bar.row;
     const span = r.end - r.start;
     const dur = axis === 't' ? fmtDur(span, meta()?.unit) : fmtRecords(span);
@@ -296,59 +413,82 @@ export function createTracksPanel(sh: Shared) {
     positionTooltipNearMouse();
   }
 
-  function seekAt(cx: number, cy: number) {
-    const h = hit(cx, cy);
-    if (h) {
-      const r = h.bar.row;
-      if (typeof r.seq === 'number') sh.ctx.post({ type: 'jump', seq: seekSeqFor(r.seq) });
-      else if (axis === 'seq') sh.ctx.post({ type: 'jump', seq: seekSeqFor(r.start) });
-      else sh.ctx.post({ type: 'jump', t: r.start });
-      return;
-    }
-    // empty space seeks to the value under the pointer, as a strip does
-    const x = cx - body.getBoundingClientRect().left;
+  /** Seek to the value under pixel x, as a strip does. */
+  function seekTo(x: number) {
     const val = valAt(x, view(), W());
     sh.ctx.post(axis === 't' ? { type: 'seek', t: val } : { type: 'seek', seq: val });
   }
 
-  sc.addEventListener('scroll', () => { draw(); scheduleFetch(); });
+  function select(x0: number, x1: number, end?: { x: number; y: number }) {
+    sh.ctx.select?.(axis, selectionRange(view(), W(), x0, x1), end);
+    draw();
+  }
+
+  function clearSelection() {
+    sh.ctx.select?.(axis, null);
+    draw();
+  }
+
+  /** Whether client x is on the scroller's own scrollbar. */
+  const onScrollbar = (cx: number) => cx - sc.getBoundingClientRect().left > sc.clientWidth;
+
+  let dragging = false;
+  let selecting: number | null = null; // the anchor x while shift-dragging a range
+
+  sc.addEventListener('scroll', () => { hideTooltip(OWNER); draw(); scheduleFetch(); });
   sc.addEventListener('wheel', (e: WheelEvent) => {
-    const r = body.getBoundingClientRect();
-    if (e.ctrlKey || e.metaKey) {
-      e.preventDefault();
-      setView(zoomAt(view(), e.clientX - r.left, W(), Math.exp(e.deltaY * 0.0015)));
-    } else if (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
-      e.preventDefault();
-      const d = e.shiftKey ? e.deltaY : e.deltaX;
-      setView(panBy(view(), -d, W()));
-    }
-    // a plain wheel scrolls the tracks (the scroller's own behavior)
+    const p = at(e.clientX, e.clientY);
+    // over the name gutter a plain wheel scrolls the tracks (the scroller's own behavior)
+    if (p.x < GUTTER_W && !e.shiftKey) return;
+    e.preventDefault();
+    setView(wheelView(view(), e, p.x, W()));
   }, { passive: false });
 
-  let drag: { x: number; v: Range; moved: boolean; id: number } | null = null;
   sc.addEventListener('pointerdown', (e: PointerEvent) => {
-    if (e.button !== 0) return;
-    // the scrollbar: leave it to the scroller
-    if (e.clientX - sc.getBoundingClientRect().left > sc.clientWidth) return;
-    drag = { x: e.clientX, v: view(), moved: false, id: e.pointerId };
+    if (e.button !== 0 || onScrollbar(e.clientX)) return;
     sc.setPointerCapture?.(e.pointerId);
+    const x = at(e.clientX, e.clientY).x;
+    clearSelection();
+    if (e.shiftKey) {
+      selecting = x;
+      select(x, x);
+    } else {
+      dragging = true;
+      seekTo(x);
+    }
   });
   sc.addEventListener('pointermove', (e: PointerEvent) => {
-    if (drag) {
-      const dx = e.clientX - drag.x;
-      if (Math.abs(dx) > 3) drag.moved = true;
-      if (drag.moved) { hideTooltip(OWNER); setView(panBy(drag.v, dx, W())); return; }
-    }
+    const x = at(e.clientX, e.clientY).x;
+    hoverX = onScrollbar(e.clientX) ? null : x;
+    draw();
+    if (selecting !== null) select(selecting, x);
+    else if (dragging) seekTo(x);
     tooltip(e.clientX, e.clientY);
   });
   sc.addEventListener('pointerup', (e: PointerEvent) => {
-    const d = drag;
-    drag = null;
-    if (d && !d.moved) seekAt(e.clientX, e.clientY);
+    dragging = false;
+    if (selecting === null) return;
+    const x = at(e.clientX, e.clientY).x;
+    const a = selecting;
+    selecting = null;
+    if (Math.abs(x - a) > SELECT_MIN_PX) select(a, x, { x: e.clientX, y: e.clientY });
+    else clearSelection();
   });
-  sc.addEventListener('pointercancel', () => { drag = null; });
-  sc.addEventListener('pointerleave', () => hideTooltip(OWNER));
-  sc.addEventListener('dblclick', () => setView(axisBounds(axis, meta())));
+  sc.addEventListener('pointercancel', () => {
+    dragging = false;
+    if (selecting !== null) {
+      selecting = null;
+      clearSelection();
+    }
+  });
+  sc.addEventListener('pointerleave', () => {
+    hoverX = null;
+    draw();
+    hideTooltip(OWNER);
+  });
+  sc.addEventListener('dblclick', (e: MouseEvent) => {
+    if (!onScrollbar(e.clientX)) setView(axisBounds(axis, meta()));
+  });
 
   axisSel.onchange = () => {
     axis = axisSel.value === 'seq' ? 'seq' : 't';

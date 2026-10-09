@@ -158,11 +158,16 @@ export type IntervalCtx = {
     loaded: boolean;
     meta: { n?: number; tMin?: number; tMax?: number; unit?: string; intervals?: { intervals?: number } | null; [k: string]: any } | null;
     state: { seq: number; t?: number } | null;
+    /** The strips' range selection and its mirror on the other axis (kind 0 = time, 1 = events). */
+    sel?: { kind: number; lo: number; hi: number } | null;
+    selMirror?: { kind: number; lo: number; hi: number } | null;
   };
   onState(fn: (s: Playhead) => void): void;
   onView(fn: (v: Views | { tlT: Range; tlS: Range }) => void): void;
   /** Optional: drive the strips' view (main.ts's `UI.setView`). Without it the flame chart keeps a local view. */
   setView?: (axis: Axis, r: Range) => void;
+  /** Optional: the strips' range selection (shift+drag): set, clear (null), or end at client {x, y} with its popover. */
+  select?: (axis: Axis, r: Range | null, at?: { x: number; y: number }) => void;
   /** Optional: a trace finished loading. Without it the panels notice a new `ui.meta`. */
   onLoad?: (fn: () => void) => void;
 };

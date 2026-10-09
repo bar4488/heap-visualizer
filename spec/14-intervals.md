@@ -272,8 +272,9 @@ does work only while its tab is in front, and every request goes through
 rpc.ts's coalescing `requestLatest` under its own `intervals-` key, so
 playback or a fast zoom never builds a backlog.
 
-A click on an interval anywhere seeks to one record past its begin, so the
-interval is open at the playhead (IVL-005).
+A click on an interval in Stacks or Intervals seeks to one record past its
+begin, so the interval is open at the playhead (IVL-005). Tracks is a
+timeline and seeks like one (IVL-UI-003).
 
 ### IVL-UI-001: Durations
 
@@ -300,14 +301,24 @@ The state at the playhead from `domain-state`, asked once per playhead move:
 A flame chart on a canvas drawn on the main thread, at the device pixel
 ratio, in colors read from the `--ivl-*` CSS tokens.
 
-- **Rows**: per thread with calls or spans (by process, then thread id) a
-  head with its name, one row per call depth, then one row per span depth;
-  then a `CPUs` heading and one row per CPU (by number) of run slices. Calls
-  and spans are colored by name, slices by thread; idle slices are muted. An
+- **Rows**: a `Threads` heading, then per thread with calls or spans (by
+  process, then thread id) a head with its name and color, one row per call
+  depth, then one row per span depth; then a `CPUs` heading and one row per
+  CPU (by number) of run slices. Calls and spans are colored by name, slices
+  by thread (a thread's head shows its slice color); idle slices are a thin
+  muted stroke. Bars wide enough carry their name, cut with an ellipsis. An
   open interval has a notch at its right end. A track's rows grow as deeper
-  intervals arrive and never shrink while the trace is loaded.
+  intervals arrive and never shrink while the trace is loaded. A thread's
+  head stays pinned at the top while its rows are scrolled through.
+- **Gutter**: the lane names (`calls`, `spans`, `cpu N`) sit in a narrow
+  translucent gutter laid over the plot's left edge, so the plot keeps the
+  strips' full width.
 - **Axis**: the strips' view range on the axis the head selects — time or
-  event index — with ticks, and the playhead as a vertical line.
+  event index — across the panel's full width with no inset, as the strips
+  draw it, so a value lines up with them when the panel shares their
+  column; ticks, the strips' selection band (or its mirror) on this axis,
+  a hover line, and the playhead drawn as the strips draw it (the played
+  part tinted, a line, a grab triangle).
 - **Data**: only tracks in view are fetched, each by one `interval-window`
   for the view plus half a view either side, at twice the panel's width,
   re-asked only when the view leaves that margin, the zoom changes by more
@@ -316,12 +327,15 @@ ratio, in colors read from the `--ivl-*` CSS tokens.
   start where the previous bar in their row reaches are folded into it.
 - **Vertical**: groups are virtualized; only those in the viewport are drawn
   and fetched.
-- **Input**: hover shows the name, kind, duration and thread; a click on a
-  bar seeks to its begin and on empty space seeks to the value under the
-  pointer; a drag or shift+wheel (or a horizontal wheel) pans,
-  ctrl/⌘+wheel zooms about the pointer, a plain wheel scrolls the tracks,
-  and a double click shows the whole trace. Zoom and pan drive the strips'
-  view, so the two stay on one x-range.
+- **Input**: the strips' gestures, exactly ([TL-004](05-timelines.md#tl-004-interaction),
+  one implementation in `src/web/timeline-interaction.ts`): click or drag
+  seeks to the value under the pointer, wheel zooms about the pointer,
+  shift+wheel pans, double-click shows the whole axis, and shift+drag makes
+  the strips' range selection with its popover. Hover shows a bar's name,
+  kind, duration and thread, a gutter row's track name, or else the value
+  under the pointer. The tracks scroll vertically by the scrollbar or by a
+  wheel over the gutter. Zoom and pan drive the strips' view, so the two
+  stay on one x-range.
 
 ### IVL-UI-004: Intervals
 
