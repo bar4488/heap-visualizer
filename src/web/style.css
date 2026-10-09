@@ -51,6 +51,8 @@ body { display: flex; flex-direction: column; }
   max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .sep { width: 1px; height: 20px; background: var(--border); margin: 0 4px; }
+/* toggles a domain module adds (src/web/panels.ts), in the toolbar's flow */
+.domain-toggles { display: contents; }
 
 button, select, input {
   background: var(--bg3);
@@ -656,11 +658,32 @@ input[type="color"] {
 .ev-row.ev-custom { background: rgba(188, 140, 255, 0.07); }
 .ev-row.ev-custom:hover { background: rgba(188, 140, 255, 0.16); }
 
+/* any other domain's record: its generic summary (DOM-004) */
+.ev-row .ev-op.b { color: #56d364; }
+.ev-row .ev-op.x { color: #f0883e; }
+.ev-row .ev-op.c { color: #a5d6ff; }
+.ev-row .ev-thr { flex: none; color: var(--fg-dim); max-width: 120px; overflow: hidden; text-overflow: ellipsis; }
+.ev-row .ev-src { flex: none; margin-left: auto; color: var(--fg-dim); font-size: 10.5px; }
+.ev-row.ev-generic .ev-label { color: var(--fg); font-style: normal; }
+.ev-row.ev-generic { background: rgba(86, 211, 100, 0.04); }
+/* the domain toggles: one chip per domain the trace has records of */
+.ev-domains { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 10px; border-bottom: 1px solid var(--border, #30363d); }
+.ev-chip {
+  font: 11px ui-monospace, monospace; padding: 1px 8px; border-radius: 10px; cursor: pointer;
+  border: 1px solid var(--border, #30363d); background: transparent; color: var(--fg-dim);
+  text-decoration: line-through;
+}
+.ev-chip.on { color: var(--fg); background: var(--bg3); text-decoration: none; }
+
 #warnings-list { font-family: ui-monospace, monospace; font-size: 11.5px; }
 #warnings-list .warn-row { padding: 3px 4px; border-radius: 4px; cursor: pointer; display: flex; gap: 8px; }
 #warnings-list .warn-row:hover { background: var(--bg3); }
 #warnings-list .warn-seq { color: var(--accent); flex: none; }
+#warnings-list .warn-kind { color: var(--fg-dim); flex: none; }
 #warnings-list .warn-msg { color: #d29922; }
+#warnings-list .warn-domain { margin: 8px 0 2px; color: var(--fg); font-weight: 700; }
+#warnings-list .warn-domain:first-child { margin-top: 0; }
+#warnings-list .warn-domain .dim { font-weight: 400; }
 
 .detail-body { font-family: ui-monospace, monospace; font-size: 11.5px; white-space: pre-wrap; }
 .detail-body .row { display: flex; gap: 8px; }

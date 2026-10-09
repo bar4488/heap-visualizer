@@ -26,7 +26,7 @@ target_dir() {
 }
 
 mkdir -p dist
-rm -rf dist/shell dist/heap dist/logs
+rm -rf dist/shell dist/heap dist/logs dist/stream dist/intervals
 
 if (( ! web_only )); then
   core_target=$(target_dir src/core/Cargo.toml)
@@ -74,6 +74,10 @@ fs.writeFileSync("dist/vendor/dockview.css", JSON.parse(m[1]));
 # index.html and style.css compile to nothing, so they are copied. This is the
 # one part of the loop the build step costs you: a CSS tweak needs ./build.sh web.
 cp src/web/index.html src/web/style.css src/web/install.sh src/web/install.ps1 dist/
+# a domain module's own stylesheet ships beside its compiled module
+for css in src/web/intervals/*.css; do
+  if [[ -e "$css" ]]; then mkdir -p dist/intervals; cp "$css" dist/intervals/; fi
+done
 
 # A full local build is also a self-hostable Linux test deployment. Release CI
 # replaces/extends these files with both platform binaries, but uses the same

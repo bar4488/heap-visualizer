@@ -89,6 +89,13 @@ The declaration belongs to the domain, not to the shell: the shell places and
 persists whatever panels it is handed, and must not name one. A window that is
 not heap-shaped (Request) is declared to the shell by its own module.
 
+The table is assembled from per-domain tables: the heap's, and one per
+evidence domain module, which declares its panels through a registration hook
+(`src/web/panels.ts`) at startup. Each module is registered for the domain it
+needs; its panels' toolbar toggles show, and they start open, only for a trace
+that has records of that domain. A new domain's panels need no wiring beyond
+its module's entry in that list.
+
 **The shell's panel API.** Domain code reaches panels only through the shell's
 layout API (`shell/layout.ts`), which owns visibility, placement, focus,
 toolbar toggles and close buttons. It is the only code that talks to the dock
@@ -134,7 +141,8 @@ leave the page: there are no popout windows.
 Around the grid are three **edge groups** — left, right, bottom:
 
 - An edge group is one group of tabs along that side, resizable at its inner
-  edge.
+  edge. The bottom group's tab strip sits above its content, as every grid
+  group's does.
 - It **collapses** to a rail of its tab titles (written vertically on the
   left and right), from a button at the end of its tab strip; collapsing never
   closes, undocks or reorders its panels, and expanding restores its size.
@@ -207,10 +215,16 @@ exactly one of those.
   each row renameable inline, with the applicable recolor/jump/center/delete
   actions
   ([07-analysis](07-analysis.md)).
-- **Warnings**: the flagged-input list; click jumps to the event
-  ([MODEL-005](03-core-model.md#model-005-warnings)).
-- **Events**: the virtualized event list, with follow and filtered-only
-  toggles ([NAV-005](06-playback-navigation.md#nav-005-the-events-panel)).
+- **Warnings**: the flagged-input list, grouped by the domain that raised
+  each warning (with each domain's total), each row its kind, message and
+  meaningful detail; click jumps to the event
+  ([MODEL-005](03-core-model.md#model-005-warnings),
+  [IVL-006](14-intervals.md#ivl-006-warnings)).
+- **Events**: the virtualized list of every domain's records, with follow and
+  filtered-only toggles ([NAV-005](06-playback-navigation.md#nav-005-the-events-panel))
+  and one chip per domain the trace has records of, which leaves that
+  domain's records out of the list
+  ([DOM-004](13-domains-and-logs.md#dom-004-the-domain-registry)).
 - **Logs**: the trace's log lines as a terminal — virtualized, dimmed past the
   playhead, following it like `tail -f`, narrowed by minimum level and text
   search ([LOG-007](13-domains-and-logs.md#log-007-the-logs-panel)). Its

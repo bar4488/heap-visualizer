@@ -16,6 +16,12 @@ import { createDockview, themeDark } from 'dockview-core';
 import { showTooltip, hideTooltip, positionTooltipNearMouse } from './shell/tooltip.ts';
 import { heapPanels } from './heap/panels.ts';
 import {
+  domainPanels, domainPresent, listeners, type PanelModule, type PanelRecord, type ViewRanges,
+} from './panels.ts';
+import { registerIntervalPanels } from './intervals/index.ts';
+import { groupWarnings, warningDetail } from './warnings-model.ts';
+import { genericStatusText } from './stream/stream-model.ts';
+import {
   initAnalysis, markDirty, tagIdFor, syncTagDatalist, buildMarksPanel,
   buildTagsSection, sendAddrMarks, gotoAddr, addAddrMark,
   renderAddrMarkLines, setAddrMarkYs, addBookmark, updateMarkers,
@@ -29,7 +35,7 @@ import {
 import {
   initEventsPanel, evState, refreshEventsPanel, onEventsSlice, flashRects,
   updateEventsPanel, onEvPos, resetEventsPanel, updateEventsSelBand,
-} from './heap/events-panel.ts';
+} from './stream/events-panel.ts';
 import {
   initLogsPanel, logsPresent, resetLogsPanel, updateLogsPanel,
 } from './logs/logs-panel.ts';
@@ -141,6 +147,18 @@ const OP_EVENT = 3;
 
 const worker = new Worker('worker.js', { type: 'module' }) as TypedWorker;
 initRpc(worker);
+
+// playhead and view-range subscriptions for domain modules (panels.ts)
+const stateListeners = listeners<Extract<FromWorker, { type: 'state' }>>();
+const viewListeners = listeners<ViewRanges>();
+const loadListeners = listeners<TraceMeta>();
+let lastView = '';
+function emitView() {
+  const key = `${UI.tlT.lo},${UI.tlT.hi},${UI.tlS.lo},${UI.tlS.hi}`;
+  if (key === lastView) return;
+  lastView = key;
+  viewListeners.emit({ t: { ...UI.tlT }, seq: { ...UI.tlS } });
+}
 let resolveWorkerReady: () => void;
 const workerReady = new Promise<void>((resolve) => { resolveWorkerReady = resolve; });
 let renderedServerTraceId: string | null = null;
@@ -487,6 +505,8 @@ worker.onmessage = (ev) => {
     case 'stepped':
       if (m.event) {
         const e = m.event;
+        // a record of a domain without a bespoke row (DOM-004): its summary
+        if (typeof e.domain === 'string') { $('st-info').textContent = genericStatusText(e); break; }
         // a log line touches no allocation either; the Logs panel follows it
         if (e.op === OP_LOG) { $('st-info').textContent = logStatusText(e); break; }
         if (e.op === OP_EVENT) {
@@ -613,6 +633,10 @@ function onLoaded(m) {
   $('btn-warnings').hidden = wc === 0;
   $('warn-count').textContent = fmtNum(wc);
 
+  // a domain module's toggle shows only for a trace with that domain
+  for (const p of PANELS) if (p.ownToggle) $(p.toggle).hidden = !needsMet(p);
+  lastView = '';
+
   // every panel refills itself from the new trace, in table order — the UI
   // fields each one reads were all reset above
   for (const { refill } of PANELS) refill?.();
@@ -642,6 +666,8 @@ function onLoaded(m) {
       $('st-info').textContent = `analysis load failed: ${(error as Error).message}`;
     });
   }
+  // domain modules (panels.ts onLoad): the new trace is in place
+  loadListeners.emit(m.meta);
 }
 
 function onState(m) {
@@ -673,6 +699,8 @@ function onState(m) {
   renderAddrMarkLines();
   updateEventsPanel();
   updateLogsPanel();
+  stateListeners.emit(m);
+  emitView();
 }
 
 // ---------------------------------------------------------------------------
@@ -1548,7 +1576,7 @@ $$('input[name=fmode]').forEach((radio) => {
 // which panels exist, and what refills each from a loaded trace. The table
 // itself is src/web/heap/panels.ts; the refill functions are this file's, so
 // they are attached here where they are in scope.
-const PANELS = heapPanels({
+const HEAP_PANELS = heapPanels({
   'play-panel': () => buildSpeedSelect(),
   // the row size comes from the trace header, with the default left visible
   // as a hint
@@ -1561,8 +1589,28 @@ const PANELS = heapPanels({
   'logs-panel': () => resetLogsPanel(),
 });
 
-layout.init($('dock'), { createDockview, theme: themeDark });
-for (const p of PANELS) {
+// Every panel, in table order: the heap's table, then whatever the domain
+// modules declare. Refilled per trace in this order (onLoaded).
+const PANELS: PanelRecord[] = [...HEAP_PANELS];
+
+/** Whether the loaded trace has records of the domain a panel needs. */
+function needsMet(p: PanelRecord): boolean {
+  if (!p.needs) return true;
+  if (p.needs === 'logs') return logsPresent();
+  return domainPresent(UI.meta?.domains, p.needs);
+}
+
+function registerPanel(p: PanelRecord) {
+  // a domain module's toolbar toggle is made here, beside the Logs toggle,
+  // and shown only for a trace that has the domain (onLoaded)
+  if (p.ownToggle) {
+    const btn = document.createElement('button');
+    btn.id = p.toggle;
+    btn.hidden = true;
+    btn.textContent = p.title;
+    if (p.hint) btn.title = p.hint;
+    $('domain-toggles').appendChild(btn);
+  }
   layout.register(p.id, {
     title: p.title,
     singleton: !p.multi,
@@ -1572,11 +1620,37 @@ for (const p of PANELS) {
     size: p.size,
     floatSize: p.float,
     autoPlace: p.autoPlace || null,
-    // read when applied: whether Logs starts open depends on the loaded trace
-    defaultLocation: () => ({ dock: p.dock, open: p.open && (p.needs !== 'logs' || logsPresent()) }),
-    build: p.multi ? (_key, info) => buildPinnedWindow(info) : () => $(p.id),
+    // read when applied: whether Logs (or any panel that needs a domain)
+    // starts open depends on the loaded trace
+    defaultLocation: () => ({ dock: p.dock, open: p.open && needsMet(p) }),
+    build: p.build ? () => p.build() : p.multi ? (_key, info) => buildPinnedWindow(info) : () => $(p.id),
   });
 }
+
+layout.init($('dock'), { createDockview, theme: themeDark });
+for (const p of HEAP_PANELS) registerPanel(p);
+
+// Domain modules declare their own panels (the hook and the PanelContext
+// contract are in panels.ts): each is listed with the domain it needs. They
+// run after the heap's panels are registered and before the first layout, so
+// a module may also call `ctx.layout.register` itself.
+const PANEL_MODULES: PanelModule[] = [
+  { needs: 'intervals', register: registerIntervalPanels },
+];
+domainPanels(PANEL_MODULES, {
+  layout,
+  post: (msg) => worker.postMessage(msg),
+  request,
+  requestLatest,
+  ui: UI,
+  onState: (fn) => stateListeners.add(fn),
+  onView: (fn) => viewListeners.add(fn),
+  setView: (axis, range) => UI.setView[axis === 't' ? 0 : 1]?.(range),
+  onLoad: (fn) => loadListeners.add(fn),
+}, HEAP_PANELS.map((p) => p.id), (p) => {
+  PANELS.push(p);
+  registerPanel(p);
+});
 layout.resetLayout({ keepFloating: true });
 
 // the toolbar's overflow menu: shell actions that are not panels
@@ -1622,8 +1696,17 @@ function buildWarningsPanel() {
   if (total > UI.warnings.length) {
     html += `<div class="group-title">showing first ${UI.warnings.length} of ${fmtNum(total)}</div>`;
   }
-  html += UI.warnings.map((w) =>
-    `<div class="warn-row" data-seq="${w.seq}"><span class="warn-seq">#${w.seq}</span><span class="warn-msg">${esc(w.msg)}</span></div>`).join('');
+  // grouped by the domain that raised them (MODEL-005, IVL-006)
+  for (const g of groupWarnings(UI.warnings, UI.meta.warnCounts)) {
+    html += `<div class="warn-domain">${esc(g.domain)} <span class="dim">${fmtNum(g.total)}</span></div>`;
+    html += g.rows.map((w) => {
+      const detail = warningDetail(w);
+      return `<div class="warn-row" data-seq="${w.seq}" title="${esc(`${g.domain}.${w.kind ?? w.code}`)}">`
+        + `<span class="warn-seq">#${w.seq}</span>`
+        + (w.kind ? `<span class="warn-kind">${esc(w.kind)}</span>` : '')
+        + `<span class="warn-msg">${esc(w.msg)}${detail ? ` <span class="dim">(${esc(detail)})</span>` : ''}</span></div>`;
+    }).join('');
+  }
   list.innerHTML = html || '<i>none</i>';
   $$('.warn-row', list).forEach((row) => {
     row.onclick = () => worker.postMessage({ type: 'jump', seq: +row.dataset.seq + 1 });
@@ -1631,7 +1714,7 @@ function buildWarningsPanel() {
 }
 
 // ---------------------------------------------------------------------------
-// events panel (src/web/heap/events-panel.ts): the virtualized sequential list.
+// events panel (src/web/stream/events-panel.ts): the virtualized list of every domain's records.
 // ---------------------------------------------------------------------------
 
 initEventsPanel({
@@ -1876,6 +1959,7 @@ function setupTimeline(stripId, canvas, kind) {
       : clampView(raw, 0, Math.max(UI.meta.n, 1), 4);
     if (kind === 0) UI.tlT = v; else UI.tlS = v;
     UI.tlLocalAt = performance.now();
+    emitView();
     worker.postMessage({ type: 'tlview', kind, lo: v.lo, hi: v.hi });
     updateSelOverlay();
     if (mirror) {

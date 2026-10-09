@@ -136,6 +136,20 @@ interval domain's its open call stacks, spans and CPUs
 ([IVL-005](14-intervals.md#ivl-005-state-at-the-playhead)). The interval
 query's parameters are IVL-007's.
 
+**In the browser.** The worker answers the generic exports as queries —
+`domains`, `domain-query`, `domain-locate`, `domain-state`, `record` — and
+attaches the descriptors to the loaded trace's metadata (`meta.domains`), so
+a domain added to the core reaches the web layer without new messages. Each
+query replies even with no trace loaded or an export missing (`available:
+false` and an empty document). The Events list renders any record without a
+bespoke row from its generic summary — letter from its descriptor's `kinds`,
+then its thread (with `pid` and thread name when the trace has them), title
+and source — and carries one toggle per domain with records. Leaving domains
+out keeps the list virtualized: a position maps to a seq by binary search over
+the included domains' record counts at a seq, each a locate (a domain whose
+query is not over its own records — the interval domain's — is counted as
+the remainder of the spine).
+
 **Agent records**: the core provides one bounded page of any domain's
 records, `Engine::agent_domain_records(domain, params)` →
 `{domain, total, from, items, next}`, with `seqLo`/`seqHi`/`from`/`count`
@@ -309,8 +323,9 @@ trace has log records. It is listed by `hp_lanes_json` as `logs.level`.
 These exports are the log domain's instance of the generic ABI
 ([DOM-004](#dom-004-the-domain-registry)): `hp_logs_query` and
 `hp_logs_locate` are `hp_domain_query` / `hp_domain_locate` with
-`domain: "logs"` and answer identical documents. They stay for the browser
-until it moves to the generic exports.
+`domain: "logs"` and answer identical documents. The browser's Logs panel
+reads through the generic exports (the worker's `domain-query` and
+`domain-locate`); `hp_logs_meta_json` still supplies its per-level counts.
 
 Input details: `minLevel` is a number 0–5 or a level name (aliases accepted)
 and defaults to 0; `text` defaults to empty; numbers are read leniently
