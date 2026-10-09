@@ -142,9 +142,9 @@ records, `Engine::agent_domain_records(domain, params)` →
 bounded as LOG-008 (`count` 1–200, default 50) plus the domain's own
 parameters (for logs `minLevel` and `text`; for marks `text`; for
 intervals IVL-007's); an unknown
-parameter is an invalid request. It is the core of a future
-`GET /api/v1/domains/{d}/records`; `GET /api/v1/logs` is this page for
-`logs`.
+parameter is an invalid request. It backs
+`GET /api/v1/domains/{d}/records` ([API-002](12-agent-api.md#api-002-discovery-and-overview));
+`GET /api/v1/logs` is this page for `logs`.
 
 ## LOG-001: The log record `L`
 
@@ -266,7 +266,7 @@ titled **Logs**, rendered as a terminal:
   copyable as plain lines.
 
 Default layout ([SHELL-008](09-ui-shell.md#shell-008-the-default-layout)):
-docked in the left drawer below Events, open when the loaded trace has log
+docked in the bottom edge group, open when the loaded trace has log
 records and closed otherwise.
 
 ## LOG-008: Logs in the agent API
