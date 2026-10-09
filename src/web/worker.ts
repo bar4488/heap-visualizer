@@ -2,6 +2,7 @@
 // The main thread only sends input events and receives state/query results.
 
 import { fmtBytes, fmtAllocSize as fmtAllocSizeMode, clampView } from './fmt.ts';
+import { paintPlayhead } from './timeline-interaction.ts';
 import { QUERY_FAILURE, queryFailureReply } from './query-failure.ts';
 import type { DomainDescriptor, EventRow, FromWorker, SettingKey, ToWorker } from './protocol.ts';
 import { maskPlan, maskRank, maskSeqAt, rowDomain } from './stream/stream-model.ts';
@@ -398,18 +399,7 @@ function renderTl(kind) {
   // playhead
   const val = kind === 0 ? E.hp_cur_t() : E.hp_cur();
   const x = ((val - view.lo) / (view.hi - view.lo)) * w;
-  if (x >= -2 && x <= w + 2) {
-    ctx.fillStyle = 'rgba(230,237,243,0.08)';
-    ctx.fillRect(0, 0, Math.max(0, x), h);
-    ctx.fillStyle = '#e6edf3';
-    ctx.fillRect(Math.round(x) - Math.round(dpr / 2), 0, Math.max(1, Math.round(1.5 * dpr)), h);
-    // grab triangle
-    ctx.beginPath();
-    ctx.moveTo(x - 4 * dpr, 0);
-    ctx.lineTo(x + 4 * dpr, 0);
-    ctx.lineTo(x, 5 * dpr);
-    ctx.fill();
-  }
+  if (x >= -2 && x <= w + 2) paintPlayhead(ctx, x, 0, h, dpr);
 }
 
 function postState() {

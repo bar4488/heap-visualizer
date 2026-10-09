@@ -1,50 +1,16 @@
-// Interval domain: the Tracks panel's geometry — axis mapping and the view's
-// zoom and pan, the vertical stack of track groups and which of them are in
-// view, bars from window rows (with sub-pixel culling), hit testing, axis
-// ticks, and color picking. No DOM, so `node --test` covers it
-// (src/web/test/intervals-flame.test.ts); tracks-panel.ts draws with it.
+// Interval domain: the Tracks panel's geometry — the windows it fetches,
+// the vertical stack of track groups and which of them are in view, bars
+// from window rows (with sub-pixel culling), hit testing, axis ticks, and
+// color picking. The x-axis mapping and the gestures' zoom and pan are the
+// strips' (src/web/timeline-interaction.ts). No DOM, so `node --test` covers
+// it (src/web/test/intervals-flame.test.ts); tracks-panel.ts draws with it.
 
-import { clampView } from '../fmt.ts';
+import { xOf } from '../timeline-interaction.ts';
 import { cpuKey, threadKey, threadLabel } from './intervals-model.ts';
 import type { Axis, Range, TrackCpu, TrackThread, WindowRow } from './types.ts';
 
 // --- the x-axis ------------------------------------------------------------------
-
-/** The x pixel of axis value `v` in a `width`-px canvas showing `view`. */
-export function xOf(v: number, view: Range, width: number): number {
-  const span = view.hi - view.lo;
-  return span > 0 ? ((v - view.lo) / span) * width : 0;
-}
-
-/** The axis value at pixel `x` — xOf's inverse. */
-export function valAt(x: number, view: Range, width: number): number {
-  return width > 0 ? view.lo + (x / width) * (view.hi - view.lo) : view.lo;
-}
-
-/** The whole extent of an axis, as the strips clamp it (worker.ts's tlview). */
-export function axisBounds(axis: Axis, meta: { n?: number; tMin?: number; tMax?: number } | null): Range & { minSpan: number } {
-  if (axis === 't') {
-    const lo = meta?.tMin ?? 0;
-    return { lo, hi: Math.max(meta?.tMax ?? lo + 1, lo + 1), minSpan: 1e-9 };
-  }
-  return { lo: 0, hi: Math.max(meta?.n ?? 1, 1), minSpan: 4 };
-}
-
-export function clampAxis(r: Range, b: Range & { minSpan: number }): Range {
-  return clampView(r, b.lo, b.hi, b.minSpan);
-}
-
-/** Zoom by `factor` (>1 out, <1 in) about the value at pixel `x` — the strips' wheel. */
-export function zoomAt(view: Range, x: number, width: number, factor: number): Range {
-  const c = valAt(x, view, width);
-  return { lo: c - (c - view.lo) * factor, hi: c + (view.hi - c) * factor };
-}
-
-/** Pan so the content moves `dx` px right (a drag) — the view moves left. */
-export function panBy(view: Range, dx: number, width: number): Range {
-  const d = width > 0 ? (dx / width) * (view.hi - view.lo) : 0;
-  return { lo: view.lo - d, hi: view.hi - d };
-}
+// The mapping, zoom, pan and clamp are the strips' own (timeline-interaction.ts).
 
 /** The window a track was fetched for: an axis range at a pixel width. */
 export type Fetched = { axis: Axis; lo: number; hi: number; width: number };
@@ -82,9 +48,13 @@ export function axisTicks(view: Range, width: number, px = 100): number[] {
 
 // --- the vertical stack -----------------------------------------------------------
 
-export const ROW_H = 16;
-export const HEAD_H = 16;
+/** One call, span or CPU row; a thread's head; a section heading (THREADS, CPUS). */
+export const ROW_H = 18;
+export const HEAD_H = 20;
+export const SECTION_H = 20;
 export const GROUP_GAP = 4;
+/** The track-name gutter laid over the plot's left edge (CSS px). */
+export const GUTTER_W = 56;
 
 /** Rows a track needs per lane, learned from the windows it was sent. */
 export type Depths = { call: number; span: number };
@@ -123,14 +93,19 @@ export function mergeDepths(a: Depths | undefined, b: Depths): Depths {
 }
 
 /**
- * Track groups top to bottom: per thread a head (its name), its call rows by
- * depth, then its span rows; then a `CPUs` heading and one row per CPU. A lane
- * the thread has anything in gets at least one row. `threads` and `cpus` are
- * in display order (orderTracks).
+ * Track groups top to bottom: a `Threads` heading, per thread a head (its
+ * name), its call rows by depth, then its span rows; then a `CPUs` heading
+ * and one row per CPU. A lane the thread has anything in gets at least one
+ * row. `threads` and `cpus` are in display order (orderTracks).
  */
 export function layoutGroups(threads: TrackThread[], cpus: TrackCpu[], depths: Map<string, Depths>) {
   const groups: Group[] = [];
   let y = 0;
+  const heading = (key: string, label: string) => {
+    groups.push({ key, kind: 'heading', label, top: y, height: SECTION_H, callTop: y + SECTION_H, callRows: 0, spanTop: y + SECTION_H, spanRows: 0 });
+    y += SECTION_H;
+  };
+  if (threads.length) heading('threads', 'Threads');
   for (const t of threads) {
     const key = threadKey(t);
     const d = depths.get(key);
@@ -144,8 +119,7 @@ export function layoutGroups(threads: TrackThread[], cpus: TrackCpu[], depths: M
     y += height;
   }
   if (cpus.length) {
-    groups.push({ key: 'cpus', kind: 'heading', label: 'CPUs', top: y, height: HEAD_H, callTop: y + HEAD_H, callRows: 0, spanTop: y + HEAD_H, spanRows: 0 });
-    y += HEAD_H;
+    heading('cpus', 'CPUs');
     for (const c of cpus) {
       groups.push({
         key: cpuKey(c.cpu), kind: 'cpu', label: `cpu ${c.cpu}`, cpu: c.cpu, top: y, height: ROW_H + 1,

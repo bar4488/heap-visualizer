@@ -1,43 +1,18 @@
-// The Tracks panel's geometry (src/web/intervals/flame-model.ts): the axis,
-// zoom and pan, the group stack and its vertical window, bars and culling,
-// and hit testing.
+// The Tracks panel's geometry (src/web/intervals/flame-model.ts): the group
+// stack and its vertical window, bars and culling, and hit testing. Its axis,
+// zoom and pan are the strips' (timeline-interaction.test.ts).
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  GROUP_GAP, HEAD_H, ROW_H, axisBounds, axisTicks, clampAxis, colorKey, colorSlot, depthsOf, groupAt,
-  hitBar, laneAt, layoutBars, layoutGroups, mergeDepths, panBy, valAt, visibleGroups, windowCovers, windowFor, xOf, zoomAt,
+  GROUP_GAP, HEAD_H, ROW_H, SECTION_H, axisTicks, colorKey, colorSlot, depthsOf, groupAt,
+  hitBar, laneAt, layoutBars, layoutGroups, mergeDepths, visibleGroups, windowCovers, windowFor,
 } from '../intervals/flame-model.ts';
 import type { WindowRow } from '../intervals/types.ts';
 
 const row = (over: Partial<WindowRow>): WindowRow => ({
   ivl: 0, name: 'f', category: 'call', depth: 0, start: 0, end: 10, open: false, lane: 'call', ...over,
-});
-
-test('the axis maps values to pixels and back', () => {
-  const v = { lo: 100, hi: 300 };
-  assert.equal(xOf(200, v, 400), 200);
-  assert.equal(xOf(100, v, 400), 0);
-  assert.equal(valAt(400, v, 400), 300);
-  assert.equal(valAt(xOf(250, v, 800), v, 800), 250);
-});
-
-test('zoom keeps the value under the pointer; pan moves with the drag', () => {
-  const v = { lo: 0, hi: 100 };
-  const z = zoomAt(v, 100, 400, 0.5); // pointer at value 25
-  assert.equal(valAt(100, z, 400), 25);
-  assert.equal(z.hi - z.lo, 50);
-  const p = panBy(v, 40, 400); // content right by a tenth: view left by 10
-  assert.deepEqual(p, { lo: -10, hi: 90 });
-});
-
-test('views clamp to the axis as the strips do', () => {
-  const meta = { n: 1000, tMin: 50, tMax: 150 };
-  assert.deepEqual(axisBounds('seq', meta), { lo: 0, hi: 1000, minSpan: 4 });
-  assert.deepEqual(clampAxis({ lo: -10, hi: 90 }, axisBounds('seq', meta)), { lo: 0, hi: 100 });
-  assert.deepEqual(clampAxis({ lo: 0, hi: 5000 }, axisBounds('t', meta)), { lo: 50, hi: 150 });
-  assert.deepEqual(clampAxis({ lo: 10, hi: 11 }, axisBounds('seq', meta)), { lo: 10, hi: 14 });
 });
 
 test('ticks land on a 1/2/5 grid inside the view', () => {
@@ -47,19 +22,22 @@ test('ticks land on a 1/2/5 grid inside the view', () => {
   assert.deepEqual(axisTicks({ lo: 0, hi: 0 }, 100), []);
 });
 
-test('groups stack a head, call rows by depth, then span rows; CPUs under a heading', () => {
+test('groups stack under a Threads heading: a head, call rows by depth, then span rows; CPUs under their own heading', () => {
   const depths = new Map([['thr:1', { call: 3, span: 0 }]]);
   const L = layoutGroups(
     [{ thr: 1, name: 'main', calls: 4, spans: 2 }, { thr: 2, name: 'w', calls: 0, spans: 1 }],
     [{ cpu: 0, slices: 3 }],
     depths,
   );
-  const [a, b, head, cpu] = L.groups;
+  const [threadsHead, a, b, head, cpu] = L.groups;
+  assert.equal(threadsHead.kind, 'heading');
+  assert.equal(threadsHead.label, 'Threads');
+  assert.equal(a.top, SECTION_H);
   assert.equal(a.callRows, 3);
   assert.equal(a.spanRows, 1); // spans but no depth seen yet: one row
   assert.equal(a.height, HEAD_H + 4 * ROW_H + GROUP_GAP);
   assert.equal(a.spanTop, a.top + HEAD_H + 3 * ROW_H);
-  assert.equal(b.top, a.height);
+  assert.equal(b.top, a.top + a.height);
   assert.equal(b.callRows, 0);
   assert.equal(head.kind, 'heading');
   assert.equal(cpu.kind, 'cpu');
@@ -73,9 +51,9 @@ test('only the groups in the viewport are visible (virtualized)', () => {
   const threads = Array.from({ length: 1000 }, (_, i) => ({ thr: i, name: `t${i}`, calls: 1, spans: 0 }));
   const L = layoutGroups(threads, [], new Map());
   const gh = HEAD_H + ROW_H + GROUP_GAP;
-  const vis = visibleGroups(L.groups, 10 * gh + 5, 3 * gh);
+  const vis = visibleGroups(L.groups, SECTION_H + 10 * gh + 5, 3 * gh);
   assert.deepEqual(vis.map((g) => g.thr), [10, 11, 12, 13]);
-  assert.equal(groupAt(L.groups, 500 * gh + 1).thr, 500);
+  assert.equal(groupAt(L.groups, SECTION_H + 500 * gh + 1).thr, 500);
   assert.equal(groupAt(L.groups, L.height + 5), null);
 });
 

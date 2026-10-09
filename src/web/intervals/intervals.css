@@ -7,8 +7,13 @@
   --ivl-dim: var(--term-dim, #6e7681);
   --ivl-head: #11151b;
   --ivl-grid: #30363d;
-  --ivl-idle: #262c35;
-  --ivl-playhead: #f85149;
+  /* Tracks: the strips' background and chrome, so the two read as one view */
+  --ivl-track-bg: var(--bg, #0d1117);
+  --ivl-section: var(--bg2, #161b22);
+  --ivl-gutter: #0d1117eb;
+  --ivl-tick: #ffffff08;
+  --ivl-idle: #8b949e;
+  --ivl-sel: #58a6ff2e;
   --ivl-bar-fg: #0b0e13;
   --ivl-cur: var(--term-cur, #1d2a3a);
   /* twelve muted hues, readable under dark text */
@@ -40,7 +45,10 @@
 /* Tracks: a canvas behind a transparent scroller that only carries the height */
 .ivl-tbody { position: relative; flex: 1 1 auto; min-height: 0; background: var(--ivl-bg); }
 .ivl-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
-.ivl-tscroll { position: absolute; inset: 0; overflow-x: hidden; overflow-y: auto; cursor: crosshair; touch-action: none; }
+.ivl-tscroll {
+  position: absolute; inset: 0; overflow-x: hidden; overflow-y: auto; cursor: crosshair; touch-action: none;
+  scrollbar-width: thin; scrollbar-color: var(--border, #30363d) transparent;
+}
 .ivl-spacer { width: 1px; }
 
 /* Stacks */
