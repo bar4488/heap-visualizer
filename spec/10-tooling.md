@@ -141,6 +141,9 @@ and aimed at what a refactor breaks silently:
   threads run on the same input, so the main thread's optimistic local zoom
   agreeing with the worker's authoritative clamp rests on it;
 - `normAddr` (`heap/addr.js`), and the panel table (`heap/panels.js`);
+- the shell's panel API (`shell/layout.ts`): open/close/hook state, multi-
+  instance windows and their dock slot, proportional drawer heights, the z
+  band, and the clamps a restore or viewport resize applies;
 - the **session round-trip** — `buildSession → applySession → buildSession`
   must be a fixed point, plus drawer docking, address-range validation and
   playhead restore;

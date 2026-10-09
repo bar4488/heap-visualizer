@@ -95,9 +95,9 @@ answers.
 
 | | |
 |---|---|
-| `src/web/shell/` | `dom.ts` (`$`, `$$`, `setHtml`, `delegate`, device↔CSS px), `panels.ts` (draggable windows, z-stack), `drawers.ts` (dockable left/right drawers), `tooltip.ts`. **No domain identifiers.** |
+| `src/web/shell/` | `dom.ts` (`$`, `$$`, `setHtml`, `delegate`, device↔CSS px), `layout.ts` (the panel API domain code uses: register, open/close/toggle/reveal, hooks, reset, the layout half of the session — [SHELL-003](09-ui-shell.md#shell-003-panels-are-declared-as-data)), `panels.ts` (draggable windows, z band), `drawers.ts` (dockable left/right drawers), `tooltip.ts`. **No domain identifiers.** |
 | `src/web/heap/` | `analysis.ts` (tags, names, colors, marks, `.heapa`), `panels.ts` (the panel table), `events-panel.ts`, `addr.ts` |
-| `src/web/session.ts` | The boundary: serializes shell state (window/drawer geometry) *and* heap state (view, crop, filters, playhead) into the one per-trace session blob |
+| `src/web/session.ts` | The boundary: puts the shell's layout serialization (window/drawer geometry, from `shell/layout.ts`) *and* heap state (view, crop, filters, playhead) into the one per-trace session blob |
 | `src/web/main.ts` | Trace/worker/toolbar wiring and the three coordinated views. Owns `UIState`, the shared main-thread state every other module receives as `deps.ui` |
 | `src/web/fmt.ts`, `src/web/rpc.ts` | Shared with the worker; the request/response layer |
 | `src/web/protocol.ts` | The message protocol, types only. Both sides import it, so a message one side does not know about is a build error |
