@@ -415,7 +415,7 @@ impl View {
     /// the current row_bytes (same span/cap rules as live occupancy).
     fn build_all_rows(&mut self, s: &Store) {
         let mut set: std::collections::HashSet<u64> = std::collections::HashSet::new();
-        for e in s.row_bits_events(&s.heap.creators) {
+        for e in s.row_bits_events(&s.dom.heap.creators) {
             let a = s.addr(e);
             let r0 = self.row_of(a);
             let r1 = self.row_of(a.saturating_add(s.span(e)).saturating_sub(1));

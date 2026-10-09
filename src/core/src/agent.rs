@@ -7,8 +7,9 @@ use serde_json::{json, Value};
 use crate::analysis::{ApplyError, Change};
 use crate::filter_eval::{self, Ctx, FieldValues};
 use crate::filter_plan;
+use crate::domain::{self, param_error, RecordParams};
 use crate::logs::{self as log_domain, LEVEL_NAMES};
-use crate::store::{warn_code_name, Store, NONE_U16, NONE_U32, OP_E, OP_F, OP_L, OP_M, OP_R};
+use crate::store::{warn_code_name, Store, NONE_U16, NONE_U32, OP_F, OP_M, OP_R};
 use crate::{project_analysis, App};
 
 #[derive(Clone, Debug, Serialize)]
@@ -37,7 +38,7 @@ pub enum TagQueryError {
 /// with `bit` and `creators`).
 fn matches(app: &App, source: &str) -> Result<Vec<u64>, Error> {
     if source.trim().is_empty() {
-        return Ok(app.store.heap.creators.clone());
+        return Ok(app.store.dom.heap.creators.clone());
     }
     let expr = heap_visualizer_filter_dsl::parse(source).map_err(|error| Error {
         message: error.message,
@@ -72,15 +73,9 @@ fn creators<'a>(store: &'a Store, bits: &'a [u64]) -> impl Iterator<Item = u32> 
     store.row_bits_events(bits)
 }
 
+/// An op's string operation name — its kind in the op table.
 fn op_name(op: u8) -> &'static str {
-    match op {
-        OP_M => "malloc",
-        OP_F => "free",
-        OP_R => "realloc",
-        OP_E => "event",
-        OP_L => "log",
-        _ => "unknown",
-    }
+    domain::op_kind(op)
 }
 
 fn tag_values(app: &App, creator: u32) -> Vec<Value> {
@@ -429,14 +424,14 @@ pub(crate) fn overview(app: &App, top: usize) -> Value {
             peak = (current, event + 1);
         }
     }
-    for event in creators(store, &store.heap.creators) {
+    for event in creators(store, &store.dom.heap.creators) {
         if store.death(event) == NONE_U32 {
             live_count += 1;
             live_bytes += store.size(event) as u128;
         }
     }
     let mut site_bytes = vec![0_u128; store.sites.len()];
-    for event in creators(store, &store.heap.creators) {
+    for event in creators(store, &store.dom.heap.creators) {
         if store.site(event) != NONE_U32 {
             site_bytes[store.site(event) as usize] += store.size(event) as u128;
         }
@@ -482,7 +477,7 @@ pub(crate) fn overview(app: &App, top: usize) -> Value {
 
 /// Log records by level for the overview (LOG-008): one prefix-sum read.
 fn log_counts(store: &Store) -> Value {
-    let by_level = store.logs.by_level();
+    let by_level = store.dom.logs.by_level();
     let levels: serde_json::Map<String, Value> = LEVEL_NAMES
         .iter()
         .zip(by_level)
@@ -491,11 +486,12 @@ fn log_counts(store: &Store) -> Value {
     json!({ "records": store.n_log, "byLevel": levels })
 }
 
-/// Default and maximum page size of `GET /api/v1/logs` (LOG-008).
-pub const LOGS_COUNT_DEFAULT: usize = 50;
-pub const LOGS_COUNT_MAX: usize = 200;
+/// Default and maximum page size of `GET /api/v1/logs` (LOG-008) — the
+/// limits every domain's records page shares.
+pub const LOGS_COUNT_DEFAULT: usize = domain::RECORDS_COUNT_DEFAULT;
+pub const LOGS_COUNT_MAX: usize = domain::RECORDS_COUNT_MAX;
 /// Longest accepted `text` operand, in bytes.
-pub const LOGS_TEXT_MAX: usize = 1024;
+pub const LOGS_TEXT_MAX: usize = log_domain::TEXT_MAX;
 
 /// The query parameters of `GET /api/v1/logs`, as the transport parsed them.
 /// `min_level` is a level name (case-insensitive, with aliases) or `0`–`5`.
@@ -509,50 +505,43 @@ pub struct LogsParams {
     pub count: Option<usize>,
 }
 
-fn param_error(message: &str) -> Error {
-    Error { message: message.into(), start: 0, end: 0 }
-}
-
 /// One page of log records (LOG-008): `{total, from, items, next}`, ordered
-/// by seq, at most `LOGS_COUNT_MAX` items. The caller adds `traceId`.
+/// by seq, at most `LOGS_COUNT_MAX` items. The caller adds `traceId`. This is
+/// `domain_records` for the log domain.
 pub(crate) fn logs(app: &App, params: &LogsParams) -> Result<Value, Error> {
-    let min_level = match params.min_level.as_deref() {
-        None | Some("") => 0,
-        Some(name) => match name.parse::<u8>() {
-            Ok(n) if (n as usize) < log_domain::NLEVEL => n,
-            Ok(_) => return Err(param_error("minLevel must be 0 through 5 or a level name")),
-            Err(_) => log_domain::level_from_name(name)
-                .ok_or_else(|| param_error("minLevel must be trace, debug, info, warn, error, or fatal"))?,
-        },
-    };
-    let count = params.count.unwrap_or(LOGS_COUNT_DEFAULT);
-    if count == 0 || count > LOGS_COUNT_MAX {
-        return Err(param_error("count must be from 1 through 200"));
-    }
-    let text = params.text.clone().unwrap_or_default();
-    if text.len() > LOGS_TEXT_MAX {
-        return Err(param_error("text is limited to 1024 bytes"));
-    }
-    let query = log_domain::LogQuery {
-        min_level,
-        text,
+    let mut p = RecordParams {
         seq_lo: params.seq_lo,
         seq_hi: params.seq_hi,
+        from: params.from,
+        count: params.count,
+        params: Default::default(),
     };
-    let logs = &app.store.logs;
-    let matched = log_domain::Matches::new(logs, &query);
-    let total = matched.total(logs) as usize;
-    let from = params.from.min(total);
-    let hi = from.saturating_add(count).min(total);
-    let items: Vec<Value> = (from..hi)
-        .map(|k| log_domain::agent_item(&app.store, matched.row(logs, k as u32)))
-        .collect();
-    Ok(json!({
-        "total": total,
-        "from": from,
-        "items": items,
-        "next": (hi < total).then_some(hi),
-    }))
+    if let Some(level) = &params.min_level {
+        p.params.insert("minLevel".into(), level.clone());
+    }
+    if let Some(text) = &params.text {
+        p.params.insert("text".into(), text.clone());
+    }
+    let mut page = domain_records(app, "logs", &p)?;
+    if let Some(object) = page.as_object_mut() {
+        object.remove("domain");
+    }
+    Ok(page)
+}
+
+/// One bounded page of any domain's records, in seq order:
+/// `{domain, total, from, items, next}` — the core of a generic
+/// `GET /api/v1/domains/{d}/records?seqLo=&seqHi=&from=&count=&…`. The
+/// domain's own parameters (`minLevel`, `text` for logs) ride in
+/// `params.params`; an unknown one is an invalid request. The caller adds
+/// `traceId`.
+pub(crate) fn domain_records(app: &App, name: &str, params: &RecordParams) -> Result<Value, Error> {
+    let d = domain::by_name(name)
+        .and_then(|id| domain::get(&app.store, id))
+        .ok_or_else(|| param_error("unknown domain"))?;
+    let mut page = d.agent_records(params)?;
+    page["domain"] = json!(d.name());
+    Ok(page)
 }
 
 pub(crate) fn timeline(
@@ -580,18 +569,32 @@ pub(crate) fn timeline(
         (from.min(u64::from(u32::MAX)) as u32, to.min(u64::from(u32::MAX)) as u32)
     };
     let bit = |event| bit(store, &bits, event);
-    for event in store.heap_events(lo, hi) {
-        let i = event as usize;
+    // the bin of spine record `event`, when it falls in the requested range
+    let bin_of = |event: u32| {
         let coordinate = if domain == "time" {
-            app.store.t[i]
+            store.t[event as usize]
         } else {
             event as u64
         };
-        if coordinate < from || coordinate >= to {
-            continue;
+        (from..to).contains(&coordinate).then(|| {
+            (((coordinate - from) as u128 * bins as u128 / width as u128) as usize).min(bins - 1)
+        })
+    };
+    // landmarks are the marks domain's: its rows in the range, by two
+    // binary searches, whatever the heap holds
+    let marks = &store.dom.marks;
+    let (m0, m1) = marks.rows_in(lo, hi);
+    for &event in &marks.seq[m0 as usize..m1 as usize] {
+        if let Some(bin) = bin_of(event) {
+            rows[bin].3 += 1;
         }
-        let bin = ((coordinate - from) as u128 * bins as u128 / width as u128) as usize;
-        let row = &mut rows[bin.min(bins - 1)];
+    }
+    for event in store.heap_events(lo, hi) {
+        let i = event as usize;
+        let Some(bin) = bin_of(event) else {
+            continue;
+        };
+        let row = &mut rows[bin];
         match app.store.op[i] {
             OP_M if bit(event) => {
                 row.0 += 1;
@@ -615,7 +618,6 @@ pub(crate) fn timeline(
                     row.5 += app.store.size(old) as u128;
                 }
             }
-            OP_E => row.3 += 1,
             _ => {}
         }
     }
@@ -633,11 +635,27 @@ pub(crate) fn timeline(
     Ok(json!({ "domain": domain, "range": range, "bins": rows }))
 }
 
+/// One stream-context event in API-008's shape. Each domain's records are
+/// read from that domain's store: a record without a heap row never reaches
+/// a heap column.
 fn event_value(app: &App, event: u32) -> Value {
     let store = &app.store;
     let i = event as usize;
-    if store.op[i] == OP_E {
-        return json!({ "seq": event, "time": store.t[i].to_string(), "operation": "event", "title": (store.label_at(event) != NONE_U32).then(|| store.ev_labels[store.label_at(event) as usize].clone()) });
+    match store.domain_of(event) {
+        domain::HEAP => {}
+        domain::MARKS => {
+            return json!({ "seq": event, "time": store.t[i].to_string(), "operation": "event", "title": domain::marks::title(store, event) });
+        }
+        domain::LOGS => {
+            let logs = &store.dom.logs;
+            let row = logs.row_at_or_after(event);
+            let item = log_domain::agent_item(store, row);
+            return json!({
+                "seq": event, "time": store.t[i].to_string(), "operation": "log",
+                "level": item["level"], "logger": item["logger"], "msg": item["msg"], "fields": item["fields"],
+            });
+        }
+        _ => return json!({ "seq": event, "time": store.t[i].to_string(), "operation": op_name(store.op[i]) }),
     }
     let creator = if store.op[i] == OP_F {
         store.target(event)
@@ -654,39 +672,68 @@ fn event_value(app: &App, event: u32) -> Value {
     })
 }
 
+/// Which records of the non-heap domains `/stream/context` returns besides
+/// the events touching matching allocations (API-008).
+#[derive(Clone, Copy, Debug)]
+pub struct ContextOptions {
+    /// `E` landmarks (`includeLandmarks`, default true).
+    pub landmarks: bool,
+    /// Log records (`includeLogs`, default false). Excluded logs are never
+    /// dropped silently: the response counts them in `omitted.logs`.
+    pub logs: bool,
+}
+
+impl Default for ContextOptions {
+    fn default() -> Self {
+        ContextOptions { landmarks: true, logs: false }
+    }
+}
+
 pub(crate) fn stream_context(
     app: &App,
     source: &str,
     center: u32,
     before: u32,
     after: u32,
-    landmarks: bool,
+    options: ContextOptions,
 ) -> Result<Value, Error> {
     let bits = matches(app, source)?;
+    let store = &app.store;
     let from = center.saturating_sub(before);
     let to = center
         .saturating_add(after)
         .saturating_add(1)
-        .min(app.store.len());
+        .min(store.len());
+    let mut omitted_logs = 0u32;
     let events: Vec<_> = (from..to)
         .filter(|&event| {
-            if app.store.op[event as usize] == OP_E {
-                return landmarks;
-            }
             let i = event as usize;
-            let creator = if app.store.op[i] == OP_F {
-                app.store.target(event)
+            match store.domain_of(event) {
+                domain::HEAP => {}
+                domain::MARKS => return options.landmarks,
+                domain::LOGS => {
+                    omitted_logs += (!options.logs) as u32;
+                    return options.logs;
+                }
+                _ => return false,
+            }
+            let creator = if store.op[i] == OP_F {
+                store.target(event)
             } else {
                 event
             };
-            (creator != NONE_U32 && bit(&app.store, &bits, creator))
-                || (app.store.op[i] == OP_R
-                    && app.store.target(event) != NONE_U32
-                    && bit(&app.store, &bits, app.store.target(event)))
+            (creator != NONE_U32 && bit(store, &bits, creator))
+                || (store.op[i] == OP_R
+                    && store.target(event) != NONE_U32
+                    && bit(store, &bits, store.target(event)))
         })
         .map(|event| event_value(app, event))
         .collect();
-    Ok(json!({ "range": { "from": from, "to": to }, "events": events }))
+    let mut value = json!({ "range": { "from": from, "to": to }, "events": events });
+    if omitted_logs > 0 {
+        value["omitted"] = json!({ "logs": omitted_logs });
+    }
+    Ok(value)
 }
 
 pub(crate) fn apply_tag_query(
@@ -791,6 +838,33 @@ mod tests {
             .unwrap();
         assert_eq!(context["events"].as_array().unwrap().len(), 2);
         assert_eq!(context["events"][1]["operation"], "event");
+        assert!(context.get("omitted").is_none(), "no logs, nothing omitted");
+    }
+
+    /// Log records in a context window are never dropped silently: they are
+    /// counted as omitted, or returned when asked for, and reading one never
+    /// touches a heap column (the debug build asserts heap reads).
+    #[test]
+    fn stream_context_counts_or_includes_log_records() {
+        let mut engine = Engine::new();
+        engine.parse_begin();
+        engine.parse_chunk(br#"{"op":"M","id":1,"addr":"0x1000","size":64,"t":10}
+{"op":"L","t":11,"level":"error","logger":"db","msg":"boom","code":7}
+{"op":"E","t":12,"title":"phase"}
+{"op":"F","id":1,"t":13}
+"#);
+        engine.parse_end();
+        let quiet = engine.agent_stream_context("", 1, 1, 2, true).unwrap();
+        assert_eq!(quiet["events"].as_array().unwrap().len(), 3);
+        assert_eq!(quiet["omitted"]["logs"], 1);
+        let options = ContextOptions { landmarks: false, logs: true };
+        let full = engine.agent_stream_context_with("", 1, 1, 2, options).unwrap();
+        let ops: Vec<&str> = full["events"].as_array().unwrap().iter().map(|e| e["operation"].as_str().unwrap()).collect();
+        assert_eq!(ops, ["malloc", "log", "free"]);
+        assert_eq!(full["events"][1]["level"], "error");
+        assert_eq!(full["events"][1]["fields"]["code"], 7);
+        assert!(full["events"][1].get("id").is_none());
+        assert!(full.get("omitted").is_none());
     }
 
     #[test]

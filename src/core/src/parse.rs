@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use crate::domain::point::PointStore;
 use crate::json::{parse_addr, push_json_str, unescape, Scan};
 use crate::store::*;
 
@@ -38,6 +39,8 @@ pub struct Parser {
     field_map: HashMap<String, u32>,
     logger_map: HashMap<String, u32>,
     log_frag_map: HashMap<String, u32>,
+    /// Log custom field name -> index into the log domain's own catalog.
+    log_field_map: HashMap<String, u32>,
     seq_warned: bool,
 }
 
@@ -88,6 +91,7 @@ impl Parser {
             field_map: HashMap::new(),
             logger_map: HashMap::new(),
             log_frag_map: HashMap::new(),
+            log_field_map: HashMap::new(),
             seq_warned: false,
         }
     }
@@ -152,6 +156,7 @@ impl Parser {
         self.field_map = HashMap::new();
         self.logger_map = HashMap::new();
         self.log_frag_map = HashMap::new();
+        self.log_field_map = HashMap::new();
     }
 
     fn line(&mut self, line: &[u8]) {
@@ -243,16 +248,6 @@ impl Parser {
         i
     }
 
-    fn intern_label(&mut self, label: String) -> u32 {
-        if let Some(&i) = self.label_map.get(&label) {
-            return i;
-        }
-        let i = self.store.ev_labels.len() as u32;
-        self.label_map.insert(label.clone(), i);
-        self.store.ev_labels.push(label);
-        i
-    }
-
     fn intern_extra(&mut self, ex: String) -> u32 {
         if let Some(&i) = self.extra_map.get(&ex) {
             return i;
@@ -261,87 +256,25 @@ impl Parser {
         // The catalog is built here, on the fragment that is new, so each
         // distinct combination of custom keys is scanned exactly once however
         // many events carry it.
-        let members = self.catalog_fragment(&ex);
+        let members = catalog_fragment(&mut self.field_map, &mut self.store.fields, &ex);
         self.extra_map.insert(ex.clone(), i);
         self.store.extras.push(ex);
         self.store.extra_fields.push(members);
         i
     }
 
-    /// Record every key of one raw object-body fragment (`"k":v,"k2":v2`) in
-    /// the field catalog, returning the catalog indexes it carries.
-    fn catalog_fragment(&mut self, ex: &str) -> Vec<u32> {
-        let bytes = ex.as_bytes();
-        let mut sc = Scan::new(bytes);
-        let mut members = Vec::new();
-        loop {
-            let Some((lo, hi)) = sc.string_span() else {
-                break;
-            };
-            if !sc.eat(b':') {
-                break;
-            }
-            sc.ws();
-            let head = sc.peek();
-            let Some((vlo, vhi)) = sc.skip_value() else {
-                break;
-            };
-            let shape = match head {
-                b'"' => FIELD_STRING,
-                b't' | b'f' => FIELD_BOOL,
-                b'n' => FIELD_NULL,
-                b'{' | b'[' => FIELD_OTHER,
-                // a number: a fraction or an exponent makes it a float, and
-                // the two are one numeric type at the catalog level (T034)
-                _ => {
-                    if bytes[vlo..vhi]
-                        .iter()
-                        .any(|c| matches!(c, b'.' | b'e' | b'E'))
-                    {
-                        FIELD_FLOAT
-                    } else {
-                        FIELD_INT
-                    }
-                }
-            };
-            let name = unescape(&bytes[lo..hi]);
-            let index = match self.field_map.get(&name) {
-                Some(&index) => index,
-                None => {
-                    let index = self.store.fields.len() as u32;
-                    self.field_map.insert(name.clone(), index);
-                    self.store.fields.push(FieldInfo {
-                        name,
-                        types: 0,
-                        events: 0,
-                    });
-                    index
-                }
-            };
-            self.store.fields[index as usize].types |= shape;
-            // a fragment repeating a key counts once; the value the evaluator
-            // will read is the last, so the duplicate is not a second member
-            if !members.contains(&index) {
-                members.push(index);
-            }
-            if !sc.eat(b',') {
-                break;
-            }
-        }
-        members
-    }
-
     /// Append one record to the event spine (DOM-001). The spine -> heap rank
     /// is materialized the first time a non-heap record arrives — until then
     /// every record is a heap record and the heap row is the spine index, so
     /// a heap-only trace never builds the mapping.
-    fn push_spine(&mut self, op: u8, t: u64, thr_idx: u16, heap: bool) {
+    fn push_spine(&mut self, op: u8, t: u64, thr_idx: u16) {
+        let heap = crate::domain::op_domain(op) == crate::domain::HEAP;
         let s = &mut self.store;
         let e = s.len();
         if !heap && s.hrank.is_empty() {
-            debug_assert_eq!(s.heap.addr.len(), e as usize);
+            debug_assert_eq!(s.dom.heap.addr.len(), e as usize);
             s.hrank = (0..=e).collect();
-            s.heap.seq = (0..e).collect();
+            s.dom.heap.seq = (0..e).collect();
         }
         s.op.push(op);
         s.t.push(t);
@@ -349,7 +282,7 @@ impl Parser {
         if let Some(&r) = s.hrank.last() {
             s.hrank.push(r + heap as u32);
             if heap {
-                s.heap.seq.push(e);
+                s.dom.heap.seq.push(e);
             }
         }
     }
@@ -385,15 +318,10 @@ impl Parser {
         // before anything is stamped or interned: a dropped record must leave
         // no trace — no clock movement, no catalogued site or field, and no
         // warning pinned to whichever record comes next.
-        let op = match raw.op {
-            b'M' => OP_M,
-            b'F' => OP_F,
-            b'R' => OP_R,
-            b'E' => OP_E,
-            _ => {
-                // unknown record type: forward-compat, ignore
-                return;
-            }
+        // the op table names every record type; a letter it does not know
+        // (or one another domain's reader owns) is ignored: forward-compat
+        let Some(op) = crate::domain::op_for_letter(raw.op).filter(|&op| op != OP_L) else {
+            return;
         };
         // op F with the reserved null id is a no-op record
         if op == OP_F && raw.id == Some(0) {
@@ -407,7 +335,11 @@ impl Parser {
         }
 
         let (e, t) = self.stamp(raw.t, raw.seq);
-        self.apply_heap(raw, op, e, t);
+        if op == OP_E {
+            self.apply_mark(raw, e, t);
+        } else {
+            self.apply_heap(raw, op, e, t);
+        }
     }
 
     /// Timestamp and seq checks shared by every domain's records (TRACE-007):
@@ -443,6 +375,41 @@ impl Parser {
         (e, t)
     }
 
+    /// One `E` landmark (TRACE-010): a spine row and a mark row, nothing
+    /// else. `site` and `stack` describe an allocation, so they are not read
+    /// off a mark — a site nobody ever allocated from would sit in the legend
+    /// at count zero. Its custom fields go to the trace-wide fragment table
+    /// and catalog, as they did when marks were heap rows.
+    fn apply_mark(&mut self, mut raw: Raw, e: u32, t: u64) {
+        let label = match raw.title.take() {
+            Some(title) => intern_label(&mut self.label_map, &mut self.store.dom.marks, title),
+            None => NONE_U32,
+        };
+        let thr_idx = match raw.thr {
+            Some(v) => self.intern_thr(v, e),
+            None => NONE_U16,
+        };
+        let extra = self.intern_counted_extra(&mut raw.extra);
+        self.push_spine(OP_E, t, thr_idx);
+        self.store.dom.marks.push(e, 0, label, "", extra);
+        self.store.n_custom += 1;
+    }
+
+    /// Intern a heap-or-mark fragment in the trace-wide table and count one
+    /// more event on each of its keys. NONE_U32 for an empty fragment.
+    fn intern_counted_extra(&mut self, extra: &mut String) -> u32 {
+        if extra.is_empty() {
+            return NONE_U32;
+        }
+        let index = self.intern_extra(std::mem::take(extra));
+        // exact per-key event counts, without re-scanning the fragment
+        for i in 0..self.store.extra_fields[index as usize].len() {
+            let field = self.store.extra_fields[index as usize][i] as usize;
+            self.store.fields[field].events += 1;
+        }
+        index
+    }
+
     /// One `L` record (LOG-001): a spine row and a log row, nothing else.
     fn apply_log(&mut self, mut log: crate::logs::RawLog) {
         use crate::logs::{truncate_msg, LevelRead, LEVEL_INFO};
@@ -470,47 +437,26 @@ impl Parser {
             None => NONE_U16,
         };
         let logger = match log.logger.take() {
-            Some(name) => match self.logger_map.get(&name) {
-                Some(&i) => i,
-                None => {
-                    let logs = &mut self.store.logs;
-                    let i = logs.loggers.len() as u32;
-                    self.logger_map.insert(name.clone(), i);
-                    logs.loggers.push(name);
-                    logs.logger_count.push(0);
-                    i
-                }
-            },
+            Some(name) => intern_label(&mut self.logger_map, &mut self.store.dom.logs, name),
             None => NONE_U32,
         };
         let fields = if log.extra.is_empty() {
             NONE_U32
         } else {
-            match self.log_frag_map.get(&log.extra) {
-                Some(&i) => i,
-                None => {
-                    let logs = &mut self.store.logs;
-                    let i = logs.frags.len() as u32;
-                    self.log_frag_map.insert(log.extra.clone(), i);
-                    logs.frags.push(std::mem::take(&mut log.extra));
-                    i
-                }
-            }
+            intern_frag(
+                &mut self.log_frag_map,
+                &mut self.log_field_map,
+                &mut self.store.dom.logs,
+                std::mem::take(&mut log.extra),
+            )
         };
-        self.push_spine(OP_L, t, thr_idx, false);
-        self.store.logs.push(e, level, logger, &msg, fields);
+        self.push_spine(OP_L, t, thr_idx);
+        self.store.dom.logs.push(e, level, logger, &msg, fields);
         self.store.n_log += 1;
     }
 
     fn apply_heap(&mut self, mut raw: Raw, op: u8, e: u32, t: u64) {
-        // A custom event is a label and its custom fields; `site` and `stack`
-        // describe an allocation, so they are not read off one — a site nobody
-        // ever allocated from would sit in the legend at count zero.
-        let label = match (op, raw.title.take()) {
-            (OP_E, Some(title)) => self.intern_label(title),
-            _ => NONE_U32,
-        };
-        let site = match raw.site.filter(|_| op != OP_E) {
+        let site = match raw.site {
             Some(name) => self.intern_site(name),
             None => NONE_U32,
         };
@@ -518,21 +464,11 @@ impl Parser {
             Some(v) => self.intern_thr(v, e),
             None => NONE_U16,
         };
-        let stack = match raw.stack.filter(|_| op != OP_E) {
+        let stack = match raw.stack {
             Some(st) => self.intern_stack(st),
             None => NONE_U32,
         };
-        let extra = if raw.extra.is_empty() {
-            NONE_U32
-        } else {
-            let index = self.intern_extra(std::mem::take(&mut raw.extra));
-            // exact per-key event counts, without re-scanning the fragment
-            for i in 0..self.store.extra_fields[index as usize].len() {
-                let field = self.store.extra_fields[index as usize][i] as usize;
-                self.store.fields[field].events += 1;
-            }
-            index
-        };
+        let extra = self.intern_counted_extra(&mut raw.extra);
 
         // resolve the killed allocation for F / R
         let mut target = NONE_U32;
@@ -581,10 +517,10 @@ impl Parser {
         }
 
         // ---- push the spine row, then the heap row ----
-        self.push_spine(op, t, thr_idx, true);
+        self.push_spine(op, t, thr_idx);
         let s = &mut self.store;
-        let h = s.heap.addr.len();
-        let hc = &mut s.heap;
+        let h = s.dom.heap.addr.len();
+        let hc = &mut s.dom.heap;
         hc.id.push(raw.id.unwrap_or(0));
         hc.addr.push(addr);
         hc.size.push(size);
@@ -593,7 +529,6 @@ impl Parser {
         push_lazy(&mut hc.usable, h, usable, 0);
         hc.site.push(site);
         push_lazy(&mut hc.stack, h, stack, NONE_U32);
-        push_lazy(&mut hc.label, h, label, NONE_U32);
         push_lazy(&mut hc.extra, h, extra, NONE_U32);
         hc.target.push(target);
         hc.death.push(NONE_U32);
@@ -614,7 +549,7 @@ impl Parser {
         // ---- liveness bookkeeping ----
         if target != NONE_U32 {
             let th = s.heap_rank(target) as usize;
-            s.heap.death[th] = e;
+            s.dom.heap.death[th] = e;
             let ta = s.addr(target);
             if let Some(tend) = self.live.remove(&(ta, target)) {
                 multiset_remove(&mut self.live_spans, tend - ta);
@@ -680,8 +615,7 @@ impl Parser {
         match op {
             OP_M => s.n_malloc += 1,
             OP_F => s.n_free += 1,
-            OP_R => s.n_realloc += 1,
-            _ => s.n_custom += 1,
+            _ => s.n_realloc += 1,
         }
 
         // ---- periodic snapshot ----
@@ -714,12 +648,7 @@ impl Default for Store {
             t: Vec::new(),
             thr_idx: Vec::new(),
             hrank: Vec::new(),
-            heap: HeapCols {
-                green_pre: vec![0],
-                red_pre: vec![0],
-                ..HeapCols::default()
-            },
-            logs: crate::logs::LogStore::default(),
+            dom: crate::domain::Domains::default(),
             old_geom: std::collections::HashMap::new(),
             tag_members: Vec::new(),
             tag_any: Vec::new(),
@@ -735,7 +664,6 @@ impl Default for Store {
             thrs: Vec::new(),
             thr_count: Vec::new(),
             stacks: Vec::new(),
-            ev_labels: Vec::new(),
             extras: Vec::new(),
             fields: Vec::new(),
             extra_fields: Vec::new(),
@@ -764,6 +692,109 @@ impl Default for Store {
         }
     }
 }
+
+/// Intern `name` in a point store's label dictionary (a logger, a title).
+fn intern_label<const N: usize>(map: &mut HashMap<String, u32>, p: &mut PointStore<N>, name: String) -> u32 {
+    if let Some(&i) = map.get(&name) {
+        return i;
+    }
+    let i = p.labels.len() as u32;
+    map.insert(name.clone(), i);
+    p.labels.push(name);
+    p.label_count.push(0);
+    i
+}
+
+/// Intern a custom-field fragment in a point store's own fragment table,
+/// cataloguing a new fragment's keys in the domain's own field catalog
+/// (`field_map` names its entries) once, and counting this record on each.
+fn intern_frag<const N: usize>(
+    map: &mut HashMap<String, u32>,
+    field_map: &mut HashMap<String, u32>,
+    p: &mut PointStore<N>,
+    frag: String,
+) -> u32 {
+    let i = match map.get(&frag) {
+        Some(&i) => i,
+        None => {
+            let i = p.frags.len() as u32;
+            let members = catalog_fragment(field_map, &mut p.catalog, &frag);
+            map.insert(frag.clone(), i);
+            p.frags.push(frag);
+            p.frag_fields.push(members);
+            i
+        }
+    };
+    for &field in &p.frag_fields[i as usize] {
+        p.catalog[field as usize].events += 1;
+    }
+    i
+}
+
+/// Record every key of one raw object-body fragment (`"k":v,"k2":v2`) in
+/// a field catalog (the trace's, or one domain's), returning the catalog indexes
+/// it carries.
+fn catalog_fragment(field_map: &mut HashMap<String, u32>, catalog: &mut Vec<FieldInfo>, ex: &str) -> Vec<u32> {
+    let bytes = ex.as_bytes();
+    let mut sc = Scan::new(bytes);
+    let mut members = Vec::new();
+    loop {
+        let Some((lo, hi)) = sc.string_span() else {
+            break;
+        };
+        if !sc.eat(b':') {
+            break;
+        }
+        sc.ws();
+        let head = sc.peek();
+        let Some((vlo, vhi)) = sc.skip_value() else {
+            break;
+        };
+        let shape = match head {
+            b'"' => FIELD_STRING,
+            b't' | b'f' => FIELD_BOOL,
+            b'n' => FIELD_NULL,
+            b'{' | b'[' => FIELD_OTHER,
+            // a number: a fraction or an exponent makes it a float, and
+            // the two are one numeric type at the catalog level (T034)
+            _ => {
+                if bytes[vlo..vhi]
+                    .iter()
+                    .any(|c| matches!(c, b'.' | b'e' | b'E'))
+                {
+                    FIELD_FLOAT
+                } else {
+                    FIELD_INT
+                }
+            }
+        };
+        let name = unescape(&bytes[lo..hi]);
+        let index = match field_map.get(&name) {
+            Some(&index) => index,
+            None => {
+                let index = catalog.len() as u32;
+                field_map.insert(name.clone(), index);
+                catalog.push(FieldInfo {
+                    name,
+                    types: 0,
+                    events: 0,
+                });
+                index
+            }
+        };
+        catalog[index as usize].types |= shape;
+        // a fragment repeating a key counts once; the value the evaluator
+        // will read is the last, so the duplicate is not a second member
+        if !members.contains(&index) {
+            members.push(index);
+        }
+        if !sc.eat(b',') {
+            break;
+        }
+    }
+    members
+}
+
 
 /// Drop one occurrence of `key` from a counted multiset.
 fn multiset_remove(set: &mut BTreeMap<u64, u32>, key: u64) {

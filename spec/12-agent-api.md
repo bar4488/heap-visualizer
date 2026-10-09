@@ -146,6 +146,14 @@ only events touching matching allocations plus requested custom landmarks,
 using string operation names. Realloc events identify both their creator and
 the allocation they replace.
 
+Log records are temporal context, not allocation evidence: they are returned
+only when `includeLogs` is true (default false), as `{seq, time,
+operation:"log", level, logger, msg, fields}`. Excluded log records are never
+dropped silently — when the window holds any, the response adds `omitted:
+{logs: n}`. (The core provides both through
+`Engine::agent_stream_context_with`; the transport's `includeLogs` field is
+a pending follow-up, and until then it always omits and counts them.)
+
 ## API-009: Canonical and bulk analysis changes
 
 `POST /api/v1/analysis/changes` remains the sole vocabulary for ordinary

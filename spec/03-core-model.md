@@ -24,15 +24,25 @@ The store is split along the domain boundary of
 - the **event spine** holds the columns every record has — `op`, `t`, and
   thread — one row per record of any domain, indexed by `seq`;
 - the **heap domain** (`HeapCols`) holds `id`, `addr`, `size`, `usable`,
-  site, stack, label, custom-field fragment, `target`/`death` links, the
-  timeline prefix sums, and the tag bitsets — one row per heap record (`M`,
-  `F`, `R`, and for now `E`), never one per record of another domain;
-- each further domain (logs, [LOG-003](13-domains-and-logs.md#log-003-the-log-store))
-  keeps its own store keyed by spine index.
+  site, stack, custom-field fragment, `target`/`death` links, the timeline
+  prefix sums, and the tag bitsets — one row per heap record (`M`, `F`,
+  `R`), never one per record of another domain;
+- each further domain keeps its own store keyed by spine index: the
+  **marks** domain holds the `E` landmarks (title and custom fields), and
+  the **log** domain the `L` records
+  ([LOG-003](13-domains-and-logs.md#log-003-the-log-store)). Both are
+  point stores ([DOM-004](13-domains-and-logs.md#dom-004-the-domain-registry)).
+
+Which domain a record belongs to is decided by one table from op to
+(domain, kind) — never by op numbering — and the domain stores sit side by
+side as concrete fields, so heap work reaches its columns directly. A
+landmark's custom fields stay in the trace-wide fragment table and field
+catalog, which the allocation filter reads, exactly as when landmarks were
+heap rows.
 
 Heap rows are read **by spine index** through accessors. While every record
 is a heap record the heap row *is* the spine index and no mapping exists; the
-first non-heap record materializes a spine→heap rank (`hrank`) and a
+first non-heap record (a log line or a landmark) materializes a spine→heap rank (`hrank`) and a
 heap→spine column, so a heap-only trace pays nothing for the boundary. Link
 values stay spine indexes, so allocation identity (MODEL-002) is unchanged by
 the presence of other domains.

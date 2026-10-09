@@ -13,10 +13,12 @@ pub const OP_R: u8 = 2;
 pub const OP_E: u8 = 3;
 /// A structured log line: the log domain's record ([LOG-001]). It occupies a
 /// seq on the spine and has no heap row at all — every heap accessor is for
-/// heap records (`op <= OP_E`) only.
+/// heap records only (`domain::op_domain(op) == HEAP`).
 ///
 /// [LOG-001]: ../../../spec/13-domains-and-logs.md#log-001-the-log-record-l
 pub const OP_L: u8 = 4;
+
+// Ops index `domain::OPS`, which maps each to its domain and kind.
 
 // Warning codes.
 pub const W_MALFORMED: u8 = 0;
@@ -130,8 +132,8 @@ pub struct Warning {
 }
 
 /// The heap domain's payload columns ([DOM-002]): one row per heap record
-/// (`M`, `F`, `R`, and — for now — the `E` landmark), never one per record of
-/// another domain. A row is addressed by its **spine index** through the
+/// (`M`, `F`, `R`), never one per record of another domain — `E` landmarks
+/// are the marks domain's. A row is addressed by its **spine index** through the
 /// `Store` accessors (`addr(e)`, `size(e)`, …); the heap row behind it is the
 /// spine index itself until a non-heap record exists, so a heap-only trace
 /// pays nothing for the mapping.
@@ -141,7 +143,6 @@ pub struct Warning {
 ///
 /// [DOM-002]: ../../../spec/13-domains-and-logs.md
 /// [MODEL-002]: ../../../spec/03-core-model.md
-#[derive(Default)]
 pub struct HeapCols {
     pub id: Vec<u64>,
     pub addr: Vec<u64>,
@@ -157,9 +158,6 @@ pub struct HeapCols {
     /// (unrecognized top-level keys), interned as a raw JSON object body
     /// fragment; NONE_U32 = none. Lazy column; read via `extra_at`.
     pub extra: Vec<u32>,
-    /// For E events: index into `ev_labels` of the record's `title`
-    /// (NONE_U32 = unlabelled). Lazy column; read via `label_at`.
-    pub label: Vec<u32>,
     /// For F/R events: spine index of the creating event (M/R) being killed.
     pub target: Vec<u32>,
     /// For creator events (M/R): the spine index that kills this allocation.
@@ -178,6 +176,26 @@ pub struct HeapCols {
     pub creators: Vec<u64>,
 }
 
+impl Default for HeapCols {
+    fn default() -> Self {
+        HeapCols {
+            id: Vec::new(),
+            addr: Vec::new(),
+            size: Vec::new(),
+            usable: Vec::new(),
+            site: Vec::new(),
+            stack: Vec::new(),
+            extra: Vec::new(),
+            target: Vec::new(),
+            death: Vec::new(),
+            seq: Vec::new(),
+            green_pre: vec![0],
+            red_pre: vec![0],
+            creators: Vec::new(),
+        }
+    }
+}
+
 pub struct Store {
     // ---- the event spine (DOM-001): one row per record of any domain ----
     pub op: Vec<u8>,
@@ -188,9 +206,8 @@ pub struct Store {
     /// a non-heap record exists; empty = identity (heap row = spine index).
     pub hrank: Vec<u32>,
 
-    // ---- domains ----
-    pub heap: HeapCols,
-    pub logs: crate::logs::LogStore,
+    // ---- domains (DOM-002): each domain's payload store, keyed by spine ----
+    pub dom: crate::domain::Domains,
 
     /// For R events only: old geometry (resolved from target, else record
     /// copy), keyed by event index. Side table so non-R events cost nothing.
@@ -241,9 +258,6 @@ pub struct Store {
     pub thrs: Vec<i64>,
     pub thr_count: Vec<u32>,
     pub stacks: Vec<String>,
-    /// Labels of custom (E) events. Interned like sites: a producer marking
-    /// every frame writes the same handful of strings over and over.
-    pub ev_labels: Vec<String>,
     pub extras: Vec<String>,
     /// Catalog of the caller-defined top-level fields seen anywhere in the
     /// trace, in first-observation order. Built as fragments are interned —
@@ -273,7 +287,7 @@ pub struct Store {
     pub n_malloc: u32,
     pub n_free: u32,
     pub n_realloc: u32,
-    /// Custom (E) events. Not an allocation count — kept apart from the three
+    /// Custom (E) events — the marks domain's row count. Not an allocation count — kept apart from the three
     /// above so nothing sums them into one.
     pub n_custom: u32,
     /// Log (L) records — the log domain's row count.
@@ -304,10 +318,21 @@ impl Store {
         }
     }
 
-    /// Is spine record `e` a heap record (`M`/`F`/`R`/`E`)?
+    /// Is spine record `e` a heap record? Decided by the op table
+    /// ([`crate::domain::op_domain`]), never by op numbering.
     #[inline]
     pub fn is_heap(&self, e: u32) -> bool {
-        self.op.get(e as usize).is_some_and(|&op| op <= OP_E)
+        self.op
+            .get(e as usize)
+            .is_some_and(|&op| crate::domain::op_domain(op) == crate::domain::HEAP)
+    }
+
+    /// Domain of spine record `e` (`domain::NO_DOMAIN` past the end).
+    #[inline]
+    pub fn domain_of(&self, e: u32) -> crate::domain::DomainId {
+        self.op
+            .get(e as usize)
+            .map_or(crate::domain::NO_DOMAIN, |&op| crate::domain::op_domain(op))
     }
 
     /// Number of heap records in spine `[0, b)`. The identity until a
@@ -335,7 +360,7 @@ impl Store {
     #[inline]
     pub fn heap_row(&self, e: u32) -> Option<usize> {
         if self.hrank.is_empty() {
-            ((e as usize) < self.heap.addr.len()).then_some(e as usize)
+            ((e as usize) < self.dom.heap.addr.len()).then_some(e as usize)
         } else if self.is_heap(e) {
             Some(self.hrank[e as usize] as usize)
         } else {
@@ -346,17 +371,17 @@ impl Store {
     /// Spine index of heap row `h`.
     #[inline]
     pub fn heap_seq(&self, h: usize) -> u32 {
-        if self.heap.seq.is_empty() {
+        if self.dom.heap.seq.is_empty() {
             h as u32
         } else {
-            self.heap.seq[h]
+            self.dom.heap.seq[h]
         }
     }
 
     /// Number of heap rows.
     #[inline]
     pub fn heap_len(&self) -> u32 {
-        self.heap.addr.len() as u32
+        self.dom.heap.addr.len() as u32
     }
 
     /// Heap rows whose records lie in spine `[lo, hi)` — two rank lookups, so
@@ -408,88 +433,84 @@ impl Store {
     /// Creator events (M/R) in spine `[0, b)`, from the heap prefix sums.
     #[inline]
     pub fn green_before(&self, b: u32) -> u32 {
-        self.heap.green_pre[self.heap_rank(b) as usize]
+        self.dom.heap.green_pre[self.heap_rank(b) as usize]
     }
 
     /// Free marks (F/R) in spine `[0, b)`.
     #[inline]
     pub fn red_before(&self, b: u32) -> u32 {
-        self.heap.red_pre[self.heap_rank(b) as usize]
+        self.dom.heap.red_pre[self.heap_rank(b) as usize]
     }
 
     #[inline]
     pub fn id(&self, e: u32) -> u64 {
-        self.heap.id[self.hr(e)]
+        self.dom.heap.id[self.hr(e)]
     }
 
     #[inline]
     pub fn addr(&self, e: u32) -> u64 {
-        self.heap.addr[self.hr(e)]
+        self.dom.heap.addr[self.hr(e)]
     }
 
     #[inline]
     pub fn size(&self, e: u32) -> u64 {
-        self.heap.size[self.hr(e)]
+        self.dom.heap.size[self.hr(e)]
     }
 
     /// Site intern index of heap record `e` (NONE_U32 = absent).
     #[inline]
     pub fn site(&self, e: u32) -> u32 {
-        self.heap.site[self.hr(e)]
+        self.dom.heap.site[self.hr(e)]
     }
 
     /// For F/R: the creator `e` kills (NONE_U32 = unresolved).
     #[inline]
     pub fn target(&self, e: u32) -> u32 {
-        self.heap.target[self.hr(e)]
+        self.dom.heap.target[self.hr(e)]
     }
 
     /// For M/R: the event that kills `e` (NONE_U32 = never freed).
     #[inline]
     pub fn death(&self, e: u32) -> u32 {
-        self.heap.death[self.hr(e)]
+        self.dom.heap.death[self.hr(e)]
     }
 
     /// Usable-size hint for event `e` (0 = absent). Lazy column: empty means
     /// no event in the trace carried the hint.
     #[inline]
     pub fn usable_at(&self, e: u32) -> u64 {
-        if self.heap.usable.is_empty() {
+        if self.dom.heap.usable.is_empty() {
             0
         } else {
-            self.heap.usable[self.hr(e)]
+            self.dom.heap.usable[self.hr(e)]
         }
     }
 
     /// Stack intern index for event `e` (NONE_U32 = absent). Lazy column.
     #[inline]
     pub fn stack_at(&self, e: u32) -> u32 {
-        if self.heap.stack.is_empty() {
+        if self.dom.heap.stack.is_empty() {
             NONE_U32
         } else {
-            self.heap.stack[self.hr(e)]
+            self.dom.heap.stack[self.hr(e)]
         }
     }
 
-    /// Label intern index for event `e` (NONE_U32 = absent, or not a heap
-    /// record). Lazy column: only a trace carrying custom events
-    /// materializes it.
+    /// Title intern index of mark record `e` (NONE_U32 = untitled, or not
+    /// a mark); the title is `dom.marks.labels[i]`.
     #[inline]
     pub fn label_at(&self, e: u32) -> u32 {
-        if self.heap.label.is_empty() {
-            return NONE_U32;
-        }
-        self.heap_row(e).map_or(NONE_U32, |h| self.heap.label[h])
+        crate::domain::marks::row(self, e).map_or(NONE_U32, |r| self.dom.marks.label[r as usize])
     }
 
     /// Extra-fields intern index for heap record `e` (NONE_U32 = absent, or
     /// not a heap record — another domain keeps its own fields). Lazy column.
     #[inline]
     pub fn extra_at(&self, e: u32) -> u32 {
-        if self.heap.extra.is_empty() {
+        if self.dom.heap.extra.is_empty() {
             return NONE_U32;
         }
-        self.heap_row(e).map_or(NONE_U32, |h| self.heap.extra[h])
+        self.heap_row(e).map_or(NONE_U32, |h| self.dom.heap.extra[h])
     }
 
     /// Old (addr, size) geometry of the allocation an R event replaced;
@@ -588,7 +609,7 @@ impl Store {
     /// Total creator events, from the prefix sum the parser already built.
     #[inline]
     pub fn creator_count(&self) -> u32 {
-        self.heap.green_pre.last().copied().unwrap_or(0)
+        self.dom.heap.green_pre.last().copied().unwrap_or(0)
     }
 
     /// Tagged creators per tag id, with index 0 flipped to the **untagged**
