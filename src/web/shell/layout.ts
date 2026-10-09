@@ -329,7 +329,8 @@ function init(hostEl: any, eng: Engine) {
     },
   });
   for (const e of EDGES) {
-    api.addEdgeGroup(e, { id: edgeGroupId(e), initialSize: EDGE_SIZE[e], collapsed: true });
+    const g = api.addEdgeGroup(e, { id: edgeGroupId(e), initialSize: EDGE_SIZE[e], collapsed: true });
+    g.onDidCollapsedChange?.(later);
     api.setEdgeGroupVisible(e, false);
   }
   api.onDidAddPanel(later);
@@ -430,7 +431,7 @@ function setEdgeCollapsed(e: Edge, collapsed: boolean) {
   if (collapsed) g.api.collapse();
   else g.api.expand();
   // its windows come into sight or go out of it
-  later();
+  sync();
 }
 
 // An edge group with nothing in it is hidden — except during a drag, when it
@@ -446,7 +447,7 @@ function syncEdges() {
       if (!edgeGroup(e)?.api.isCollapsed()) edgeGroup(e)?.api.collapse();
     } else if (edgeWasEmpty[e]) {
       edgeWasEmpty[e] = false;
-      setEdgeCollapsed(e, false);
+      edgeGroup(e)?.api.expand(); // (no sync: this is part of one)
     }
   }
 }
@@ -551,8 +552,11 @@ function withBatch<T>(fn: () => T): T {
 // ---------------------------------------------------------------------------
 // placing
 
+// The box floating positions are measured from: the grid between the edge
+// groups (Dockview's own root), or the whole dock before it has one.
 function hostRect() {
-  const r = host?.getBoundingClientRect?.();
+  const grid = host?.querySelector?.('.dv-dockview');
+  const r = (grid || host)?.getBoundingClientRect?.();
   return r && r.width ? r : { left: 0, top: 0, width: innerWidth, height: innerHeight };
 }
 

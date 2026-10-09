@@ -124,12 +124,15 @@ test('a toggle brings an open window that is out of sight to the front, and clos
   layout.toggle('b-panel');
   assert.equal(layout.isOpen('b-panel'), false);
 
-  // a collapsed edge: the toolbar toggle expands it rather than closing
+  // a collapsed edge: the toolbar toggle expands it rather than closing, and
+  // the window coming back into sight runs its open hooks (a list catches up)
   api.getGroup('edge-right').api.collapse();
   assert.equal(layout.isShown('a-panel'), false);
+  opened.length = 0;
   toggleBtn.onclick();
   assert.equal(layout.isOpen('a-panel'), true);
   assert.equal(api.getGroup('edge-right').api.isCollapsed(), false);
+  assert.deepEqual(opened, ['a']);
   toggleBtn.onclick();
   assert.equal(layout.isOpen('a-panel'), false);
 });
