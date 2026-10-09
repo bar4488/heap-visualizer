@@ -180,7 +180,8 @@ impl DictCol {
     fn value(self, id: usize, s: &Store, fv: &FieldValues) -> Value {
         match self {
             DictCol::Site => Value::String(s.sites[id].clone()),
-            DictCol::Thread => Value::Int(s.thrs[id] as i128),
+            // a process track's placeholder `thr` is no thread
+            DictCol::Thread => s.track_thr(id as u16).map_or(Value::Missing, |t| Value::Int(t as i128)),
             DictCol::Stack => Value::String(s.stacks[id].clone()),
             DictCol::Field { key, .. } => fv.at(key, id as u32),
         }
@@ -191,10 +192,7 @@ impl DictCol {
     #[inline]
     fn num_at(self, s: &Store, fv: &FieldValues, h: u32) -> Option<Num> {
         match self {
-            DictCol::Thread => match s.thr_idx[s.heap_seq(h as usize) as usize] {
-                NONE_U16 => None,
-                t => Some(Num::Int(s.thrs[t as usize] as i128)),
-            },
+            DictCol::Thread => s.track_thr(s.thr_idx[s.heap_seq(h as usize) as usize]).map(|t| Num::Int(t as i128)),
             DictCol::Field { key, .. } => match fv.at_ref(key, custom_fragment_of(self, s, h)) {
                 Some(Value::Int(v)) => Some(Num::Int(*v)),
                 Some(Value::Float(v)) => Some(Num::Float(*v)),

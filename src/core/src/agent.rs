@@ -9,7 +9,7 @@ use crate::filter_eval::{self, Ctx, FieldValues};
 use crate::filter_plan;
 use crate::domain::{self, param_error, RecordParams};
 use crate::logs::{self as log_domain, LEVEL_NAMES};
-use crate::store::{warn_code_name, Store, NONE_U16, NONE_U32, OP_F, OP_M, OP_R};
+use crate::store::{warn_code_name, Store, NONE_U32, OP_F, OP_M, OP_R};
 use crate::{project_analysis, App};
 
 #[derive(Clone, Debug, Serialize)]
@@ -327,11 +327,7 @@ pub(crate) fn summarize(
             } else {
                 "(none)".into()
             }],
-            "thread" => vec![if app.store.thr_idx[i] != NONE_U16 {
-                app.store.thrs[app.store.thr_idx[i] as usize].to_string()
-            } else {
-                "(none)".into()
-            }],
+            "thread" => vec![app.store.track_thr(app.store.thr_idx[i]).map_or_else(|| "(none)".into(), |t| t.to_string())],
             "freed" => vec![if app.store.death(event) != NONE_U32 {
                 "freed".into()
             } else {
@@ -655,6 +651,15 @@ fn event_value(app: &App, event: u32) -> Value {
                 "level": item["level"], "logger": item["logger"], "msg": item["msg"], "fields": item["fields"],
             });
         }
+        domain::INTERVALS => {
+            let d = domain::interval::view(store);
+            let row = store.dom.intervals.edges.row_at_or_after(event);
+            let item = domain::Domain::agent_item(&d, row);
+            return json!({
+                "seq": event, "time": store.t[i].to_string(), "operation": item["kind"], "title": item["title"],
+                "category": item["source"], "thr": item["thr"], "interval": item["interval"],
+            });
+        }
         _ => return json!({ "seq": event, "time": store.t[i].to_string(), "operation": op_name(store.op[i]) }),
     }
     let creator = if store.op[i] == OP_F {
@@ -689,14 +694,30 @@ impl Default for ContextOptions {
     }
 }
 
+/// [`ContextOptions`] plus interval edges (`includeIntervals`, default
+/// false; excluded edges are counted in `omitted.intervals`). A separate
+/// type so a transport that builds `ContextOptions` keeps compiling.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ContextInclude {
+    pub options: ContextOptions,
+    pub intervals: bool,
+}
+
+impl From<ContextOptions> for ContextInclude {
+    fn from(options: ContextOptions) -> Self {
+        ContextInclude { options, intervals: false }
+    }
+}
+
 pub(crate) fn stream_context(
     app: &App,
     source: &str,
     center: u32,
     before: u32,
     after: u32,
-    options: ContextOptions,
+    include: ContextInclude,
 ) -> Result<Value, Error> {
+    let options = include.options;
     let bits = matches(app, source)?;
     let store = &app.store;
     let from = center.saturating_sub(before);
@@ -705,6 +726,7 @@ pub(crate) fn stream_context(
         .saturating_add(1)
         .min(store.len());
     let mut omitted_logs = 0u32;
+    let mut omitted_intervals = 0u32;
     let events: Vec<_> = (from..to)
         .filter(|&event| {
             let i = event as usize;
@@ -714,6 +736,10 @@ pub(crate) fn stream_context(
                 domain::LOGS => {
                     omitted_logs += (!options.logs) as u32;
                     return options.logs;
+                }
+                domain::INTERVALS => {
+                    omitted_intervals += (!include.intervals) as u32;
+                    return include.intervals;
                 }
                 _ => return false,
             }
@@ -730,8 +756,15 @@ pub(crate) fn stream_context(
         .map(|event| event_value(app, event))
         .collect();
     let mut value = json!({ "range": { "from": from, "to": to }, "events": events });
-    if omitted_logs > 0 {
-        value["omitted"] = json!({ "logs": omitted_logs });
+    if omitted_logs > 0 || omitted_intervals > 0 {
+        let mut omitted = serde_json::Map::new();
+        if omitted_logs > 0 {
+            omitted.insert("logs".into(), json!(omitted_logs));
+        }
+        if omitted_intervals > 0 {
+            omitted.insert("intervals".into(), json!(omitted_intervals));
+        }
+        value["omitted"] = Value::Object(omitted);
     }
     Ok(value)
 }

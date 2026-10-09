@@ -29,6 +29,7 @@ use serde_json::{json, Value};
 
 use super::point::{contains_ci, PointStore};
 use super::*;
+pub use super::interval_window::{Axis, Window, WindowRequest, WindowTrack, WindowTree, WINDOW_ROWS_MAX};
 
 pub const CAT_SCHED: u8 = 0;
 pub const CAT_CALL: u8 = 1;
@@ -109,6 +110,13 @@ pub struct IntervalStore {
     span_tree: Vec<u32>,
     /// Begin index per CPU: its run slices, by begin.
     pub cpus: BTreeMap<u16, Vec<u32>>,
+    /// Begin index per spine track: the spans begun on it.
+    pub track_spans: BTreeMap<u16, Vec<u32>>,
+    /// Window trees over `calls`, `track_spans` and `cpus` (IVL-008), built
+    /// at finish.
+    pub call_win: BTreeMap<u16, WindowTree>,
+    pub span_win: BTreeMap<u16, WindowTree>,
+    pub cpu_win: BTreeMap<u16, WindowTree>,
     pub by_cat: [u32; NCAT],
 }
 
@@ -422,6 +430,7 @@ impl Builder {
         let i = Self::new_interval(st, CAT_SPAN, track as u32, e, depth as u16, parent, label);
         st.span[i as usize] = sid;
         st.spans.push(i);
+        st.track_spans.entry(track).or_default().push(i);
         self.open_spans.insert(id.to_string(), i);
         self.last_span.insert(id.to_string(), i);
         i
@@ -485,6 +494,13 @@ impl Builder {
             }
         }
         s.dom.intervals.build_span_tree();
+        let st = &s.dom.intervals;
+        let build = |lists: &BTreeMap<u16, Vec<u32>>| -> BTreeMap<u16, WindowTree> {
+            lists.iter().map(|(&k, list)| (k, WindowTree::build(s, st, list))).collect()
+        };
+        let (calls, spans, cpus) = (build(&st.calls), build(&st.track_spans), build(&st.cpus));
+        let st = &mut s.dom.intervals;
+        (st.call_win, st.span_win, st.cpu_win) = (calls, spans, cpus);
     }
 }
 
@@ -821,14 +837,19 @@ impl<'a> IntervalView<'a> {
         json!({ "applied": applied, "threads": threads, "spans": spans, "cpus": cpus })
     }
 
-    /// Thread tracks that carry calls, and CPUs, for the descriptor.
-    fn tracks_value(&self) -> Value {
+    /// Thread tracks that carry calls or begin spans, and CPUs: the
+    /// descriptor's `tracks` and `hp_tracks_json` (IVL-008).
+    pub fn tracks_value(&self) -> Value {
         let (s, st) = (self.s, self.st());
-        let threads: Vec<Value> = st
-            .calls
-            .iter()
-            .map(|(&track, list)| {
-                let mut v = json!({ "thr": s.track_thr(track), "name": self.track_label(track), "calls": list.len() });
+        let mut keys: Vec<u16> = st.calls.keys().chain(st.track_spans.keys()).copied().collect();
+        keys.sort_unstable();
+        keys.dedup();
+        let threads: Vec<Value> = keys
+            .into_iter()
+            .map(|track| {
+                let calls = st.calls.get(&track).map_or(0, Vec::len);
+                let spans = st.track_spans.get(&track).map_or(0, Vec::len);
+                let mut v = json!({ "thr": s.track_thr(track), "name": self.track_label(track), "calls": calls, "spans": spans });
                 if let Some(pid) = s.track_pid_of(track) {
                     v["pid"] = json!(pid);
                 }
@@ -837,6 +858,29 @@ impl<'a> IntervalView<'a> {
             .collect();
         let cpus: Vec<Value> = st.cpus.iter().map(|(&cpu, list)| json!({ "cpu": cpu, "slices": list.len() })).collect();
         json!({ "threads": threads, "cpus": cpus })
+    }
+
+    /// The window document for a JSON request (IVL-008): `{rows, culled,
+    /// truncated}`, or `{rows: [], culled: 0, truncated: false, error}`.
+    pub fn window_json(&self, request: &Value, out: &mut String) {
+        let req = match WindowRequest::parse(self.s, request) {
+            Ok(req) => req,
+            Err(error) => {
+                *out = json!({ "rows": [], "culled": 0, "truncated": false, "error": error }).to_string();
+                return;
+            }
+        };
+        let w = super::interval_window::window(self.s, &req);
+        out.clear();
+        out.reserve(w.rows.len() * 160);
+        out.push_str("{\"rows\":[");
+        for (k, &(i, lane)) in w.rows.iter().enumerate() {
+            if k > 0 {
+                out.push(',');
+            }
+            super::interval_window::push_row(out, self.s, self.st(), req.axis, i, lane, |t| self.track_label(t));
+        }
+        out.push_str(&format!("],\"culled\":{},\"truncated\":{}}}", w.culled, w.truncated));
     }
 }
 
@@ -874,6 +918,10 @@ impl Domain for IntervalView<'_> {
                 "textBytes": TEXT_MAX, "depth": DEPTH_MAX, "openSpans": OPEN_SPANS_MAX, "cpus": CPU_MAX,
             },
         })
+    }
+
+    fn query_params(&self) -> &'static [&'static str] {
+        &["category", "thr", "pid", "cpu", "text", "minDur", "seqLo", "seqHi"]
     }
 
     fn count(&self) -> u32 {

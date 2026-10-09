@@ -100,8 +100,10 @@ Two layers, both rows only for interval records:
   and flags (idle, implicitly closed, double run).
 
 Load-time **begin indexes**, each a subsequence of interval order and so
-sorted by begin: the call frames per track, every span, and the run slices
-per CPU; plus a max-end segment tree over the span list.
+sorted by begin: the call frames per track, every span, the spans begun on
+each track, and the run slices per CPU; plus a max-end segment tree over the
+span list, and a window tree over each per-track and per-CPU index
+([IVL-008](#ivl-008-the-window)).
 
 ## IVL-004: Limits and unclosed intervals
 
@@ -164,9 +166,8 @@ are unique across domains
 The domain is `intervals`, with kinds `begin` (`B`), `end` (`X`) and
 `switch` (`C`), and descriptor `shape` `interval`. Besides DOM-004's keys
 its descriptor carries `intervals` (the interval count), `categories`
-(`["sched","call","span"]`), `byCategory`, `tracks` (`{threads:[{thr, pid?,
-name, calls}], cpus:[{cpu, slices}]}`), and `limits` adding `depth`,
-`openSpans` and `cpus`.
+(`["sched","call","span"]`), `byCategory`, `tracks` (IVL-008's tracks
+document), and `limits` adding `depth`, `openSpans` and `cpus`.
 
 - **Rows** (count, row ↔ seq, generic summary, Events-list row) are edges.
   An edge's summary `title` shows the edge: `→ name`, `← name`,
@@ -192,6 +193,72 @@ name, calls}], cpus:[{cpu, slices}]}`), and `limits` adding `depth`,
   page takes `category`, `thr`, `pid`, `cpu`, `text` and `minDur`.
   `agent_item` of an edge row is its summary plus the `interval` it begins
   or ends.
+- **Stream context** (`Engine::agent_stream_context_with`, API-008) returns
+  interval edges only when asked (`ContextInclude { intervals: true }`,
+  the transport's `includeIntervals`, default false), as `{seq, time,
+  operation: begin|end|switch, title, category, thr, interval}`; excluded
+  edges are counted in `omitted.intervals`, as excluded logs are in
+  `omitted.logs`. The local server does not pass the flag yet.
+
+## IVL-008: The window
+
+The data behind a flame chart or a CPU track: one track's intervals
+overlapping a viewport, culled to what is wide enough to draw.
+
+**`hp_interval_window(len)`** (JSON in the shared buffer, result through
+`hp_ret`; natively `Engine::interval_window_json(request)`, and
+`Engine::interval_window(&Value)` for the rows as data):
+
+```json
+{"track": {"thr": 1, "pid": 7}, "axis": "t", "lo": 1000, "hi": 2000, "width": 1600, "category": "call"}
+```
+
+- `track` is `{thr, pid?}` (a thread; `thr: null` with a `pid` is that
+  process's track), or `{cpu}`. A track the trace does not have answers an
+  empty window.
+- `axis` is `seq` (spine position) or `t` (trace time); `lo` ≤ `hi` are in
+  axis units, `width` > 0 in device pixels. `category` (`sched`, `call`,
+  `span`) optionally keeps one list.
+- Any other key, a bad `axis`, `hi` < `lo`, a non-positive `width` or an
+  unknown `category` answers `{rows: [], culled: 0, truncated: false,
+  error}`.
+
+The answer is `{rows, culled, truncated}`. Each row is `{ivl, name,
+category, lane, depth, seq, start, end, open, thr, pid?, …}`, where `seq`
+is the spine index of the interval's begin edge (its `B` or `C`), so a
+click on either axis can seek exactly to it:
+
+- On a thread track the rows are its **calls** (`lane: "call"`, `depth` the
+  stack depth) and then the **spans begun on it** (`lane: "span"`, `depth`
+  the span tree's depth, plus `span`) — a renderer draws the span lanes
+  below the deepest call lane; spans at one depth may overlap. A CPU
+  track's rows are its **run slices** (`lane: "slice"`, `depth` 0) with
+  `cpu`, `idle`, and the running thread's `thr` and label as `name`
+  (`"idle"` and `thr: null` when idle).
+- `start`/`end` are the begin and end in axis units — seqs, or trace times
+  as numbers. An open interval (or a CPU's last slice) ends at the trace
+  end: seq = the record count, t = the last timestamp; `open` says so.
+- A row is included when it overlaps the window (`start` ≤ `hi` and `end` ≥
+  `lo`). Within a lane rows are in begin order.
+- An overlapping interval whose visible part, `min(end, hi) − max(start,
+  lo)`, projects to under 0.5 px (`(hi − lo) / width` axis units per pixel)
+  is **culled** and counted in `culled` instead. With `hi = lo` nothing is
+  culled.
+- At most 20,000 rows: the row that would exceed the cap sets `truncated`
+  and ends the answer (`culled` then counts only what was visited first).
+
+Cost: no scan of the trace. Each per-track or per-CPU begin index carries a
+segment tree over blocks of 16 intervals holding each node's latest end and
+widest interval on both axes. A query binary-searches the intervals
+beginning at or before `hi`, skips nodes ending before `lo`, and counts as
+culled without opening it any node whose intervals all begin inside the
+window and are all narrower than the cull width — O((v + 1) log n) for v
+drawn intervals.
+
+**`hp_tracks_json()`** (natively `Engine::tracks_json()`) is the descriptor's
+`tracks`: `{threads: [{thr, pid?, name, calls, spans}], cpus: [{cpu,
+slices}]}` — every track with calls or spans begun on it, by track, with
+its `T` name or `thread N`/`process N`, and every CPU with a slice.
 
 ## IVL-UI: The interval panels
 

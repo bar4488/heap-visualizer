@@ -53,6 +53,10 @@ impl Domain for HeapView<'_> {
         })
     }
 
+    fn query_params(&self) -> &'static [&'static str] {
+        &["seqLo", "seqHi"]
+    }
+
     fn count(&self) -> u32 {
         self.0.heap_len()
     }

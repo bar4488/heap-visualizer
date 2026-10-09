@@ -983,8 +983,8 @@ pub fn alloc_info(
         out.push_str("null");
     }
     out.push_str(",\"thr\":");
-    if s.thr_idx[ei] != NONE_U16 {
-        out.push_str(&format!("{}", s.thrs[s.thr_idx[ei] as usize]));
+    if let Some(thr) = s.track_thr(s.thr_idx[ei]) {
+        out.push_str(&thr.to_string());
     } else {
         out.push_str("null");
     }
