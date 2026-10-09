@@ -169,13 +169,38 @@ input { font-family: ui-monospace, monospace; }
   --dv-tabs-and-actions-container-font-size: 12px;
   --dv-floating-border: 1px solid var(--border);
   --dv-floating-box-shadow: 0 10px 30px rgba(0,0,0,0.6);
-  --dv-floating-titlebar-height: 10px;
   --dv-context-menu-background-color: var(--bg2);
   --dv-context-menu-color: var(--fg);
   color: var(--fg);
 }
 #dock .dv-default-tab { font-weight: 600; }
 #dock .dv-tab:focus-visible, #dock .dock-action:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+
+/* A floating window. It moves by the empty part of its tab strip (the shell
+   sets the engine's drag handle to the strip), so that reads as a handle. Its
+   edges resize it: the engine's handles are 4px, straddling the frame, and
+   sit at a z-index taken from a custom property its own stylesheet defines
+   in terms of itself, which makes it invalid — so the window's content
+   painted over them and caught the pointer. Wider, and above the content. */
+#dock .dv-resize-container .dv-void-container { cursor: move; }
+#dock .dv-resize-container.dv-resize-container-dragging .dv-void-container { cursor: grabbing; }
+#dock .dv-resize-container > [class^='dv-resize-handle-'] { z-index: 5; }
+#dock .dv-resize-container > .dv-resize-handle-top,
+#dock .dv-resize-container > .dv-resize-handle-bottom { height: 8px; }
+#dock .dv-resize-container > .dv-resize-handle-top { top: -4px; }
+#dock .dv-resize-container > .dv-resize-handle-bottom { bottom: -4px; }
+#dock .dv-resize-container > .dv-resize-handle-left,
+#dock .dv-resize-container > .dv-resize-handle-right { width: 8px; }
+#dock .dv-resize-container > .dv-resize-handle-left { left: -4px; }
+#dock .dv-resize-container > .dv-resize-handle-right { right: -4px; }
+#dock .dv-resize-container > .dv-resize-handle-topleft,
+#dock .dv-resize-container > .dv-resize-handle-topright,
+#dock .dv-resize-container > .dv-resize-handle-bottomleft,
+#dock .dv-resize-container > .dv-resize-handle-bottomright { width: 12px; height: 12px; z-index: 6; }
+#dock .dv-resize-container > .dv-resize-handle-topleft { top: -5px; left: -5px; }
+#dock .dv-resize-container > .dv-resize-handle-topright { top: -5px; right: -5px; }
+#dock .dv-resize-container > .dv-resize-handle-bottomleft { bottom: -5px; left: -5px; }
+#dock .dv-resize-container > .dv-resize-handle-bottomright { bottom: -5px; right: -5px; }
 
 /* the buttons at the end of a tab strip: collapse an edge, maximize a group */
 .dock-actions { display: flex; align-items: center; height: 100%; padding: 0 4px; }

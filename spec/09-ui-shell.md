@@ -134,9 +134,10 @@ Dragging a tab rearranges it: onto another group's tab strip or center makes it
 a tab there, onto a group's edge splits that group, onto the outer edge of the
 grid splits the whole grid. Holding Shift while dragging (or the tab's context
 menu → Float) floats a panel in its own **floating group**, which moves by its
-title bar and resizes from its edges. A grid group can be **maximized** (its
-header button or the tab menu) to fill the dock, and restored. Panels never
-leave the page: there are no popout windows.
+title bar — the empty part of its tab strip — and resizes from its edges and
+corners; dragging its tab (or Shift-dragging the strip) docks it. A grid group
+can be **maximized** (its header button or the tab menu) to fill the dock, and
+restored. Panels never leave the page: there are no popout windows.
 
 Around the grid are three **edge groups** — left, right, bottom:
 
@@ -181,14 +182,30 @@ default. It is written back in the current shape.
 ## SHELL-005: The allocation window lifecycle
 
 One **live** Allocation panel follows selection (click, step, search-jump).
-**Pinning** (📌) detaches the current window in place — the pinned window takes
-the live window's place in the dock, identical chrome, the orange pin the only
-tell — and the next selection opens a fresh live panel, cascade-placed to
-avoid landing on pinned ones. Selecting an
+While it is open it stays exactly where it is — a new selection changes its
+content, never its place or size. **Pinning** (📌) detaches the current window
+in place — the pinned window takes the live window's place in the dock at the
+same position and size, identical chrome, the orange pin the only tell — and
+the next selection opens a fresh live panel placed from scratch. Selecting an
 already-pinned allocation raises its window instead of duplicating it.
 Unpinning returns the window's content to the live panel, in the pinned
-window's place. Pinned windows dock like any other window and are restored
-from the session by creator event index, each into its saved slot.
+window's place (moving the live panel there if it is open elsewhere). Pinned
+windows dock like any other window and are restored from the session by
+creator event index, each into its saved slot — a floating one at its saved
+position and size.
+
+**Placing a floating window from scratch.** A live panel that floats from
+scratch (its first opening, or after a pin) opens at its declared float size
+**beside the selection** it shows — to the right of the clicked point, else
+the left, below, above — never covering that point. It takes the nearest spot
+that overlaps no other floating window. When the workspace has no such spot,
+it **cascades**: it goes where it hides least of the other floating windows,
+above all their title strips, then the selection, then their bodies, as near
+its preferred spot as that allows. A selection with no point (a step, a
+search jump) places it at the workspace's bottom-left on the same terms. Any
+window floated from its tab menu is placed the same way, from its own corner.
+A plain close (×, Escape) is not a fresh start: the live panel reopens where
+the user left it.
 
 The window can insert `allocation(<id>).` at the Filter editor's current
 selection and open contextual completion. This writes source only—it neither
@@ -261,8 +278,8 @@ the panels that are consulted continuously already docked and open:
   records that condition beside the panel's home and open state.
 - **Floating and closed**: Play, Warnings, Allocation and its pinned clones.
   Play is a window a user opens for a moment and dismisses; Warnings only
-  exists when the trace has any; Allocation follows selection and floats at
-  the workspace's bottom-left, cascading past pinned windows
+  exists when the trace has any; Allocation follows selection and floats
+  beside the selection, clear of other floating windows
   ([SHELL-005](#shell-005-the-allocation-window-lifecycle)).
 
 A restored session overrides this **wholly**, not as a patch on top of it.

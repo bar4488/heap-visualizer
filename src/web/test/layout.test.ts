@@ -232,6 +232,36 @@ test('serialize -> restore puts every window back, and a saved pinned window kee
   assert.deepEqual(edgeIds('left'), ['l-panel']);
 });
 
+test('a transient window a session saw open, but that is closed now, is not restored (no empty window)', () => {
+  layout.resetLayout();
+  layout.open('t-panel', '', { dock: 'left' });
+  const saved = layout.serialize();
+  layout.close('t-panel');
+  layout.restore(JSON.parse(JSON.stringify(saved)));
+  assert.equal(layout.isOpen('t-panel'), false);
+  assert.deepEqual(edgeIds('left'), ['l-panel']);
+  // open now, it stays open across the restore
+  layout.open('t-panel', '', { dock: 'left' });
+  layout.restore(JSON.parse(JSON.stringify(saved)));
+  assert.equal(layout.isOpen('t-panel'), true);
+  layout.close('t-panel');
+});
+
+test('opening an open window in another window\'s place moves it there (unpin into the live window)', () => {
+  layout.resetLayout();
+  layout.open('t-panel', '', { at: { left: 50, top: 60 } });
+  layout.open('pin', '5', { at: { left: 400, top: 300 } });
+  const place = layout.placeOf('pin', '5');
+  layout.close('pin', '5');
+  layout.open('t-panel', '', { place });
+  const box = api.getPanel('t-panel').group.api.boundingBox;
+  assert.deepEqual([box.left, box.top], [400, 300]);
+  // without a place, an open window stays where it is
+  layout.open('t-panel');
+  assert.equal(api.getPanel('t-panel').group.api.boundingBox.left, 400);
+  layout.close('t-panel');
+});
+
 test('a restore cannot lose the view that must always exist, and a broken one falls back to the default', () => {
   layout.resetLayout();
   const saved = layout.serialize();
