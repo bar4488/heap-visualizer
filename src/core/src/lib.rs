@@ -844,7 +844,7 @@ pub extern "C" fn hp_filter_apply(len: u32) {
             return;
         }
     };
-    let mut bits = vec![0u64; (a.store.len() as usize).div_ceil(64)];
+    let mut bits = vec![0u64; a.store.row_words()];
     let matches = filter_plan::scan(&plan, &ctx, &mut bits);
     let creators = plan.creator_count();
     let mode = a.cfg.filter.mode;
@@ -985,13 +985,10 @@ fn tag_filter_matches(a: &mut App, tag: u32) -> u32 {
     let Some(bits) = a.cfg.filter.matches.as_ref() else {
         return 0;
     };
-    let to_tag: Vec<u32> = (0..a.store.len())
-        .filter(|&e| {
-            matches!(a.store.op[e as usize], OP_M | OP_R)
-                && bits
-                    .get(e as usize / 64)
-                    .is_some_and(|word| word & (1 << (e % 64)) != 0)
-        })
+    let to_tag: Vec<u32> = a
+        .store
+        .row_bits_events(bits)
+        .filter(|&e| matches!(a.store.op[e as usize], OP_M | OP_R))
         .collect();
     let tag = tag.min(255) as u8;
     for &e in &to_tag {
@@ -1018,7 +1015,7 @@ fn tag_seq_range(a: &mut App, lo: u32, hi: u32, tag: u32, by_free: u32) -> u32 {
         let s = &a.store;
         let f = &a.cfg.filter;
         let filtered = f.mode != render::FILTER_OFF;
-        (lo..hi.min(s.len()))
+        s.heap_events(lo, hi)
             .filter_map(|e| {
                 let op = s.op[e as usize];
                 if by_free != 0 {
@@ -1132,9 +1129,17 @@ pub extern "C" fn hp_tags_clear() {
 pub extern "C" fn hp_retag(from: u32, to: u32) -> u32 {
     let a = unsafe { &mut *app() };
     let (from, to) = (from.min(255) as u8, to.min(255) as u8);
-    let events: Vec<u32> = (0..a.store.len())
-        .filter(|&e| a.store.has_tag(e, from))
-        .collect();
+    let s = &a.store;
+    // a tag's members are its bitset over heap rows; tag 0 (untagged) has no
+    // bitset, so it alone walks the heap rows
+    let events: Vec<u32> = match (from, s.tag_members.get(from as usize)) {
+        (0, _) => (0..s.heap_len() as usize)
+            .map(|h| s.heap_seq(h))
+            .filter(|&e| s.has_tag(e, 0))
+            .collect(),
+        (_, Some(bits)) => s.row_bits_events(bits).collect(),
+        (_, None) => Vec::new(),
+    };
     for &e in &events {
         a.store.remove_tag(e, from);
         if to != 0 {
@@ -1154,11 +1159,10 @@ pub extern "C" fn hp_tags_dump_json() {
 }
 
 fn tags_dump_json(s: &Store, o: &mut String) {
+    // each tag's bitset over heap rows, read back as ascending spine indexes
     let mut lists: Vec<Vec<u32>> = vec![Vec::new(); 256];
-    for e in 0..s.len() {
-        for t in s.tag_ids(e) {
-            lists[t as usize].push(e);
-        }
+    for (t, bits) in s.tag_members.iter().enumerate().skip(1) {
+        lists[t] = s.row_bits_events(bits).collect();
     }
     o.clear();
     o.push('{');
@@ -1550,17 +1554,14 @@ fn query_json(a: &App, source: &str, from: u32, count: u32) -> String {
             Ok(plan) => plan,
             Err(error) => return query_diagnostic(&error.message, error.span.start, error.span.end),
         };
-        let mut found = vec![0_u64; (a.store.len() as usize).div_ceil(64)];
+        let mut found = vec![0_u64; a.store.row_words()];
         filter_plan::scan(&plan, &context, &mut found);
         bits = Some(found);
     }
-    let matches: Vec<u32> = (0..a.store.len())
-        .filter(|&e| matches!(a.store.op[e as usize], OP_M | OP_R))
-        .filter(|&e| {
-            bits.as_ref().is_none_or(|found| {
-                found[e as usize / 64] & (1_u64 << (e % 64)) != 0
-            })
-        })
+    // the scan is already intersected with the creators
+    let matches: Vec<u32> = a
+        .store
+        .row_bits_events(bits.as_deref().unwrap_or(&a.store.heap.creators))
         .collect();
     let lo = (from as usize).min(matches.len());
     let hi = lo.saturating_add(count as usize).min(matches.len());
@@ -1641,21 +1642,34 @@ fn ensure_ev_filtered(a: &mut App) {
     a.ev_dirty = false;
     let s = &a.store;
     let f = &a.cfg.filter;
+    // Membership is decided in heap rows: a log record has no allocation to
+    // pass a filter (the filter language is over allocations, DOM-003), so
+    // the walk never visits another domain's records, and the record kind is
+    // read off the heap prefix sums rather than the spine's op column.
+    let (green, red) = (&s.heap.green_pre, &s.heap.red_pre);
+    let pass = |h: usize| {
+        f.mode == render::FILTER_OFF
+            || f.matches.as_ref().is_none_or(|bits| {
+                bits.get(h / 64).is_some_and(|w| w & (1 << (h % 64)) != 0)
+            })
+    };
     let mut list = Vec::new();
-    for e in 0..s.len() {
-        // a custom event or a log record has no allocation to pass a filter,
-        // so it drops out of the filtered list exactly as an F of an unknown
-        // id does (the filter language is over allocations, DOM-003)
-        if matches!(s.op[e as usize], OP_E | OP_L) {
-            continue;
-        }
-        let creator = if s.op[e as usize] == OP_F {
-            s.target(e)
+    for h in 0..s.heap_len() as usize {
+        // a creator (M/R) passes as itself and an F as the allocation it
+        // frees; a custom event (neither mark) has no allocation and drops
+        // out exactly as an F of an unknown id does
+        let creator = if green[h + 1] != green[h] {
+            Some(h)
+        } else if red[h + 1] != red[h] {
+            match s.heap.target[h] {
+                NONE_U32 => None,
+                t => Some(s.heap_rank(t) as usize),
+            }
         } else {
-            e
+            None
         };
-        if creator != NONE_U32 && f.pass(s, creator) {
-            list.push(e);
+        if creator.is_some_and(pass) {
+            list.push(s.heap_seq(h));
         }
     }
     a.ev_filtered = list;
@@ -1887,16 +1901,19 @@ mod tests {
         let full = base.with_fields(&fields);
         let plan =
             filter_plan::lower(&expr, &full).unwrap_or_else(|e| panic!("{source}: {}", e.message));
-        let mut bits = vec![0u64; (a.store.len() as usize).div_ceil(64).max(1)];
+        let mut bits = vec![0u64; a.store.row_words().max(1)];
         let matched = filter_plan::scan(&plan, &full, &mut bits);
 
+        // the oracle walks the spine and evaluates by spine index; the plan's
+        // bits are heap rows, so this is also the boundary conversion's test
         let mut oracle = vec![0u64; bits.len()];
         let mut counted = 0;
         for e in 0..a.store.len() {
             if matches!(a.store.op[e as usize], OP_M | OP_R)
                 && filter_eval::evaluate(&expr, &full, e).unwrap()
             {
-                oracle[e as usize / 64] |= 1 << (e % 64);
+                let h = a.store.heap_row(e).unwrap();
+                oracle[h / 64] |= 1 << (h % 64);
                 counted += 1;
             }
         }
@@ -1908,9 +1925,7 @@ mod tests {
     /// The creator events a source matches, through the plan.
     fn matching(a: &App, labels: &[String], source: &str) -> Vec<u32> {
         let bits = match_bits(a, labels, source);
-        (0..a.store.len())
-            .filter(|&e| bits[e as usize / 64] >> (e % 64) & 1 == 1)
-            .collect()
+        a.store.row_bits_events(&bits).collect()
     }
 
     fn tags(store: &Store) -> Vec<Vec<u8>> {
@@ -2086,7 +2101,7 @@ mod tests {
         let mut a = load(SAMPLE_WITH_EVENTS);
         a.cfg.filter.mode = render::FILTER_DIM;
         // every bit set, the custom events' included
-        a.cfg.filter.matches = Some(vec![u64::MAX; (a.store.len() as usize).div_ceil(64)]);
+        a.cfg.filter.matches = Some(vec![u64::MAX; a.store.row_words()]);
         a.ev_dirty = true;
         ensure_ev_filtered(&mut a);
         assert!(
@@ -3345,7 +3360,7 @@ not json at all
             let fields = filter_eval::FieldValues::resolve(&expr, &a.store);
             let full = base.with_fields(&fields);
             let plan = filter_plan::lower(&expr, &full).unwrap();
-            let mut bits = vec![0u64; (a.store.len() as usize).div_ceil(64).max(1)];
+            let mut bits = vec![0u64; a.store.row_words().max(1)];
 
             // everything that allocates — parsing, checking, resolving custom
             // fields, lowering, the output buffer — has happened by now
@@ -3494,6 +3509,48 @@ not json at all
             let hits = matching(&a, &labels, source).len();
             nonempty += usize::from(hits > 0);
             proper += usize::from(hits > 0 && hits < creators);
+        }
+
+        // The same corpus over the same heap records with a log line before
+        // every one: the plan runs in heap rows while `seq`, `time`, thread,
+        // death links and the oracle are spine-indexed, so every boundary
+        // conversion is exercised. Tags and the name follow the heap rows.
+        let mut mixed_src = String::new();
+        for (i, line) in src.lines().enumerate() {
+            if line.contains("\"op\":\"H\"") || line.trim().is_empty() || line.starts_with('#') {
+                mixed_src.push_str(line);
+            } else {
+                mixed_src.push_str(&format!(
+                    "{{\"op\":\"L\",\"thr\":{},\"msg\":\"before {i}\",\"size\":9}}\n{line}",
+                    i % 3
+                ));
+            }
+            mixed_src.push('\n');
+        }
+        let mut m = load(&mixed_src);
+        assert_eq!(m.store.heap_len(), a.store.heap_len());
+        assert!(m.store.n_log > 0 && !m.store.hrank.is_empty());
+        for e in 0..a.store.len() {
+            let me = m.store.heap_seq(e as usize);
+            for tag in a.store.tag_ids(e).collect::<Vec<_>>() {
+                m.store.add_tag(me, tag);
+            }
+        }
+        m.names = vec![(m.store.heap_seq(named as usize), "anchor".to_string())];
+        let ids = |app: &App, events: Vec<u32>| -> Vec<u64> {
+            events.into_iter().map(|e| app.store.id(e)).collect()
+        };
+        for source in corpus {
+            let mixed = matching(&m, &labels, source);
+            // positions differ between the traces, so only expressions that
+            // do not read one are expected to select the same allocations
+            if !source.contains(".seq") && !source.contains(".time") && !source.contains("lifetime") {
+                assert_eq!(
+                    ids(&m, mixed),
+                    ids(&a, matching(&a, &labels, source)),
+                    "`{source}` selects different allocations once logs are present"
+                );
+            }
         }
         // a corpus where everything matched nothing would pass the equivalence
         // assertion while testing nothing

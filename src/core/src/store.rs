@@ -172,6 +172,10 @@ pub struct HeapCols {
     // Always at least `[0]`.
     pub green_pre: Vec<u32>,
     pub red_pre: Vec<u32>,
+    /// Creator (M/R) membership by heap row, as a bitset: the mask every
+    /// allocation filter scan is intersected with. Built once at load so an
+    /// apply never re-derives it.
+    pub creators: Vec<u64>,
 }
 
 pub struct Store {
@@ -355,6 +359,52 @@ impl Store {
         self.heap.addr.len() as u32
     }
 
+    /// Heap rows whose records lie in spine `[lo, hi)` — two rank lookups, so
+    /// a range walk over heap records never visits another domain's records.
+    #[inline]
+    pub fn heap_rows(&self, lo: u32, hi: u32) -> std::ops::Range<usize> {
+        let hi = hi.min(self.len());
+        let lo = lo.min(hi);
+        self.heap_rank(lo) as usize..self.heap_rank(hi) as usize
+    }
+
+    /// Spine indexes of the heap records in spine `[lo, hi)`, ascending.
+    pub fn heap_events(&self, lo: u32, hi: u32) -> impl DoubleEndedIterator<Item = u32> + '_ {
+        self.heap_rows(lo, hi).map(move |h| self.heap_seq(h))
+    }
+
+    /// Words in a bitset over heap rows — the shape of an allocation filter's
+    /// match set and of every tag bitset.
+    #[inline]
+    pub fn row_words(&self) -> usize {
+        (self.heap_len() as usize).div_ceil(64)
+    }
+
+    /// Is spine record `e` set in the heap-row bitset `bits`? A record with
+    /// no heap row never is.
+    #[inline]
+    pub fn row_bit(&self, bits: &[u64], e: u32) -> bool {
+        self.heap_row(e).is_some_and(|h| {
+            bits.get(h / 64)
+                .is_some_and(|w| w & (1 << (h % 64)) != 0)
+        })
+    }
+
+    /// Spine indexes of the rows set in heap-row bitset `bits`, ascending.
+    pub fn row_bits_events<'a>(&'a self, bits: &'a [u64]) -> impl Iterator<Item = u32> + 'a {
+        bits.iter().enumerate().flat_map(move |(w, &word)| {
+            let mut word = word;
+            std::iter::from_fn(move || {
+                if word == 0 {
+                    return None;
+                }
+                let b = word.trailing_zeros() as usize;
+                word &= word - 1;
+                Some(self.heap_seq(w * 64 + b))
+            })
+        })
+    }
+
     /// Creator events (M/R) in spine `[0, b)`, from the heap prefix sums.
     #[inline]
     pub fn green_before(&self, b: u32) -> u32 {
@@ -510,6 +560,12 @@ impl Store {
         let h = self.heap_row(e);
         let mask = h.map_or([0; 4], |h| self.block_mask(h));
         BlockTags { mask, word: 0 }.filter(move |&tag| h.is_some_and(|h| self.row_has_tag(h, tag)))
+    }
+
+    /// Every tag on heap row `h`, ascending — `tag_ids` for a caller already
+    /// working in heap rows.
+    pub(crate) fn row_tag_ids(&self, h: usize) -> impl Iterator<Item = u8> + '_ {
+        BlockTags { mask: self.block_mask(h), word: 0 }.filter(move |&tag| self.row_has_tag(h, tag))
     }
 
     #[inline]

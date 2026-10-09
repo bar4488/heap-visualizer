@@ -90,7 +90,7 @@ fn generate(heap: u32, logs_per_heap: u32, mut sink: impl FnMut(&[u8])) -> Vec<u
             let id = next_id;
             next_id += 1;
             let addr = next_addr;
-            next_addr += (size + 15) / 16 * 16 + 16;
+            next_addr += size.div_ceil(16) * 16 + 16;
             out.extend_from_slice(
                 format!(
                     "{{\"op\":\"M\",\"t\":{t},\"id\":{id},\"addr\":\"0x{addr:x}\",\"size\":{size},\"thr\":{thr},\"site\":\"{site}\",\"pool\":{}}}\n",
@@ -261,8 +261,8 @@ fn main() {
         let h0 = heap as usize / 3;
         let hsteps = 5_000usize;
         let hstep = time(3, || hp_seek_seq(heap_seq[h0] + 1), || {
-            for h in h0 + 1..=h0 + hsteps {
-                hp_seek_seq(heap_seq[h] + 1);
+            for &e in &heap_seq[h0 + 1..=h0 + hsteps] {
+                hp_seek_seq(e + 1);
             }
         });
         rows[5].values.push(ns(hstep) / hsteps as f64);
@@ -289,6 +289,12 @@ fn main() {
         });
         // the list rebuild alone: subtract the apply it includes
         rows[8].values.push((ms(list) - ms(size)).max(0.0));
+        // the same heap records must give the same answers in every trace
+        clear_filter();
+        let by_size = apply_filter("alloc.size >= 1024");
+        clear_filter();
+        let by_tag = apply_filter(source);
+        eprintln!("  filtered events: by size {by_size}, by tag {by_tag}");
         clear_filter();
 
         // timelines: whole-trace view

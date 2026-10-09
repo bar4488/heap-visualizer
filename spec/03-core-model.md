@@ -37,6 +37,21 @@ heap→spine column, so a heap-only trace pays nothing for the boundary. Link
 values stay spine indexes, so allocation identity (MODEL-002) is unchanged by
 the presence of other domains.
 
+Heap *work* runs in heap-row space and converts only at its boundaries
+(`hrank` for spine→heap, the heap→spine column, or a binary search over
+`t`). The allocation filter's plan, its match bitset, and the tag bitsets
+are all over heap rows, so the column-slice and tag-word fast paths hold in a
+mixed trace; replay and the Events-list filter walk heap rows; and range
+reads (tagging a seq range, the agent timeline) visit only the heap records
+inside the range. The cost of these operations follows the heap record
+count, not the spine length: `cargo run --release --example mixed_bench
+--manifest-path src/core/Cargo.toml` compares heap-only against the same
+heap records with 10× and 100× as many log lines, and the mixed columns
+should match the heap-only one within noise. What still grows with the spine
+is per-record load cost, the timeline's per-column binary searches and log
+lane (O(width · log n)), and a few percent on random seeks, whose replay
+reads spine-indexed accessors.
+
 ## MODEL-002: Identity — ids resolve to event indices at load
 
 The wire format names allocations by `id`; the engine does not. During the
@@ -82,7 +97,9 @@ Seeking to seq *n* means reconstructing the live set after *n* events.
   picks whichever is cheaper: incremental replay from where it is, or rebuild
   from the nearest snapshot at-or-before the target plus forward replay. This
   bounds worst-case seek cost to roughly one snapshot interval regardless of
-  trace length.
+  trace length. Both costs — and the snapshot cadence — are counted in heap
+  records: other domains' records cannot change the live set, so replay
+  skips them without visiting them.
 - Snapshot count is capped (~96): when full, every other snapshot is dropped
   and the interval doubles, keeping memory bounded on huge traces while
   degrading seek cost only logarithmically. Snapshots are a viewer-internal

@@ -68,21 +68,17 @@ const GHOST_MARK: u8 = 0x80;
 #[derive(Default)]
 pub struct Filter {
     pub mode: u8,
-    /// Match bits for the applied E010 expression, indexed by creator event.
-    /// `None` means the expression is empty/off.
+    /// Match bits for the applied E010 expression, indexed by heap row (read
+    /// by spine index through `Store::row_bit`). `None` means the expression
+    /// is empty/off.
     pub matches: Option<Vec<u64>>,
 }
 
 impl Filter {
-    fn bit(words: &[u64], i: u32) -> bool {
-        let w = (i / 64) as usize;
-        w < words.len() && words[w] >> (i % 64) & 1 == 1
-    }
-
     /// Does creator `e` pass? Everything does while the filter is off or no
     /// expression is applied.
-    pub fn pass(&self, _s: &Store, e: u32) -> bool {
-        self.mode == FILTER_OFF || self.matches.as_ref().is_none_or(|bits| Self::bit(bits, e))
+    pub fn pass(&self, s: &Store, e: u32) -> bool {
+        self.mode == FILTER_OFF || self.matches.as_ref().is_none_or(|bits| s.row_bit(bits, e))
     }
 }
 
