@@ -68,7 +68,7 @@ describes a filter can **apply it**.
   [SHELL-002](../../spec/09-ui-shell.md#shell-002-panels-are-windows) (windows),
   [SHELL-003](../../spec/09-ui-shell.md#shell-003-panels-are-declared-as-data)
   (declared as data) and
-  [SHELL-004](../../spec/09-ui-shell.md#shell-004-docking-drawers) (docking,
+  [SHELL-004](../../spec/09-ui-shell.md#shell-004-docking) (docking,
   collapse-to-rail, session-persisted geometry) do not apply to it. The cost is
   that width-drag is reimplemented in ~15 lines instead of inherited; the gain
   is that nothing about it has to be reconciled with per-trace session state.
@@ -196,7 +196,7 @@ describes a filter can **apply it**.
 - **A wide left drawer costs the views their screen.** SHELL's guiding stance
   is that the views own the screen; a guide big enough to read comfortably is
   big enough to hurt. Collapse-to-rail
-  ([SHELL-004](../../spec/09-ui-shell.md#shell-004-docking-drawers)) already
+  ([SHELL-004](../../spec/09-ui-shell.md#shell-004-docking)) already
   exists and may be enough.
 - **Client-side markdown rendering is an HTML injection surface** if content is
   ever fetched rather than built in. Build-time rendering avoids the question
