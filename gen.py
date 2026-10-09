@@ -2,11 +2,13 @@
 """gen.py - synthetic heap-event stream generator for heap-visualizer.
 
 Emits a JSONL (.heapl) stream of malloc/free/realloc events conforming to
-spec/02-trace-format.md v1, interleaved with structured `L` log lines
-(spec/13-domains-and-logs.md) unless --no-logs is given. It simulates a free-list allocator serving a workload made
-of allocation "sites" (each with a characteristic size range and lifetime) and
-sprinkles in same-timestamp bursts so the temporal and sequential timelines in
-the viewer visibly diverge.
+spec/02-trace-format.md, interleaved with structured `L` log lines
+(spec/13-domains-and-logs.md) unless --no-logs is given, and with interval
+records (calls, spans and CPU switches, spec/14-intervals.md, which make the
+trace v2) unless --no-intervals is given. It simulates a free-list allocator
+serving a workload made of allocation "sites" (each with a characteristic size
+range and lifetime) and sprinkles in same-timestamp bursts so the temporal and
+sequential timelines in the viewer visibly diverge.
 
 Deterministic: identical --seed and args produce byte-identical output.
 Only the Python standard library is used.
@@ -111,8 +113,8 @@ IVL_FUNCS: list[str] = [
 ]
 IVL_ROUTES: list[str] = ["/upload", "/tiles", "/search", "/health"]
 DEMO_PID = 4242        # the process id the demo's startup log reports
-IVL_DEPTH = 8           # deepest call stack per thread, with --intervals
-IVL_OPEN_SPANS = 16     # most spans open at once, with --intervals
+IVL_DEPTH = 8           # deepest call stack per thread (intervals on)
+IVL_OPEN_SPANS = 16     # most spans open at once (intervals on)
 
 LOG_BUDGET = 64 << 20    # past this, each new high-water mark is also an error
 
@@ -240,7 +242,7 @@ class Generator:
         self.n_log = 0
         self._log_peak_step = 0
         self._log_req = 0
-        # Interval edges (--intervals) draw from their own stream too.
+        # Interval edges (on unless --no-intervals) draw from their own stream too.
         self.ivl_rng = random.Random(args.seed * 104729 + 3)
         self.ivl_stacks: dict[int, list[str]] = {}
         self.open_spans: list[str] = []
@@ -557,7 +559,7 @@ class Generator:
             self._log(out, "debug", "render.tiles", f"large tile buffer {last.size} B",
                       thr=last.thr, id=last.id, addr=self._hexaddr(last.addr))
 
-    # -- intervals (--intervals, trace format v2) ----------------------------
+    # -- intervals (on unless --no-intervals; trace format v2) --------------
 
     def _ivl_names(self, out) -> None:
         """`T` records naming each thread; they take no seq."""
@@ -777,13 +779,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="omit the structured `L` log lines (startup, phases, "
                         "requests, and warnings tied to heap moments) that are "
                         "otherwise interleaved with the heap records")
-    p.add_argument("--intervals", action="store_true",
-                   help="write a v2 trace with interval records: `T` thread "
-                        "names, nested `B`/`X` calls per thread, request spans "
-                        "that may end on another thread, and `C` context "
-                        "switches on up to 4 CPUs (use with --threads)")
+    p.add_argument("--no-intervals", action="store_false", dest="intervals",
+                   help="omit the interval records and write a v1 trace; by "
+                        "default the trace is v2 with `T` thread names, nested "
+                        "`B`/`X` calls per thread, request spans that may end "
+                        "on another thread, and `C` context switches on up to "
+                        "4 CPUs (more with --threads)")
+    # the default since intervals were turned on; kept so older commands run
+    p.add_argument("--intervals", action="store_true", dest="intervals",
+                   help=argparse.SUPPRESS)
     p.add_argument("--quiet", action="store_true",
                    help="suppress the stderr summary")
+    p.set_defaults(intervals=True)
     return p.parse_args(argv)
 
 
