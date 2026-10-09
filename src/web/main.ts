@@ -2201,17 +2201,20 @@ addrScroll.addEventListener('click', (e) => {
   if (!UI.loaded) return;
   // a plain request, not the hover key: a click must not be superseded by the
   // next hover, nor dropped when the pointer leaves
+  const at = { x: e.clientX, y: e.clientY };
   request('pick', {
     x: e.clientX - r.left, y: e.clientY - r.top, forClick: true,
-  }).then(onPickResult);
+  }).then((m) => onPickResult(m, at));
 });
 
-function onPickResult(m) {
+// `at`: the viewport point a click picked at, which an Allocation window
+// opening from scratch is placed beside
+function onPickResult(m, at = null) {
   const info = m.info;
   if (m.forClick) {
     UI.selected = info ? info.e : null;
     worker.postMessage({ type: 'set', key: 'selected', value: UI.selected });
-    fillDetailPanel(info);
+    fillDetailPanel(info, null, at);
   } else if (info) {
     hoverRects = info.rects || [];
     drawMoveLink(UI.state && UI.state.moveLink);
@@ -2378,8 +2381,11 @@ function fillEventPanel(event) {
 }
 
 // `place`: open the live panel there (where a window being unpinned stood —
-// `layout.placeOf`)
-function fillDetailPanel(info, place = null) {
+// `layout.placeOf`), moving it if it is open elsewhere. `near`: the viewport
+// point of the selection, which a window placed from scratch opens beside.
+// Otherwise an open live panel stays exactly where it is and only its content
+// changes, so it never jumps while selection moves.
+function fillDetailPanel(info, place = null, near = null) {
   const panel = $('detail-panel');
   if (!info) { layout.close('detail-panel'); return; }
   // never two windows for the same allocation: if it is already pinned,
@@ -2392,10 +2398,10 @@ function fillDetailPanel(info, place = null) {
   UI.detailInfo = info;
   panel.querySelector('.ph-t').textContent = detailTitle(info);
   buildDetailBody($('detail-body'), info);
-  // only reset/cascade position when the live panel was just vacated by a
-  // pin (so a fresh window doesn't land on the pinned one); a plain close
-  // (× or Escape) reopens the window where the user left it
-  layout.open('detail-panel', '', place ? { place } : { freshPosition: UI.detailWasPinned });
+  // only place it from scratch when the live panel was just vacated by a
+  // pin (so a fresh window doesn't land on the pinned one), or has never been
+  // open; a plain close (× or Escape) reopens the window where the user left it
+  layout.open('detail-panel', '', place ? { place } : { freshPosition: UI.detailWasPinned, near });
   UI.detailWasPinned = false;
 }
 
@@ -2439,7 +2445,11 @@ $('d-pin').onclick = () => {
   if (!info) return;
   // identical chrome to the live panel, in its place — the orange pin is the
   // only tell
-  createPinnedWindow(info, { place: layout.placeOf('detail-panel') });
+  const hadFocus = $('detail-panel').contains(document.activeElement);
+  const win = createPinnedWindow(info, { place: layout.placeOf('detail-panel') });
   UI.detailWasPinned = true;
   layout.close('detail-panel');
+  // the pin button was pressed in a window that is now gone: keyboard focus
+  // carries over to the same button in the window that replaced it
+  if (hadFocus) $1('.d-pin', win)?.focus({ preventScroll: true });
 };

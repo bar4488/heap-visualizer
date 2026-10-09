@@ -28,6 +28,7 @@
 
 import type { DockviewApi } from 'dockview-core';
 import { $ } from './dom.ts';
+import { placeFloat, type Box, type Point } from './float-place.ts';
 import {
   EDGES, defaultPlan, legacyPlan, type Edge, type Home, type Plan, type TypeInfo,
 } from './layout-plan.ts';
@@ -57,7 +58,12 @@ export type PanelSpec = {
   size?: number;
   /** Its size when it floats (px). */
   floatSize?: { width: number; height: number };
-  /** Float it at the workspace's bottom-left, cascading past open windows of the `avoid` types. */
+  /**
+   * Float it, when it floats from scratch, beside the point it was opened
+   * from (`near`), or else at the workspace's bottom-left — either way clear
+   * of every floating window (`avoid` is kept for declarations that name the
+   * types; every floating window is avoided now).
+   */
   autoPlace?: { avoid?: string[] } | null;
   onOpen?: (key: string, el: any) => void;
   onClose?: (key: string, el: any) => void;
@@ -72,6 +78,8 @@ export type OpenOptions = {
   at?: At;
   /** Ignore where it last was and place it from scratch. */
   freshPosition?: boolean;
+  /** A viewport point it opens beside, when it floats from scratch (the clicked allocation). */
+  near?: Point | null;
   /** Put it in this edge group, the center, or floating (null). */
   dock?: Home;
   /** Put it where another window is or was (`placeOf`): pin and unpin swap a window in place. */
@@ -316,6 +324,11 @@ function init(hostEl: any, eng: Engine) {
     // (no popouts: a window's controls are found by id, and a popout would
     // move them into another document — so no 'popout' in the tab menu)
     floatingGroupBounds: 'boundedWithinViewport',
+    // a floating window moves by the empty part of its tab strip, like a
+    // window by its title bar; dragging a tab (or Shift-dragging the strip)
+    // docks it. (The engine's default is a separate thin bar above the tabs,
+    // which leaves the strip itself docking the window when it is dragged.)
+    floatingGroupDragHandle: 'tabbar',
     // the map, last in the center column, takes the room a resize adds
     proportionalLayout: false,
     createComponent: (o) => new Adopt(o.id),
@@ -325,7 +338,15 @@ function init(hostEl: any, eng: Engine) {
       const id = p?.panel?.id;
       const inst = id ? instances.get(id) : null;
       const closable = !inst || spec(inst.type).closable;
-      return closable ? ['float', 'maximize', 'separator', 'close'] : ['float', 'maximize'];
+      // Float through the shell, so it lands clear of the other floating
+      // windows at its own float size (the engine's own puts every one at
+      // the same spot)
+      const float = inst ? {
+        label: 'Float',
+        disabled: p.panel.group?.api.location.type === 'floating',
+        action: () => floatPanel(p.panel, inst),
+      } : 'float';
+      return closable ? [float, 'maximize', 'separator', 'close'] : [float, 'maximize'];
     },
   });
   for (const e of EDGES) {
@@ -486,13 +507,30 @@ function later() {
   queueMicrotask(sync);
 }
 
+// A floating group's whole window — its frame, not just the group inside it —
+// in the coordinates the engine places floating windows in. Reopening a
+// window at this box puts it back exactly where it was: the group's own box
+// is inset by the frame, and a window placed by it creeps and shrinks on
+// every pin, unpin and reopen.
+function floatBoxOf(g): Box | null {
+  const frame = g?.element?.closest?.('.dv-resize-container');
+  const area = frame?.parentElement;
+  if (frame && area) {
+    const r = frame.getBoundingClientRect();
+    const a = area.getBoundingClientRect();
+    if (r.width && r.height) return { left: r.left - a.left, top: r.top - a.top, width: r.width, height: r.height };
+  }
+  const b = g?.api.boundingBox;
+  return b ? { left: b.left, top: b.top, width: b.width, height: b.height } : null;
+}
+
 function slotOf(panel): Slot {
   const g = panel.group;
   const loc = g?.api.location;
   if (loc?.type === 'edge') return { edge: loc.position };
   if (loc?.type === 'floating') {
-    const b = g.api.boundingBox || panel.api?.boundingBox;
-    if (b) return { float: { left: b.left, top: b.top, width: b.width, height: b.height } };
+    const b = floatBoxOf(g);
+    if (b) return { float: b };
     return { float: { left: 40, top: 40, ...FLOAT_SIZE } };
   }
   return { group: g.id };
@@ -576,25 +614,37 @@ function floatSize(t: Registered) {
   return { width: Math.min(s.width, Math.max(160, hr.width - 20)), height: Math.min(s.height, Math.max(120, hr.height - 20)) };
 }
 
-/** A floating spot for an instance with no saved one: bottom-left cascading (autoPlace), or top-right. */
-function defaultFloat(inst: Instance, t: Registered) {
-  const hr = hostRect();
-  const size = floatSize(t);
-  const gap = 12;
-  if (!t.autoPlace) return { left: Math.max(gap, hr.width - size.width - gap), top: gap, ...size };
-  const avoid = new Set([...(t.autoPlace.avoid || []), inst.type]);
-  const others = api.panels
-    .filter((p) => p.id !== inst.id && avoid.has(instances.get(p.id)?.type) && p.group?.api.location.type === 'floating')
-    .map((p) => p.group.api.boundingBox)
+// The floating windows on screen now, but for the group holding `exceptId`.
+function floatingBoxes(exceptId = '') {
+  return (api.groups || [])
+    .filter((g) => g.api.location.type === 'floating' && !g.panels.some((p) => p.id === exceptId))
+    .map(floatBoxOf)
     .filter(Boolean);
-  let left = gap;
-  let top = Math.max(gap, hr.height - size.height - gap);
-  const clash = () => others.some((b) => Math.abs(b.left - left) < 48 && Math.abs(b.top - top) < 48);
-  while (clash() && top > gap) {
-    left = Math.min(hr.width - 60, left + 28);
-    top = Math.max(gap, top - 28);
-  }
-  return { left, top, ...size };
+}
+
+/**
+ * A floating spot for an instance with no saved one, clear of every other
+ * floating window: beside `near` (a viewport point) for a type that places
+ * itself (autoPlace), else at its corner — bottom-left for autoPlace, top-right
+ * for the rest (shell/float-place.ts).
+ */
+function defaultFloat(inst: Instance, t: Registered, near: Point | null = null) {
+  const hr = hostRect();
+  return placeFloat({
+    area: { width: hr.width, height: hr.height },
+    size: t.floatSize || FLOAT_SIZE,
+    others: floatingBoxes(inst.id),
+    anchor: t.autoPlace && near ? { x: near.x - hr.left, y: near.y - hr.top } : null,
+    corner: t.autoPlace ? 'bottom-left' : 'top-right',
+  });
+}
+
+// The tab menu's Float: the panel floats at its own float size, clear of the
+// floating windows already there.
+function floatPanel(panel, inst: Instance) {
+  const b = defaultFloat(inst, spec(inst.type));
+  withBatch(() => api.addFloatingGroup(panel, { position: { left: b.left, top: b.top }, width: b.width, height: b.height }));
+  sync();
 }
 
 function fromViewport(at: At, t: Registered) {
@@ -670,7 +720,7 @@ function slotFor(inst: Instance, t: Registered, opts: OpenOptions): Slot {
   if (opts.dock !== undefined) {
     if (opts.dock === 'center') return { center: true };
     if (opts.dock) return { edge: opts.dock };
-    return { float: opts.at ? fromViewport(opts.at, t) : defaultFloat(inst, t) };
+    return { float: opts.at ? fromViewport(opts.at, t) : defaultFloat(inst, t, opts.near) };
   }
   if (opts.at) return { float: fromViewport(opts.at, t) };
   const last = slots.get(inst.id);
@@ -678,7 +728,7 @@ function slotFor(inst: Instance, t: Registered, opts: OpenOptions): Slot {
   const home = defaultsOf(t).dock;
   if (home === 'center') return { center: true };
   if (home) return { edge: home };
-  return { float: defaultFloat(inst, t) };
+  return { float: defaultFloat(inst, t, opts.near) };
 }
 
 // ---------------------------------------------------------------------------
@@ -713,7 +763,9 @@ function open(type: string, key = '', opts: OpenOptions = {}) {
         panel = addTo(id, type, titleOf(inst), where);
         if (opensEdge) setEdgeCollapsed((where as any).edge, false);
       }
-    } else if (!opts.restoring && opts.dock !== undefined) {
+    } else if (!opts.restoring && (opts.dock !== undefined || opts.place)) {
+      // already open, and asked to be somewhere: moved there (unpinning puts
+      // the live window where the pinned one stood)
       const where = slotFor(inst, t, opts);
       const now = slotOf(panel);
       if (JSON.stringify(where) !== JSON.stringify(now)) {
@@ -964,6 +1016,15 @@ function restore(snapshot) {
         if (t && !t.singleton) continue;
         placeholders.delete(id);
         const p = api.getPanel(ph.id);
+        if (p) api.removePanel(p);
+      }
+      // (a transient singleton's element exists, so the engine adopts it
+      // straight back rather than leaving a placeholder: the live Allocation
+      // window the session saw open would come back empty)
+      for (const inst of instances.values()) {
+        const t = spec(inst.type);
+        if (t.persist || !t.singleton || keep.includes(inst)) continue;
+        const p = api.getPanel(inst.id);
         if (p) api.removePanel(p);
       }
       for (const inst of keep) {
