@@ -244,16 +244,6 @@ impl Parser {
         i
     }
 
-    fn intern_label(&mut self, label: String) -> u32 {
-        if let Some(&i) = self.label_map.get(&label) {
-            return i;
-        }
-        let i = self.store.ev_labels.len() as u32;
-        self.label_map.insert(label.clone(), i);
-        self.store.ev_labels.push(label);
-        i
-    }
-
     fn intern_extra(&mut self, ex: String) -> u32 {
         if let Some(&i) = self.extra_map.get(&ex) {
             return i;
@@ -404,7 +394,11 @@ impl Parser {
         }
 
         let (e, t) = self.stamp(raw.t, raw.seq);
-        self.apply_heap(raw, op, e, t);
+        if op == OP_E {
+            self.apply_mark(raw, e, t);
+        } else {
+            self.apply_heap(raw, op, e, t);
+        }
     }
 
     /// Timestamp and seq checks shared by every domain's records (TRACE-007):
@@ -438,6 +432,41 @@ impl Parser {
             }
         }
         (e, t)
+    }
+
+    /// One `E` landmark (TRACE-010): a spine row and a mark row, nothing
+    /// else. `site` and `stack` describe an allocation, so they are not read
+    /// off a mark — a site nobody ever allocated from would sit in the legend
+    /// at count zero. Its custom fields go to the trace-wide fragment table
+    /// and catalog, as they did when marks were heap rows.
+    fn apply_mark(&mut self, mut raw: Raw, e: u32, t: u64) {
+        let label = match raw.title.take() {
+            Some(title) => intern_label(&mut self.label_map, &mut self.store.dom.marks, title),
+            None => NONE_U32,
+        };
+        let thr_idx = match raw.thr {
+            Some(v) => self.intern_thr(v, e),
+            None => NONE_U16,
+        };
+        let extra = self.intern_counted_extra(&mut raw.extra);
+        self.push_spine(OP_E, t, thr_idx);
+        self.store.dom.marks.push(e, 0, label, "", extra);
+        self.store.n_custom += 1;
+    }
+
+    /// Intern a heap-or-mark fragment in the trace-wide table and count one
+    /// more event on each of its keys. NONE_U32 for an empty fragment.
+    fn intern_counted_extra(&mut self, extra: &mut String) -> u32 {
+        if extra.is_empty() {
+            return NONE_U32;
+        }
+        let index = self.intern_extra(std::mem::take(extra));
+        // exact per-key event counts, without re-scanning the fragment
+        for i in 0..self.store.extra_fields[index as usize].len() {
+            let field = self.store.extra_fields[index as usize][i] as usize;
+            self.store.fields[field].events += 1;
+        }
+        index
     }
 
     /// One `L` record (LOG-001): a spine row and a log row, nothing else.
@@ -481,14 +510,7 @@ impl Parser {
     }
 
     fn apply_heap(&mut self, mut raw: Raw, op: u8, e: u32, t: u64) {
-        // A custom event is a label and its custom fields; `site` and `stack`
-        // describe an allocation, so they are not read off one — a site nobody
-        // ever allocated from would sit in the legend at count zero.
-        let label = match (op, raw.title.take()) {
-            (OP_E, Some(title)) => self.intern_label(title),
-            _ => NONE_U32,
-        };
-        let site = match raw.site.filter(|_| op != OP_E) {
+        let site = match raw.site {
             Some(name) => self.intern_site(name),
             None => NONE_U32,
         };
@@ -496,21 +518,11 @@ impl Parser {
             Some(v) => self.intern_thr(v, e),
             None => NONE_U16,
         };
-        let stack = match raw.stack.filter(|_| op != OP_E) {
+        let stack = match raw.stack {
             Some(st) => self.intern_stack(st),
             None => NONE_U32,
         };
-        let extra = if raw.extra.is_empty() {
-            NONE_U32
-        } else {
-            let index = self.intern_extra(std::mem::take(&mut raw.extra));
-            // exact per-key event counts, without re-scanning the fragment
-            for i in 0..self.store.extra_fields[index as usize].len() {
-                let field = self.store.extra_fields[index as usize][i] as usize;
-                self.store.fields[field].events += 1;
-            }
-            index
-        };
+        let extra = self.intern_counted_extra(&mut raw.extra);
 
         // resolve the killed allocation for F / R
         let mut target = NONE_U32;
@@ -571,7 +583,6 @@ impl Parser {
         push_lazy(&mut hc.usable, h, usable, 0);
         hc.site.push(site);
         push_lazy(&mut hc.stack, h, stack, NONE_U32);
-        push_lazy(&mut hc.label, h, label, NONE_U32);
         push_lazy(&mut hc.extra, h, extra, NONE_U32);
         hc.target.push(target);
         hc.death.push(NONE_U32);
@@ -658,8 +669,7 @@ impl Parser {
         match op {
             OP_M => s.n_malloc += 1,
             OP_F => s.n_free += 1,
-            OP_R => s.n_realloc += 1,
-            _ => s.n_custom += 1,
+            _ => s.n_realloc += 1,
         }
 
         // ---- periodic snapshot ----
@@ -708,7 +718,6 @@ impl Default for Store {
             thrs: Vec::new(),
             thr_count: Vec::new(),
             stacks: Vec::new(),
-            ev_labels: Vec::new(),
             extras: Vec::new(),
             fields: Vec::new(),
             extra_fields: Vec::new(),

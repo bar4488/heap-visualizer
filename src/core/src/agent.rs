@@ -575,18 +575,32 @@ pub(crate) fn timeline(
         (from.min(u64::from(u32::MAX)) as u32, to.min(u64::from(u32::MAX)) as u32)
     };
     let bit = |event| bit(store, &bits, event);
-    for event in store.heap_events(lo, hi) {
-        let i = event as usize;
+    // the bin of spine record `event`, when it falls in the requested range
+    let bin_of = |event: u32| {
         let coordinate = if domain == "time" {
-            app.store.t[i]
+            store.t[event as usize]
         } else {
             event as u64
         };
-        if coordinate < from || coordinate >= to {
-            continue;
+        (from..to).contains(&coordinate).then(|| {
+            (((coordinate - from) as u128 * bins as u128 / width as u128) as usize).min(bins - 1)
+        })
+    };
+    // landmarks are the marks domain's: its rows in the range, by two
+    // binary searches, whatever the heap holds
+    let marks = &store.dom.marks;
+    let (m0, m1) = marks.rows_in(lo, hi);
+    for &event in &marks.seq[m0 as usize..m1 as usize] {
+        if let Some(bin) = bin_of(event) {
+            rows[bin].3 += 1;
         }
-        let bin = ((coordinate - from) as u128 * bins as u128 / width as u128) as usize;
-        let row = &mut rows[bin.min(bins - 1)];
+    }
+    for event in store.heap_events(lo, hi) {
+        let i = event as usize;
+        let Some(bin) = bin_of(event) else {
+            continue;
+        };
+        let row = &mut rows[bin];
         match app.store.op[i] {
             OP_M if bit(event) => {
                 row.0 += 1;
@@ -610,7 +624,6 @@ pub(crate) fn timeline(
                     row.5 += app.store.size(old) as u128;
                 }
             }
-            OP_E => row.3 += 1,
             _ => {}
         }
     }
@@ -632,7 +645,7 @@ fn event_value(app: &App, event: u32) -> Value {
     let store = &app.store;
     let i = event as usize;
     if store.op[i] == OP_E {
-        return json!({ "seq": event, "time": store.t[i].to_string(), "operation": "event", "title": (store.label_at(event) != NONE_U32).then(|| store.ev_labels[store.label_at(event) as usize].clone()) });
+        return json!({ "seq": event, "time": store.t[i].to_string(), "operation": "event", "title": domain::marks::title(store, event) });
     }
     let creator = if store.op[i] == OP_F {
         store.target(event)

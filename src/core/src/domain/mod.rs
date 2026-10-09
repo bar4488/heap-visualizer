@@ -30,6 +30,7 @@ use crate::store::*;
 /// A domain's index in the registry.
 pub type DomainId = u8;
 pub const HEAP: DomainId = 0;
+pub const MARKS: DomainId = 1;
 pub const LOGS: DomainId = 2;
 /// The domain of an op the table does not know.
 pub const NO_DOMAIN: DomainId = u8::MAX;
@@ -55,7 +56,7 @@ pub const OPS: [OpInfo; 5] = [
     OpInfo { op: OP_M, letter: b'M', domain: HEAP, kind: "malloc" },
     OpInfo { op: OP_F, letter: b'F', domain: HEAP, kind: "free" },
     OpInfo { op: OP_R, letter: b'R', domain: HEAP, kind: "realloc" },
-    OpInfo { op: OP_E, letter: b'E', domain: HEAP, kind: "event" },
+    OpInfo { op: OP_E, letter: b'E', domain: MARKS, kind: "event" },
     OpInfo { op: OP_L, letter: b'L', domain: LOGS, kind: "log" },
 ];
 
@@ -97,6 +98,7 @@ pub fn by_name(name: &str) -> Option<DomainId> {
 #[derive(Default)]
 pub struct Domains {
     pub heap: HeapCols,
+    pub marks: marks::MarkStore,
     pub logs: crate::logs::LogStore,
 }
 
@@ -105,6 +107,7 @@ pub struct Domains {
 pub fn get(s: &Store, id: DomainId) -> Option<Box<dyn Domain + '_>> {
     Some(match id {
         HEAP => Box::new(heap::HeapView(s)),
+        MARKS => Box::new(marks::view(s)),
         LOGS => Box::new(crate::logs::view(s)),
         _ => return None,
     })
@@ -454,6 +457,7 @@ pub fn write_page(out: &mut String, total: u32, from: u32, count: u32, max: u32,
 }
 
 pub mod heap;
+pub mod marks;
 pub mod point;
 
 #[cfg(test)]

@@ -1439,10 +1439,9 @@ fn push_event_json(o: &mut String, s: &Store, e: u32) {
             "{{\"seq\":{},\"op\":{},\"t\":{},\"e\":null,\"title\":",
             e, OP_E, s.t[ei] as f64
         ));
-        if s.label_at(e) != NONE_U32 {
-            push_json_str(o, &s.ev_labels[s.label_at(e) as usize]);
-        } else {
-            o.push_str("null");
+        match domain::marks::title(s, e) {
+            Some(title) => push_json_str(o, title),
+            None => o.push_str("null"),
         }
         o.push_str(",\"thr\":");
         if s.thr_idx[ei] != NONE_U16 {
@@ -1450,10 +1449,9 @@ fn push_event_json(o: &mut String, s: &Store, e: u32) {
         } else {
             o.push_str("null");
         }
-        if s.extra_at(e) != NONE_U32 {
-            o.push_str(",\"extra\":{");
-            o.push_str(&s.extras[s.extra_at(e) as usize]);
-            o.push('}');
+        if let Some(fields) = domain::marks::fields(s, e) {
+            o.push_str(",\"extra\":");
+            domain::push_fields(o, Some(fields));
         }
         o.push('}');
         return;
@@ -2004,7 +2002,7 @@ mod tests {
             assert_eq!((s.n_malloc, s.n_free, s.n_realloc), (2, 2, 1));
             assert_eq!(s.warn_counts.iter().sum::<u32>(), 0);
             // labels intern; an E without a title has none
-            assert_eq!(s.ev_labels, vec!["phase: warm up", "phase: steady"]);
+            assert_eq!(s.dom.marks.labels, vec!["phase: warm up", "phase: steady"]);
             assert_eq!(s.label_at(0), 0);
             assert_eq!(s.label_at(1), NONE_U32);
             assert_eq!(s.label_at(7), NONE_U32);
@@ -3499,13 +3497,14 @@ not json at all
         let mut m = load(&mixed_src);
         assert_eq!(m.store.heap_len(), a.store.heap_len());
         assert!(m.store.n_log > 0 && !m.store.hrank.is_empty());
-        for e in 0..a.store.len() {
-            let me = m.store.heap_seq(e as usize);
+        for h in 0..a.store.heap_len() as usize {
+            let (e, me) = (a.store.heap_seq(h), m.store.heap_seq(h));
             for tag in a.store.tag_ids(e).collect::<Vec<_>>() {
                 m.store.add_tag(me, tag);
             }
         }
-        m.names = vec![(m.store.heap_seq(named as usize), "anchor".to_string())];
+        let named_row = a.store.heap_row(named).unwrap();
+        m.names = vec![(m.store.heap_seq(named_row), "anchor".to_string())];
         let ids = |app: &App, events: Vec<u32>| -> Vec<u64> {
             events.into_iter().map(|e| app.store.id(e)).collect()
         };

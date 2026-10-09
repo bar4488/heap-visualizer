@@ -132,8 +132,8 @@ pub struct Warning {
 }
 
 /// The heap domain's payload columns ([DOM-002]): one row per heap record
-/// (`M`, `F`, `R`, and — for now — the `E` landmark), never one per record of
-/// another domain. A row is addressed by its **spine index** through the
+/// (`M`, `F`, `R`), never one per record of another domain — `E` landmarks
+/// are the marks domain's. A row is addressed by its **spine index** through the
 /// `Store` accessors (`addr(e)`, `size(e)`, …); the heap row behind it is the
 /// spine index itself until a non-heap record exists, so a heap-only trace
 /// pays nothing for the mapping.
@@ -158,9 +158,6 @@ pub struct HeapCols {
     /// (unrecognized top-level keys), interned as a raw JSON object body
     /// fragment; NONE_U32 = none. Lazy column; read via `extra_at`.
     pub extra: Vec<u32>,
-    /// For E events: index into `ev_labels` of the record's `title`
-    /// (NONE_U32 = unlabelled). Lazy column; read via `label_at`.
-    pub label: Vec<u32>,
     /// For F/R events: spine index of the creating event (M/R) being killed.
     pub target: Vec<u32>,
     /// For creator events (M/R): the spine index that kills this allocation.
@@ -189,7 +186,6 @@ impl Default for HeapCols {
             site: Vec::new(),
             stack: Vec::new(),
             extra: Vec::new(),
-            label: Vec::new(),
             target: Vec::new(),
             death: Vec::new(),
             seq: Vec::new(),
@@ -262,9 +258,6 @@ pub struct Store {
     pub thrs: Vec<i64>,
     pub thr_count: Vec<u32>,
     pub stacks: Vec<String>,
-    /// Labels of custom (E) events. Interned like sites: a producer marking
-    /// every frame writes the same handful of strings over and over.
-    pub ev_labels: Vec<String>,
     pub extras: Vec<String>,
     /// Catalog of the caller-defined top-level fields seen anywhere in the
     /// trace, in first-observation order. Built as fragments are interned —
@@ -294,7 +287,7 @@ pub struct Store {
     pub n_malloc: u32,
     pub n_free: u32,
     pub n_realloc: u32,
-    /// Custom (E) events. Not an allocation count — kept apart from the three
+    /// Custom (E) events — the marks domain's row count. Not an allocation count — kept apart from the three
     /// above so nothing sums them into one.
     pub n_custom: u32,
     /// Log (L) records — the log domain's row count.
@@ -503,15 +496,11 @@ impl Store {
         }
     }
 
-    /// Label intern index for event `e` (NONE_U32 = absent, or not a heap
-    /// record). Lazy column: only a trace carrying custom events
-    /// materializes it.
+    /// Title intern index of mark record `e` (NONE_U32 = untitled, or not
+    /// a mark); the title is `dom.marks.labels[i]`.
     #[inline]
     pub fn label_at(&self, e: u32) -> u32 {
-        if self.dom.heap.label.is_empty() {
-            return NONE_U32;
-        }
-        self.heap_row(e).map_or(NONE_U32, |h| self.dom.heap.label[h])
+        crate::domain::marks::row(self, e).map_or(NONE_U32, |r| self.dom.marks.label[r as usize])
     }
 
     /// Extra-fields intern index for heap record `e` (NONE_U32 = absent, or

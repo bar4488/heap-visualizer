@@ -78,3 +78,27 @@ fn summaries_have_the_generic_shape() {
     assert_eq!(v["fields"]["pool"], "p");
     assert!(v.get("level").is_none());
 }
+
+#[test]
+fn marks_hold_no_heap_row_and_keep_the_trace_catalog() {
+    let engine = engine(MIXED);
+    let s = &engine.app.store;
+    assert_eq!(s.domain_of(2), MARKS);
+    assert_eq!(s.heap_row(2), None);
+    assert_eq!(s.heap_len(), 2, "heap rows are M/F/R only");
+    assert_eq!(s.dom.marks.len(), 1);
+    // the landmark's field stays filterable-as-before: in the trace catalog
+    assert!(s.fields.iter().any(|f| f.name == "frame" && f.events == 1));
+    let marks = get(s, MARKS).unwrap();
+    let d = marks.descriptor();
+    assert_eq!(d["fields"][0]["name"], "frame");
+    assert_eq!(d["keys"]["label"], "title");
+    let mut out = String::new();
+    marks.record_json(0, &mut out);
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!((v["kind"].as_str(), v["title"].as_str()), (Some("event"), Some("phase")));
+    assert_eq!(v["fields"]["frame"], 1);
+    // the mark in force at a seq
+    assert_eq!(marks.state_at(2), None);
+    assert_eq!(marks.state_at(3).unwrap()["last"]["title"], "phase");
+}

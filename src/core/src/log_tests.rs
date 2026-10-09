@@ -116,11 +116,30 @@ fn live(a: &App) -> Vec<(u64, u64, u64)> {
     v
 }
 
+/// `rank[p]`: records other than logs in spine `[0, p)` — the position in
+/// the log-free trace that matches position `p` of the mixed one. (Marks
+/// are their own domain, so heap rank no longer is that position.)
+fn non_log_rank(s: &Store) -> Vec<u32> {
+    let mut rank = vec![0];
+    for &op in &s.op {
+        rank.push(rank.last().unwrap() + (op != OP_L) as u32);
+    }
+    rank
+}
+
+/// Spine index of the `k`th record that is not a log.
+fn non_log_seqs(s: &Store) -> Vec<u32> {
+    (0..s.len()).filter(|&e| s.op[e as usize] != OP_L).collect()
+}
+
 // ------------------------------------------------------------- DOM-002
 
 #[test]
 fn heap_only_trace_builds_no_mapping() {
     let (heap, _) = gen(7, 500, 0);
+    // landmarks are the marks domain's records: a trace with none is the
+    // heap-only one
+    let heap: String = heap.lines().filter(|l| !l.contains("\"op\":\"E\"")).map(|l| format!("{l}\n")).collect();
     let a = load_app(&heap);
     assert!(a.store.hrank.is_empty());
     assert!(a.store.dom.heap.seq.is_empty());
@@ -134,9 +153,10 @@ fn log_records_get_no_heap_rows_and_heap_records_no_log_rows() {
     let (h, m) = (load_app(&heap), load_app(&mixed));
     let s = &m.store;
     assert!(s.n_log > 0);
-    assert_eq!(s.heap_len(), h.store.len(), "one heap row per heap record");
+    assert_eq!(s.heap_len(), h.store.heap_len(), "one heap row per heap record");
     assert_eq!(s.dom.logs.len(), s.n_log);
-    assert_eq!(s.len(), s.heap_len() + s.dom.logs.len());
+    assert_eq!(s.dom.marks.len(), s.n_custom);
+    assert_eq!(s.len(), s.heap_len() + s.dom.marks.len() + s.dom.logs.len());
     for col in [s.dom.heap.id.len(), s.dom.heap.size.len(), s.dom.heap.site.len(), s.dom.heap.target.len(), s.dom.heap.death.len()] {
         assert_eq!(col, s.heap_len() as usize);
     }
@@ -148,7 +168,7 @@ fn log_records_get_no_heap_rows_and_heap_records_no_log_rows() {
                 assert!(s.is_heap(e));
                 assert_eq!(s.heap_seq(h), e);
             }
-            None => assert_eq!(s.op[e as usize], OP_L),
+            None => assert!(matches!(s.op[e as usize], OP_L | OP_E)),
         }
     }
     // L records are not custom events and not allocations
@@ -169,23 +189,24 @@ fn live_set_is_identical_with_and_without_log_records() {
         assert_eq!(m.store.peak_live_bytes, h.store.peak_live_bytes);
         assert_eq!(m.store.total_alloc_bytes, h.store.total_alloc_bytes);
         let len = m.store.len();
+        let rank = non_log_rank(&m.store);
         for p in 0..=len {
             m.view.seek(&m.store, p);
-            let applied = m.store.heap_rank(p);
+            let applied = rank[p as usize];
             h.view.seek(&h.store, applied);
             assert_eq!(m.view.live_bytes, h.view.live_bytes, "seed {seed} at {p}");
             assert_eq!(live(&m), live(&h), "seed {seed} at {p}");
         }
         for p in (0..=len).rev().step_by(7) {
             m.view.seek(&m.store, p);
-            h.view.seek(&h.store, m.store.heap_rank(p));
+            h.view.seek(&h.store, rank[p as usize]);
             assert_eq!(live(&m), live(&h), "seed {seed} back at {p}");
         }
         let mut r = Rng(seed * 31 + 1);
         for _ in 0..200 {
             let p = r.below(len as u64 + 1) as u32;
             m.view.seek(&m.store, p);
-            h.view.seek(&h.store, m.store.heap_rank(p));
+            h.view.seek(&h.store, rank[p as usize]);
             assert_eq!(live(&m), live(&h), "seed {seed} jump to {p}");
         }
     }
@@ -255,10 +276,11 @@ fn agent_timeline_ranges_convert_at_the_heap_boundary() {
             .map(|b| serde_json::json!([b["allocations"], b["frees"], b["reallocations"], b["customEvents"], b["allocatedBytes"], b["freedBytes"]]))
             .collect()
     };
+    let base = non_log_seqs(sm);
     for (a, b) in [(0usize, 3000usize), (0, 1), (17, 18), (500, 2400), (2999, 3000)] {
-        // spine range [first heap record a, last heap record b - 1]
-        let lo = sm.heap_seq(a);
-        let hi = sm.heap_seq(b - 1) + 1;
+        // spine range [first non-log record a, last non-log record b - 1]
+        let lo = base[a];
+        let hi = base[b - 1] + 1;
         let th = h.agent_timeline(src, "seq", a as u64, b as u64, 1).unwrap();
         let tm = m.agent_timeline(src, "seq", u64::from(lo), u64::from(hi), 1).unwrap();
         assert_eq!(counts(&th), counts(&tm), "seq [{a}, {b})");
