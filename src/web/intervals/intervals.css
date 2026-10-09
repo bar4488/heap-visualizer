@@ -1,0 +1,99 @@
+/* ---------- Interval panels (spec/14 IVL-UI): Tracks, Stacks, Intervals ----------
+   The terminal look of the Logs panel (its --term-* tokens), and the flame
+   chart's colors as tokens tracks-panel.ts reads with getComputedStyle. */
+:root {
+  --ivl-bg: var(--term-bg, #0a0c10);
+  --ivl-fg: var(--term-fg, #d0d7de);
+  --ivl-dim: var(--term-dim, #6e7681);
+  --ivl-head: #11151b;
+  --ivl-grid: #30363d;
+  --ivl-idle: #262c35;
+  --ivl-playhead: #f85149;
+  --ivl-bar-fg: #0b0e13;
+  --ivl-cur: var(--term-cur, #1d2a3a);
+  /* twelve muted hues, readable under dark text */
+  --ivl-c0: #6cb6ff;
+  --ivl-c1: #7ee2a8;
+  --ivl-c2: #e3b341;
+  --ivl-c3: #f0883e;
+  --ivl-c4: #d2a8ff;
+  --ivl-c5: #ff9bce;
+  --ivl-c6: #56d4dd;
+  --ivl-c7: #a5d6a7;
+  --ivl-c8: #f2cc60;
+  --ivl-c9: #b4a7f5;
+  --ivl-c10: #ffa198;
+  --ivl-c11: #9ecbff;
+}
+
+.ivl-panel .head-actions { display: flex; gap: 8px; align-items: center; }
+.ivl-panel .ivl-count {
+  color: var(--fg-dim); font-weight: 400; font-size: 11px;
+  margin-right: auto; padding-left: 8px; font-variant-numeric: tabular-nums;
+}
+.ivl-panel .ivl-axis { padding: 1px 4px; font-size: 11px; }
+.ivl-empty {
+  position: absolute; left: 12px; top: 26px;
+  color: var(--ivl-dim); font: 11.5px ui-monospace, monospace; pointer-events: none;
+}
+
+/* Tracks: a canvas behind a transparent scroller that only carries the height */
+.ivl-tbody { position: relative; flex: 1 1 auto; min-height: 0; background: var(--ivl-bg); }
+.ivl-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.ivl-tscroll { position: absolute; inset: 0; overflow-x: hidden; overflow-y: auto; cursor: crosshair; touch-action: none; }
+.ivl-spacer { width: 1px; }
+
+/* Stacks */
+.ivl-state {
+  flex: 1 1 auto; min-height: 0; overflow: auto; position: relative;
+  background: var(--ivl-bg); color: var(--ivl-fg);
+  font: 11.5px ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  padding-bottom: 8px;
+}
+.ivl-sec {
+  position: sticky; top: 0; z-index: 1;
+  padding: 3px 8px; background: var(--ivl-head); color: var(--ivl-dim);
+  border-bottom: 1px solid var(--border); text-transform: uppercase; letter-spacing: 0.4px; font-size: 10.5px;
+}
+.ivl-state .dim { color: var(--ivl-dim); }
+.ivl-none { padding: 3px 10px; color: var(--ivl-dim); }
+.ivl-th { padding: 2px 0 4px; border-bottom: 1px solid #ffffff0a; }
+.ivl-th-name { padding: 2px 8px; color: var(--term-logger, #79c0ff); }
+.ivl-frame { line-height: 17px; white-space: pre; overflow: hidden; text-overflow: ellipsis; cursor: pointer; padding-right: 8px; }
+.ivl-frame:hover { background: #ffffff0d; }
+.ivl-frame.inner { background: var(--ivl-cur); box-shadow: inset 2px 0 0 var(--accent); }
+.ivl-cpus { border-collapse: collapse; width: 100%; }
+.ivl-cpus td { padding: 1px 8px; white-space: nowrap; }
+.ivl-cpu[data-seq] { cursor: pointer; }
+.ivl-cpu[data-seq]:hover { background: #ffffff0d; }
+.ivl-cpu.running td:nth-child(2) { color: var(--ivl-fg); }
+
+/* Intervals list */
+.ivl-bar { display: flex; gap: 6px; padding: 5px 8px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.ivl-bar .ivl-text { flex: 1; min-width: 80px; }
+.ivl-bar .ivl-mindur { width: 80px; }
+.ivl-bar .ivl-mindur.bad { border-color: var(--red); }
+.ivl-cols, .ivl-lrow { display: flex; gap: 10px; padding: 0 10px; white-space: pre; }
+.ivl-cols {
+  background: var(--ivl-head); color: var(--ivl-dim); border-bottom: 1px solid var(--border);
+  font: 10.5px ui-monospace, monospace; line-height: 18px;
+}
+.ivl-cols .ivl-sort { padding: 0 4px; font: inherit; background: none; border-color: transparent; color: inherit; width: 96px; text-align: left; }
+.ivl-cols .ivl-sort:hover { color: var(--ivl-fg); }
+.ivl-lscroll {
+  position: relative; overflow: auto; flex: 1 1 auto; min-height: 0;
+  background: var(--ivl-bg); color: var(--ivl-fg);
+}
+.ivl-lscroll:focus { outline: none; }
+.ivl-rows { position: absolute; left: 0; top: 0; min-width: 100%; font: 11.5px ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; }
+.ivl-lrow { height: 18px; line-height: 18px; cursor: pointer; }
+.ivl-lrow:hover { background: #ffffff0d; }
+.ivl-lrow .c-t { color: var(--ivl-dim); width: 96px; flex: none; }
+.ivl-cols .c-dur, .ivl-lrow .c-dur { width: 64px; flex: none; text-align: right; }
+.ivl-cols .c-cat, .ivl-lrow .c-cat { width: 32px; flex: none; }
+.ivl-cols .c-trk, .ivl-lrow .c-trk { width: 48px; flex: none; overflow: hidden; text-overflow: ellipsis; }
+.ivl-lrow .c-cat, .ivl-lrow .c-trk { color: var(--ivl-dim); }
+.ivl-lrow.c-span .c-cat { color: var(--literal, #d2a8ff); }
+.ivl-lrow.c-sched .c-cat { color: var(--term-warn, #e3b341); }
+.ivl-lrow.open { background: var(--ivl-cur); box-shadow: inset 2px 0 0 var(--accent); }
+.ivl-lrow.future { opacity: 0.38; }
