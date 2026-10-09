@@ -155,7 +155,10 @@ function highlight(id: string) {
   // behind the toggle's back. Anything still hidden (a toolbar button that
   // needs a loaded trace) is reported, not forced.
   const panel = el.closest('.panel');
-  const toggle = panel && panel.hidden && PANEL_TOGGLE.get(panel.id);
+  // (open but out of sight — a tab behind another, a collapsed edge — counts
+  // as closed here: the toggle brings such a window to the front)
+  const unseen = panel && (panel.hidden || panel.checkVisibility?.() === false);
+  const toggle = unseen && PANEL_TOGGLE.get(panel.id);
   if (toggle) $(toggle).click();
   if (el.hidden) { note(`guide: "${id}" is not available yet`); return; }
 
@@ -277,8 +280,9 @@ export function initGuide() {
     if (btn) act(btn.dataset.act);
   });
 
-  // Width drag, the one piece of drawer behavior worth having here. Panels get
-  // this from shell/drawers.ts, which this surface deliberately does not use.
+  // Width drag, the one piece of dock behavior worth having here. Panels get
+  // this from the dock (shell/layout.ts), which this surface deliberately does
+  // not use.
   const grip = $('guide-resize');
   grip.addEventListener('pointerdown', (ev: PointerEvent) => {
     grip.setPointerCapture(ev.pointerId);

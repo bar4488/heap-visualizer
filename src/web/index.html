@@ -6,6 +6,12 @@
 <!-- Self-hosters raise this only when their deployed web client requires a newer companion. -->
 <meta name="heapviz-minimum-version" content="0.2.0">
 <title>heap-visualizer — heap allocation visualizer</title>
+<!-- No bundler: the dock engine's bare specifier maps onto the copy build.sh
+     vendors from the pinned npm package (D014). -->
+<script type="importmap">
+{ "imports": { "dockview-core": "./vendor/dockview-core.esm.min.mjs" } }
+</script>
+<link rel="stylesheet" href="vendor/dockview.css">
 <link rel="stylesheet" href="style.css">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect x='1' y='6' width='5' height='4' fill='%233fb950'/><rect x='7' y='6' width='3' height='4' fill='%23f85149'/><rect x='11' y='6' width='4' height='4' fill='%233fb950'/></svg>">
 </head>
@@ -21,7 +27,9 @@
   <button id="btn-request" title="Ask for a feature">Request…</button>
   <button id="btn-more" title="More: workspace actions" aria-haspopup="menu" aria-expanded="false" aria-controls="more-menu" aria-label="More">⋯</button>
   <div id="more-menu" role="menu" aria-label="Workspace" hidden>
-    <button id="btn-reset-layout" role="menuitem" title="Put every window, drawer and size back to the default layout">Reset layout</button>
+    <button id="btn-view-time" role="menuitemcheckbox" title="Show or hide the time strip">Time strip</button>
+    <button id="btn-view-seq" role="menuitemcheckbox" title="Show or hide the event-index strip">Event-index strip</button>
+    <button id="btn-reset-layout" role="menuitem" title="Put every view, window, dock and size back to the default layout">Reset layout</button>
   </div>
   <span id="trace-title" class="title"></span>
 
@@ -58,8 +66,8 @@
 <div id="legend" hidden></div>
 
 <div id="workspace">
-<!-- The guide is not a panel and not a dockable drawer (spec SHELL-009): it is
-     its own surface at the left edge of the workspace, outside #drawer-left. -->
+<!-- The guide is not a panel and does not dock (spec SHELL-009): it is its own
+     surface at the left edge of the workspace, outside the dock. -->
 <aside id="guide" hidden>
   <div id="guide-bar">
     <span id="guide-title">Tasks</span>
@@ -69,8 +77,10 @@
   <div id="guide-body"></div>
   <div id="guide-resize" title="Drag to resize the guide"></div>
 </aside>
-<div id="drawer-left" class="drawer" hidden></div>
-<main id="views">
+<!-- The dock (shell/layout.ts, Dockview): the views and every window live in
+     it as panels. The views start here and are adopted into it at startup. -->
+<main id="dock"></main>
+<div id="views" hidden>
   <section class="tl-strip" id="strip-t">
     <span class="tl-tag" title="x = wall-clock time; bursts bunch up">time</span>
     <canvas id="tlt"></canvas>
@@ -99,8 +109,7 @@
     <div id="addr-spacer"></div>
     <div id="empty-hint">no live allocations at this point</div>
   </section>
-</main>
-<div id="drawer-right" class="drawer" hidden></div>
+</div>
 </div>
 
 <footer id="status">

@@ -5,5 +5,8 @@
   "devDependencies": {
     "@types/node": "^26.1.1",
     "typescript": "^5.9.0"
+  },
+  "dependencies": {
+    "dockview-core": "8.4.1"
   }
 }

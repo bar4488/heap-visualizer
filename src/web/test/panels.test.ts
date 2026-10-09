@@ -14,7 +14,7 @@ test('every record carries an id, a title, a default layout, and a refill slot',
   for (const p of panels) {
     assert.equal(typeof p.id, 'string');
     assert.ok(p.title.length > 0, `${p.id} has no title`);
-    assert.ok(p.dock === null || p.dock === 'left' || p.dock === 'right');
+    assert.ok([null, 'left', 'right', 'bottom', 'center'].includes(p.dock));
     assert.equal(typeof p.open, 'boolean');
     assert.equal(p.refill, null); // no refills supplied
   }
@@ -23,10 +23,13 @@ test('every record carries an id, a title, a default layout, and a refill slot',
 
 test('the panel table declares the complete default workspace', () => {
   const panels = heapPanels();
+  // the views, top to bottom: two strips above the map, which cannot be closed
   assert.deepEqual(
-    panels.filter((p) => p.dock === 'left').map((p) => [p.id, p.open]),
-    [['events-panel', true], ['logs-panel', true]],
+    panels.filter((p) => p.dock === 'center').map((p) => [p.id, p.open, p.closable !== false]),
+    [['strip-t', true, true], ['strip-s', true, true], ['addr-scroll', true, false]],
   );
+  assert.deepEqual(panels.filter((p) => p.dock === 'left').map((p) => [p.id, p.open]), [['events-panel', true]]);
+  assert.deepEqual(panels.filter((p) => p.dock === 'bottom').map((p) => [p.id, p.open]), [['logs-panel', true]]);
   // ...but Logs opens only for a trace that has log records (LOG-007)
   assert.deepEqual(panels.filter((p) => p.needs).map((p) => [p.id, p.needs]), [['logs-panel', 'logs']]);
   assert.deepEqual(
