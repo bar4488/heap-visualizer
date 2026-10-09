@@ -6,9 +6,9 @@ belongs in [spec/](../spec/README.md); this file is operational.
 ## Build
 
 ```sh
-npm install         # typescript + @types/node, dev-only, once
+npm install         # typescript + @types/node (dev), dockview-core (vendored), once
 ./build.sh          # everything into dist/: the wasm, the compiled web layer,
-                    # and a generated demo trace
+                    # the vendored dock engine, and a generated demo trace
 ./build.sh web      # skip the cargo build; recompile only the web layer
 ```
 
@@ -18,6 +18,14 @@ layer is TypeScript; `tsc` emits browser ES modules with source maps, and
 refuses to emit at all if anything fails to type-check.
 
 Needs the wasm target: `rustup target add wasm32-unknown-unknown`.
+
+**The dock engine is vendored, not bundled.** `dockview-core` is pinned to an
+exact version in `package.json` ([D014](decisions/D014-dockview-for-windowing.md)).
+`build.sh` copies its one self-contained ES module to
+`dist/vendor/dockview-core.esm.min.mjs`, which the import map in `index.html`
+maps the bare specifier onto, and writes `dist/vendor/dockview.css` — lifted
+out of the package's UMD build, because the ESM build ships no stylesheet. An
+upgrade is a deliberate version bump plus a look at the result in a browser.
 
 **`./build.sh` emits two wasm modules.** `heap_visualizer_core.wasm` is the
 engine, loaded by the worker. `filter_lexer.wasm` is `src/filter-dsl/` on its
@@ -193,8 +201,10 @@ strips the types itself, which is why sources import each other as `./x.ts` and
 sources in `src/web/`, not against `dist/`. Type-checking is the one thing that
 needs `npm install`.
 `src/web/test/dom-stub.ts` is a stand-in for the DOM surface the web layer
-actually touches — that is what makes the persisted round-trips testable
-without a browser.
+actually touches, and `src/web/test/fake-dockview.ts` for the slice of the dock
+engine the shell drives — that is what makes the persisted round-trips and the
+panel API testable without a browser (the shell receives the engine from
+`main.ts` rather than importing it, so no test loads `dockview-core`).
 
 The web suite covers, among others: `fmt.ts` in full (`clampView` included —
 it is the one function both threads run on the same input), `normAddr`, the
@@ -207,8 +217,9 @@ What it does not cover yet: see [Verify a web change](#verify-a-web-change).
 
 ## Verify a web change
 
-Rendering, pointer interaction, and the real worker round trip are not yet
-covered by any suite. Run the available checks and say precisely what they
+Rendering, pointer interaction, the real dock engine (dragging tabs, edge
+groups, floating), and the real worker round trip are not yet covered by any
+suite. Run the available checks and say precisely what they
 did and did not establish.
 
 ```sh
@@ -243,7 +254,7 @@ in the final result rather than blocking otherwise verified work.
 | `src/core/` | Rust engine: parse, columnar store, state, render, timeline. Also an `rlib`, so tests run natively. |
 | `src/filter-dsl/` | Dependency-free Rust crate for allocation-filter source spans, syntax trees, and parsing. |
 | `src/web/protocol.ts` | The main-thread ↔ worker message contract. Types only; both sides import it. |
-| `src/web/shell/` | Domain-independent: panel windows, drawers, tooltip, DOM helpers. Names no heap concept. |
+| `src/web/shell/` | Domain-independent: the panel API over the dock (`layout.ts`, the only code that talks to Dockview), its engine-free layout plans, tooltip, DOM helpers. Names no heap concept. |
 | `src/web/heap/` | Heap-specific: analysis data, the panel table, events panel, address helpers. |
 | `src/web/session.ts` | The boundary: serializes shell state *and* heap state into one per-trace blob. |
 | `src/web/main.ts` | Trace/worker/toolbar wiring plus the three coordinated views. Owns `UIState`, the shared state every other module takes as `deps.ui`. |

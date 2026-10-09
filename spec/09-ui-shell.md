@@ -1,152 +1,186 @@
-# 09 — UI Shell: Toolbar, Windows, Docking
+# 09 — UI Shell: Toolbar, Dock, Panels
 
-The chrome around the three views. Guiding stance: the views own the screen;
-everything else is a **window** the user summons, places, and dismisses.
+The chrome around the views. Guiding stance: the views own the screen;
+everything else is a **window** the user summons, places, and dismisses. Views
+and windows alike are **panels in one dock** — a split/tab grid with edge
+groups and floating groups — so a new view (a flame graph, a span view) is one
+more panel type, not a new layout.
 
 ## SHELL-001: Layout
 
 - **Toolbar** (top): open/demo, trace title, panel toggles (Play, Layout,
   Appearance, Filter, Events, Logs, Marks), horizontal-zoom pill, crop pill, marks
   Save/Load, jump box, warnings badge, and an overflow menu (⋯) carrying
-  workspace actions — **Reset layout**
-  ([SHELL-008](#shell-008-the-default-layout)).
+  workspace actions — show/hide the **Time strip** and **Event-index strip**,
+  and **Reset layout** ([SHELL-008](#shell-008-the-default-layout)).
 - **Legend strip** under the toolbar when a color mode needs one.
-- **Workspace**: optional left/right drawers flanking the three stacked views,
-  with the guide surface ([SHELL-009](#shell-009-the-guide-surface)) outside
-  them at the left edge.
+- **Workspace**: the dock ([SHELL-004](#shell-004-docking)), with the guide
+  surface ([SHELL-009](#shell-009-the-guide-surface)) outside it at the left
+  edge.
 - **Status bar** (bottom): playhead position (seq + t), live count/bytes,
   transient info line, trace summary line.
 - Overlays above everything as needed: tooltip, selection popover, search
   overlay, drop overlay, load progress.
 
-## SHELL-002: Panels are windows
+## SHELL-002: Panels: views and windows
 
-Every panel (Play, Layout, Appearance, Filter, Marks, Warnings, Events, Logs,
-Allocation, pinned allocation windows, Event, Request) is a window: it is
-either floating — dragged by its header, z-stacked with most-recently-touched
-on top — or docked in a drawer ([SHELL-004](#shell-004-docking-drawers)).
-Every window is closable. Toolbar buttons toggle visibility; which home a
-window has, and where it sits in it, persists per trace via the session
+Everything in the workspace is a panel in the dock. Two kinds:
+
+- **Views** — the address map, the time strip and the event-index strip. They
+  start in the center grid, the two strips stacked above the map. The
+  **address map cannot be closed**: its tab has no close button and no amount
+  of restoring or resetting can leave the workspace without it. The strips can
+  be closed from their tab and brought back from the overflow menu.
+- **Windows** — Play, Layout, Appearance, Filter, Marks, Warnings, Events,
+  Logs, Allocation, pinned allocation windows, Event, Request. Every window is
+  closable. Toolbar buttons toggle them.
+
+A panel's tab carries its title (a window that retitles itself, like
+Allocation naming its allocation, retitles its tab), its close button, and is
+its drag handle. A window's own controls (follow, filtered, pin, ＋ mark, a
+line count) stay in a row at its top. A **toolbar toggle** closes its window
+when it is on screen, and brings it to the front when it is open but out of
+sight — a tab behind another, or in a collapsed edge group. Where each panel
+is persists per trace via the session
 ([ANL-007](07-analysis.md#anl-007-persistence--heapa-files-and-autosave)), and
 starts from the default layout ([SHELL-008](#shell-008-the-default-layout)).
 
 Behaviors every window has, whatever it contains:
 
-- **One z band.** Floating windows stack among themselves only, in a band
-  below every overlay (tooltip, selection popover, search, drop and progress
-  overlays, setup). No amount of raising may carry a window above an overlay;
-  the stack is renormalized rather than counted upward.
-- **Reachable.** A floating window's header must stay on screen: a position
-  restored from a session, and every floating window after a viewport resize,
-  is pulled back so at least a strip of its header is inside the viewport.
+- **Below the overlays.** The dock is one stacking context: no floating group,
+  however raised, can sit above an overlay (tooltip, selection popover, menu,
+  search, drop and progress overlays, setup).
+- **Reachable.** A floating group stays inside the workspace: positions
+  restored from a session, and every floating group after a viewport resize,
+  are held within it.
 - **Keyboard.** A window is a labelled region (named by its title). Opening one
   from its toolbar toggle moves focus into it, and closing it while focus is
-  inside returns focus to whatever opened it. **Escape** closes the window that
-  has focus, unless a control inside it used the key first (an open completion
-  list closes on the first Escape, the window on the next). Close buttons carry
+  inside (or with focus lost to the page) returns focus to whatever opened it.
+  **Escape** closes the window that has focus, unless a control inside it used
+  the key first (an open completion list closes on the first Escape, the
+  window on the next). Escape never closes a view. Window close buttons carry
   an accessible name ("Close Filter"); toolbar toggles expose whether their
-  window is open (`aria-pressed`). A window opened by the app rather than by
-  the user — the Allocation window following a selection — does not take
-  focus.
+  window is open (`aria-pressed`, `aria-checked` in the menu); the dock's own
+  collapse and maximize buttons are named and expose their state. A window
+  opened by the app rather than by the user — the Allocation window following
+  a selection — does not take focus.
 
 ## SHELL-003: Panels are declared as data
 
-Every window must be declared as data — one record per panel carrying at least
+Every panel must be declared as data — one record per panel carrying at least
 its element id, its title, and how it refills itself from a freshly loaded
 trace — and that declaration must be the only place a panel id is written.
 Nothing may keep a second list of panels alongside it, including the code that
 titles panels, the code that toggles them, the code that hides them on a new
-trace, and the code that persists their geometry. A refill function declared
+trace, and the code that persists their place. A refill function declared
 against an id that is not in the table is an error, not a step that silently
 never runs.
 
-Each record must also carry that panel's place in the default layout — which
-drawer it docks in, or that it floats, and whether it starts open
-([SHELL-008](#shell-008-the-default-layout)). Windows that are opened per
-selection or per event (Allocation, its pinned clones, Event) are declared in
-the same table, marked as not persisted: the session does not store their open
-state or geometry as windows. Pinned allocation windows are **multi-instance**:
-one window per creator event, addressed as type + key.
+Each record must also carry that panel's place in the default layout — the
+center grid, an edge group, or floating — whether it starts open, and whether
+it can be closed ([SHELL-008](#shell-008-the-default-layout)). Windows that are
+opened per selection or per event (Allocation, its pinned clones, Event) are
+declared in the same table, marked as not persisted: a restored session does
+not decide their open state. Pinned allocation windows are **multi-instance**:
+one window per creator event, addressed as type + key, and the panel id is
+`type:key`.
 
 The declaration belongs to the domain, not to the shell: the shell places and
-persists whatever windows it is handed, and must not name a panel. A window
-that is not heap-shaped (Request) is declared to the shell by its own module.
+persists whatever panels it is handed, and must not name one. A window that is
+not heap-shaped (Request) is declared to the shell by its own module.
 
-**The shell's panel API.** Domain code reaches windows only through the shell's
-layout API (`shell/layout.ts`), which owns visibility, drawer bookkeeping,
-placement, focus, toolbar toggles and close buttons:
+**The shell's panel API.** Domain code reaches panels only through the shell's
+layout API (`shell/layout.ts`), which owns visibility, placement, focus,
+toolbar toggles and close buttons. It is the only code that talks to the dock
+engine ([D014](../docs/decisions/D014-dockview-for-windowing.md)):
 
-- `register(type, {title, singleton, defaultLocation, build, persist, toggle,
-  autoPlace, onOpen, onClose})` declares a type. A singleton's element is
-  adopted at once; a multi-instance type's `build(key, data)` makes a window
-  per key.
-- `open(type, key?, options)`, `close`, `toggle`, `reveal` (open, raise, and
-  expand a collapsed drawer holding it), `isOpen`. Options cover moving focus,
-  a floating position, docking, and replaying a restore. Every open and close
-  goes through these, and they keep the drawer, the toolbar toggle and the
-  hooks consistent — domain code never writes a window's visibility or dock
-  side itself.
-- `onOpen(type, fn)` / `onClose(type, fn)`: what a window does when it becomes
-  visible (the Events and Logs lists catch up) or hidden. Hooks run on every
-  open/close transition, including those a reset or a restore makes, once the
-  whole layout is in place.
+- `register(type, {title, singleton, closable, defaultLocation, build, persist,
+  toggle, size, floatSize, autoPlace, onOpen, onClose})` declares a type. A
+  singleton's element is adopted at once; a multi-instance type's
+  `build(key, data)` makes an element per key.
+- `open(type, key?, options)`, `close`, `toggle`, `reveal` (open, bring its tab
+  to the front, and expand a collapsed edge group holding it), `isOpen`,
+  `isShown`. Options cover moving focus, a floating position, a home (an edge,
+  the center, floating), another window's place (`placeOf` — pinning and
+  unpinning swap a window in place), and replaying a restore. Every open and
+  close goes through these — domain code never writes a panel's visibility.
+- `onOpen(type, fn)` / `onClose(type, fn)`: what a window does when it opens or
+  comes back into sight (its tab brought to the front, its edge expanded — the
+  Events and Logs lists catch up), and when it closes. Hooks run once the
+  whole layout is in place, including after a reset or a restore.
 - `resetLayout()` — the default layout ([SHELL-008](#shell-008-the-default-layout)).
-- `serialize()` / `restore()` — the session's `windows` and `drawers`, which
-  the session module carries in its envelope without reading inside them.
-  Restoring clamps what it restores (positions, drawer widths) to the current
-  viewport.
+- `serialize()` / `restore()` — the session's `shell` section, which the
+  session module carries in its envelope without reading inside it
+  ([SHELL-004](#shell-004-docking)).
 
-The API, not the drawer and drag machinery behind it, is the contract: a
-different layout engine (a split/tab tree) replaces what is behind it without
-domain code changing.
+Panel elements are **long-lived and adopted, never created by the dock**: the
+views' canvases are transferred to the render worker once at startup, and the
+app finds controls by element id. A closed panel's element stays in the
+document, hidden; an open one is moved into the dock. A view that is closed or
+hidden measures nothing, and the render worker keeps its last size rather than
+being resized to nothing.
 
-## SHELL-004: Docking drawers
+## SHELL-004: Docking
 
-Any window can be **docked** by dragging it to a screen edge (or an already
-open drawer): an insertion indicator previews the drop position in an open
-drawer, and an outline over the workspace previews where an empty or
-collapsed drawer will appear — a preview never shows, hides or resizes a
-drawer, so nothing reflows mid-drag. Drop docks the window into a vertical
-stack; **Escape** during a drag puts the window back exactly where it was
-picked up, docked or floating. Behaviors that define the feel:
+The dock is a grid of **groups**; a group shows one or more panels as tabs.
+Dragging a tab rearranges it: onto another group's tab strip or center makes it
+a tab there, onto a group's edge splits that group, onto the outer edge of the
+grid splits the whole grid. Holding Shift while dragging (or the tab's context
+menu → Float) floats a panel in its own **floating group**, which moves by its
+title bar and resizes from its edges. A grid group can be **maximized** (its
+header button or the tab menu) to fill the dock, and restored. Panels never
+leave the page: there are no popout windows.
 
-- A drawer exists only while it has visible docked windows; empty drawers
-  vanish.
-- A drawer that has content carries a bar at its top with a **collapse**
-  control. Collapsing must reduce the drawer to a narrow rail carrying that
-  control and the titles of its open windows, written vertically (clicking a
-  title expands the drawer). It must not close, undock, or reorder the windows
-  in it; expanding must restore them at the drawer's previous width. Collapsed
-  state persists with the session, and dropping a window on a collapsed drawer
-  expands it.
-- Docked windows share the drawer's height **in proportion**: each has a share,
-  even by default. Dividers between them move share between the neighboring
-  pair only. Opening, closing or adding a window redistributes height by those
-  shares rather than resetting them, and the shares persist with the session.
-  Dividers are focusable separators, adjustable with ↑/↓.
-- The drawer's width is draggable at its inner edge (also a focusable
-  separator, ←/→), within 160–600 px, and never so wide that the views get
-  narrower than a minimum (320 px). The width asked for is kept: when the
-  viewport narrows the drawer is shown narrower, and it returns to the asked
-  width when there is room again. A restored width is clamped the same way.
-- Dragging a docked window pops it out immediately (it re-docks only if
-  actually dropped on a drawer), so a window in motion is always visibly "in
-  hand".
-- Closing a docked window keeps its dock slot so reopening from the toolbar
-  returns it to its place; the drawer vanishes if that leaves it empty.
-- Dock layout and order (pinned allocation windows included), drawer widths,
-  heights, collapse and floating positions restore with the session.
+Around the grid are three **edge groups** — left, right, bottom:
+
+- An edge group is one group of tabs along that side, resizable at its inner
+  edge.
+- It **collapses** to a rail of its tab titles (written vertically on the
+  left and right), from a button at the end of its tab strip; collapsing never
+  closes, undocks or reorders its panels, and expanding restores its size.
+  Collapse persists with the session. Opening or revealing a window that lives
+  there expands it.
+- An edge group with no panels **is not shown**; while a tab is being dragged,
+  empty edges show as rails so a panel can be dropped onto them, and one that
+  fills up from empty opens expanded.
+
+Closing a panel keeps its place: reopening it from its toggle returns it to
+the edge group, the grid group or the floating position it was in (or, if
+that group is gone, to its default home).
+
+**The dock layout in the session.** The shell's half of the session is a
+`shell` section with its own `version`. Version 2 is the dock engine's own
+serialization of the whole layout — groups, splits and their sizes, tabs and
+the active one, edge groups' sizes and collapse, floating groups' positions —
+plus where closed windows reopen. A restore replaces the layout wholly. A
+saved panel whose window does not exist yet (a pinned allocation window, which
+comes back after a worker round-trip) holds its slot until it is recreated
+there, and the slot is dropped if it never is. A saved panel for a window that
+is not persisted, or that this build does not know, is not restored; windows
+that are not persisted keep their open state across a restore. Restoring a
+layout that lacks a view that cannot be closed adds the view back.
+
+A session written before the dock (shell version 1: `windows` with each
+window's floating position and visibility, and `drawers` with the left and
+right drawers' order, widths and collapse) is read once, through one path,
+into a dock layout: each drawer becomes that edge group (its order the tab
+order, its width the group's size, its collapse kept), docked pinned windows
+keep their slot, windows the old session knew about but did not dock float
+where they were, a window docked but closed reopens in that edge, and anything
+the old session did not know about — the views, the bottom edge — takes its
+default. It is written back in the current shape.
 
 ## SHELL-005: The allocation window lifecycle
 
 One **live** Allocation panel follows selection (click, step, search-jump).
-**Pinning** (📌) detaches the current window in place — identical chrome, the
-orange pin the only tell — and the next selection opens a fresh live panel,
-cascade-placed to avoid landing on pinned ones. Selecting an
+**Pinning** (📌) detaches the current window in place — the pinned window takes
+the live window's place in the dock, identical chrome, the orange pin the only
+tell — and the next selection opens a fresh live panel, cascade-placed to
+avoid landing on pinned ones. Selecting an
 already-pinned allocation raises its window instead of duplicating it.
-Unpinning returns the window's content to the live panel. Pinned windows dock
-like any other window and are restored from the session by creator event
-index.
+Unpinning returns the window's content to the live panel, in the pinned
+window's place. Pinned windows dock like any other window and are restored
+from the session by creator event index, each into its saved slot.
 
 The window can insert `allocation(<id>).` at the Filter editor's current
 selection and open contextual completion. This writes source only—it neither
@@ -198,40 +232,44 @@ map. Controls carry `title` tooltips explaining gesture modifiers.
 
 ## SHELL-008: The default layout
 
-Where a window sits before anyone has moved it is a decision, not an accident
-of CSS. With no session to restore, the workspace must open with the panels
-that are consulted continuously already docked and open:
+Where a panel sits before anyone has moved it is a decision, not an accident
+of CSS. With no session to restore, the workspace must open with the views and
+the panels that are consulted continuously already docked and open:
 
-- **Right drawer**, top to bottom: Layout, Appearance, Filter, Marks.
-- **Left drawer**, top to bottom: Events, Logs. Logs starts open only when
-  the loaded trace has log records, and closed otherwise
-  ([LOG-007](13-domains-and-logs.md#log-007-the-logs-panel)); the panel
-  table records that condition beside the panel's dock and open state.
+- **Center**, top to bottom: the time strip, the event-index strip (each at a
+  strip's height), the address map (the rest).
+- **Right edge**, as tabs in this order, Layout in front: Layout, Appearance,
+  Filter, Marks.
+- **Left edge**: Events.
+- **Bottom edge**: Logs — a wide terminal. It starts open only when the loaded
+  trace has log records, and closed otherwise
+  ([LOG-007](13-domains-and-logs.md#log-007-the-logs-panel)); the panel table
+  records that condition beside the panel's home and open state.
 - **Floating and closed**: Play, Warnings, Allocation and its pinned clones.
   Play is a window a user opens for a moment and dismisses; Warnings only
-  exists when the trace has any; Allocation follows selection and is placed
-  relative to it ([SHELL-005](#shell-005-the-allocation-window-lifecycle)).
+  exists when the trace has any; Allocation follows selection and floats at
+  the workspace's bottom-left, cascading past pinned windows
+  ([SHELL-005](#shell-005-the-allocation-window-lifecycle)).
 
-A restored session overrides this **wholly**, not as a patch on top of it: a
-window the default docks and the session does not must end up floating.
+A restored session overrides this **wholly**, not as a patch on top of it.
 
 A newly loaded trace with no session starts from this layout too, keeping
-floating windows where the user left them. **Reset layout** (toolbar overflow
-menu) applies it on demand and completely: every declared window back in its
-default drawer and order, or floating at its default spot, persisted windows
-open or closed as declared, drawers at their default width, docked heights
-even, nothing collapsed. Windows opened per selection (Allocation, pinned
-clones, Event) keep their open state and are only moved — undocked and back
-on screen. The result is autosaved like any other layout change.
+floating windows' positions. **Reset layout** (toolbar overflow menu) applies
+it on demand and completely: every view back in the center, every declared
+window back in its default edge and order or floating at its default spot,
+persisted windows open or closed as declared, edge groups at their default
+size and expanded. Windows opened per selection (Allocation, pinned clones,
+Event) keep their open state and are only moved — floated, on screen. The
+result is autosaved like any other layout change.
 
 ## SHELL-009: The guide surface
 
 The user-facing guide is **not a window**. It must not appear in the panel
 declaration ([SHELL-003](#shell-003-panels-are-declared-as-data)), must not
-dock, float, or z-stack ([SHELL-002](#shell-002-panels-are-windows),
-[SHELL-004](#shell-004-docking-drawers)), and must not carry per-trace session
+dock, float, or tab ([SHELL-002](#shell-002-panels-views-and-windows),
+[SHELL-004](#shell-004-docking)), and must not carry per-trace session
 geometry. It is its own surface at the left edge of the workspace, outside the
-docking drawers, toggled from the toolbar and closable.
+dock, toggled from the toolbar and closable.
 
 Its content must be a concise task list in plain markdown authored under `src/`,
 such that each section read as raw text is complete. It prioritizes actions and
