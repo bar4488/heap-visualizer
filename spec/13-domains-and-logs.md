@@ -5,6 +5,14 @@ The heap is the **first** evidence domain, not the product's only shape; logs
 are the second. This module states what every domain shares, and then
 specifies the log domain. Design background: `docs/explorations/E022`.
 
+How a domain's records are encoded is settled by
+[D013](../docs/decisions/D013-hybrid-record-types.md): a built-in domain gets
+its own `op` letter, and producer-defined kinds use `E` with a `kind` field.
+The proposed next format revision (process identity, clock contract, header
+kinds, and the interval domain) is
+[E023](../docs/explorations/E023-trace-format-v2.md); it is not yet part of
+this spec.
+
 ## DOM-001: One event spine
 
 Every record that occupies an event index — of any domain — shares one
@@ -50,7 +58,9 @@ the worker and DOM present it.
 
 ## LOG-001: The log record `L`
 
-A structured log line emitted by the traced program.
+A structured log line emitted by the traced program. `L` is a built-in
+domain letter under [D013](../docs/decisions/D013-hybrid-record-types.md);
+logs are not written as `E` records with a `kind`.
 
 ```json
 {"seq":120,"t":10480,"op":"L","thr":2,"level":"warn","logger":"net.http","msg":"retrying request","attempt":3}
