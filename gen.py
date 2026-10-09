@@ -105,6 +105,15 @@ LOG_PATHS: list[str] = [
 ]
 LOG_EVERY = 160          # operations between request log lines, on average
 LOG_PEAK_STEP = 8 << 20  # a warn each time peak live bytes crosses a multiple
+IVL_FUNCS: list[str] = [
+    "main_loop", "handle_request", "parse_body", "render_tile",
+    "flush_cache", "compress", "db_query",
+]
+IVL_ROUTES: list[str] = ["/upload", "/tiles", "/search", "/health"]
+DEMO_PID = 4242        # the process id the demo's startup log reports
+IVL_DEPTH = 8           # deepest call stack per thread, with --intervals
+IVL_OPEN_SPANS = 16     # most spans open at once, with --intervals
+
 LOG_BUDGET = 64 << 20    # past this, each new high-water mark is also an error
 
 
@@ -231,6 +240,14 @@ class Generator:
         self.n_log = 0
         self._log_peak_step = 0
         self._log_req = 0
+        # Interval edges (--intervals) draw from their own stream too.
+        self.ivl_rng = random.Random(args.seed * 104729 + 3)
+        self.ivl_stacks: dict[int, list[str]] = {}
+        self.open_spans: list[str] = []
+        self.n_span = 0
+        self.n_ivl = 0
+        self.n_cpus = max(1, min(args.threads, 4))
+        self.cpu_running: dict[int, int] = {}   # cpu -> thread it runs
 
     # -- id / time helpers --------------------------------------------------
 
@@ -483,7 +500,7 @@ class Generator:
 
     def _log_startup(self, out) -> None:
         a = self.args
-        self._log(out, "info", "app", "heapviz-demo 0.3.1 starting", thr=0, pid=4242)
+        self._log(out, "info", "app", "heapviz-demo 0.3.1 starting", thr=0, pid=DEMO_PID)
         self._log(out, "debug", "app.config", "loaded config from /etc/demo/app.toml",
                   thr=0, threads=a.threads, arena=self._hexaddr(a.arena_base))
         self._log(out, "trace", "mem.arena", "arena reserved", thr=0,
@@ -540,6 +557,68 @@ class Generator:
             self._log(out, "debug", "render.tiles", f"large tile buffer {last.size} B",
                       thr=last.thr, id=last.id, addr=self._hexaddr(last.addr))
 
+    # -- intervals (--intervals, trace format v2) ----------------------------
+
+    def _ivl_names(self, out) -> None:
+        """`T` records naming each thread; they take no seq."""
+        for thr in range(self.args.threads):
+            name = "main" if thr == 0 else f"worker-{thr}"
+            out.write(json.dumps({"op": "T", "thr": thr, "name": name}, separators=(",", ":")))
+            out.write("\n")
+
+    def _ivl_edge(self, out, rec: dict) -> None:
+        self.n_ivl += 1
+        self._emit(out, rec)
+
+    def _ivl_step(self, out) -> None:
+        """Maybe one interval edge: a call begin/end on a thread's stack, a
+        request span begin/end (ending on any thread), or a context switch."""
+        r = self.ivl_rng
+        thr = r.randrange(self.args.threads)
+        stack = self.ivl_stacks.setdefault(thr, [])
+        x = r.random()
+        if x < 0.35 and len(stack) < IVL_DEPTH:
+            name = r.choice(IVL_FUNCS)
+            stack.append(name)
+            self._ivl_edge(out, {"t": self.t, "op": "B", "thr": thr, "name": name})
+        elif x < 0.7 and stack:
+            self._ivl_edge(out, {"t": self.t, "op": "X", "thr": thr, "name": stack.pop()})
+        elif x < 0.78:
+            if self.open_spans and (r.random() < 0.5 or len(self.open_spans) >= IVL_OPEN_SPANS):
+                sid = self.open_spans.pop(r.randrange(len(self.open_spans)))
+                self._ivl_edge(out, {"t": self.t, "op": "X", "thr": thr, "span": sid,
+                                     "status": r.choice(["ok", "ok", "ok", "error"])})
+            else:
+                self.n_span += 1
+                sid = f"r{self.n_span}"
+                rec = {"t": self.t, "op": "B", "thr": thr, "span": sid, "name": "request",
+                       "route": r.choice(IVL_ROUTES)}
+                if self.open_spans and r.random() < 0.4:
+                    rec["parent"] = r.choice(self.open_spans)
+                self.open_spans.append(sid)
+                self._ivl_edge(out, rec)
+        elif x < 0.9:
+            # switch a CPU to a thread no other CPU is running, else idle
+            cpu = r.randrange(self.n_cpus)
+            busy = {t for c, t in self.cpu_running.items() if c != cpu}
+            ready = [t for t in range(self.args.threads) if t not in busy]
+            rec = {"t": self.t, "op": "C", "cpu": cpu}
+            if ready and r.random() < 0.85:
+                rec["thr"] = self.cpu_running[cpu] = r.choice(ready)
+            else:
+                self.cpu_running.pop(cpu, None)
+                rec["state"] = "S"
+            self._ivl_edge(out, rec)
+
+    def _ivl_close(self, out) -> None:
+        """Close every open call and span at the end of the trace."""
+        for thr, stack in sorted(self.ivl_stacks.items()):
+            while stack:
+                self._ivl_edge(out, {"t": self.t, "op": "X", "thr": thr, "name": stack.pop()})
+        for sid in self.open_spans:
+            self._ivl_edge(out, {"t": self.t, "op": "X", "thr": 0, "span": sid, "status": "ok"})
+        self.open_spans = []
+
     def _drain_due_frees(self, out) -> None:
         """Emit every scheduled free whose time has arrived."""
         while self.pending and self.pending[0][0] <= self.t:
@@ -559,9 +638,13 @@ class Generator:
         phase_len = max(1, args.ops // len(LOG_PHASES))
         if logs:
             self._log_startup(out)
+        if args.intervals:
+            self._ivl_names(out)
         for i in range(args.ops):
             self._advance_time()
             self._drain_due_frees(out)
+            if args.intervals:
+                self._ivl_step(out)
             if every and i % every == 0:
                 self._do_custom_event(out)
             if logs and i % phase_len == 0 and i // phase_len < len(LOG_PHASES):
@@ -579,6 +662,9 @@ class Generator:
         if logs:
             self._log(out, "info", "app", "shutting down: freeing remaining allocations",
                       thr=0, live=len(self.live), live_bytes=self._cur_live_bytes)
+
+        if args.intervals:
+            self._ivl_close(out)
 
         # flush all remaining scheduled frees in time order
         while self.pending:
@@ -598,11 +684,14 @@ class Generator:
     def _emit_header(self, out) -> None:
         header = {
             "op": "H",
-            "v": FORMAT_VERSION,
+            "v": 2 if self.args.intervals else FORMAT_VERSION,
             "unit": self.args.unit,
             "arena_base": self._hexaddr(self.args.arena_base),
             "row_bytes": self.args.row_bytes,
             "title": "seed=%d ops=%d" % (self.args.seed, self.args.ops),
+            # v2: the process every record belongs to; the startup log's
+            # `pid` field names the same one
+            **({"pid": DEMO_PID} if self.args.intervals else {}),
             "meta": {
                 "generator": "gen.py",
                 "threads": self.args.threads,
@@ -621,14 +710,14 @@ class Generator:
         span = self.max_addr - self.min_addr
         return (
             "heap-visualizer gen.py summary\n"
-            "  events        : %d (M=%d F=%d R=%d E=%d L=%d)\n"
+            "  events        : %d (M=%d F=%d R=%d E=%d L=%d B/X/C=%d)\n"
             "  leaked allocs : %d (%d bytes still live at end)\n"
             "  peak live     : %d bytes (%.2f MiB)\n"
             "  address span  : %s .. %s (%d bytes, %.2f MiB)\n"
             "  final t       : %d %s\n"
             % (
                 self.seq,
-                self.n_malloc, self.n_free, self.n_realloc, self.n_custom, self.n_log,
+                self.n_malloc, self.n_free, self.n_realloc, self.n_custom, self.n_log, self.n_ivl,
                 self.n_leak, self._cur_live_bytes,
                 self.peak_live_bytes, self.peak_live_bytes / (1 << 20),
                 self._hexaddr(self.min_addr), self._hexaddr(self.max_addr),
@@ -688,6 +777,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="omit the structured `L` log lines (startup, phases, "
                         "requests, and warnings tied to heap moments) that are "
                         "otherwise interleaved with the heap records")
+    p.add_argument("--intervals", action="store_true",
+                   help="write a v2 trace with interval records: `T` thread "
+                        "names, nested `B`/`X` calls per thread, request spans "
+                        "that may end on another thread, and `C` context "
+                        "switches on up to 4 CPUs (use with --threads)")
     p.add_argument("--quiet", action="store_true",
                    help="suppress the stderr summary")
     return p.parse_args(argv)

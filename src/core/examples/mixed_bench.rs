@@ -1,14 +1,17 @@
 //! Heap-only versus mixed-trace benchmark (DOM-002's performance gate).
 //!
-//! Generates one deterministic heap workload in memory and loads it three
-//! times: heap-only, and with structured log lines interleaved at 10x and
-//! 100x the heap record count. The heap records are identical in all three,
-//! so every heap operation below asks the same question of each trace and
-//! the mixed columns should match the heap-only one.
+//! Generates one deterministic heap workload in memory and loads it several
+//! times: heap-only, with structured log lines interleaved at 10x and 100x
+//! the heap record count, and (a v2 trace) with interval edges — nested
+//! calls on four threads, spans, and context switches on four CPUs — at 10x.
+//! The heap records are identical in all of them, so every heap operation
+//! below asks the same question of each trace and the mixed columns should
+//! match the heap-only one.
 //!
 //! ```sh
 //! cargo run --release --example mixed_bench --manifest-path src/core/Cargo.toml
 //! cargo run --release --example mixed_bench --manifest-path src/core/Cargo.toml -- --heap 200000
+//! cargo run --release --example mixed_bench --manifest-path src/core/Cargo.toml -- --ratios 0 --intervals 10,100
 //! ```
 //!
 //! Times are wall-clock medians over a few rounds; treat differences under
@@ -43,14 +46,75 @@ const SITES: [&str; 8] = [
 const LEVELS: [&str; 6] = ["trace", "debug", "info", "warn", "error", "fatal"];
 const LOGGERS: [&str; 4] = ["net.http", "db.pool", "cache", "sched"];
 
+/// One trace's mix: other-domain records per heap record.
+#[derive(Clone, Copy)]
+struct Mix {
+    logs: u32,
+    intervals: u32,
+}
+
+impl Mix {
+    fn label(self) -> String {
+        match (self.logs, self.intervals) {
+            (0, 0) => "heap-only".into(),
+            (l, 0) => format!("+{l}x logs"),
+            (0, i) => format!("+{i}x ivl"),
+            (l, i) => format!("+{l}x/{i}x"),
+        }
+    }
+}
+
+/// Interval edges for the interval mix: per-thread call stacks up to depth
+/// 12, a span tree, and a context switch every eighth edge.
+struct Edges {
+    rng: Rng,
+    stacks: [u32; 4],
+    open_spans: Vec<u32>,
+    next_span: u32,
+}
+
+const FUNCS: [&str; 6] = ["main", "serve", "handle", "parse", "encode", "flush"];
+
+impl Edges {
+    fn next(&mut self, t: u64, out: &mut Vec<u8>) {
+        let r = self.rng.below(16);
+        let thr = self.rng.below(4) as usize;
+        let line = if r < 2 {
+            let cpu = self.rng.below(4);
+            format!("{{\"op\":\"C\",\"t\":{t},\"cpu\":{cpu},\"thr\":{thr}}}\n")
+        } else if r < 4 {
+            if self.open_spans.len() < 64 && (self.open_spans.is_empty() || self.rng.below(2) == 0) {
+                self.next_span += 1;
+                let parent = self.open_spans.last().map_or(String::new(), |p| format!(",\"parent\":\"s{p}\""));
+                self.open_spans.push(self.next_span);
+                format!("{{\"op\":\"B\",\"t\":{t},\"thr\":{thr},\"span\":\"s{}\",\"name\":\"request\"{parent}}}\n", self.next_span)
+            } else {
+                let id = self.open_spans.swap_remove(self.rng.below(self.open_spans.len() as u64) as usize);
+                format!("{{\"op\":\"X\",\"t\":{t},\"thr\":{thr},\"span\":\"s{id}\"}}\n")
+            }
+        } else if self.stacks[thr] < 12 && (self.stacks[thr] == 0 || self.rng.below(2) == 0) {
+            self.stacks[thr] += 1;
+            let name = FUNCS[self.rng.below(FUNCS.len() as u64) as usize];
+            format!("{{\"op\":\"B\",\"t\":{t},\"thr\":{thr},\"name\":\"{name}\"}}\n")
+        } else {
+            self.stacks[thr] -= 1;
+            format!("{{\"op\":\"X\",\"t\":{t},\"thr\":{thr}}}\n")
+        };
+        out.extend_from_slice(line.as_bytes());
+    }
+}
+
 /// Stream the trace in ~1 MiB chunks through `sink`, returning the spine
 /// index of every heap record (so seeks can target the same heap state in
 /// every trace).
-fn generate(heap: u32, logs_per_heap: u32, mut sink: impl FnMut(&[u8])) -> Vec<u32> {
+fn generate(heap: u32, mix: Mix, mut sink: impl FnMut(&[u8])) -> Vec<u32> {
+    let logs_per_heap = mix.logs;
     let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
     let mut log_rng = Rng(0x2545_f491_4f6c_dd1d);
+    let mut edges = Edges { rng: Rng(0x5851_f42d_4c95_7f2d), stacks: [0; 4], open_spans: Vec::new(), next_span: 0 };
     let mut out = Vec::with_capacity(1 << 21);
-    out.extend_from_slice(b"{\"op\":\"H\",\"v\":1,\"unit\":\"ns\",\"title\":\"mixed bench\"}\n");
+    let version = if mix.intervals > 0 { 2 } else { 1 };
+    out.extend_from_slice(format!("{{\"op\":\"H\",\"v\":{version},\"unit\":\"ns\",\"title\":\"mixed bench\"}}\n").as_bytes());
     let mut live: Vec<(u64, u64)> = Vec::new(); // (id, addr)
     let mut next_id = 1u64;
     let mut next_addr = 0x1000_0000u64;
@@ -72,6 +136,11 @@ fn generate(heap: u32, logs_per_heap: u32, mut sink: impl FnMut(&[u8])) -> Vec<u
                 )
                 .as_bytes(),
             );
+            spine += 1;
+        }
+        for _ in 0..mix.intervals {
+            t += 1;
+            edges.next(t, &mut out);
             spine += 1;
         }
         t += 1 + rng.below(5);
@@ -118,10 +187,10 @@ fn feed(bytes: &[u8]) {
     unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len()) };
 }
 
-fn load(heap: u32, ratio: u32) -> (Duration, Vec<u32>, u32) {
+fn load(heap: u32, mix: Mix) -> (Duration, Vec<u32>, u32) {
     let mut parse = Duration::ZERO;
     hp_parse_begin();
-    let heap_seq = generate(heap, ratio, |chunk| {
+    let heap_seq = generate(heap, mix, |chunk| {
         feed(chunk);
         let start = Instant::now();
         hp_parse_chunk(chunk.len() as u32);
@@ -172,6 +241,7 @@ struct Row {
 fn main() {
     let mut heap = 50_000u32;
     let mut ratios = vec![0u32, 10, 100];
+    let mut interval_ratios = vec![10u32];
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -181,6 +251,15 @@ fn main() {
                     .next()
                     .expect("--ratios 0,10,100")
                     .split(',')
+                    .map(|v| v.parse().expect("ratio"))
+                    .collect()
+            }
+            "--intervals" => {
+                interval_ratios = args
+                    .next()
+                    .expect("--intervals 10,100")
+                    .split(',')
+                    .filter(|v| !v.is_empty())
                     .map(|v| v.parse().expect("ratio"))
                     .collect()
             }
@@ -204,20 +283,27 @@ fn main() {
         ("retag 1 -> 2 -> 1", "ms"),
         ("tags dump", "ms"),
         ("agent timeline: 1% range, 100 bins", "ms"),
+        ("interval state at a random seq", "us"),
+        ("interval query: calls >= 40 ns", "ms"),
     ];
+    let mixes: Vec<Mix> = ratios
+        .iter()
+        .map(|&logs| Mix { logs, intervals: 0 })
+        .chain(interval_ratios.iter().map(|&intervals| Mix { logs: 0, intervals }))
+        .collect();
     let mut rows: Vec<Row> = names
         .iter()
         .map(|&(name, unit)| Row { name, unit, values: Vec::new() })
         .collect();
 
-    for &ratio in &ratios {
-        let (parse, heap_seq, n) = load(heap, ratio);
+    for &mix in &mixes {
+        let (parse, heap_seq, n) = load(heap, mix);
         let ms = |d: Duration| d.as_secs_f64() * 1e3;
         let us = |d: Duration| d.as_secs_f64() * 1e6;
         let ns = |d: Duration| d.as_secs_f64() * 1e9;
         rows[0].values.push(ms(parse));
         rows[1].values.push(ns(parse) / n as f64);
-        eprintln!("ratio {ratio}: {n} records loaded in {:.0} ms", ms(parse));
+        eprintln!("{}: {n} records loaded in {:.0} ms", mix.label(), ms(parse));
 
         // random jumps between heap states
         let mut rng = Rng(7);
@@ -326,31 +412,53 @@ fn main() {
         hp_parse_end();
         let mut engine = Engine::new();
         engine.parse_begin();
-        let heap_seq = generate(heap, ratio, |chunk| engine.parse_chunk(chunk));
+        let heap_seq = generate(heap, mix, |chunk| engine.parse_chunk(chunk));
         engine.parse_end();
         let (lo, hi) = (heap_seq[heap as usize / 2], heap_seq[heap as usize / 2 + heap as usize / 100]);
         let agent = time(5, || {}, || {
             black_box(engine.agent_timeline("alloc.size >= 64", "seq", lo as u64, hi as u64, 100).unwrap());
         });
         rows[14].values.push(ms(agent));
+        if mix.intervals > 0 {
+            let seqs: Vec<u32> = (0..400).map(|_| rng.below(n as u64) as u32).collect();
+            let state = time(5, || {}, || {
+                for &seq in &seqs {
+                    black_box(engine.domain_state("intervals", seq));
+                }
+            });
+            rows[15].values.push(us(state) / seqs.len() as f64);
+            let query = time(5, || {}, || {
+                // a fresh query each round: the cache would answer a repeat
+                black_box(engine.domain_query_json(r#"{"domain":"intervals","category":"call","minDur":40,"count":50}"#));
+                black_box(engine.domain_query_json(r#"{"domain":"intervals","count":1}"#));
+            });
+            rows[16].values.push(ms(query));
+        } else {
+            rows[15].values.push(f64::NAN);
+            rows[16].values.push(f64::NAN);
+        }
         drop(engine);
     }
 
     println!("heap records: {heap}");
     print!("| {:<38} |", "operation");
-    for r in &ratios {
-        print!(" {:>12} |", if *r == 0 { "heap-only".to_string() } else { format!("+{r}x logs") });
+    for m in &mixes {
+        print!(" {:>12} |", m.label());
     }
     println!();
     print!("|{:-<40}|", "");
-    for _ in &ratios {
+    for _ in &mixes {
         print!("{:->14}|", "");
     }
     println!();
     for row in &rows {
         print!("| {:<38} |", format!("{} ({})", row.name, row.unit));
         for v in &row.values {
-            print!(" {:>12.2} |", v);
+            if v.is_nan() {
+                print!(" {:>12} |", "—");
+            } else {
+                print!(" {:>12.2} |", v);
+            }
         }
         println!();
     }

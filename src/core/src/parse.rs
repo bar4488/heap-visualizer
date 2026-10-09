@@ -42,6 +42,16 @@ pub struct Parser {
     /// Log custom field name -> index into the log domain's own catalog.
     log_field_map: HashMap<String, u32>,
     seq_warned: bool,
+    /// A record line has been read (the v2 gate looks at the first one).
+    seen_record: bool,
+    /// The line being applied is the trace's first record.
+    first_record: bool,
+    /// v2: the header's `pid`, the default for every record without one.
+    default_pid: u32,
+    /// v2: `(pid, thr?)` -> track index.
+    track_map: HashMap<(u32, Option<i64>), u16>,
+    /// Interval pairing state (IVL-002).
+    ivl: crate::domain::interval::Builder,
 }
 
 #[derive(Default)]
@@ -69,6 +79,12 @@ struct Raw {
     row_bytes: Option<u64>,
     arena_base: Option<u64>,
     meta: Option<String>,
+    // v2 fields
+    pid: Option<u32>,
+    name: Option<String>,
+    span: Option<String>,
+    parent: Option<String>,
+    cpu: Option<u64>,
 }
 
 impl Parser {
@@ -93,6 +109,11 @@ impl Parser {
             log_frag_map: HashMap::new(),
             log_field_map: HashMap::new(),
             seq_warned: false,
+            seen_record: false,
+            first_record: false,
+            default_pid: 0,
+            track_map: HashMap::new(),
+            ivl: Default::default(),
         }
     }
 
@@ -144,6 +165,7 @@ impl Parser {
         }
         // ghost candidates are queried by address range at render time
         s.overlap_index.sort_unstable();
+        std::mem::take(&mut self.ivl).finish(&mut self.store);
         // free load-time maps
         self.id_map = HashMap::new();
         self.live = BTreeMap::new();
@@ -157,6 +179,7 @@ impl Parser {
         self.logger_map = HashMap::new();
         self.log_frag_map = HashMap::new();
         self.log_field_map = HashMap::new();
+        self.track_map = HashMap::new();
     }
 
     fn line(&mut self, line: &[u8]) {
@@ -173,6 +196,9 @@ impl Parser {
             return;
         }
         let line = &line[a..b];
+        self.first_record = !self.seen_record;
+        self.seen_record = true;
+        let v2 = self.store.v2;
         // A log line is read by its own domain's parser: its keys mean
         // something else there, and every other key is a custom field. The
         // record's `op` is peeked first so each line is normally read once.
@@ -184,17 +210,17 @@ impl Parser {
         // else the line is malformed. The second reader runs only on the rare
         // line the first rejects — a malformed one, or one repeating `op`.
         let log = if peek_op(line) == Some(b"L") {
-            match crate::logs::parse_log_line(line) {
+            match crate::logs::parse_log_line(line, v2) {
                 Some(log) => Some(log),
-                None => match parse_raw(line) {
+                None => match parse_raw(line, v2) {
                     Some(raw) if raw.op != b'L' => return self.apply(raw),
                     _ => None,
                 },
             }
         } else {
-            match parse_raw(line) {
+            match parse_raw(line, v2) {
                 Some(raw) if raw.op != b'L' => return self.apply(raw),
-                _ => crate::logs::parse_log_line(line),
+                _ => crate::logs::parse_log_line(line, v2),
             }
         };
         match log {
@@ -235,6 +261,40 @@ impl Parser {
         self.thr_map.insert(thr, i);
         self.store.thrs.push(thr);
         self.store.thr_count.push(0);
+        i
+    }
+
+    /// Track index for record `e`: v1 interns `thr` alone; v2 interns the
+    /// `(pid, thr?)` pair ([IVL-001]), where a thread-less record of a
+    /// non-zero process is on that process's track and a thread-less record
+    /// of process 0 has no track, as in v1.
+    ///
+    /// [IVL-001]: ../../../spec/14-intervals.md
+    fn intern_track(&mut self, pid: Option<u32>, thr: Option<i64>, e: u32) -> u16 {
+        if !self.store.v2 {
+            return match thr {
+                Some(v) => self.intern_thr(v, e),
+                None => NONE_U16,
+            };
+        }
+        let pid = pid.unwrap_or(self.default_pid);
+        if thr.is_none() && pid == 0 {
+            return NONE_U16;
+        }
+        if let Some(&i) = self.track_map.get(&(pid, thr)) {
+            return i;
+        }
+        let s = &mut self.store;
+        if s.thrs.len() >= NONE_U16 as usize {
+            s.warn(e, W_THREADS, thr.unwrap_or(0) as u64);
+            return NONE_U16;
+        }
+        let i = s.thrs.len() as u16;
+        self.track_map.insert((pid, thr), i);
+        s.thrs.push(thr.unwrap_or(0));
+        s.thr_count.push(0);
+        s.track_pid.push(pid);
+        s.track_proc.push(thr.is_none());
         i
     }
 
@@ -292,7 +352,14 @@ impl Parser {
             let s = &mut self.store;
             s.has_header = true;
             s.version = raw.v.unwrap_or(1);
-            if s.version != 1 {
+            // v2 semantics apply only when the first record is a v >= 2
+            // header (IVL-001); a later header never reinterprets a trace
+            let gate = self.first_record && s.version >= 2;
+            if gate {
+                s.v2 = true;
+                self.default_pid = raw.pid.unwrap_or(0);
+            }
+            if s.version != 1 && !(gate && s.version == 2) {
                 let seq = s.len().saturating_sub(1);
                 s.warn(seq, W_VERSION, s.version as u64);
             }
@@ -320,9 +387,25 @@ impl Parser {
         // warning pinned to whichever record comes next.
         // the op table names every record type; a letter it does not know
         // (or one another domain's reader owns) is ignored: forward-compat
+        if raw.op == b'T' {
+            if self.store.v2 {
+                self.apply_track_name(raw);
+            }
+            return;
+        }
         let Some(op) = crate::domain::op_for_letter(raw.op).filter(|&op| op != OP_L) else {
             return;
         };
+        let interval = crate::domain::op_domain(op) == crate::domain::INTERVALS;
+        // the interval letters are unknown ops to a v1 trace, skipped
+        if interval && !self.store.v2 {
+            return;
+        }
+        if op == OP_C && raw.cpu.is_none() {
+            let seq = self.store.len().saturating_sub(1);
+            self.store.warn(seq, W_MALFORMED, 0);
+            return;
+        }
         // op F with the reserved null id is a no-op record
         if op == OP_F && raw.id == Some(0) {
             return;
@@ -335,7 +418,9 @@ impl Parser {
         }
 
         let (e, t) = self.stamp(raw.t, raw.seq);
-        if op == OP_E {
+        if interval {
+            self.apply_edge(raw, op, e, t);
+        } else if op == OP_E {
             self.apply_mark(raw, e, t);
         } else {
             self.apply_heap(raw, op, e, t);
@@ -385,14 +470,40 @@ impl Parser {
             Some(title) => intern_label(&mut self.label_map, &mut self.store.dom.marks, title),
             None => NONE_U32,
         };
-        let thr_idx = match raw.thr {
-            Some(v) => self.intern_thr(v, e),
-            None => NONE_U16,
-        };
+        let thr_idx = self.intern_track(raw.pid, raw.thr, e);
         let extra = self.intern_counted_extra(&mut raw.extra);
         self.push_spine(OP_E, t, thr_idx);
         self.store.dom.marks.push(e, 0, label, "", extra);
         self.store.n_custom += 1;
+    }
+
+    /// A v2 `T`: name a process or a thread. Off the spine; the last name
+    /// wins; a `T` without a string `name` is dropped silently.
+    fn apply_track_name(&mut self, raw: Raw) {
+        let Some(mut name) = raw.name else {
+            return;
+        };
+        crate::domain::interval::truncate_at(&mut name, crate::domain::interval::TRACK_NAME_MAX);
+        let pid = raw.pid.unwrap_or(self.default_pid);
+        self.store.track_names.insert((pid, raw.thr), name);
+    }
+
+    /// One `B`/`X`/`C` (IVL-002): a spine row and an edge row, paired into
+    /// the interval store. A `C`'s track is its incoming thread's; without
+    /// `thr` the CPU goes idle and `pid` is ignored.
+    fn apply_edge(&mut self, mut raw: Raw, op: u8, e: u32, t: u64) {
+        let idle = op == OP_C && raw.thr.is_none();
+        let track = if idle { NONE_U16 } else { self.intern_track(raw.pid, raw.thr, e) };
+        let edge = crate::domain::interval::RawEdge {
+            name: raw.name.take(),
+            span: raw.span.take(),
+            parent: raw.parent.take(),
+            cpu: raw.cpu.unwrap_or(0) as u16,
+            idle,
+            fields: std::mem::take(&mut raw.extra),
+        };
+        self.push_spine(op, t, track);
+        self.ivl.apply(&mut self.store, e, op, track, edge);
     }
 
     /// Intern a heap-or-mark fragment in the trace-wide table and count one
@@ -432,10 +543,7 @@ impl Parser {
         if truncate_msg(&mut msg) {
             self.store.warn(e, W_LONG_LOG, full as u64);
         }
-        let thr_idx = match log.thr {
-            Some(v) => self.intern_thr(v, e),
-            None => NONE_U16,
-        };
+        let thr_idx = self.intern_track(log.pid, log.thr, e);
         let logger = match log.logger.take() {
             Some(name) => intern_label(&mut self.logger_map, &mut self.store.dom.logs, name),
             None => NONE_U32,
@@ -460,10 +568,7 @@ impl Parser {
             Some(name) => self.intern_site(name),
             None => NONE_U32,
         };
-        let thr_idx = match raw.thr {
-            Some(v) => self.intern_thr(v, e),
-            None => NONE_U16,
-        };
+        let thr_idx = self.intern_track(raw.pid, raw.thr, e);
         let stack = match raw.stack {
             Some(st) => self.intern_stack(st),
             None => NONE_U32,
@@ -663,12 +768,16 @@ impl Default for Store {
             site_count: Vec::new(),
             thrs: Vec::new(),
             thr_count: Vec::new(),
+            track_pid: Vec::new(),
+            track_proc: Vec::new(),
+            track_names: std::collections::BTreeMap::new(),
             stacks: Vec::new(),
             extras: Vec::new(),
             fields: Vec::new(),
             extra_fields: Vec::new(),
             has_header: false,
             version: 1,
+            v2: false,
             unit: "ns".to_string(),
             title: String::new(),
             hdr_row_bytes: 0,
@@ -694,7 +803,7 @@ impl Default for Store {
 }
 
 /// Intern `name` in a point store's label dictionary (a logger, a title).
-fn intern_label<const N: usize>(map: &mut HashMap<String, u32>, p: &mut PointStore<N>, name: String) -> u32 {
+pub(crate) fn intern_label<const N: usize>(map: &mut HashMap<String, u32>, p: &mut PointStore<N>, name: String) -> u32 {
     if let Some(&i) = map.get(&name) {
         return i;
     }
@@ -708,7 +817,7 @@ fn intern_label<const N: usize>(map: &mut HashMap<String, u32>, p: &mut PointSto
 /// Intern a custom-field fragment in a point store's own fragment table,
 /// cataloguing a new fragment's keys in the domain's own field catalog
 /// (`field_map` names its entries) once, and counting this record on each.
-fn intern_frag<const N: usize>(
+pub(crate) fn intern_frag<const N: usize>(
     map: &mut HashMap<String, u32>,
     field_map: &mut HashMap<String, u32>,
     p: &mut PointStore<N>,
@@ -835,6 +944,12 @@ enum OpKey {
     OldId,
     OldAddr,
     OldSize,
+    // v2 (IVL-001)
+    Pid,
+    Name,
+    Span,
+    Parent,
+    Cpu,
 }
 
 impl OpKey {
@@ -849,15 +964,27 @@ impl OpKey {
             b"old_id" => OpKey::OldId,
             b"old_addr" => OpKey::OldAddr,
             b"old_size" => OpKey::OldSize,
+            b"pid" => OpKey::Pid,
+            b"name" => OpKey::Name,
+            b"span" => OpKey::Span,
+            b"parent" => OpKey::Parent,
+            b"cpu" => OpKey::Cpu,
             _ => return None,
         })
     }
 
-    /// Does record type `op` define this key?
-    fn defined_on(self, op: u8) -> bool {
+    /// Does record type `op` define this key? The v2 keys are custom
+    /// fields of a v1 trace, except a header's `pid`, read leniently
+    /// before the version is known.
+    fn defined_on(self, op: u8, v2: bool) -> bool {
         match self {
             OpKey::Title => op == b'H' || op == b'E',
             OpKey::OldId | OpKey::OldAddr | OpKey::OldSize => op == b'R',
+            OpKey::Pid => v2 || op == b'H',
+            OpKey::Name => v2 && matches!(op, b'B' | b'X' | b'T'),
+            OpKey::Span => v2 && matches!(op, b'B' | b'X'),
+            OpKey::Parent => v2 && op == b'B',
+            OpKey::Cpu => v2 && op == b'C',
             _ => op == b'H',
         }
     }
@@ -889,6 +1016,46 @@ impl OpKey {
             OpKey::Meta => raw.meta = Some(String::from_utf8_lossy(v).into_owned()),
             OpKey::OldId => raw.old_id = Some(sc.unsigned_integer()?),
             OpKey::OldSize => raw.old_size = Some(sc.unsigned_integer()?),
+            OpKey::Pid => match sc.unsigned_integer().and_then(|p| u32::try_from(p).ok()) {
+                Some(p) => raw.pid = Some(p),
+                // a header's `pid` never makes it malformed
+                None if raw.op == b'H' => {}
+                None => return None,
+            },
+            OpKey::Name => {
+                sc.ws();
+                if sc.peek() == b'"' {
+                    let (a, b) = sc.string_span()?;
+                    raw.name = Some(unescape(&v[a..b]));
+                } else if raw.op != b'T' {
+                    // a `T` without a string name is dropped silently instead
+                    return None;
+                }
+            }
+            OpKey::Span | OpKey::Parent => {
+                sc.ws();
+                let id = if sc.peek() == b'"' {
+                    let (a, b) = sc.string_span()?;
+                    unescape(&v[a..b])
+                } else {
+                    sc.integer()?.to_string()
+                };
+                if id.len() > crate::domain::interval::SPAN_ID_MAX {
+                    return None;
+                }
+                if self == OpKey::Span {
+                    raw.span = Some(id);
+                } else {
+                    raw.parent = Some(id);
+                }
+            }
+            OpKey::Cpu => {
+                let cpu = sc.unsigned_integer()?;
+                if cpu >= crate::domain::interval::CPU_MAX {
+                    return None;
+                }
+                raw.cpu = Some(cpu);
+            }
         }
         Some(())
     }
@@ -919,7 +1086,7 @@ fn peek_op(line: &[u8]) -> Option<&[u8]> {
     }
 }
 
-fn parse_raw(line: &[u8]) -> Option<Raw> {
+fn parse_raw(line: &[u8], v2: bool) -> Option<Raw> {
     let mut sc = Scan::new(line);
     if !sc.eat(b'{') {
         return None;
@@ -1010,7 +1177,7 @@ fn parse_raw(line: &[u8]) -> Option<Raw> {
     }
     for ((ks, ke), (a, b), key) in rest {
         match key {
-            Some(key) if key.defined_on(raw.op) => key.read(&line[a..b], &mut raw)?,
+            Some(key) if key.defined_on(raw.op, v2) => key.read(&line[a..b], &mut raw)?,
             _ => {
                 if !raw.extra.is_empty() {
                     raw.extra.push(',');

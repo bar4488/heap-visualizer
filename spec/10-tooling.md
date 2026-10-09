@@ -27,9 +27,17 @@ Design decisions that matter:
   are interleaved by default — startup, phases, requests, warnings at heap
   high-water marks — from their own random stream, so the heap records are
   identical with or without them; `--no-logs` omits them.
+- **Intervals** (`--intervals`) make the trace v2
+  ([TRACE-011](02-trace-format.md#trace-011-version-2-and-process-identity))
+  with a header `pid`, `T` thread names, nested `B`/`X` calls per thread,
+  request spans that may end on another thread, and `C` context switches on
+  up to four CPUs that never run one thread twice
+  ([spec/14](14-intervals.md)). They come from their own random stream too,
+  so the heap records are the same with or without them.
 
 Knobs: `--seed --ops --threads --mean-gap --burst-prob --leak-rate
---realloc-rate --arena-base --row-bytes --unit --fields --no-logs --out`.
+--realloc-rate --arena-base --row-bytes --unit --fields --no-logs
+--intervals --out`.
 
 `--fields` attaches caller-defined custom fields
 ([TRACE-001](02-trace-format.md#trace-001-general-rules)) to records, so the

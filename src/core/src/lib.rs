@@ -274,6 +274,12 @@ impl Engine {
         self.app.out.clone()
     }
 
+    /// `hp_domain_state`'s document for a JSON request `{domain, seq}`.
+    pub fn domain_state_json(&mut self, request: &str) -> String {
+        write_domain_state(&mut self.app, request.as_bytes());
+        self.app.out.clone()
+    }
+
     /// `hp_domain_locate`'s document for a JSON request `{domain, seq, …}`.
     pub fn domain_locate_json(&mut self, request: &str) -> String {
         write_domain_locate(&mut self.app, request.as_bytes());
@@ -608,6 +614,8 @@ fn write_warnings_json(a: &mut App) {
         }
         o.push_str(&format!("{{\"seq\":{},\"code\":{},\"kind\":", w.seq, w.code));
         push_json_str(o, store::warn_code_name(w.code));
+        o.push_str(",\"domain\":");
+        push_json_str(o, store::warn_domain(w.code));
         o.push_str(",\"msg\":");
         push_json_str(o, warn_name(w.code));
         o.push_str(&format!(",\"detail\":{},\"detailExact\":\"{}\"}}", w.detail as f64, w.detail));
@@ -1495,11 +1503,7 @@ fn push_event_json(o: &mut String, s: &Store, e: u32) {
             None => o.push_str("null"),
         }
         o.push_str(",\"thr\":");
-        if s.thr_idx[ei] != NONE_U16 {
-            o.push_str(&format!("{}", s.thrs[s.thr_idx[ei] as usize]));
-        } else {
-            o.push_str("null");
-        }
+        domain::push_thr(o, s, e);
         if let Some(fields) = domain::marks::fields(s, e) {
             o.push_str(",\"extra\":");
             domain::push_fields(o, Some(fields));
@@ -1569,11 +1573,7 @@ fn write_allocation_json(o: &mut String, s: &Store, e: u32) -> bool {
         o.push_str("null");
     }
     o.push_str(",\"thread\":");
-    if s.thr_idx[i] != NONE_U16 {
-        o.push_str(&s.thrs[s.thr_idx[i] as usize].to_string());
-    } else {
-        o.push_str("null");
-    }
+    domain::push_thr(o, s, e);
     let death = s.death(e);
     o.push_str(",\"death\":");
     if death != NONE_U32 {
@@ -1854,6 +1854,15 @@ fn write_domain_locate(a: &mut App, input: &[u8]) {
     }
 }
 
+fn write_domain_state(a: &mut App, input: &[u8]) {
+    let state = with_domain_request(a, input, None, |d, req, _, out| {
+        *out = d.state_at(req.seq()).map_or_else(|| "null".to_string(), |v| v.to_string());
+    });
+    if let Err(error) = state {
+        a.out = format!("{{\"error\":\"{error}\"}}");
+    }
+}
+
 fn write_record_json(a: &mut App, seq: u32) {
     let s = &a.store;
     a.out.clear();
@@ -1887,6 +1896,17 @@ pub extern "C" fn hp_domain_query(len: u32) {
     let a = unsafe { &mut *app() };
     let input = a.buf[..len as usize].to_vec();
     write_domain_query(a, &input);
+    ret_str(&a.out);
+}
+
+/// `{domain, seq}` → the domain's state with `seq` records applied (the
+/// interval domain's call stacks, open spans and CPUs; the mark in force),
+/// or `null` for a domain without one.
+#[no_mangle]
+pub extern "C" fn hp_domain_state(len: u32) {
+    let a = unsafe { &mut *app() };
+    let input = a.buf[..len as usize].to_vec();
+    write_domain_state(a, &input);
     ret_str(&a.out);
 }
 

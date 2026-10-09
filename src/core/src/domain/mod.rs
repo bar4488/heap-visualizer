@@ -32,12 +32,13 @@ pub type DomainId = u8;
 pub const HEAP: DomainId = 0;
 pub const MARKS: DomainId = 1;
 pub const LOGS: DomainId = 2;
+pub const INTERVALS: DomainId = 3;
 /// The domain of an op the table does not know.
 pub const NO_DOMAIN: DomainId = u8::MAX;
-pub const NDOMAIN: usize = 3;
+pub const NDOMAIN: usize = 4;
 /// Registry names, indexed by [`DomainId`]. These are the `domain` values of
 /// every generic request and document.
-pub const DOMAIN_NAMES: [&str; NDOMAIN] = ["heap", "marks", "logs"];
+pub const DOMAIN_NAMES: [&str; NDOMAIN] = ["heap", "marks", "logs", "intervals"];
 
 /// One record type: its wire letter, its domain, and its kind name.
 #[derive(Clone, Copy, Debug)]
@@ -52,12 +53,16 @@ pub struct OpInfo {
 /// type is one row here plus its reader.
 ///
 /// [D013]: ../../../../docs/decisions/D013-hybrid-record-types.md
-pub const OPS: [OpInfo; 5] = [
+pub const OPS: [OpInfo; 8] = [
     OpInfo { op: OP_M, letter: b'M', domain: HEAP, kind: "malloc" },
     OpInfo { op: OP_F, letter: b'F', domain: HEAP, kind: "free" },
     OpInfo { op: OP_R, letter: b'R', domain: HEAP, kind: "realloc" },
     OpInfo { op: OP_E, letter: b'E', domain: MARKS, kind: "event" },
     OpInfo { op: OP_L, letter: b'L', domain: LOGS, kind: "log" },
+    // v2 only: a v1 trace skips these letters as unknown (IVL-001)
+    OpInfo { op: OP_B, letter: b'B', domain: INTERVALS, kind: "begin" },
+    OpInfo { op: OP_X, letter: b'X', domain: INTERVALS, kind: "end" },
+    OpInfo { op: OP_C, letter: b'C', domain: INTERVALS, kind: "switch" },
 ];
 
 const OP_DOMAIN: [DomainId; OPS.len()] = {
@@ -100,6 +105,7 @@ pub struct Domains {
     pub heap: HeapCols,
     pub marks: marks::MarkStore,
     pub logs: crate::logs::LogStore,
+    pub intervals: interval::IntervalStore,
 }
 
 /// The domain `id` over store `s`, as the cold trait surface. `None` for an
@@ -109,6 +115,7 @@ pub fn get(s: &Store, id: DomainId) -> Option<Box<dyn Domain + '_>> {
         HEAP => Box::new(heap::HeapView(s)),
         MARKS => Box::new(marks::view(s)),
         LOGS => Box::new(crate::logs::view(s)),
+        INTERVALS => Box::new(interval::view(s)),
         _ => return None,
     })
 }
@@ -157,6 +164,7 @@ impl Summary<'_> {
             self.seq, s.t[self.seq as usize] as f64
         ));
         push_thr(o, s, self.seq);
+        push_pid(o, s, self.seq);
         o.push_str(",\"domain\":");
         push_json_str(o, DOMAIN_NAMES[self.domain as usize]);
         o.push_str(",\"kind\":");
@@ -192,6 +200,9 @@ impl Summary<'_> {
         if let Some((_, name)) = self.level {
             v["level"] = json!(name);
         }
+        if let Some(pid) = s.track_pid_of(s.thr_idx[self.seq as usize]) {
+            v["pid"] = json!(pid);
+        }
         if let Some(source) = self.source {
             v["source"] = json!(source);
         }
@@ -213,6 +224,14 @@ pub struct Request {
     pub from: Option<f64>,
     pub count: Option<f64>,
     pub seq: Option<f64>,
+    /// Interval queries: `sched`, `call` or `span`.
+    pub category: Option<String>,
+    /// Interval queries: a track by `thr` (and `pid`), or a CPU.
+    pub thr: Value,
+    pub pid: Value,
+    pub cpu: Value,
+    /// Interval queries: minimum duration, in trace time units.
+    pub min_dur: Value,
 }
 
 pub fn clamp_u32(v: f64) -> u32 {
@@ -244,7 +263,11 @@ impl Request {
 /// The engine's one cached query: a text query's matches, kept so that
 /// paging and locate against the same query do not rescan (LOG-004).
 #[derive(Default)]
-pub struct QueryCache(pub Option<(DomainId, point::PointQuery, point::Matches)>);
+pub struct QueryCache(
+    pub Option<(DomainId, point::PointQuery, point::Matches)>,
+    /// The interval domain's last query and its matching intervals.
+    pub Option<(interval::IntervalQuery, Vec<u32>)>,
+);
 
 /// Parameters of an agent records page (`/api/v1/domains/{d}/records`):
 /// the shared paging bounds plus the domain's own named parameters, as the
@@ -360,16 +383,21 @@ pub trait Domain {
 // ------------------------------------------------------------- helpers
 
 pub fn push_thr(o: &mut String, s: &Store, seq: u32) {
-    match s.thr_idx[seq as usize] {
-        NONE_U16 => o.push_str("null"),
-        t => o.push_str(&s.thrs[t as usize].to_string()),
+    match s.track_thr(s.thr_idx[seq as usize]) {
+        None => o.push_str("null"),
+        Some(t) => o.push_str(&t.to_string()),
     }
 }
 
 pub fn thr_value(s: &Store, seq: u32) -> Value {
-    match s.thr_idx[seq as usize] {
-        NONE_U16 => Value::Null,
-        t => json!(s.thrs[t as usize]),
+    json!(s.track_thr(s.thr_idx[seq as usize]))
+}
+
+/// `,"pid":N` for a record on a v2 track; nothing otherwise, so v1
+/// documents keep their shape.
+pub fn push_pid(o: &mut String, s: &Store, seq: u32) {
+    if let Some(pid) = s.track_pid_of(s.thr_idx[seq as usize]) {
+        o.push_str(&format!(",\"pid\":{pid}"));
     }
 }
 
@@ -457,8 +485,11 @@ pub fn write_page(out: &mut String, total: u32, from: u32, count: u32, max: u32,
 }
 
 pub mod heap;
+pub mod interval;
 pub mod marks;
 pub mod point;
 
+#[cfg(test)]
+mod interval_tests;
 #[cfg(test)]
 mod tests;
