@@ -253,6 +253,48 @@ impl Engine {
         self.app.out.clone()
     }
 
+    /// `hp_domains_json`'s document: every domain's descriptor.
+    pub fn domains_json(&mut self) -> String {
+        write_domains_json(&mut self.app);
+        self.app.out.clone()
+    }
+
+    /// `hp_domain_query`'s document for a JSON request `{domain, …}`.
+    pub fn domain_query_json(&mut self, request: &str) -> String {
+        write_domain_query(&mut self.app, request.as_bytes());
+        self.app.out.clone()
+    }
+
+    /// `hp_domain_locate`'s document for a JSON request `{domain, seq, …}`.
+    pub fn domain_locate_json(&mut self, request: &str) -> String {
+        write_domain_locate(&mut self.app, request.as_bytes());
+        self.app.out.clone()
+    }
+
+    /// `hp_record_json`'s document: spine record `seq`'s generic summary.
+    pub fn record_json(&mut self, seq: u32) -> String {
+        write_record_json(&mut self.app, seq);
+        self.app.out.clone()
+    }
+
+    /// `hp_lanes_json`'s document: the timeline lanes, bottom first.
+    pub fn lanes_json(&mut self) -> String {
+        write_lanes_json(&mut self.app);
+        self.app.out.clone()
+    }
+
+    /// A domain's state as of `seq` records applied, for a domain that has
+    /// one (the mark in force); `None` otherwise or for an unknown domain.
+    pub fn domain_state(&self, domain: &str, seq: u32) -> Option<serde_json::Value> {
+        domain::get(&self.app.store, domain::by_name(domain)?)?.state_at(seq)
+    }
+
+    /// One bounded page of any domain's records — the core of a generic
+    /// `GET /api/v1/domains/{d}/records`, without `traceId`.
+    pub fn agent_domain_records(&self, domain: &str, params: &domain::RecordParams) -> Result<serde_json::Value, agent::Error> {
+        agent::domain_records(&self.app, domain, params)
+    }
+
     /// One bounded page of `GET /api/v1/logs` (LOG-008), without `traceId`,
     /// which the transport adds as for every other agent response.
     pub fn agent_logs(&self, params: &agent::LogsParams) -> Result<serde_json::Value, agent::Error> {
@@ -1766,6 +1808,90 @@ fn write_logs_locate(a: &mut App, input: &[u8]) {
     if with_domain_request(a, input, Some(domain::LOGS), |d, req, cache, out| d.locate_json(req, cache, out)).is_err() {
         a.out = "{\"row\":-1,\"total\":0,\"error\":\"invalid log query\"}".into();
     }
+}
+
+// ---------------------------------------------------------------------------
+// domains (DOM-003): the generic surface every domain answers through
+// ---------------------------------------------------------------------------
+
+fn write_domains_json(a: &mut App) {
+    let all: Vec<serde_json::Value> = domain::all(&a.store).map(|d| d.descriptor()).collect();
+    a.out = serde_json::Value::Array(all).to_string();
+}
+
+fn write_domain_query(a: &mut App, input: &[u8]) {
+    if let Err(error) = with_domain_request(a, input, None, |d, req, cache, out| d.query_json(req, cache, out)) {
+        a.out = format!("{{\"total\":0,\"from\":0,\"rows\":[],\"error\":\"{error}\"}}");
+    }
+}
+
+fn write_domain_locate(a: &mut App, input: &[u8]) {
+    if let Err(error) = with_domain_request(a, input, None, |d, req, cache, out| d.locate_json(req, cache, out)) {
+        a.out = format!("{{\"row\":-1,\"total\":0,\"error\":\"{error}\"}}");
+    }
+}
+
+fn write_record_json(a: &mut App, seq: u32) {
+    let s = &a.store;
+    a.out.clear();
+    let found = domain::get(s, s.domain_of(seq)).and_then(|d| Some((d.row_of(seq)?, d)));
+    match found {
+        Some((row, d)) => d.record_json(row, &mut a.out),
+        None => a.out.push_str("null"),
+    }
+}
+
+fn write_lanes_json(a: &mut App) {
+    let lanes: Vec<serde_json::Value> = domain::all(&a.store)
+        .flat_map(|d| domain::lanes_value(d.name(), d.lanes()).as_array().cloned().unwrap_or_default())
+        .collect();
+    a.out = serde_json::Value::Array(lanes).to_string();
+}
+
+/// Every domain's descriptor: `[{id, name, kinds, shape, count, lanes,
+/// fields, query, limits}]`.
+#[no_mangle]
+pub extern "C" fn hp_domains_json() {
+    let a = unsafe { &mut *app() };
+    write_domains_json(a);
+    ret_str(&a.out);
+}
+
+/// One page of a domain's query: the input buffer holds `{domain, …query,
+/// from, count}`; the result is `{total, from, rows}` in the domain's keys.
+#[no_mangle]
+pub extern "C" fn hp_domain_query(len: u32) {
+    let a = unsafe { &mut *app() };
+    let input = a.buf[..len as usize].to_vec();
+    write_domain_query(a, &input);
+    ret_str(&a.out);
+}
+
+/// `{row, total}` for `{domain, …query, seq}`: the last match at or before
+/// `seq`.
+#[no_mangle]
+pub extern "C" fn hp_domain_locate(len: u32) {
+    let a = unsafe { &mut *app() };
+    let input = a.buf[..len as usize].to_vec();
+    write_domain_locate(a, &input);
+    ret_str(&a.out);
+}
+
+/// The generic summary of spine record `seq`, whatever its domain, or
+/// `null`.
+#[no_mangle]
+pub extern "C" fn hp_record_json(seq: u32) {
+    let a = unsafe { &mut *app() };
+    write_record_json(a, seq);
+    ret_str(&a.out);
+}
+
+/// The timeline lanes the loaded trace draws, bottom first.
+#[no_mangle]
+pub extern "C" fn hp_lanes_json() {
+    let a = unsafe { &mut *app() };
+    write_lanes_json(a);
+    ret_str(&a.out);
 }
 
 /// `{count, byLevel:[n0..n5], loggers:[{name,count}]}`.
