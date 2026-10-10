@@ -770,11 +770,6 @@ input[type="color"] {
 }
 .ev-row:hover { background: var(--bg3); }
 .ev-row.cur { background: #1f3d2b; box-shadow: inset 2px 0 0 var(--green); }
-.ev-row .ev-seq {
-  color: var(--fg-dim); width: 58px; flex: none; text-align: left;
-  font-variant-numeric: tabular-nums;
-}
-.ev-row .ev-addr { color: var(--accent); }
 .ev-row .ev-size { color: var(--fg); }
 .ev-row .ev-site { color: var(--fg-dim); overflow: hidden; text-overflow: ellipsis; }
 /* a custom event: a landmark in the stream, not an allocation operation */
@@ -785,8 +780,7 @@ input[type="color"] {
 .ev-row.ev-custom:hover { background: rgba(188, 140, 255, 0.16); }
 
 /* any other domain's record: its generic summary (DOM-004) */
-.ev-row .ev-thr { flex: none; color: var(--fg-dim); max-width: 120px; overflow: hidden; text-overflow: ellipsis; }
-.ev-row .ev-src { flex: none; margin-left: auto; color: var(--fg-dim); font-size: 10.5px; }
+.ev-row .ev-src { flex: none; color: var(--fg-dim); font-size: 10.5px; }
 .ev-row.ev-generic .ev-label { color: var(--fg); font-style: normal; }
 .ev-row.ev-generic { background: rgba(86, 211, 100, 0.04); }
 /* the domain toggles: one chip per domain the trace has records of */
@@ -1113,3 +1107,40 @@ input[type="color"] {
 }
 .ev-chip.on::before { opacity: 1; }
 .ev-row.ev-log.lv-0 .ev-kind, .ev-row.ev-log.lv-1 .ev-kind { color: var(--fg-dim); }
+
+/* A row: kind, then what the record is (primary), then where (secondary:
+   thread, short address), then the seq. The secondary text gives up its
+   width long before the primary does (NAV-005). */
+.ev-row .ev-main {
+  flex: 0 1 auto; min-width: 5ch; overflow: hidden; text-overflow: ellipsis;
+  /* a pixel of slack: text exactly as wide as its box can still ellipsize */
+  padding-right: 1px; margin-right: -1px;
+}
+/* each secondary field shows whole or not at all: one that does not fit
+   wraps onto a second line the row clips (the zero-width space first lets
+   even the first field wrap away rather than be cut in half) */
+.ev-row .ev-sub {
+  flex: 1 1 0; min-width: 0; max-width: max-content; height: 18px; overflow: hidden;
+  white-space: normal; color: var(--fg-dim); font-size: 10.5px; opacity: 0.85;
+}
+.ev-row .ev-sub::before { content: "\200b"; }
+.ev-row .ev-thr, .ev-row .ev-addr { display: inline-block; white-space: nowrap; }
+.ev-row .ev-addr { color: color-mix(in srgb, var(--accent) 65%, var(--fg-dim)); }
+.ev-row .ev-seq {
+  flex: none; margin-left: auto; padding-left: 4px;
+  color: var(--fg-dim); font-size: 10px; opacity: 0.7; font-variant-numeric: tabular-nums;
+}
+/* the header's columns menu: which optional fields a row shows */
+#events-panel .ev-cols { position: relative; }
+#ev-cols-btn {
+  background: none; border: 1px solid var(--border, #30363d); border-radius: 4px;
+  color: var(--fg-dim); font-size: 11px; padding: 0 6px; line-height: 16px;
+}
+#ev-cols-btn:hover, #ev-cols-btn[aria-expanded="true"] { color: var(--fg); background: var(--bg3); }
+.ev-cols-menu {
+  position: absolute; right: 0; top: calc(100% + 4px); z-index: 30;
+  display: flex; flex-direction: column; gap: 2px; padding: 4px 8px; min-width: 96px;
+  background: var(--bg2); border: 1px solid var(--border, #30363d); border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.5); white-space: nowrap;
+}
+.ev-cols-menu[hidden] { display: none; }

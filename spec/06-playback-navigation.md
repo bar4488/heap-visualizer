@@ -59,8 +59,33 @@ executes the item's own action (seek, go-to-address, select+jump, …).
 
 ## NAV-005: The Events panel
 
-A virtualized list of every event (seq, kind, then the record's details —
-addr, size and site for the heap) — the textual twin of the sequential strip.
+A virtualized list of every event — the textual twin of the sequential strip.
+A row says what the record is before where it happened, so the useful part
+survives a narrow panel: the domain's bar, the kind chip, then the **primary**
+text, then the **secondary** text, dim, and last the seq when shown.
+
+- **Primary:** heap — size and site (`12.4 KiB json_node`; a free shows the
+  freed allocation's size and site); a call or return — the function's name;
+  a span — its name; a switch — `cpu 3 → worker-1`; a log — its message; a
+  mark — its title.
+- **Secondary:** the thread by its short name (`worker-2`, or `t3` without
+  one), prefixed by its pid (`4242/worker-2`) only when the trace's threads
+  span more than one process; for heap rows, the address shortened to its
+  last six hex digits (`…ea41a0`).
+- **Space:** the secondary text gives up its width before the primary does;
+  each secondary field shows whole or not at all, and the primary text
+  ellipsizes from its end only once the secondary is gone.
+- **Tooltip:** hovering a row gives what it shortens or leaves out — the full
+  seq, `t`, the full address, and the thread with its pid — and what a click
+  does.
+- **Columns:** a `cols ▾` menu in the panel header shows or hides the thread,
+  the address and the seq (small, dim, right-aligned, no thousands
+  separators). The thread and address are shown and the seq hidden by
+  default; the choice is a viewer preference kept in local storage across
+  traces and reloads.
+
+The same short thread naming — no pid in a single-process trace — is used in
+the kind tooltip and the status line.
 
 The **kind** column names each record in a word, never a wire letter: heap
 `alloc` / `free` / `realloc` (green / red / amber), `mark`, a log's level as a
@@ -74,13 +99,13 @@ The column is fixed-width (about eight characters) so rows scan as a table;
 each kind sits in a chip tinted by its domain, and a thin bar on the row's
 left repeats the domain's color, as the domain's toggle chip at the top of the
 panel does. Hovering the kind says the record in words — "Allocation of 64 B
-at 0x… (site json_node)", "Function call begins on thread worker-2 (pid
-4242): parse_body". The status line on stepping onto a record, and the Event
+at 0x… (site json_node)", "Function call begins on thread worker-2:
+parse_body" (`(pid 4242)` after the thread only in a multi-process trace). The status line on stepping onto a record, and the Event
 window's title (`Mark · <label>`), use the same words.
 
 A custom event ([TRACE-010](02-trace-format.md#trace-010-custom-event-record-e))
-has no geometry to list, so its row shows its label in place of the address,
-size and site, and is visibly not an allocation row. Clicking it seeks there
+has no geometry to list, so its row's primary text is its label, and the row
+is visibly not an allocation row. Clicking it seeks there
 and opens the **Event** window — label, seq, time, thread, and the record's
 custom fields, presented as the allocation panel presents them
 ([ANL-006](07-analysis.md#anl-006-the-allocation-panel-and-pinned-windows)),

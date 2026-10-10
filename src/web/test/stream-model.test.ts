@@ -6,8 +6,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  domainChips, genericStatusText, includedDomains, kindInfo, kindTooltip, maskPlan, maskRank, maskSeqAt,
-  renderRow, rowDomain, threadLabel, threadNames,
+  DEFAULT_COLUMNS, domainChips, genericStatusText, includedDomains, kindInfo, kindTooltip, maskPlan, maskRank, maskSeqAt,
+  parseColumns, renderRow, rowDomain, rowText, shortAddr, threadLabel, threadNames, threadPhrase, toggleColumn,
 } from '../stream/stream-model.ts';
 import type { DomainDescriptor } from '../protocol.ts';
 
@@ -80,17 +80,60 @@ test('the kind tooltip says the record in words', () => {
   assert.equal(kindTooltip({ seq: 0, op: 1, addr: '0x1000', size: 64 }, ctx), 'Free of 64 B at 0x1000');
   assert.equal(kindTooltip(LOG, ctx), 'Log line at level WARN from net on thread 2');
   assert.equal(kindTooltip(MARK, ctx), 'Mark: phase');
-  assert.equal(kindTooltip(edge(3, 'begin', 'call', '→ handle_upload'), ctx), 'Function call begins on thread worker-1 (pid 7): handle_upload');
+  assert.equal(kindTooltip(edge(3, 'begin', 'call', '→ handle_upload'), ctx), 'Function call begins on thread worker-1: handle_upload');
   assert.equal(kindTooltip(edge(3, 'end', 'span', '← r42', 2, null), ctx), 'Span ends on thread 2: r42');
-  assert.equal(kindTooltip(edge(3, 'switch', 'sched', 'cpu 3 ⇐ worker-1'), ctx), 'Context switch on thread worker-1 (pid 7): cpu 3 → worker-1');
+  assert.equal(kindTooltip(edge(3, 'switch', 'sched', 'cpu 3 ⇐ worker-1'), ctx), 'Context switch on thread worker-1: cpu 3 → worker-1');
+});
+
+test('a row says what the record is first, then where', () => {
+  const text = (ev: any) => rowText(ev, ctx);
+  const heap = { ...HEAP_M, addr: '0x555555ea41a0', thr: 1, pid: 7 };
+  assert.deepEqual(text(heap), { primary: '64 B json_node', thread: 'worker-1', addr: '…ea41a0' });
+  // a free reads the freed allocation's size and site, as the engine reports them
+  assert.equal(text({ seq: 5, op: 1, addr: '0x1000', size: 32, site: 'buf' }).primary, '32 B buf');
+  assert.equal(text({ seq: 5, op: 1, addr: '0x1000', size: 32, site: null }).primary, '32 B');
+  assert.deepEqual(text(edge(3, 'begin', 'call', '→ handle_upload')), { primary: 'handle_upload', thread: 'worker-1', addr: '' });
+  assert.equal(text(edge(3, 'end', 'span', '← request')).primary, 'request');
+  assert.equal(text(edge(3, 'switch', 'sched', 'cpu 3 ⇐ worker-1')).primary, 'cpu 3 → worker-1');
+  assert.deepEqual(text(LOG), { primary: 'retry <x>', thread: 't2', addr: '' });
+  assert.deepEqual(text(MARK), { primary: 'phase', thread: '', addr: '' });
+
+  // markup order: kind, primary, secondary, seq (when shown)
+  const html = renderRow(heap, { ...ctx, columns: { seq: true, addr: true, thread: true } });
+  const at = (cls: string) => html.indexOf(`class="${cls}`);
+  assert.ok(at('ev-kind') < at('ev-main') && at('ev-main') < at('ev-sub') && at('ev-sub') < at('ev-seq'));
+  assert.match(html, /<span class="ev-seq">0<\/span>/);
+  // the row's tooltip carries what the row shortens or leaves out
+  assert.match(html, /title="seq 0 · t 1 · addr 0x555555ea41a0 · thread worker-1 \(pid 7\)\nclick: seek here and select the allocation"/);
+  assert.match(renderRow({ ...HEAP_M, seq: 70777 }, ctx), /title="seq 70777 /);
+});
+
+test('the columns menu shows or hides the seq, address and thread', () => {
+  assert.deepEqual(DEFAULT_COLUMNS, { seq: false, addr: true, thread: true });
+  assert.deepEqual(parseColumns(null), DEFAULT_COLUMNS);
+  assert.deepEqual(parseColumns('not json'), DEFAULT_COLUMNS);
+  assert.deepEqual(parseColumns('{"seq":true,"addr":"x"}'), { seq: true, addr: true, thread: true });
+  assert.deepEqual(toggleColumn(DEFAULT_COLUMNS, 'thread'), { seq: false, addr: true, thread: false });
+
+  const heap = { ...HEAP_M, thr: 1, pid: 7 };
+  const row = (columns: any) => renderRow(heap, { ...ctx, columns });
+  const shown = row(DEFAULT_COLUMNS);
+  assert.match(shown, /ev-addr">0x1000</);
+  assert.match(shown, /ev-thr">worker-1</);
+  assert.doesNotMatch(shown, /ev-seq/);
+  const bare = row({ seq: true, addr: false, thread: false });
+  assert.doesNotMatch(bare, /ev-addr|ev-thr|ev-sub/);
+  assert.match(bare, /ev-seq">0</);
+  // hidden fields stay in the tooltip
+  assert.match(bare, /addr 0x1000 · thread worker-1/);
 });
 
 test('rows of every shape: heap geometry, a log line, a landmark, and a generic summary', () => {
   const heap = renderRow(HEAP_M, ctx);
   assert.match(heap, /class="ev-kind k-malloc" title="Allocation of 64 B at 0x1000 \(site json_node\)">alloc</);
-  assert.match(heap, /0x1000/);
-  assert.match(heap, /64 B/);
-  assert.match(heap, /json_node/);
+  assert.match(heap, /ev-addr">0x1000</);
+  assert.match(heap, /ev-size">64 B</);
+  assert.match(heap, /ev-site">json_node</);
   assert.match(heap, /data-domain="heap"/);
 
   const log = renderRow(LOG, ctx);
@@ -108,7 +151,7 @@ test('rows of every shape: heap geometry, a log line, a landmark, and a generic 
   const begin = renderRow(edge(3, 'begin', 'call', '→ handle_upload'), ctx);
   assert.match(begin, />call ▸</);
   assert.match(begin, /ev-label">handle_upload</);
-  assert.match(begin, /7\/1 worker-1/);
+  assert.match(begin, /ev-thr">worker-1</);
   assert.doesNotMatch(begin, /ev-src/);
   assert.match(begin, / cur"/);
   assert.doesNotMatch(begin, /undefined/);
@@ -117,23 +160,45 @@ test('rows of every shape: heap geometry, a log line, a landmark, and a generic 
   assert.match(sw, />switch</);
   assert.match(sw, /cpu 3 → worker/);
   // the core's placeholder label is not a thread name
-  assert.match(sw, /ev-thr">2</);
+  assert.match(sw, /ev-thr">t2</);
   for (const html of [heap, log, mark, begin, sw]) assert.doesNotMatch(html, /ev-op/);
 });
 
 test('the status line uses the same words as the list', () => {
   assert.equal(
     genericStatusText(edge(9, 'begin', 'call', '→ handle_upload'), DOMAINS, ctx.names),
-    'call ▸ handle_upload · thread worker-1 (pid 7) · seq 9',
+    'call ▸ handle_upload · thread worker-1 · seq 9',
   );
   assert.equal(genericStatusText(edge(9, 'switch', 'sched', 'cpu 3 ⇐ main', 1, null), DOMAINS), 'switch cpu 3 → main · thread 1 · seq 9');
 });
 
-test('thread labels: id, process, and name when there is one', () => {
+test('threads read by name, with the pid only when the trace has more than one process', () => {
   assert.equal(threadLabel(null, null), '');
-  assert.equal(threadLabel(3, undefined), '3');
-  assert.equal(threadLabel(1, 7, ctx.names), '7/1 worker-1');
-  assert.equal(threadLabel(1, 8, ctx.names), '8/1');
+  assert.equal(threadLabel(3, undefined), 't3');
+  assert.equal(threadLabel(1, 7, ctx.names), 'worker-1');
+  assert.equal(threadLabel(1, 8, ctx.names), 't1');
+  assert.equal(threadPhrase(1, 7, ctx.names), 'thread worker-1');
+
+  const two: DomainDescriptor[] = [{
+    id: 'intervals', name: 'Intervals', kinds: [], shape: 'interval', count: 1,
+    tracks: { threads: [{ thr: 1, pid: 7, name: 'worker-1' }, { thr: 1, pid: 9, name: 'main' }], cpus: [] },
+  }];
+  const names = threadNames(two);
+  assert.equal(ctx.names.multiProcess, false);
+  assert.equal(names.multiProcess, true);
+  assert.equal(threadLabel(1, 7, names), '7/worker-1');
+  assert.equal(threadLabel(1, 9, names), '9/main');
+  assert.equal(threadPhrase(1, 9, names), 'thread main (pid 9)');
+  assert.equal(
+    genericStatusText(edge(9, 'begin', 'call', '→ f', 1, 9), two, names),
+    'call ▸ f · thread main (pid 9) · seq 9',
+  );
+});
+
+test('a short address keeps its last six hex digits', () => {
+  assert.equal(shortAddr('0x555555ea41a0'), '…ea41a0');
+  assert.equal(shortAddr('0x1000'), '0x1000');
+  assert.equal(shortAddr(undefined), '');
 });
 
 test('domain chips list the domains with records, and an all-on set excludes nothing', () => {

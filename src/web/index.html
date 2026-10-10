@@ -341,6 +341,14 @@
     <span class="head-actions">
       <label title="Only list events whose allocation passes the current Filter (an F follows the allocation it frees)"><input type="checkbox" id="ev-filtered"> filtered</label>
       <label title="Keep the current event in view while stepping / playing"><input type="checkbox" id="ev-follow" checked> follow</label>
+      <span class="ev-cols">
+        <button type="button" id="ev-cols-btn" aria-haspopup="true" aria-expanded="false" title="Columns: choose what each row shows besides the record">cols ▾</button>
+        <span id="ev-cols-menu" class="ev-cols-menu" role="menu" hidden>
+          <label title="The record's thread"><input type="checkbox" data-col="thread"> thread</label>
+          <label title="A heap record's address, last six hex digits"><input type="checkbox" data-col="addr"> address</label>
+          <label title="The record's position in the trace"><input type="checkbox" data-col="seq"> seq</label>
+        </span>
+      </span>
       <button class="panel-close">×</button>
     </span>
   </div>

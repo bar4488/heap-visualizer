@@ -1,8 +1,9 @@
 // The Events panel — a virtualized list of the trace's spine records, of
 // every domain (DOM-001), with click-to-jump, keyboard stepping, drag
 // selection over a seq range, and a chip per domain to leave its records out.
-// Rows are rendered in stream/stream-model.ts: the heap's address, size and
-// site, and any other domain's generic record summary (DOM-004).
+// Rows are rendered in stream/stream-model.ts: what the record is first (a
+// heap record's size and site, a function's name, a log's message), then where
+// (thread, short address), with a columns menu for the optional fields.
 //
 // Virtualization detail worth keeping in mind: browsers cap element height,
 // so past EV_MAX_SPACER the spacer stops being 1:1 with the event count and
@@ -16,7 +17,8 @@ import { layout } from '../shell/layout.ts';
 import { esc, fmtNum } from '../fmt.ts';
 import { revealLogSeq } from '../logs/logs-panel.ts';
 import {
-  domainChips, includedDomains, renderRow, threadNames, type DomainChip, type ThreadNames,
+  domainChips, includedDomains, parseColumns, renderRow, threadNames, toggleColumn,
+  type DomainChip, type EventColumn, type ThreadNames,
 } from './stream-model.ts';
 
 let d = null;
@@ -37,6 +39,15 @@ export const evState = { from: 0, count: 0, reqId: 0, lastSeq: -1, total: -1, se
 // the domain toggles: one chip per domain the trace has records of, and the
 // ids of those left out. Per trace — a new trace lists everything again.
 const domainState = { chips: [] as DomainChip[], excluded: new Set<string>(), names: new Map() as ThreadNames };
+
+// which optional fields a row shows (the header's columns menu): a viewer's
+// preference, kept across traces and reloads
+const COLUMNS_KEY = 'heapviz:events-columns';
+let columns = parseColumns(readStored(COLUMNS_KEY));
+
+function readStored(key: string): string | null {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
 
 const evFiltered = () => $('ev-filtered').checked;
 /** The domains the list includes, or undefined when it is the whole spine. */
@@ -87,7 +98,7 @@ export function onEventsSlice(m) {
   evState.seqs = m.events.map((ev) => ev.seq);
   const ctx = {
     domains: d.ui.meta?.domains, names: domainState.names,
-    fmtAllocSize: d.fmtAllocSize, curSeq: d.ui.state ? d.ui.state.seq - 1 : -1,
+    fmtAllocSize: d.fmtAllocSize, curSeq: d.ui.state ? d.ui.state.seq - 1 : -1, columns,
   };
   $('events-rows').innerHTML = m.events.map((ev) => renderRow(ev, ctx)).join('');
   $$('.ev-row', $('events-rows')).forEach((row) => {
@@ -263,7 +274,35 @@ function relistEvents() {
   if (layout.isOpen('events-panel')) refreshEventsPanel();
 }
 
+function renderColumnsMenu() {
+  $$('#ev-cols-menu input[data-col]').forEach((box) => { box.checked = !!columns[box.dataset.col]; });
+}
+
+function wireColumnsMenu() {
+  const btn = $('ev-cols-btn');
+  const menu = $('ev-cols-menu');
+  const setOpen = (open: boolean) => {
+    menu.hidden = !open;
+    btn.setAttribute('aria-expanded', String(open));
+  };
+  renderColumnsMenu();
+  btn.onclick = (e) => { e.stopPropagation(); setOpen(menu.hidden); };
+  menu.addEventListener('change', (e) => {
+    const col = e.target?.dataset?.col as EventColumn | undefined;
+    if (!col) return;
+    columns = toggleColumn(columns, col);
+    try { localStorage.setItem(COLUMNS_KEY, JSON.stringify(columns)); } catch { /* storage unavailable: this session only */ }
+    renderColumnsMenu();
+    refreshEventsPanel();
+  });
+  document.addEventListener('pointerdown', (e) => {
+    if (!menu.hidden && !(e.target as Element | null)?.closest?.('.ev-cols')) setOpen(false);
+  });
+  menu.addEventListener('keydown', (e) => { if (e.key === 'Escape') { setOpen(false); btn.focus(); } });
+}
+
 function wireEventsPanel() {
+  wireColumnsMenu();
   $('ev-filtered').onchange = () => {
     relistEvents();
     updateEventsPanel();
