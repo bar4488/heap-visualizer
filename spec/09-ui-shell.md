@@ -49,8 +49,9 @@ Everything in the workspace is a panel in the dock. Two kinds:
   closable. The View menu toggles them (Play and Warnings: their top-bar
   button; Request: the Help menu).
 
-A panel's tab carries its title (a window that retitles itself, like
-Allocation naming its allocation, retitles its tab), the window's own
+A panel's tab carries its title (a window that retitles itself, like a
+pinned allocation window naming its allocation, retitles its tab; a window can
+give its tab a tooltip with what the short title stands for), the window's own
 **actions** (the Allocation window's pin — small icon buttons between the
 title and the close button, each a real button with an accessible name,
 reachable by Tab and pressed with Enter or Space), its close button, and is
@@ -131,8 +132,10 @@ the View menu's entries are built from the records, never listed by hand
 - `open(type, key?, options)`, `close`, `toggle`, `reveal` (open, bring its tab
   to the front, and expand a collapsed edge holding it), `isOpen`,
   `isShown`. Options cover moving focus, a floating position, a home (an edge,
-  the center, floating), another window's place (`placeOf` — pinning and
-  unpinning swap a window in place), and replaying a restore. Every open and
+  the center, floating), another window's place (`placeOf` — an unpinned
+  allocation's live window opens where the pinned one stood), a tab beside
+  another window in whatever group it is in (`beside` — a pinned allocation
+  window opens beside the live one), and replaying a restore. Every open and
   close goes through these — domain code never writes a panel's visibility.
 - `onOpen(type, fn)` / `onClose(type, fn)`: what a window does when it opens or
   comes back into sight (its tab brought to the front, its edge expanded — the
@@ -156,11 +159,23 @@ The dock is a grid of **groups**; a group shows one or more panels as tabs.
 Dragging a tab rearranges it: onto another group's tab strip or center makes it
 a tab there, onto a group's edge splits that group, onto the outer edge of the
 grid splits the whole grid. Holding Shift while dragging (or the tab's context
-menu → Float) floats a panel in its own **floating group**, which moves by its
+menu → Float) floats a panel in its own **floating window**, which moves by its
 title bar — the empty part of its tab strip — and resizes from its edges and
-corners; dragging its tab (or Shift-dragging the strip) docks it. A grid group
-can be **maximized** (its header button or the tab menu) to fill the dock, and
-restored. Panels never leave the page: there are no popout windows.
+corners; Shift-dragging the strip docks the whole window. A floating window
+is a small grid of its own: a tab dropped on another floating window's tab
+strip or center joins it as a tab, and one dropped on the edge of one of its
+groups splits that group inside the floating window. Any tab can be taken out
+again: dragging it onto a group or an edge docks it there; dragging it onto a
+view's body (the address map, a strip — the empty workspace) floats it on its
+own with its tab under the drop point; Shift-dragging it floats it as it
+goes. A window's tab menu offers **Float** (from the grid) or **Move to new
+window** (from a floating window that holds other tabs — placed as
+[SHELL-005](#shell-005-the-allocation-window-lifecycle) places a window floated
+from its tab menu), **Split right** and **Split down** (the tab into a new
+group beside its own, inside a floating window too; offered when the group
+holds other tabs), Maximize and Close. A grid group can be **maximized** (its
+header button or the tab menu) to fill the dock, and restored. Panels never
+leave the page: there are no popout windows.
 
 The grid has three **edges** around its center — left, right, bottom. They
 are part of the one grid, not separate docks:
@@ -197,7 +212,7 @@ it was in (or, if that group is gone, to its default home).
 `shell` section with its own `version`. Version 3 is the dock engine's own
 serialization of the whole layout — the one grid's groups, splits (edges'
 splits included) and their sizes, tabs and the active one, floating groups'
-positions — plus each edge's collapse and the size each of its groups expands
+positions, the tabs they share and their own splits — plus each edge's collapse and the size each of its groups expands
 to, and where closed windows reopen. A restore replaces the layout wholly. A
 saved panel whose window does not exist yet (a pinned allocation window, which
 comes back after a worker round-trip) holds its slot until it is recreated
@@ -225,27 +240,49 @@ default. It is written back in the current shape.
 
 ## SHELL-005: The allocation window lifecycle
 
-One **live** Allocation panel follows selection (click, step, search-jump).
-While it is open it stays exactly where it is — a new selection changes its
-content, never its place or size. **Pinning** — the pin icon in the window's
-tab ([SHELL-002](#shell-002-panels-views-and-windows)), "Pin this allocation
-window" — detaches the current window
-in place — the pinned window takes the live window's place in the dock at the
-same position and size, identical chrome, the orange pin the only tell (its
-pin pressed, shown orange, and an orange line along the top of its tab;
-"Unpin this allocation window") — and the next selection opens a fresh live
-panel placed from scratch. Keyboard focus on the pin carries over to the
-pinned window's pin. Selecting an
-already-pinned allocation raises its window instead of duplicating it.
-Unpinning returns the window's content to the live panel, in the pinned
-window's place (moving the live panel there if it is open elsewhere). Pinned
-windows dock like any other window and are restored from the session by
-creator event index, each into its saved slot — a floating one at its saved
-position and size.
+There is **one live** Allocation window and **any number of pinned** ones.
+
+- **The live window** follows selection (click, step, search-jump). Its tab
+  reads "Allocation". While it is open it stays exactly where it is — a new
+  selection changes its content and brings its tab to the front of its group,
+  never its place or size.
+- **A pinned window** shows one allocation until it is closed (×, Escape) or
+  unpinned. It is its own window, `pinned-detail:<creator event>`; nothing done
+  to one pinned window — pinning another, unpinning another, closing another,
+  a new selection — changes it.
+
+**Pinning** — the pin icon in the live window's tab
+([SHELL-002](#shell-002-panels-views-and-windows)), "Pin this allocation
+window" — opens a pinned window for the shown allocation **as a tab in the
+live window's group**, wherever that group is (floating or docked), in front.
+The live window stays in that group as the other tab, still showing the same
+allocation until the next selection; nothing moves. A pinned window has the
+same chrome as the live one, the orange pin its tell (its pin pressed, shown
+orange, and an orange line along the top of its tab; "Unpin this allocation
+window"). Keyboard focus on the pin carries over to the pinned window's pin.
+Pinning an allocation that is already pinned only brings its window's tab to
+the front, and selecting a pinned allocation does the same rather than show
+it twice (the live window is left as it is).
+
+**Unpinning** (the pressed pin) closes that pinned window and selects its
+allocation, so the live window shows it — where the live window is, or, if it
+is closed, where the pinned window stood. No other window is closed or moved.
+
+**Titles.** A pinned window's tab reads the allocation's name if it has one,
+else `#<id>` (`json_root`, `#1843`), and follows a rename at once; the live
+window's tab reads "Allocation". Each tab's tooltip has the rest: the name and
+id, the range and size, the site, and birth and death.
+
+**Grouping.** Allocation windows dock, tab and split like any other window
+([SHELL-004](#shell-004-docking)): several can share one floating window as
+tabs, split inside it, and any one can be taken out again to its own floating
+window or a dock group. Pinned windows are restored from the session by
+creator event, each into its saved slot — the floating window it shared, as
+the tab it was, with its title — and the live window is not restored.
 
 **Placing a floating window from scratch.** The area a floating window is
-placed in is the whole dock, edges included. A live panel that floats from
-scratch (its first opening, or after a pin) opens at its declared float size
+placed in is the whole dock, edges included. A live window that floats from
+scratch (its first opening) opens at its declared float size
 **beside the selection** it shows — to the right of the clicked point, else
 the left, below, above — never covering that point. It takes the nearest spot
 that overlaps no other floating window. When the workspace has no such spot,

@@ -211,6 +211,38 @@ test('multi-instance windows are type + key: built on open, removed on close, op
   assert.deepEqual(layout.instancesOf('pin'), []);
 });
 
+test('a window opened beside another joins its group, floating too; its tab menu takes it out again', () => {
+  layout.resetLayout();
+  layout.open('t-panel', '', { dock: null });
+  layout.open('pin', '1', { beside: { type: 't-panel' } });
+  layout.open('pin', '2', { beside: { type: 't-panel' } });
+  const g = api.getPanel('t-panel').group;
+  assert.equal(g.api.location.type, 'floating');
+  assert.deepEqual(g.panels.map((p) => p.id), ['t-panel', 'pin:1', 'pin:2']);
+  assert.equal(g.activePanel.id, 'pin:2', 'in front');
+
+  const menu = (id) => api.options.getTabContextMenuItems({ panel: api.getPanel(id) });
+  const item = (id, label) => menu(id).find((i) => i.label === label);
+  assert.deepEqual(menu('pin:1').filter((i) => i.label).map((i) => [i.label, !!i.disabled]),
+    [['Move to new window', false], ['Split right', false], ['Split down', false]]);
+  item('pin:1', 'Move to new window').action();
+  const own = api.getPanel('pin:1').group;
+  assert.notEqual(own, g);
+  assert.equal(own.api.location.type, 'floating');
+  assert.deepEqual(g.panels.map((p) => p.id), ['t-panel', 'pin:2']);
+  // alone in its floating window there is nowhere to move it to, or split it from
+  assert.equal(item('pin:1', 'Move to new window').disabled, true);
+  assert.equal(item('pin:1', 'Split right').disabled, true);
+  // a docked window floats instead
+  assert.equal(menu('a-panel')[0].label, 'Float');
+
+  // beside a window that is not open: placed as if not asked
+  layout.close('t-panel');
+  layout.open('pin', '3', { beside: { type: 't-panel' } });
+  assert.notEqual(api.getPanel('pin:3').group, api.getPanel('pin:2').group);
+  layout.closeAll('pin');
+});
+
 test('reset keeps a transient window open and moves it to float; persisted ones go to their default', () => {
   layout.resetLayout();
   layout.open('t-panel', '', { dock: 'left' });

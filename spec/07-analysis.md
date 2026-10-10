@@ -348,10 +348,11 @@ must be marked as coming from the freeing record, and its predicate must read
 and a row must never offer a predicate that does not match the value shown
 beside it.
 
-**Pinning** (📌) freezes the current
-panel as an independent window and lets the next selection open fresh; any
-number of allocations can be pinned side by side for comparison
-([09-ui-shell](09-ui-shell.md)).
+**Pinning** (📌) keeps the shown allocation in a window of its own, titled
+by the allocation's name or `#<id>`, while the live panel goes on following
+the selection; any number of allocations can be pinned side by side for
+comparison, and unpinning one shows it in the live panel again
+([SHELL-005](09-ui-shell.md#shell-005-the-allocation-window-lifecycle)).
 
 ## ANL-007: Persistence — `.heapa` files and autosave
 

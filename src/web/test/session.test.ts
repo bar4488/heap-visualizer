@@ -17,12 +17,21 @@ const {
 } = await import('../session.ts');
 const { heapPanels } = await import('../heap/panels.ts');
 const { layout } = await import('../shell/layout.ts');
+const { LIVE, PINNED, pinAllocation, pinnedTitle, unpinAllocation } = await import('../heap/alloc-windows.ts');
 
 // the panel list comes from the domain's table, not a copy of it
 const PANELS = heapPanels();
-function pinnedEl() {
+// (titled the way main.ts titles one: the allocation's name, else `#<id>`)
+function pinnedEl(key, data) {
   const el = new El('div');
   el.classList.add('panel', 'pinned-detail');
+  const head = new El('div');
+  head.classList.add('panel-head');
+  const title = new El('span');
+  title.classList.add('ph-t');
+  title.textContent = pinnedTitle({ e: +key, id: data?.id ?? key }, data?.name);
+  head.appendChild(title);
+  el.appendChild(head);
   return el;
 }
 
@@ -421,5 +430,82 @@ test('a pinned-window restore stops when a new trace loads mid-restore', async (
   await drain();
   assert.deepEqual(created, [3]);
 
+  initSession(makeDeps(ui, posted));
+});
+
+// --- allocation windows (SHELL-005) ----------------------------------------
+
+const groupOf = (type, key = '') => layout.placeOf(type, key);
+const sameGroup = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+test('pinning A, then B, keeps both pinned and open, as tabs beside the live window', () => {
+  layout.resetLayout();
+  layout.open(LIVE); // the live window shows A
+  pinAllocation(layout, { e: 11, id: 1 });
+  layout.open(LIVE); // B is selected: the live window comes to the front
+  pinAllocation(layout, { e: 22, id: 2 });
+
+  assert.ok(layout.isOpen(PINNED, '11'), 'A is still pinned');
+  assert.ok(layout.isOpen(PINNED, '22'), 'B is pinned');
+  assert.ok(layout.isOpen(LIVE), 'the live window stays');
+  assert.deepEqual(layout.instancesOf(PINNED).map((i) => i.key), ['11', '22']);
+  // one floating window, three tabs: nothing went anywhere else
+  assert.ok('float' in groupOf(LIVE));
+  assert.ok(sameGroup(groupOf(PINNED, '11'), groupOf(LIVE)));
+  assert.ok(sameGroup(groupOf(PINNED, '22'), groupOf(LIVE)));
+
+  // pinning one that is pinned already opens nothing new
+  const el = layout.element(PINNED, '11');
+  assert.equal(pinAllocation(layout, { e: 11, id: 1 }), el);
+  assert.equal(layout.instancesOf(PINNED).length, 2);
+
+  // unpinning A closes it alone, and shows it in the live window where it is
+  const shown = [];
+  unpinAllocation(layout, { e: 11, id: 1 }, (place) => shown.push(place));
+  assert.deepEqual(shown, [null]);
+  assert.equal(layout.isOpen(PINNED, '11'), false);
+  assert.ok(layout.isOpen(PINNED, '22') && layout.isOpen(LIVE));
+  layout.closeAll(PINNED);
+  layout.close(LIVE);
+});
+
+test('a pinned tab reads the allocation\'s name, else #id', () => {
+  assert.equal(pinnedTitle({ e: 5, id: 1843 }), '#1843');
+  assert.equal(pinnedTitle({ e: 5, id: 1843 }, 'json_root'), 'json_root');
+});
+
+test('pinned windows sharing a floating window come back in it, titled, after a reload', async () => {
+  layout.resetLayout();
+  layout.open(LIVE);
+  layout.open(PINNED, '11', { data: { id: 1, name: 'json_root' }, beside: { type: LIVE } });
+  layout.open(PINNED, '22', { data: { id: 2 }, beside: { type: LIVE } });
+  const saved = JSON.parse(JSON.stringify(buildSession()));
+  assert.deepEqual(saved.heap.pinned, [{ e: 11 }, { e: 22 }]);
+  assert.equal(saved.shell.dock.panels['pinned-detail:11'].title, 'json_root');
+  assert.equal(saved.shell.dock.panels['pinned-detail:22'].title, '#2');
+
+  // a reload: nothing open, then the session
+  layout.closeAll(PINNED);
+  layout.close(LIVE);
+  layout.resetLayout();
+  const infos = { 11: { e: 11, id: 1, name: 'json_root' }, 22: { e: 22, id: 2 } };
+  initSession({
+    ...makeDeps({ ...makeUI(), meta: {} }, []),
+    requestAllocInfo: async (e) => infos[e],
+    createPinnedWindow: (info, place) => layout.open(PINNED, String(info.e), { data: info, ...place }),
+  });
+  applySession(saved);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.ok(layout.isOpen(PINNED, '11') && layout.isOpen(PINNED, '22'));
+  assert.equal(layout.isOpen(LIVE), false, 'the live window is not restored');
+  const a = groupOf(PINNED, '11');
+  assert.ok('float' in a, 'floating');
+  assert.ok(sameGroup(a, groupOf(PINNED, '22')), 'in one floating window, as tabs');
+  const panels = buildSession().shell.dock.panels;
+  assert.equal(panels['pinned-detail:11'].title, 'json_root');
+  assert.equal(panels['pinned-detail:22'].title, '#2');
+
+  layout.closeAll(PINNED);
   initSession(makeDeps(ui, posted));
 });
