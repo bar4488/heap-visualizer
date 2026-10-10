@@ -1229,6 +1229,12 @@ function placeOf(type: string, key = ''): Place | null {
   return panel ? slotOf(panel) : slots.get(inst.id) || null;
 }
 
+/** Drop where a closed window would reopen, so it is placed afresh next time. */
+function forget(type: string, key = '') {
+  const inst = find(type, key);
+  if (inst && !api?.getPanel(inst.id)) slots.delete(inst.id);
+}
+
 function closeAll(type: string) {
   for (const { key } of instancesOf(type)) close(type, key);
 }
@@ -1468,7 +1474,7 @@ function dropPlaceholders() {
 }
 
 export const layout = {
-  register, init, open, close, toggle, reveal, isOpen, isShown, element, instancesOf, location, placeOf, closeAll,
+  register, init, open, close, toggle, reveal, isOpen, isShown, element, instancesOf, location, placeOf, forget, closeAll,
   onOpen, onClose, resetLayout, serialize, restore, dropPlaceholders,
 };
 

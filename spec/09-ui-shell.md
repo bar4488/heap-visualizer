@@ -253,10 +253,12 @@ There is **one live** Allocation window and **any number of pinned** ones.
 
 **Pinning** — the pin icon in the live window's tab
 ([SHELL-002](#shell-002-panels-views-and-windows)), "Pin this allocation
-window" — opens a pinned window for the shown allocation **as a tab in the
-live window's group**, wherever that group is (floating or docked), in front.
-The live window stays in that group as the other tab, still showing the same
-allocation until the next selection; nothing moves. A pinned window has the
+window" — **replaces the live window in place** with a pinned window for the
+shown allocation: same group, floating or docked, same spot, so pinning never
+adds a window. The next selection opens the live window again — back in its
+dock group when it was docked, or as a fresh floating window beside the
+selection ([float placement](#shell-005-the-allocation-window-lifecycle)) when
+it was floating, never as a tab on the window just pinned. A pinned window has the
 same chrome as the live one, the orange pin its tell (its pin pressed, shown
 orange, and an orange line along the top of its tab; "Unpin this allocation
 window"). Keyboard focus on the pin carries over to the pinned window's pin.

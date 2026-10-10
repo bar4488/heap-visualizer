@@ -438,33 +438,37 @@ test('a pinned-window restore stops when a new trace loads mid-restore', async (
 const groupOf = (type, key = '') => layout.placeOf(type, key);
 const sameGroup = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
-test('pinning A, then B, keeps both pinned and open, as tabs beside the live window', () => {
+test('pinning replaces the live window in place; pinning B keeps A pinned', () => {
   layout.resetLayout();
-  layout.open(LIVE); // the live window shows A
+  layout.open(LIVE); // the live window shows A, floating
+  const liveSpot = groupOf(LIVE);
   pinAllocation(layout, { e: 11, id: 1 });
-  layout.open(LIVE); // B is selected: the live window comes to the front
+  // one window, not two: A's pinned window took the live window's place
+  assert.ok(layout.isOpen(PINNED, '11'), 'A is pinned');
+  assert.equal(layout.isOpen(LIVE), false, 'the live window was replaced');
+  assert.ok(sameGroup(groupOf(PINNED, '11'), liveSpot));
+
+  layout.open(LIVE); // B is selected: a fresh live window, not a tab on A's
+  assert.ok(!sameGroup(groupOf(LIVE), groupOf(PINNED, '11')));
   pinAllocation(layout, { e: 22, id: 2 });
 
   assert.ok(layout.isOpen(PINNED, '11'), 'A is still pinned');
   assert.ok(layout.isOpen(PINNED, '22'), 'B is pinned');
-  assert.ok(layout.isOpen(LIVE), 'the live window stays');
+  assert.equal(layout.isOpen(LIVE), false);
   assert.deepEqual(layout.instancesOf(PINNED).map((i) => i.key), ['11', '22']);
-  // one floating window, three tabs: nothing went anywhere else
-  assert.ok('float' in groupOf(LIVE));
-  assert.ok(sameGroup(groupOf(PINNED, '11'), groupOf(LIVE)));
-  assert.ok(sameGroup(groupOf(PINNED, '22'), groupOf(LIVE)));
 
   // pinning one that is pinned already opens nothing new
   const el = layout.element(PINNED, '11');
   assert.equal(pinAllocation(layout, { e: 11, id: 1 }), el);
   assert.equal(layout.instancesOf(PINNED).length, 2);
 
-  // unpinning A closes it alone, and shows it in the live window where it is
+  // unpinning A closes it alone; the live window (closed) opens where A stood
+  const placeA = groupOf(PINNED, '11');
   const shown = [];
   unpinAllocation(layout, { e: 11, id: 1 }, (place) => shown.push(place));
-  assert.deepEqual(shown, [null]);
+  assert.deepEqual(shown, [placeA]);
   assert.equal(layout.isOpen(PINNED, '11'), false);
-  assert.ok(layout.isOpen(PINNED, '22') && layout.isOpen(LIVE));
+  assert.ok(layout.isOpen(PINNED, '22'));
   layout.closeAll(PINNED);
   layout.close(LIVE);
 });
