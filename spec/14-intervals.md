@@ -264,8 +264,8 @@ its `T` name or `thread N`/`process N`, and every CPU with a slice.
 
 Three panels present the domain in the browser (`src/web/intervals/`), each
 a window of the shell ([SHELL-002](09-ui-shell.md#shell-002-panels-views-and-windows))
-with a toolbar toggle that is shown only when the loaded trace has
-intervals. They start open, for such a trace only, where SHELL-008 places
+with a View-menu entry, in the menu's Intervals group, that is shown only
+when the loaded trace has intervals. They start open, for such a trace only, where SHELL-008 places
 them: **Tracks** as a tab of the bottom edge (beside Logs), **Stacks** as a
 tab of the right edge; **Intervals** starts closed in the left edge. Each
 does work only while its tab is in front, and every request goes through

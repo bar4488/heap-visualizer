@@ -7,7 +7,8 @@ why the viewer itself stays client-side, is
 
 ## REQ-001: Asking for a feature
 
-The toolbar must carry a control that opens a request form: a free-text field
+The top bar must carry a control that opens a request form (Help → Request a
+feature…): a free-text field
 for the request, an optional contact field, and a send action.
 
 - Submitting must post the text to the service and report the outcome in the

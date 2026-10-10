@@ -1,4 +1,6 @@
 import { $, $$ } from './shell/dom.ts';
+import { actions } from './shell/actions.ts';
+import { toggleGuide } from './guide.ts';
 import type { LocalServerStatus } from './local-server.ts';
 
 const SEEN_KEY = 'heapviz:onboarding-seen';
@@ -19,7 +21,8 @@ function remember() {
   try { localStorage.setItem(SEEN_KEY, '1'); } catch { /* storage may be unavailable */ }
 }
 
-function showInstall() {
+/** The setup surface: File → Setup…, and the welcome card's second goal. */
+export function showInstall() {
   $('welcome').hidden = false;
   $('welcome-intro').hidden = true;
   $('welcome-install').hidden = false;
@@ -61,7 +64,6 @@ export function initOnboarding(serverConfigured: () => boolean) {
   $('setup-windows-demo').textContent = commands.windowsDemo;
   selectOS(/Windows/i.test(navigator.userAgent) ? 'windows' : 'linux');
 
-  $('btn-setup').onclick = showInstall;
   $('welcome-setup').onclick = showInstall;
   $('welcome-back').onclick = () => {
     $('welcome-intro').hidden = false;
@@ -72,12 +74,12 @@ export function initOnboarding(serverConfigured: () => boolean) {
   $('welcome-demo').onclick = () => {
     remember();
     $('welcome').hidden = true;
-    $('btn-demo').click();
-    if (!$('btn-guide').classList.contains('active')) $('btn-guide').click();
+    actions.run('file.demo');
+    toggleGuide(true);
   };
   $('welcome-connect').onclick = () => {
     $('welcome').hidden = true;
-    $('btn-connect').click();
+    actions.run('file.connect');
   };
   $('setup-linux').onclick = () => selectOS('linux');
   $('setup-windows').onclick = () => selectOS('windows');

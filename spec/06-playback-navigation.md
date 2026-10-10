@@ -42,12 +42,12 @@ close-inspection mode, so it does more than move the playhead:
   old→new link for `R`,
 - prints a one-line event readout in the status bar.
 
-**Viewport lock** (🔓/🔒 in the top toolbar, key L): when locked, stepping
+**Viewport lock** (🔓/🔒 in the top bar's transport, key L): when locked, stepping
 never auto-scrolls; the view stays anchored on the address under inspection.
 
 ## NAV-004: Jump box and search overlay
 
-The toolbar jump box accepts three grammars, disambiguated by shape: a
+The top bar's jump box accepts three grammars, disambiguated by shape: a
 number = seq, `t:…` = time, `0x…` (or `a:0x…`) = address. Address jumps move
 only the address view (nearest laid-out row, centered, flashed) and
 auto-select the live allocation covering that address, if any.
@@ -111,3 +111,9 @@ anchored seeks from fighting the user mid-drag.
 | L | Toggle viewport lock |
 | g | Search overlay |
 | Escape | Clear selection / close overlay |
+| ⌘/Ctrl+K | Command palette ([SHELL-011](09-ui-shell.md#shell-011-actions-menus-and-the-command-palette)) |
+| ⌘/Ctrl+O | Open a trace |
+| ⌘/Ctrl+S | Save the analysis |
+| ? | The shortcut list (Help → Keyboard shortcuts) |
+
+None of these fire while typing in an input.

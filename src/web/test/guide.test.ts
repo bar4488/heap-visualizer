@@ -164,13 +164,19 @@ test('every shipped guide page renders', () => {
   }
 });
 
-test('every action in a shipped page names an id that exists in index.html', () => {
+test('every action in a shipped page names an id that exists in index.html or the menus', () => {
   // T019's third pass found by hand that every scenario link pointed at a path
   // that would 404. This is the mechanical half of that check: an action whose
   // target id is not in the markup can only ever write "no element" to the
-  // status line.
+  // status line. Menu items are built at startup from the action registry
+  // (SHELL-011): their ids are the actions' `el` (main.ts) and the panel
+  // table's toggles (heap/panels.ts).
   const markup = readFileSync(join(GUIDE_DIR, '..', 'index.html'), 'utf8');
   const ids = new Set([...markup.matchAll(/id="([^"]+)"/g)].map((m) => m[1]));
+  const main = readFileSync(join(GUIDE_DIR, '..', 'main.ts'), 'utf8');
+  for (const m of main.matchAll(/\bel: '([^']+)'/g)) ids.add(m[1]);
+  const table = readFileSync(join(GUIDE_DIR, '..', 'heap', 'panels.ts'), 'utf8');
+  for (const m of table.matchAll(/\btoggle: '([^']+)'/g)) ids.add(m[1]);
 
   const missing: string[] = [];
   for (const page of pages) {

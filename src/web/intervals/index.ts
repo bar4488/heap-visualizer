@@ -5,7 +5,8 @@
 //
 // Everything is reached through `ctx` (layout, rpc, the UI snapshot and two
 // subscriptions), so this module names no other domain and no element of
-// index.html beyond the toolbar it adds its toggles to.
+// index.html. Its panels' View-menu entries go through `ctx.addToggle`, into
+// the module's group of the action registry (spec SHELL-011).
 
 import { createListPanel } from './list-panel.ts';
 import { createStatePanel } from './state-panel.ts';
@@ -16,13 +17,13 @@ import type { PanelContext } from '../panels.ts';
 
 export type { IntervalCtx } from './types.ts';
 
-/** Panel types, toolbar toggles, and where each starts (SHELL-008). */
+/** Panel types, their View-menu entries, and where each starts (SHELL-008). */
 const PANELS = [
-  { type: 'intervals-tracks', title: 'Tracks', btn: 'btn-ivl-tracks', label: 'Tracks', dock: 'bottom' as const, open: true,
+  { type: 'intervals-tracks', title: 'Tracks', dock: 'bottom' as const, open: true,
     hint: 'Calls, spans and CPU run slices as a flame chart on the timeline\'s x-axis' },
-  { type: 'intervals-state', title: 'Stacks', btn: 'btn-ivl-state', label: 'Stacks', dock: 'right' as const, open: true,
+  { type: 'intervals-state', title: 'Stacks', dock: 'right' as const, open: true,
     hint: 'The call stacks, open spans and CPUs at the playhead' },
-  { type: 'intervals-list', title: 'Intervals', btn: 'btn-ivl-list', label: 'Intervals', dock: 'left' as const, open: false,
+  { type: 'intervals-list', title: 'Intervals', dock: 'left' as const, open: false,
     hint: 'Every call, span and run slice, filterable, with durations' },
 ];
 
@@ -36,19 +37,19 @@ export function registerIntervalPanels(panelCtx: PanelContext) {
   const list = createListPanel(sh);
   const panels = { 'intervals-tracks': tracks, 'intervals-state': state, 'intervals-list': list };
 
-  addToggles();
   for (const p of PANELS) {
     const impl = panels[p.type];
     ctx.layout.register(p.type, {
       title: p.title,
       singleton: true,
-      toggle: document.getElementById(p.btn) ? p.btn : null,
       floatSize: p.type === 'intervals-tracks' ? { width: 720, height: 320 } : { width: 420, height: 420 },
       // read when applied: they start open only for a trace with intervals
       defaultLocation: () => ({ dock: p.dock, open: p.open && present(sh) }),
       build: () => impl.el,
       onOpen: () => impl.refresh(),
     });
+    // shown only for a trace with intervals (read when the menu opens)
+    panelCtx.addToggle?.(p.type, { title: p.title, hint: p.hint, visible: () => present(sh) });
   }
 
   let lastMeta: unknown = undefined;
@@ -57,7 +58,6 @@ export function registerIntervalPanels(panelCtx: PanelContext) {
     tr.gen++;
     tr.total = -1;
     tr.tracks = { threads: [], cpus: [] };
-    syncToggles();
     for (const p of Object.values(panels)) p.reset();
     if (!ctx.ui.loaded) return;
     const gen = tr.gen;
@@ -66,7 +66,6 @@ export function registerIntervalPanels(panelCtx: PanelContext) {
       const d = (dm.available && Array.isArray((dm as any).domains) ? (dm as any).domains : []).find((x: any) => x?.id === 'intervals') as any;
       tr.total = d && typeof d.intervals === 'number' ? d.intervals : 0;
       if (tk.available && tk.result) tr.tracks = tk.result;
-      syncToggles();
       // without `meta.intervals` the layout could not know at load time
       // whether to open the panels: open the default-open ones now
       if (ctx.ui.meta && ctx.ui.meta.intervals === undefined && present(sh)) {
@@ -92,29 +91,4 @@ export function registerIntervalPanels(panelCtx: PanelContext) {
     const views: Views = 'tlT' in v ? { t: v.tlT, seq: v.tlS } : v;
     tracks.view(views);
   });
-
-  function syncToggles() {
-    for (const p of PANELS) {
-      const b = document.getElementById(p.btn);
-      if (b) b.hidden = !present(sh);
-    }
-  }
-}
-
-/** The toolbar toggles, after the Logs one; hidden until a trace has intervals. */
-function addToggles() {
-  const anchor = document.getElementById('btn-logs');
-  const bar = anchor?.parentElement || document.getElementById('toolbar');
-  if (!bar) return;
-  let after: Element | null = anchor;
-  for (const p of PANELS) {
-    if (document.getElementById(p.btn)) continue;
-    const b = document.createElement('button');
-    b.id = p.btn;
-    b.hidden = true;
-    b.title = p.hint;
-    b.textContent = p.label;
-    if (after) after.after(b); else bar.appendChild(b);
-    after = b;
-  }
 }

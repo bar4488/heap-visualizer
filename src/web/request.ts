@@ -84,10 +84,10 @@ export function initRequest() {
   };
 
   // A window like any other, declared here because it is not heap-shaped:
-  // the shell toggles it from its button, and nothing about it persists.
+  // the Help menu toggles it, and nothing about it persists.
   layout.register('request-panel', {
     title: 'Request a feature',
-    toggle: 'btn-request',
+    toggle: null, // Help → Request a feature… (main.ts's action registry)
     persist: false,
     defaultLocation: { dock: null, open: false },
     build: () => panel,
