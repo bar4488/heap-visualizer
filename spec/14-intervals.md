@@ -181,8 +181,11 @@ document), and `limits` adding `depth`, `openSpans` and `cpus`.
   `category` (`sched`/`call`/`span`), `thr` (with optional `pid`; `pid`
   alone selects a process track) or `cpu`, `text` (ASCII case-insensitive
   over name and span id), `minDur` (trace time units; an open interval
-  lasts to the trace end), and `seqLo`/`seqHi`, which select the intervals
-  **overlapping** the range. A thread selects its calls, the spans begun or
+  lasts to the trace end), `seqLo`/`seqHi`, which select the intervals
+  **overlapping** the range, and the lookups `ivl` (one interval by id) and
+  `edge` (the interval the edge record at that seq begins — a `B`, or the
+  slice a `C` switches to — or ends — an `X`); a lookup that names nothing
+  matches nothing, and the other parameters still apply to it. A thread selects its calls, the spans begun or
   ended on it, and the slices it ran in. A track the trace does not have
   matches nothing. Each row is an interval document: `{row, ivl, category,
   name, seq (begin), end, t, endT, dur, open, depth, parent, thr, pid?,
@@ -279,7 +282,8 @@ playback or a fast zoom never builds a backlog.
 
 A click on an interval in Stacks or Intervals seeks to one record past its
 begin, so the interval is open at the playhead (IVL-005). Tracks is a
-timeline and seeks like one (IVL-UI-003).
+timeline and seeks like one (IVL-UI-003). Every such click also selects the
+interval (IVL-UI-005).
 
 ### IVL-UI-001: Durations
 
@@ -300,6 +304,9 @@ The state at the playhead from `domain-state`, asked once per playhead move:
   parent's id.
 - **CPUs**: per CPU, the running thread, `idle`, or `unknown`, and the seq
   its slice began.
+
+The selected interval (IVL-UI-005), while it is open at the playhead, is
+outlined in whichever section lists it.
 
 ### IVL-UI-003: Tracks
 
@@ -336,11 +343,17 @@ ratio, in colors read from the `--ivl-*` CSS tokens.
   one implementation in `src/web/timeline-interaction.ts`): click or drag
   seeks to the value under the pointer, wheel zooms about the pointer,
   shift+wheel pans, double-click shows the whole axis, and shift+drag makes
-  the strips' range selection with its popover. Hover shows a bar's name,
+  the strips' range selection with its popover. A click on a bar also
+  selects its interval (IVL-UI-005). Hover shows a bar's name,
   kind, duration and thread, a gutter row's track name, or else the value
   under the pointer. The tracks scroll vertically by the scrollbar or by a
   wheel over the gutter. Zoom and pan drive the strips' view, so the two
   stay on one x-range.
+- **Selection**: the selected interval's bar is outlined (at least a few
+  pixels wide, so a sub-pixel call still shows). A new selection scrolls its
+  row into view — following it for a moment while the tracks above it grow —
+  and, when it lies outside the visible plot (off either end, or under the
+  name gutter), pans the view to it at the same zoom.
 
 ### IVL-UI-004: Intervals
 
@@ -352,4 +365,37 @@ CPU, text (name or span id), and a minimum duration typed with a unit
 (`250us`, `1.5ms`) or in trace units; an unreadable one is marked and not
 applied. The head shows `shown / total`: matches of the filters, of all
 intervals. Rows open at the playhead are highlighted and rows not yet begun
-are dimmed.
+are dimmed. The selected interval's row is outlined.
+
+### IVL-UI-005: The interval selection and the Interval window
+
+One **interval selection** — a call, a span or a CPU run slice — is shared by
+the Events list ([NAV-005](06-playback-navigation.md#nav-005-the-events-panel)),
+Tracks, Stacks and Intervals. It is the interval's id with the edge record
+it was chosen from, and the interval's begin and end seqs once known. It is
+kept apart from the allocation selection: setting one never changes the other.
+
+- **Selecting**: a click on an interval edge row in the Events list (`call ▸`,
+  `ret ◂`, `span ▸`, `span ◂`, `switch`), on a bar in Tracks, on a frame, span
+  or CPU in Stacks, or on a row of Intervals seeks as before and selects the
+  interval. An edge selects the interval it begins or ends; a switch selects
+  the run slice it starts. The web resolves an edge to its interval with
+  `domain-query` and `edge`, and an id with `ivl` (IVL-007). An edge that
+  pairs with no interval only seeks.
+- **Showing it**: the Events list marks the rows of the interval's two edges;
+  Tracks outlines its bar and brings it into view (IVL-UI-003); Stacks
+  outlines it while it is open at the playhead; Intervals outlines its row.
+- **The Interval window** follows the selection: one live window, floating
+  and not persisted, like the Event window. It opens beside the click (beside
+  the Events list for a row of it) and, once open, keeps its place while a new
+  selection changes its content and brings it to the front. Its tab reads the
+  interval: `Call · parse_body`, `Span · request`, `CPU 2 · worker-1`. It
+  shows the kind (call, span, CPU run slice), the name, the thread by its
+  short name (the pid only in a trace of more than one process) or the CPU
+  and the thread it ran, the begin and end — each a seq that seeks to just
+  after that record, and a time since the trace start to the trace's
+  resolution — or "still open", the duration (`≥` when open), the depth and
+  the parent (a link that selects the parent and seeks to its begin), for a
+  span its id, its parent's id and the thread it ended on when that differs,
+  and the fields of the begin and end records.
+- A newly loaded trace clears the selection and closes the window.

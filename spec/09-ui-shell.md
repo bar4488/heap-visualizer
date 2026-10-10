@@ -341,7 +341,10 @@ The **Event** window is per-event, as the allocation window is: it opens when
 a custom event is stepped onto or clicked, and carries no pin — there is
 nothing per-allocation about it to restore. The panel table declares it as a
 window that is not persisted
-([SHELL-003](#shell-003-panels-are-declared-as-data)).
+([SHELL-003](#shell-003-panels-are-declared-as-data)). The **Interval**
+window is the interval domain's like window: one, following the interval
+selection, floating and not persisted, declared by its module
+([IVL-UI-005](14-intervals.md#ivl-ui-005-the-interval-selection-and-the-interval-window)).
 
 ## SHELL-007: Status and feedback conventions
 
@@ -380,7 +383,7 @@ it on demand and completely: every view back in the center, every declared
 window back in its default edge and order or floating at its default spot,
 persisted windows open or closed as declared, each edge one group again
 (splits undone) at its default size and expanded. Windows opened per selection (Allocation, pinned clones,
-Event) keep their open state and are only moved — floated, on screen. The
+Event, Interval) keep their open state and are only moved — floated, on screen. The
 result is autosaved like any other layout change.
 
 ## SHELL-009: The guide surface

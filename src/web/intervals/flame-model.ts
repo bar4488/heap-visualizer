@@ -7,7 +7,7 @@
 
 import { xOf } from '../timeline-interaction.ts';
 import { cpuKey, threadKey, threadLabel } from './intervals-model.ts';
-import type { Axis, Range, TrackCpu, TrackThread, WindowRow } from './types.ts';
+import type { Axis, IntervalRow, Range, TrackCpu, TrackThread, WindowRow } from './types.ts';
 
 // --- the x-axis ------------------------------------------------------------------
 // The mapping, zoom, pan and clamp are the strips' own (timeline-interaction.ts).
@@ -219,6 +219,56 @@ export function hitBar(bars: Bar[], lane: 'call' | 'span', depth: number, x: num
     if (b.lane === lane && b.depth === depth && x >= b.x - 1 && x <= b.x + b.w + 1) return b;
   }
   return null;
+}
+
+// --- the selected interval ----------------------------------------------------------
+
+/** Where the selected interval sits: its group, its row's content y, and its extent on the axis. */
+export type SelectedBox = { key: string; y: number; lo: number; hi: number };
+
+/**
+ * The selected interval's box in the stack (IVL-UI-005), from its interval
+ * document: a call in its thread's call rows at its depth, a span in the span
+ * rows, a slice in its CPU's row. An open interval reaches `ends` (the axis's
+ * end: the trace's last time, or its record count). Null when its track is not
+ * in the stack.
+ */
+export function selectedBox(groups: Group[], r: IntervalRow, axis: Axis, ends: number): SelectedBox | null {
+  const key = r.category === 'sched'
+    ? (r.cpu === undefined || r.cpu === null ? '' : cpuKey(r.cpu))
+    : (r.thr === null || r.thr === undefined ? '' : threadKey({ thr: r.thr, pid: r.pid }));
+  const g = groups.find((x) => x.key === key);
+  if (!g) return null;
+  const depth = Math.max(0, r.depth | 0);
+  const y = r.category === 'sched' ? g.callTop : r.category === 'span' ? g.spanTop + depth * ROW_H : g.callTop + depth * ROW_H;
+  const lo = axis === 't' ? r.t : r.seq;
+  const end = axis === 't' ? r.endT : r.end;
+  return { key, y, lo, hi: end === null || end === undefined ? Math.max(lo, ends) : end };
+}
+
+/**
+ * The scrollTop that brings content y (one row tall) into a viewport of
+ * height viewH, or null when it is already in view: centered when it is not.
+ */
+export function scrollToRow(y: number, scrollTop: number, viewH: number): number | null {
+  if (y >= scrollTop && y + ROW_H <= scrollTop + viewH) return null;
+  return Math.max(0, Math.round(y - (viewH - ROW_H) / 2));
+}
+
+/**
+ * The view that shows [lo, hi]: the same view when it overlaps its visible
+ * part (from `visibleLo`, right of the name gutter, to its end), else one of
+ * the same span centered on it (or fitted around [lo, hi] when wider).
+ */
+export function viewToShow(view: Range, lo: number, hi: number, visibleLo = view.lo): Range {
+  if (hi >= visibleLo && lo <= view.hi) return view;
+  const span = view.hi - view.lo;
+  if (hi - lo > span) {
+    const pad = (hi - lo) * 0.1;
+    return { lo: lo - pad, hi: hi + pad };
+  }
+  const mid = (lo + hi) / 2;
+  return { lo: mid - span / 2, hi: mid + span / 2 };
 }
 
 // --- colors ---------------------------------------------------------------------------

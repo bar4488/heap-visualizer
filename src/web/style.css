@@ -1093,8 +1093,11 @@ input[type="color"] {
   height: 14px; line-height: 14px; border-radius: 3px; overflow: hidden;
   font-size: 10.5px; font-weight: 600; white-space: pre; text-overflow: clip;
   color: var(--dom); background: color-mix(in srgb, var(--dom) 13%, transparent);
-  cursor: help;
 }
+/* the selected interval's edges (IVL-UI-005) */
+.ev-row.picked { outline: 1px solid color-mix(in srgb, var(--accent) 75%, transparent); outline-offset: -1px; }
+.ev-row.picked:not(.cur) { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.ev-row.picked .ev-main { color: var(--fg); }
 .ev-row[data-domain="heap"] .ev-kind.k-malloc { color: var(--green); }
 .ev-row[data-domain="heap"] .ev-kind.k-free { color: var(--red); }
 .ev-row[data-domain="heap"] .ev-kind.k-realloc { color: #d29922; }

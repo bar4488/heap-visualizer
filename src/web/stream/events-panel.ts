@@ -14,6 +14,8 @@
 
 import { $, $$, toCss } from '../shell/dom.ts';
 import { layout } from '../shell/layout.ts';
+import { hoverTips } from '../shell/tooltip.ts';
+import { edgeSelection, selectedEdges } from '../intervals/selection.ts';
 import { esc, fmtNum } from '../fmt.ts';
 import { revealLogSeq } from '../logs/logs-panel.ts';
 import {
@@ -56,7 +58,7 @@ const evDomains = () => includedDomains(domainState.chips, domainState.excluded)
 const evIndexed = () => evFiltered() || evDomains() !== undefined;
 
 // deps: { ui, post, fmtAllocSize, updateSelOverlay, requestSelMirror,
-//         openSelPopover }
+//         openSelPopover, selectInterval }
 export function initEventsPanel(deps) {
   d = deps;
   wireEventsPanel();
@@ -99,12 +101,18 @@ export function onEventsSlice(m) {
   const ctx = {
     domains: d.ui.meta?.domains, names: domainState.names,
     fmtAllocSize: d.fmtAllocSize, curSeq: d.ui.state ? d.ui.state.seq - 1 : -1, columns,
+    pickedSeqs: selectedEdges(d.ui.intervalSel ?? null),
   };
   $('events-rows').innerHTML = m.events.map((ev) => renderRow(ev, ctx)).join('');
   $$('.ev-row', $('events-rows')).forEach((row) => {
-    row.onclick = () => {
+    row.onclick = (e) => {
       const seq = +row.dataset.seq;
-      if (row.dataset.log) {
+      if (row.dataset.edge) {
+        // an interval edge: seek there, and select (and open) its interval
+        d.post({ type: 'jump', seq: seq + 1, select: true });
+        // the window opens beside the list, not over it
+        d.selectInterval?.(edgeSelection(seq, { x: row.getBoundingClientRect().right, y: e.clientY }));
+      } else if (row.dataset.log) {
         d.post({ type: 'jump', seq: seq + 1, select: true });
         revealLogSeq(seq);
       } else if (d.ui.state && seq === d.ui.state.seq - 1 && !row.dataset.custom) {
@@ -116,6 +124,14 @@ export function onEventsSlice(m) {
         d.post({ type: 'jump', seq: seq + 1, select: true });
       }
     };
+  });
+}
+
+/** The interval selection changed: mark the rows of its edges (IVL-UI-005). */
+export function markIntervalSelection() {
+  const picked = selectedEdges(d.ui.intervalSel ?? null);
+  $$('.ev-row', $('events-rows')).forEach((row) => {
+    row.classList.toggle('picked', !!row.dataset.edge && picked.has(+row.dataset.seq));
   });
 }
 
@@ -303,6 +319,8 @@ function wireColumnsMenu() {
 
 function wireEventsPanel() {
   wireColumnsMenu();
+  // the kind chip's and the row's words, in the app's tooltip (NAV-005)
+  hoverTips($('events-scroll'), 'events');
   $('ev-filtered').onchange = () => {
     relistEvents();
     updateEventsPanel();

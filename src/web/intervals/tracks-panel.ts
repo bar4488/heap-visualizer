@@ -35,9 +35,10 @@ import {
 } from '../timeline-interaction.ts';
 import {
   GROUP_GAP, GUTTER_W, HEAD_H, ROW_H, axisTicks, colorKey, colorSlot, depthsOf, groupAt, hitBar,
-  laneAt, layoutBars, layoutGroups, mergeDepths, visibleGroups, windowCovers, windowFor,
-  type Bar, type Depths, type Fetched, type Group,
+  laneAt, layoutBars, layoutGroups, mergeDepths, scrollToRow, selectedBox, viewToShow, visibleGroups, windowCovers,
+  windowFor, type Bar, type Depths, type Fetched, type Group,
 } from './flame-model.ts';
+import { intervalSelection } from './selection.ts';
 import { fmtDur, fmtRecords, orderTracks } from './intervals-model.ts';
 import { panelElement, present, shown, token, type Shared } from './shared.ts';
 import type { Axis, Range, Views, WindowQuery, WindowRow } from './types.ts';
@@ -112,6 +113,7 @@ export function createTracksPanel(sh: Shared) {
       idle: token(el, '--ivl-idle', '#8b949e'),
       text: token(el, '--ivl-bar-fg', '#0d1117'),
       sel: token(el, '--ivl-sel', '#58a6ff2e'),
+      picked: token(el, '--ivl-picked', '#ffffff'),
       accent: token(el, '--accent', '#58a6ff'),
     };
   }
@@ -148,6 +150,7 @@ export function createTracksPanel(sh: Shared) {
           if (!before || after.call !== before.call || after.span !== before.span) {
             depths.set(key, after);
             relayout();
+            if (performance.now() < followSelUntil) scrollToSelected();
             scheduleFetch(); // groups below moved: others may have come into view
           }
         }
@@ -213,6 +216,8 @@ export function createTracksPanel(sh: Shared) {
       }
     }
 
+    paintSelected(g, v, top, w, h);
+
     // the name gutter over the plot's left edge, then the heads across it
     for (const gr of shownGroups) paintGutter(g, gr, gr.top - top + AXIS_H, w);
     // the thread scrolled into keeps its head pinned on top, pushed up by the next
@@ -269,6 +274,66 @@ export function createTracksPanel(sh: Shared) {
         paintPlayhead(g, x * dpr, 0, ph, dpr);
       }
     }
+  }
+
+  /** The selected interval's box on the axis: where it ends when still open. */
+  function selBox() {
+    const r = sh.selRow;
+    if (!r) return null;
+    const m = meta();
+    return selectedBox(groups, r, axis, axis === 't' ? (m?.tMax ?? r.t) : (m?.n ?? r.seq));
+  }
+
+  /** The selected interval (IVL-UI-005): its bar outlined, at least a few px wide. */
+  function paintSelected(g: CanvasRenderingContext2D, v: Range, top: number, w: number, h: number) {
+    const box = selBox();
+    if (!box) return;
+    const by = box.y - top + AXIS_H;
+    if (by + ROW_H < AXIS_H || by > h) return;
+    let x0 = xOf(box.lo, v, w);
+    let x1 = xOf(box.hi, v, w);
+    if (x1 - x0 < 8) { const m = (x0 + x1) / 2; x0 = m - 4; x1 = m + 4; }
+    if (x1 < 0 || x0 > w) return;
+    x0 = Math.max(-3, x0);
+    x1 = Math.min(w + 3, x1);
+    const c = colors;
+    g.fillStyle = c.accent;
+    g.globalAlpha = 0.22;
+    g.fillRect(x0, by, x1 - x0, ROW_H);
+    g.globalAlpha = 1;
+    g.lineWidth = 2;
+    g.strokeStyle = c.picked;
+    g.strokeRect(x0 + 1, by + 1, x1 - x0 - 2, ROW_H - 2);
+    g.lineWidth = 1;
+    g.strokeStyle = c.accent;
+    g.strokeRect(x0 - 0.5, by - 0.5, x1 - x0 + 1, ROW_H + 1);
+  }
+
+  /**
+   * Until this time (ms), the selected interval's row is kept scrolled into
+   * view as tracks above it grow (their deeper calls arrive after the
+   * selection), unless the user scrolls or presses first.
+   */
+  let followSelUntil = 0;
+
+  /** Scroll the selected interval's row into view, when it is out of it. */
+  function scrollToSelected() {
+    const box = selBox();
+    if (!box) return;
+    const top = scrollToRow(box.y, sc.scrollTop, H() - AXIS_H);
+    if (top !== null) sc.scrollTop = top;
+  }
+
+  /** Bring the selected interval into view: its row scrolled to, the axis panned to it if it is off-screen. */
+  function revealSelected() {
+    const box = selBox();
+    if (!box) return;
+    followSelUntil = performance.now() + 2000;
+    scrollToSelected();
+    const v = view();
+    // the name gutter covers the plot's left edge: a bar under it is not in view
+    const nv = viewToShow(v, box.lo, box.hi, valAt(GUTTER_W + 4, v, W()));
+    if (nv !== v) setView(nv);
   }
 
   /** A section heading (THREADS, CPUS) across the panel. */
@@ -437,6 +502,7 @@ export function createTracksPanel(sh: Shared) {
 
   sc.addEventListener('scroll', () => { hideTooltip(OWNER); draw(); scheduleFetch(); });
   sc.addEventListener('wheel', (e: WheelEvent) => {
+    followSelUntil = 0;
     const p = at(e.clientX, e.clientY);
     // over the name gutter a plain wheel scrolls the tracks (the scroller's own behavior)
     if (p.x < GUTTER_W && !e.shiftKey) return;
@@ -447,6 +513,7 @@ export function createTracksPanel(sh: Shared) {
   sc.addEventListener('pointerdown', (e: PointerEvent) => {
     if (e.button !== 0 || onScrollbar(e.clientX)) return;
     sc.setPointerCapture?.(e.pointerId);
+    followSelUntil = 0;
     const x = at(e.clientX, e.clientY).x;
     clearSelection();
     if (e.shiftKey) {
@@ -455,6 +522,9 @@ export function createTracksPanel(sh: Shared) {
     } else {
       dragging = true;
       seekTo(x);
+      // a bar also selects its interval, which opens the Interval window
+      const h = hit(e.clientX, e.clientY);
+      if (h) sh.ctx.selectInterval?.(intervalSelection(h.bar.row.ivl, { x: e.clientX, y: e.clientY }));
     }
   });
   sc.addEventListener('pointermove', (e: PointerEvent) => {
@@ -535,6 +605,12 @@ export function createTracksPanel(sh: Shared) {
       scheduleFetch();
     },
     playhead() { if (shown(sh, TYPE)) draw(); },
+    /** The interval selection changed: outline it, and with `reveal` bring it into view. */
+    selected(reveal: boolean) {
+      if (!shown(sh, TYPE)) return;
+      if (reveal) revealSelected();
+      draw();
+    },
     view(v: Views) {
       for (const a of ['t', 'seq'] as Axis[]) {
         const r = v[a];

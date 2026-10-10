@@ -39,8 +39,9 @@ import {
 } from './analysis-port.ts';
 import {
   initEventsPanel, evState, refreshEventsPanel, onEventsSlice, flashRects,
-  updateEventsPanel, onEvPos, resetEventsPanel, updateEventsSelBand,
+  updateEventsPanel, onEvPos, resetEventsPanel, updateEventsSelBand, markIntervalSelection,
 } from './stream/events-panel.ts';
+import type { IntervalSelection } from './intervals/selection.ts';
 import {
   initLogsPanel, logsPresent, resetLogsPanel, updateLogsPanel,
 } from './logs/logs-panel.ts';
@@ -135,6 +136,11 @@ type UIState = {
   seek?: (seq: number) => void;
   fileName?: string;
   detailInfo?: AllocInfo | null;
+  /**
+   * The interval selection (IVL-UI-005): one call, span or run slice, shared
+   * by the Events list and the interval panels; apart from `selected`.
+   */
+  intervalSel?: IntervalSelection | null;
   /** When the user last zoomed a strip locally; see onState. */
   tlLocalAt?: number;
 };
@@ -156,6 +162,15 @@ initRpc(worker);
 const stateListeners = listeners<Extract<FromWorker, { type: 'state' }>>();
 const viewListeners = listeners<ViewRanges>();
 const loadListeners = listeners<TraceMeta>();
+const intervalSelListeners = listeners<IntervalSelection | null>();
+// The interval selection: set from the Events list or an interval panel, and
+// fanned out to both (the interval module resolves an edge to its interval
+// and selects again with it).
+function selectInterval(sel: IntervalSelection | null) {
+  UI.intervalSel = sel;
+  intervalSelListeners.emit(sel);
+}
+intervalSelListeners.add(() => markIntervalSelection());
 let lastView = '';
 function emitView() {
   const key = `${UI.tlT.lo},${UI.tlT.hi},${UI.tlS.lo},${UI.tlS.hi}`;
@@ -1699,6 +1714,8 @@ domainPanels(PANEL_MODULES, {
     if (at) openSelPopover(at.x, at.y);
   },
   onLoad: (fn) => loadListeners.add(fn),
+  selectInterval,
+  onIntervalSelect: (fn) => intervalSelListeners.add(fn),
   // a panel a module registered with the shell itself gets its View entry here
   addToggle: (mod, type, entry) => addPanelAction(type, {
     label: entry.title, section: moduleLabel(mod), el: `btn-${type}`, hint: entry.hint,
@@ -1901,6 +1918,7 @@ initEventsPanel({
   updateSelOverlay,
   requestSelMirror,
   openSelPopover,
+  selectInterval,
 });
 // the Logs panel (src/web/logs/logs-panel.ts): the log domain's terminal
 initLogsPanel({ ui: UI, post: (msg) => worker.postMessage(msg), requestLatest });

@@ -527,6 +527,9 @@ pub struct IntervalQuery {
     pub seq_lo: Option<u32>,
     pub seq_hi: Option<u32>,
     pub min_dur: u64,
+    /// Only this interval (`ivl`, or the one an `edge` begins or ends);
+    /// NONE_U32 matches nothing.
+    pub ivl: Option<u32>,
 }
 
 impl IntervalQuery {
@@ -546,8 +549,13 @@ impl IntervalQuery {
             Some(hi) => st.begin.partition_point(|&b| b <= hi),
             None => st.len() as usize,
         };
+        // one interval by id: a lookup, the other operands still apply
+        let (start, stop) = match self.ivl {
+            Some(i) => ((i as usize).min(stop), stop.min((i as usize).saturating_add(1))),
+            None => (0, stop),
+        };
         let mut out = Vec::new();
-        for i in 0..stop {
+        for i in start..stop {
             let iu = i as u32;
             let cat = st.cat[i];
             if self.cat.is_some_and(|c| c != cat) {
@@ -768,6 +776,22 @@ impl<'a> IntervalView<'a> {
             seq_lo: req.seq_lo(),
             seq_hi: req.seq_hi(),
             min_dur: number_param(&req.min_dur).map_or(0, |d| d.max(0.0) as u64),
+            ivl: match (number_param(&req.ivl), number_param(&req.edge)) {
+                (Some(i), _) => Some(if i >= 0.0 { clamp_u32(i) } else { NONE_U32 }),
+                (None, Some(seq)) => Some(if seq >= 0.0 { self.edge_interval(clamp_u32(seq)) } else { NONE_U32 }),
+                (None, None) => None,
+            },
+        }
+    }
+
+    /// The interval the edge record at `seq` begins (`B`, `C`) or ends
+    /// (`X`); NONE_U32 when `seq` is not an edge or pairs with none.
+    pub fn edge_interval(&self, seq: u32) -> u32 {
+        let st = self.st();
+        let Some(row) = self.row_of(seq) else { return NONE_U32 };
+        match self.s.op[seq as usize] {
+            OP_X => st.edge_close[row as usize],
+            _ => st.edge_open[row as usize],
         }
     }
 
@@ -936,6 +960,8 @@ impl Domain for IntervalView<'_> {
                 { "name": "minDur", "type": "duration" },
                 { "name": "seqLo", "type": "seq" },
                 { "name": "seqHi", "type": "seq" },
+                { "name": "ivl", "type": "interval" },
+                { "name": "edge", "type": "seq" },
             ] },
             "limits": {
                 "page": PAGE_MAX, "agentPage": RECORDS_COUNT_MAX, "agentDefault": RECORDS_COUNT_DEFAULT,
@@ -945,7 +971,7 @@ impl Domain for IntervalView<'_> {
     }
 
     fn query_params(&self) -> &'static [&'static str] {
-        &["category", "thr", "pid", "cpu", "text", "minDur", "seqLo", "seqHi"]
+        &["category", "thr", "pid", "cpu", "text", "minDur", "seqLo", "seqHi", "ivl", "edge"]
     }
 
     fn count(&self) -> u32 {
@@ -1064,7 +1090,7 @@ impl Domain for IntervalView<'_> {
         if text.len() > TEXT_MAX {
             return Err(param_error(&format!("text is limited to {TEXT_MAX} bytes")));
         }
-        let q = IntervalQuery { cat, track: track_sel(self.s, thr, pid, cpu), text, seq_lo: p.seq_lo, seq_hi: p.seq_hi, min_dur };
+        let q = IntervalQuery { cat, track: track_sel(self.s, thr, pid, cpu), text, seq_lo: p.seq_lo, seq_hi: p.seq_hi, min_dur, ivl: None };
         let m = q.run(self.s);
         Ok(agent_page(m.len(), p.from, count, |k| self.interval_value(m[k], true)))
     }
