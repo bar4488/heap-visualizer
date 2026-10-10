@@ -884,6 +884,30 @@ impl<'a> IntervalView<'a> {
     }
 }
 
+/// The interval kinds, a begin and an end refined by the edge's category (the
+/// summary's `source`): a call reads differently from a span.
+fn kinds_with_sources() -> Value {
+    let mut kinds = kinds_value(INTERVALS);
+    let sources = |kind: &str| match kind {
+        "begin" => json!({
+            "call": { "label": "call ▸", "description": "Function call begins" },
+            "span": { "label": "span ▸", "description": "Span begins" },
+        }),
+        "end" => json!({
+            "call": { "label": "ret ◂", "description": "Function call returns" },
+            "span": { "label": "span ◂", "description": "Span ends" },
+        }),
+        _ => Value::Null,
+    };
+    for k in kinds.as_array_mut().into_iter().flatten() {
+        let s = sources(k["kind"].as_str().unwrap_or(""));
+        if !s.is_null() {
+            k["sources"] = s;
+        }
+    }
+    kinds
+}
+
 impl Domain for IntervalView<'_> {
     fn id(&self) -> DomainId {
         INTERVALS
@@ -894,7 +918,7 @@ impl Domain for IntervalView<'_> {
         json!({
             "id": self.name(),
             "name": "Intervals",
-            "kinds": kinds_value(INTERVALS),
+            "kinds": kinds_with_sources(),
             "shape": "interval",
             "count": self.count(),
             "intervals": st.len(),

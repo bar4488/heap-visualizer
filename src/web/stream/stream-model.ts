@@ -14,20 +14,22 @@
 //                  {seq, op, t, e:null, thr, pid?, domain, kind, title,
 //                   level?, source?, fields}       (DOM-004)
 //
-// A domain added to the core shows up through the last shape: its letter comes
-// from its descriptor's `kinds`, its title and source from the summary.
+// A domain added to the core shows up through the last shape: its kind label
+// and description come from its descriptor's `kinds`, its title and source
+// from the summary. The wire letters (M, F, B, …) are never shown: a row reads
+// `alloc`, `free`, `call ▸`, `switch`, a log level, … (NAV-005).
 
 import { esc, fmtNum } from '../fmt.ts';
 import { levelBadge, levelIndex } from '../logs/logs-model.ts';
 import type { DomainDescriptor, EventRow } from '../protocol.ts';
 
-/** The rows the engine renders bespoke, by op: their letter and domain. */
-const BESPOKE: { letter: string; domain: string }[] = [
-  { letter: 'M', domain: 'heap' },
-  { letter: 'F', domain: 'heap' },
-  { letter: 'R', domain: 'heap' },
-  { letter: 'E', domain: 'marks' },
-  { letter: 'L', domain: 'logs' },
+/** The rows the engine renders bespoke, by op: their domain and kind. */
+const BESPOKE: { domain: string; kind: string }[] = [
+  { domain: 'heap', kind: 'malloc' },
+  { domain: 'heap', kind: 'free' },
+  { domain: 'heap', kind: 'realloc' },
+  { domain: 'marks', kind: 'event' },
+  { domain: 'logs', kind: 'log' },
 ];
 
 /** The domain a row belongs to: its summary's, else the bespoke row's. */
@@ -36,13 +38,115 @@ export function rowDomain(ev: EventRow): string {
   return BESPOKE[ev.op]?.domain ?? 'unknown';
 }
 
-/** The wire letter of a row's record type, from the domain descriptors. */
-export function opLetter(ev: EventRow, domains: DomainDescriptor[] | null | undefined): string {
-  if (typeof ev.domain !== 'string') return BESPOKE[ev.op]?.letter ?? '?';
-  const d = domains?.find((x) => x.id === ev.domain);
-  const k = d?.kinds?.find((x) => x.kind === ev.kind);
-  if (k?.op) return k.op;
-  return typeof ev.kind === 'string' && ev.kind ? ev.kind[0].toUpperCase() : '?';
+/** The kind name of a row's record (`malloc`, `begin`, …): the summary's, else the bespoke row's. */
+export function rowKind(ev: EventRow): string {
+  if (typeof ev.domain === 'string') return typeof ev.kind === 'string' && ev.kind ? ev.kind : 'record';
+  return BESPOKE[ev.op]?.kind ?? 'record';
+}
+
+// ---------------------------------------------------------------------------
+// kind labels
+
+type KindText = { label: string; description: string };
+
+/**
+ * What the UI calls each kind when a descriptor does not say (an older core):
+ * the same words the core's descriptors carry. `domain:kind`, and
+ * `domain:kind:source` where the summary's source refines it.
+ */
+const DEFAULT_KINDS: Record<string, KindText> = {
+  'heap:malloc': { label: 'alloc', description: 'Allocation' },
+  'heap:free': { label: 'free', description: 'Free' },
+  'heap:realloc': { label: 'realloc', description: 'Reallocation' },
+  'marks:event': { label: 'mark', description: 'Mark' },
+  'logs:log': { label: 'log', description: 'Log line' },
+  'intervals:begin': { label: 'begin', description: 'Interval begins' },
+  'intervals:end': { label: 'end', description: 'Interval ends' },
+  'intervals:switch': { label: 'switch', description: 'Context switch' },
+  'intervals:begin:call': { label: 'call ▸', description: 'Function call begins' },
+  'intervals:end:call': { label: 'ret ◂', description: 'Function call returns' },
+  'intervals:begin:span': { label: 'span ▸', description: 'Span begins' },
+  'intervals:end:span': { label: 'span ◂', description: 'Span ends' },
+};
+
+/** The widest label the fixed-width kind column holds. */
+const KIND_WIDTH = 8;
+
+export type KindInfo = {
+  domain: string;
+  kind: string;
+  /** Short, at most KIND_WIDTH characters: `alloc`, `call ▸`, `switch`. */
+  label: string;
+  /** The kind in words: `Allocation`, `Function call begins`. */
+  description: string;
+  /** Whether the label already says what the summary's source does. */
+  sourced: boolean;
+};
+
+/**
+ * How a row's record type reads: its descriptor kind's `label` and
+ * `description` (refined by `sources[source]` when the summary has one), else
+ * the defaults above, else the kind name itself.
+ */
+export function kindInfo(ev: EventRow, domains: DomainDescriptor[] | null | undefined): KindInfo {
+  const domain = rowDomain(ev);
+  const kind = rowKind(ev);
+  const source = typeof ev.source === 'string' ? ev.source : '';
+  const k = domains?.find((x) => x.id === domain)?.kinds?.find((x) => x.kind === kind) as any;
+  const bySource = source ? (k?.sources?.[source] ?? DEFAULT_KINDS[`${domain}:${kind}:${source}`]) : undefined;
+  const base = DEFAULT_KINDS[`${domain}:${kind}`];
+  const label = bySource?.label || k?.label || base?.label;
+  const description = bySource?.description || k?.description || base?.description;
+  return {
+    domain,
+    kind,
+    label: (label || kind).slice(0, KIND_WIDTH),
+    description: description || `${domain} ${kind} record`,
+    sourced: !!label,
+  };
+}
+
+/** A thread in words: `thread worker-2 (pid 4242)`, `thread 3`, or ''. */
+export function threadPhrase(thr: number | null | undefined, pid: number | null | undefined, names?: ThreadNames): string {
+  if (thr === null || thr === undefined) return pid === null || pid === undefined ? '' : `process ${pid}`;
+  const name = names?.get(threadKey(thr, pid)) ?? names?.get(threadKey(thr));
+  const p = pid === null || pid === undefined ? '' : ` (pid ${pid})`;
+  return `thread ${name ?? thr}${p}`;
+}
+
+/**
+ * A generic summary's title as the row's details: the kind label already says
+ * the direction, so a leading `→`/`←` goes, and a switch reads `cpu 3 → main`.
+ */
+export function detailText(title: string | null | undefined): string {
+  if (!title) return '';
+  return title.replace(/^[→←]\s*/, '').replace(/\s*⇐\s*/, ' → ');
+}
+
+/** The kind cell's tooltip: the record in words. */
+export function kindTooltip(ev: EventRow, ctx: Pick<RowContext, 'domains' | 'names' | 'fmtAllocSize'>): string {
+  const k = kindInfo(ev, ctx.domains);
+  const thr = threadPhrase(ev.thr, ev.pid, ctx.names);
+  const on = thr ? ` on ${thr}` : '';
+  if (typeof ev.domain !== 'string' && k.domain === 'heap') {
+    const size = typeof ev.size === 'number' ? ` of ${ctx.fmtAllocSize(ev.size)}` : '';
+    const at = ev.addr ? ` at ${ev.addr}` : '';
+    const site = ev.site ? ` (site ${ev.site})` : '';
+    return `${k.description}${size}${at}${site}${on}`;
+  }
+  if (typeof ev.domain !== 'string' && k.domain === 'logs') {
+    const from = ev.logger ? ` from ${ev.logger}` : '';
+    return `${k.description} at level ${levelBadge(ev.level).trim()}${from}${on}`;
+  }
+  const what = detailText(ev.title);
+  return `${k.description}${on}${what ? `: ${what}` : ''}`;
+}
+
+/** The kind cell: a fixed-width label, tinted by domain, explained on hover. */
+function kindCell(ev: EventRow, ctx: RowContext, text?: string, extra = ''): string {
+  const k = kindInfo(ev, ctx.domains);
+  const cls = `ev-kind k-${esc(k.kind)}${extra}`;
+  return `<span class="${cls}" title="${esc(kindTooltip(ev, ctx))}">${esc(text ?? k.label)}</span>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -92,41 +196,49 @@ export type RowContext = {
 /** One row's markup. Data attributes say what a click on it means. */
 export function renderRow(ev: EventRow, ctx: RowContext): string {
   const cur = ev.seq === ctx.curSeq ? ' cur' : '';
-  const letter = opLetter(ev, ctx.domains);
   const domain = rowDomain(ev);
-  const head = `<span class="ev-seq">${fmtNum(ev.seq)}</span>`
-    + `<span class="ev-op ${esc(letter.toLowerCase())}">${esc(letter)}</span>`;
+  const seq = `<span class="ev-seq">${fmtNum(ev.seq)}</span>`;
   const thr = threadLabel(ev.thr, ev.pid, ctx.names);
   const thrSpan = thr ? `<span class="ev-thr">${esc(thr)}</span>` : '';
   const attrs = `data-seq="${ev.seq}" data-domain="${esc(domain)}"`;
-  // a log line: its level and message, in place of geometry (LOG-006)
+  // a log line: its level as the kind, then its message, in place of
+  // geometry (LOG-006)
   if (typeof ev.domain !== 'string' && domain === 'logs') {
     return `<div class="ev-row ev-log lv-${levelIndex(ev.level)}${cur}" ${attrs} data-log="1" title="click: seek here and show this line in Logs">`
-      + `${head}${thrSpan}<span class="ev-lv">${levelBadge(ev.level)}</span><span class="ev-msg">${esc(ev.msg ?? '')}</span></div>`;
+      + `${seq}${kindCell(ev, ctx, levelBadge(ev.level).trim(), ' ev-lv')}${thrSpan}<span class="ev-msg">${esc(ev.msg ?? '')}</span></div>`;
   }
   // a custom event has no geometry to show: its label takes the width of the
   // address, size and site columns together (TRACE-010)
   if (typeof ev.domain !== 'string' && domain === 'marks') {
-    return `<div class="ev-row ev-custom${cur}" ${attrs} data-custom="1" title="click: seek here and open this event">`
-      + `${head}${thrSpan}<span class="ev-label">${ev.title ? esc(ev.title) : '<span class="dim">event</span>'}</span></div>`;
+    return `<div class="ev-row ev-custom${cur}" ${attrs} data-custom="1" title="click: seek here and open this mark">`
+      + `${seq}${kindCell(ev, ctx)}${thrSpan}<span class="ev-label">${ev.title ? esc(ev.title) : '<span class="dim">untitled</span>'}</span></div>`;
   }
-  // any other domain's record: its generic summary — title, then source
+  // any other domain's record: its generic summary — details, then the
+  // source when the kind label does not already say it
   if (domain !== 'heap') {
-    const title = ev.title ? esc(ev.title) : `<span class="dim">${esc(ev.kind ?? 'record')}</span>`;
-    const source = ev.source ? `<span class="ev-src">${esc(ev.source)}</span>` : '';
-    return `<div class="ev-row ev-generic d-${esc(domain)}${cur}" ${attrs} data-custom="1" title="${esc(`${domain} · ${ev.kind ?? ''} — click: seek here`)}">`
-      + `${head}${thrSpan}<span class="ev-label">${title}</span>${source}</div>`;
+    const k = kindInfo(ev, ctx.domains);
+    const what = detailText(ev.title);
+    const title = what ? esc(what) : `<span class="dim">${esc(k.kind)}</span>`;
+    const source = ev.source && !k.sourced ? `<span class="ev-src">${esc(ev.source)}</span>` : '';
+    return `<div class="ev-row ev-generic d-${esc(domain)}${cur}" ${attrs} data-custom="1" title="click: seek here">`
+      + `${seq}${kindCell(ev, ctx)}${thrSpan}<span class="ev-label">${title}</span>${source}</div>`;
   }
   return `<div class="ev-row${cur}" ${attrs} title="click: seek here and select the allocation">`
-    + `${head}<span class="ev-addr">${esc(ev.addr ?? '')}</span>`
+    + `${seq}${kindCell(ev, ctx)}<span class="ev-addr">${esc(ev.addr ?? '')}</span>`
     + `<span class="ev-size">${ctx.fmtAllocSize(ev.size)}</span>`
     + `<span class="ev-site">${ev.site ? esc(ev.site) : ''}</span></div>`;
 }
 
-/** The status-line text for a stepped-onto record of a non-heap domain. */
-export function genericStatusText(ev: EventRow): string {
-  const parts = [`${ev.domain} ${ev.kind ?? ''}`.trim()];
-  if (ev.title) parts.push(ev.title);
+/**
+ * The status-line text for a stepped-onto record of a non-heap domain, in
+ * the Events list's words: `call ▸ handle_upload · thread worker-1 (pid 7) · seq 9`.
+ */
+export function genericStatusText(ev: EventRow, domains?: DomainDescriptor[] | null, names?: ThreadNames): string {
+  const k = kindInfo(ev, domains);
+  const what = detailText(ev.title);
+  const parts = [what ? `${k.label} ${what}` : k.label];
+  const thr = threadPhrase(ev.thr, ev.pid, names);
+  if (thr) parts.push(thr);
   parts.push(`seq ${fmtNum(ev.seq)}`);
   return parts.join(' · ');
 }

@@ -1,16 +1,18 @@
 // The Events panel's pure logic (src/web/stream/stream-model.ts): rows of
-// every domain, the domain toggles, and the position ↔ seq map of a list with
-// domains left out.
+// every domain, their kind labels, the domain toggles, and the position ↔ seq
+// map of a list with domains left out.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  domainChips, genericStatusText, includedDomains, maskPlan, maskRank, maskSeqAt, opLetter,
+  domainChips, genericStatusText, includedDomains, kindInfo, kindTooltip, maskPlan, maskRank, maskSeqAt,
   renderRow, rowDomain, threadLabel, threadNames,
 } from '../stream/stream-model.ts';
 import type { DomainDescriptor } from '../protocol.ts';
 
+// descriptors as an older core sends them: letters and kind names only, so
+// every label below comes from the web's defaults
 const kinds = (pairs: string) => pairs.split(' ').map((p) => { const [op, kind] = p.split(':'); return { op, kind }; });
 const DOMAINS: DomainDescriptor[] = [
   { id: 'heap', name: 'Heap', kinds: kinds('M:malloc F:free R:realloc'), shape: 'allocation', count: 6 },
@@ -23,52 +25,108 @@ const DOMAINS: DomainDescriptor[] = [
 ];
 const ctx = { domains: DOMAINS, names: threadNames(DOMAINS), fmtAllocSize: (b: number) => `${b} B`, curSeq: 3 };
 
+const HEAP_M = { seq: 0, op: 0, t: 1, id: '1', e: 0, addr: '0x1000', size: 64, site: 'json_node' };
+const LOG = { seq: 1, op: 4, t: 2, e: null, level: 3, logger: 'net', msg: 'retry <x>', thr: 2 };
+const MARK = { seq: 2, op: 3, t: 3, e: null, title: 'phase', thr: null };
+const edge = (seq: number, kind: string, source: string, title: string, thr = 1, pid: number | null = 7) => ({
+  op: 5, e: null, seq, t: seq, thr, pid, domain: 'intervals', kind, title, source, fields: null,
+});
+
+test('every domain and kind reads as a word, never a wire letter', () => {
+  const label = (ev: any) => kindInfo(ev, DOMAINS).label;
+  assert.deepEqual(
+    [0, 1, 2].map((op) => label({ seq: 0, op })),
+    ['alloc', 'free', 'realloc'],
+  );
+  assert.equal(label(MARK), 'mark');
+  assert.equal(label(LOG), 'log');
+  assert.equal(label(edge(3, 'begin', 'call', '→ f')), 'call ▸');
+  assert.equal(label(edge(3, 'end', 'call', '← f')), 'ret ◂');
+  assert.equal(label(edge(3, 'begin', 'span', '→ r')), 'span ▸');
+  assert.equal(label(edge(3, 'end', 'span', '← r')), 'span ◂');
+  assert.equal(label(edge(3, 'switch', 'sched', 'cpu 3 ⇐ main')), 'switch');
+  // a category the defaults do not refine falls back to the kind's own label
+  assert.equal(label(edge(3, 'begin', 'gpu', '→ k')), 'begin');
+});
+
+test('labels and descriptions come from the descriptors when the core sends them', () => {
+  const labeled: DomainDescriptor[] = [
+    { id: 'heap', name: 'Heap', shape: 'allocation', count: 1, kinds: [{ op: 'M', kind: 'malloc', label: 'new', description: 'Birth' }] },
+    {
+      id: 'intervals', name: 'Intervals', shape: 'interval', count: 1,
+      kinds: [{ op: 'B', kind: 'begin', label: 'begin', sources: { call: { label: 'enter', description: 'Call entered' } } }],
+    },
+  ];
+  assert.deepEqual(kindInfo(HEAP_M, labeled), { domain: 'heap', kind: 'malloc', label: 'new', description: 'Birth', sourced: true });
+  const k = kindInfo(edge(3, 'begin', 'call', '→ f'), labeled);
+  assert.equal(k.label, 'enter');
+  assert.equal(k.description, 'Call entered');
+});
+
+test('an unknown kind falls back to its name, clipped to the column', () => {
+  const ev = { op: 9, e: null, seq: 9, t: 1, thr: null, domain: 'gpu', kind: 'kernel_launch', title: 'matmul', fields: null };
+  const k = kindInfo(ev, DOMAINS);
+  assert.equal(rowDomain(ev), 'gpu');
+  assert.equal(k.label, 'kernel_l');
+  assert.equal(k.description, 'gpu kernel_launch record');
+  assert.equal(k.sourced, false);
+  assert.equal(kindInfo({ seq: 0, op: 42 }, DOMAINS).label, 'record');
+  assert.match(renderRow(ev, ctx), /matmul/);
+  assert.equal(genericStatusText(ev, DOMAINS), 'kernel_l matmul · seq 9');
+});
+
+test('the kind tooltip says the record in words', () => {
+  assert.equal(kindTooltip(HEAP_M, ctx), 'Allocation of 64 B at 0x1000 (site json_node)');
+  assert.equal(kindTooltip({ seq: 0, op: 1, addr: '0x1000', size: 64 }, ctx), 'Free of 64 B at 0x1000');
+  assert.equal(kindTooltip(LOG, ctx), 'Log line at level WARN from net on thread 2');
+  assert.equal(kindTooltip(MARK, ctx), 'Mark: phase');
+  assert.equal(kindTooltip(edge(3, 'begin', 'call', '→ handle_upload'), ctx), 'Function call begins on thread worker-1 (pid 7): handle_upload');
+  assert.equal(kindTooltip(edge(3, 'end', 'span', '← r42', 2, null), ctx), 'Span ends on thread 2: r42');
+  assert.equal(kindTooltip(edge(3, 'switch', 'sched', 'cpu 3 ⇐ worker-1'), ctx), 'Context switch on thread worker-1 (pid 7): cpu 3 → worker-1');
+});
+
 test('rows of every shape: heap geometry, a log line, a landmark, and a generic summary', () => {
-  const heap = renderRow({ seq: 0, op: 0, t: 1, id: '1', e: 0, addr: '0x1000', size: 64, site: 'alloc_a' }, ctx);
-  assert.match(heap, /ev-op m">M</);
+  const heap = renderRow(HEAP_M, ctx);
+  assert.match(heap, /class="ev-kind k-malloc" title="Allocation of 64 B at 0x1000 \(site json_node\)">alloc</);
   assert.match(heap, /0x1000/);
   assert.match(heap, /64 B/);
-  assert.match(heap, /alloc_a/);
+  assert.match(heap, /json_node/);
+  assert.match(heap, /data-domain="heap"/);
 
-  const log = renderRow({ seq: 1, op: 4, t: 2, e: null, level: 3, logger: 'net', msg: 'retry <x>', thr: 2 }, ctx);
+  const log = renderRow(LOG, ctx);
   assert.match(log, /data-log="1"/);
-  assert.match(log, /WARN/);
+  assert.match(log, /ev-kind k-log ev-lv"[^>]*>WARN</);
   assert.match(log, /retry &lt;x&gt;/);
   assert.match(log, /data-domain="logs"/);
 
-  const mark = renderRow({ seq: 2, op: 3, t: 3, e: null, title: 'phase', thr: null }, ctx);
-  assert.match(mark, /ev-op e">E</);
+  const mark = renderRow(MARK, ctx);
+  assert.match(mark, /ev-kind k-event"[^>]*>mark</);
   assert.match(mark, /phase/);
 
-  // interval edges arrive as the generic summary; op 5+ is no longer indexed
-  // into a fixed table
-  const begin = renderRow({
-    op: 5, e: null, seq: 3, t: 4, thr: 1, pid: 7, domain: 'intervals', kind: 'begin', title: '→ handle_upload',
-    source: 'call', fields: null,
-  }, ctx);
-  assert.match(begin, /ev-op b">B</);
-  assert.match(begin, /→ handle_upload/);
+  // interval edges arrive as the generic summary; the label says the
+  // direction, so the title's arrow and the source column go
+  const begin = renderRow(edge(3, 'begin', 'call', '→ handle_upload'), ctx);
+  assert.match(begin, />call ▸</);
+  assert.match(begin, /ev-label">handle_upload</);
   assert.match(begin, /7\/1 worker-1/);
-  assert.match(begin, /ev-src">call</);
+  assert.doesNotMatch(begin, /ev-src/);
   assert.match(begin, / cur"/);
   assert.doesNotMatch(begin, /undefined/);
 
-  const sw = renderRow({
-    op: 7, e: null, seq: 4, t: 5, thr: 2, domain: 'intervals', kind: 'switch', title: 'cpu 3 ⇐ worker', source: 'sched', fields: null,
-  }, ctx);
-  assert.match(sw, /ev-op c">C</);
-  assert.match(sw, /cpu 3 ⇐ worker/);
+  const sw = renderRow({ ...edge(4, 'switch', 'sched', 'cpu 3 ⇐ worker'), thr: 2, pid: undefined }, ctx);
+  assert.match(sw, />switch</);
+  assert.match(sw, /cpu 3 → worker/);
   // the core's placeholder label is not a thread name
   assert.match(sw, /ev-thr">2</);
+  for (const html of [heap, log, mark, begin, sw]) assert.doesNotMatch(html, /ev-op/);
 });
 
-test('a domain the descriptors do not list still renders, lettered by its kind', () => {
-  const ev = { op: 9, e: null, seq: 9, t: 1, thr: null, domain: 'gpu', kind: 'kernel', title: 'matmul', fields: null };
-  assert.equal(rowDomain(ev), 'gpu');
-  assert.equal(opLetter(ev, DOMAINS), 'K');
-  assert.match(renderRow(ev, ctx), /matmul/);
-  assert.equal(opLetter({ seq: 0, op: 42 }, DOMAINS), '?');
-  assert.equal(genericStatusText(ev), 'gpu kernel · matmul · seq 9');
+test('the status line uses the same words as the list', () => {
+  assert.equal(
+    genericStatusText(edge(9, 'begin', 'call', '→ handle_upload'), DOMAINS, ctx.names),
+    'call ▸ handle_upload · thread worker-1 (pid 7) · seq 9',
+  );
+  assert.equal(genericStatusText(edge(9, 'switch', 'sched', 'cpu 3 ⇐ main', 1, null), DOMAINS), 'switch cpu 3 → main · thread 1 · seq 9');
 });
 
 test('thread labels: id, process, and name when there is one', () => {

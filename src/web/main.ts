@@ -25,7 +25,7 @@ import {
 } from './panels.ts';
 import { registerIntervalPanels } from './intervals/index.ts';
 import { groupWarnings, warningDetail } from './warnings-model.ts';
-import { genericStatusText } from './stream/stream-model.ts';
+import { genericStatusText, kindInfo, threadNames } from './stream/stream-model.ts';
 import {
   initAnalysis, markDirty, tagIdFor, syncTagDatalist, buildMarksPanel,
   buildTagsSection, sendAddrMarks, gotoAddr, addAddrMark,
@@ -145,9 +145,8 @@ type UIState = {
 const CAT = ['#58a6ff', '#3fb950', '#f2cc60', '#ff7b72', '#bc8cff', '#39c5cf',
   '#f778ba', '#d29922', '#7ee787', '#ffa657', '#79c0ff', '#d2a8ff'];
 const RAMP = ['#0e4429', '#006d32', '#26a641', '#39d353'];
-// index = the engine's op code; 3 is a custom (E) event, which is a landmark
-// rather than an allocation operation
-const OPS = ['malloc', 'free', 'realloc', 'event'];
+// the engine's op code of a custom (E) event, which is a landmark rather than
+// an allocation operation; records read by kind label (stream-model kindInfo)
 const OP_EVENT = 3;
 
 const worker = new Worker('worker.js', { type: 'module' }) as TypedWorker;
@@ -513,20 +512,23 @@ worker.onmessage = (ev) => {
       if (m.event) {
         const e = m.event;
         // a record of a domain without a bespoke row (DOM-004): its summary
-        if (typeof e.domain === 'string') { $('st-info').textContent = genericStatusText(e); break; }
+        if (typeof e.domain === 'string') {
+          $('st-info').textContent = genericStatusText(e, UI.meta?.domains, threadNames(UI.meta?.domains));
+          break;
+        }
         // a log line touches no allocation either; the Logs panel follows it
         if (e.op === OP_LOG) { $('st-info').textContent = logStatusText(e); break; }
         if (e.op === OP_EVENT) {
           // a custom event touches no allocation: the selection stays where it
           // was, and its own window opens instead of the Allocation panel
-          $('st-info').textContent = `event${e.title ? ` · ${e.title}` : ''} · seq ${fmtNum(e.seq)}`;
+          $('st-info').textContent = `${kindInfo(e, UI.meta?.domains).label}${e.title ? ` · ${e.title}` : ''} · seq ${fmtNum(e.seq)}`;
           fillEventPanel(e);
           break;
         }
         // the worker already selected the allocation this event touches
         if (e.e !== undefined && e.e !== null) UI.selected = e.e;
         $('st-info').textContent =
-          `${OPS[e.op]} id=${e.id} ${e.addr} ${fmtAllocSize(e.size)}${e.site ? ' · ' + e.site : ''}`;
+          `${kindInfo(e, UI.meta?.domains).label} id=${e.id} ${e.addr} ${fmtAllocSize(e.size)}${e.site ? ' · ' + e.site : ''}`;
         // open the allocation dialog for the malloc/free we stepped onto
         if (m.info) fillDetailPanel(m.info);
       }

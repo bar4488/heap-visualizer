@@ -86,12 +86,17 @@ rather than threaded through the engine:
   six-level instance; marks have one category, and their label is the
   title.
 
-A **descriptor** is `{id, name, kinds:[{op, kind}], shape, count, lanes,
-fields, query:{params}, limits}`, plus `categories` and `keys` (the JSON
+A **descriptor** is `{id, name, kinds:[{op, kind, label, description}],
+shape, count, lanes, fields, query:{params}, limits}`, plus `categories` and `keys` (the JSON
 keys its rows use: `{category, label, text}`) for a point domain. `shape`
 is `allocation` (heap), `point`, or `interval`
 ([IVL-007](14-intervals.md#ivl-007-the-domain-on-the-registry)), whose
-descriptor adds its own keys. `fields` is the domain's field catalog
+descriptor adds its own keys. Each kind names itself for the UI: `label` is
+a word of at most eight characters (`alloc`, `free`, `realloc`, `mark`,
+`log`, `switch`) and `description` says it in words (`Allocation`,
+`Context switch`); a kind whose reading depends on the summary's `source`
+adds `sources: {<source>: {label, description}}`. The wire letter stays in
+`op` and is not shown in the UI. `fields` is the domain's field catalog
 in `hp_fields_json`'s shape: the log domain catalogues its own custom keys
 (they never enter the allocation filter's catalog); the marks domain lists
 its keys from the trace-wide catalog it shares with the heap. `lanes` is
@@ -147,8 +152,8 @@ attaches the descriptors to the loaded trace's metadata (`meta.domains`), so
 a domain added to the core reaches the web layer without new messages. Each
 query replies even with no trace loaded or an export missing (`available:
 false` and an empty document). The Events list renders any record without a
-bespoke row from its generic summary — letter from its descriptor's `kinds`,
-then its thread (with `pid` and thread name when the trace has them), title
+bespoke row from its generic summary — the kind's `label` from its
+descriptor's `kinds` (NAV-005), then its thread (with `pid` and thread name when the trace has them), title
 and source — and carries one toggle per domain with records. Leaving domains
 out keeps the list virtualized: a position maps to a seq by binary search over
 the included domains' record counts at a seq, each a locate (a domain whose

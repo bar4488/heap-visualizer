@@ -40,13 +40,17 @@ pub const NDOMAIN: usize = 4;
 /// every generic request and document.
 pub const DOMAIN_NAMES: [&str; NDOMAIN] = ["heap", "marks", "logs", "intervals"];
 
-/// One record type: its wire letter, its domain, and its kind name.
+/// One record type: its wire letter, its domain, its kind name, and how the
+/// UI names it — a short label (at most 8 characters) and a phrase saying it
+/// in words. The letter is the wire format's; the label is what people read.
 #[derive(Clone, Copy, Debug)]
 pub struct OpInfo {
     pub op: u8,
     pub letter: u8,
     pub domain: DomainId,
     pub kind: &'static str,
+    pub label: &'static str,
+    pub description: &'static str,
 }
 
 /// Every record type the core reads, indexed by op ([D013]). Adding a record
@@ -54,15 +58,15 @@ pub struct OpInfo {
 ///
 /// [D013]: ../../../../docs/decisions/D013-hybrid-record-types.md
 pub const OPS: [OpInfo; 8] = [
-    OpInfo { op: OP_M, letter: b'M', domain: HEAP, kind: "malloc" },
-    OpInfo { op: OP_F, letter: b'F', domain: HEAP, kind: "free" },
-    OpInfo { op: OP_R, letter: b'R', domain: HEAP, kind: "realloc" },
-    OpInfo { op: OP_E, letter: b'E', domain: MARKS, kind: "event" },
-    OpInfo { op: OP_L, letter: b'L', domain: LOGS, kind: "log" },
+    OpInfo { op: OP_M, letter: b'M', domain: HEAP, kind: "malloc", label: "alloc", description: "Allocation" },
+    OpInfo { op: OP_F, letter: b'F', domain: HEAP, kind: "free", label: "free", description: "Free" },
+    OpInfo { op: OP_R, letter: b'R', domain: HEAP, kind: "realloc", label: "realloc", description: "Reallocation" },
+    OpInfo { op: OP_E, letter: b'E', domain: MARKS, kind: "event", label: "mark", description: "Mark" },
+    OpInfo { op: OP_L, letter: b'L', domain: LOGS, kind: "log", label: "log", description: "Log line" },
     // v2 only: a v1 trace skips these letters as unknown (IVL-001)
-    OpInfo { op: OP_B, letter: b'B', domain: INTERVALS, kind: "begin" },
-    OpInfo { op: OP_X, letter: b'X', domain: INTERVALS, kind: "end" },
-    OpInfo { op: OP_C, letter: b'C', domain: INTERVALS, kind: "switch" },
+    OpInfo { op: OP_B, letter: b'B', domain: INTERVALS, kind: "begin", label: "begin", description: "Interval begins" },
+    OpInfo { op: OP_X, letter: b'X', domain: INTERVALS, kind: "end", label: "end", description: "Interval ends" },
+    OpInfo { op: OP_C, letter: b'C', domain: INTERVALS, kind: "switch", label: "switch", description: "Context switch" },
 ];
 
 const OP_DOMAIN: [DomainId; OPS.len()] = {
@@ -464,12 +468,19 @@ pub fn lanes_value(domain: &str, lanes: &[Lane]) -> Value {
     )
 }
 
-/// The kinds of a domain, from the op table.
+/// The kinds of a domain, from the op table: `{op, kind, label, description}`.
 pub fn kinds_value(id: DomainId) -> Value {
     Value::Array(
         OPS.iter()
             .filter(|o| o.domain == id)
-            .map(|o| json!({ "op": (o.letter as char).to_string(), "kind": o.kind }))
+            .map(|o| {
+                json!({
+                    "op": (o.letter as char).to_string(),
+                    "kind": o.kind,
+                    "label": o.label,
+                    "description": o.description,
+                })
+            })
             .collect(),
     )
 }

@@ -59,8 +59,24 @@ executes the item's own action (seek, go-to-address, select+jump, …).
 
 ## NAV-005: The Events panel
 
-A virtualized list of every event (seq, op, addr, size, site) — the textual
-twin of the sequential strip.
+A virtualized list of every event (seq, kind, then the record's details —
+addr, size and site for the heap) — the textual twin of the sequential strip.
+
+The **kind** column names each record in a word, never a wire letter: heap
+`alloc` / `free` / `realloc` (green / red / amber), `mark`, a log's level as a
+badge (`INFO`, `WARN`, … as in the Logs panel), and intervals `call ▸` /
+`ret ◂` for a function call's begin and end, `span ▸` / `span ◂` for a span,
+and `switch` for a context switch, whose details read `cpu 3 → worker-1`.
+Labels come from the domain descriptors' `kinds`
+([DOM-004](13-domains-and-logs.md)); the web falls back to the same words for
+a core without them, and to the kind name itself for a kind it does not know.
+The column is fixed-width (about eight characters) so rows scan as a table;
+each kind sits in a chip tinted by its domain, and a thin bar on the row's
+left repeats the domain's color, as the domain's toggle chip at the top of the
+panel does. Hovering the kind says the record in words — "Allocation of 64 B
+at 0x… (site json_node)", "Function call begins on thread worker-2 (pid
+4242): parse_body". The status line on stepping onto a record, and the Event
+window's title (`Mark · <label>`), use the same words.
 
 A custom event ([TRACE-010](02-trace-format.md#trace-010-custom-event-record-e))
 has no geometry to list, so its row shows its label in place of the address,
@@ -83,7 +99,7 @@ replaces no allocation.
 - **Follow** (default on) keeps the current event scrolled into view during
   stepping/playback.
 - **Filtered** (default off) lists only events whose allocation passes the
-  active Filter — an `F` follows the allocation it frees, so an allocation's
+  active Filter — a `free` follows the allocation it frees, so an allocation's
   birth and death both stay in the list; a custom event has no allocation and
   drops out. Rows keep their real seq; the
   engine owns the filtered index (count, slice, seq→row position), rebuilt

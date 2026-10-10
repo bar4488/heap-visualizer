@@ -6,9 +6,9 @@ import { eventWindowBody, eventWindowTitle } from '../heap/event-window.ts';
 const fmtTime = (t) => `${t} ns`;
 
 test('the title names the event, or says what kind of window this is', () => {
-  assert.equal(eventWindowTitle({ seq: 4, title: 'frame 12' }), 'Event · frame 12');
-  assert.equal(eventWindowTitle({ seq: 4, title: null }), 'Event');
-  assert.equal(eventWindowTitle(null), 'Event');
+  assert.equal(eventWindowTitle({ seq: 4, title: 'frame 12' }), 'Mark · frame 12');
+  assert.equal(eventWindowTitle({ seq: 4, title: null }), 'Mark');
+  assert.equal(eventWindowTitle(null), 'Mark');
 });
 
 test('the body places the event in the stream', () => {
@@ -45,6 +45,6 @@ test('custom fields are shown but carry no filter action', () => {
 test('a label is escaped in both the title and the body', () => {
   const event = { seq: 1, op: 3, t: 1, title: '<b>boom</b>', thr: null };
   // the title is written with textContent, so it is never markup
-  assert.equal(eventWindowTitle(event), 'Event · <b>boom</b>');
+  assert.equal(eventWindowTitle(event), 'Mark · <b>boom</b>');
   assert.ok(!eventWindowBody(event, fmtTime).includes('<b>boom</b>'));
 });

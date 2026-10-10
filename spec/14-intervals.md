@@ -172,6 +172,11 @@ document), and `limits` adding `depth`, `openSpans` and `cpus`.
 - **Rows** (count, row ↔ seq, generic summary, Events-list row) are edges.
   An edge's summary `title` shows the edge: `→ name`, `← name`,
   `cpu 3 ⇐ worker-1`, `cpu 3 idle`; its `source` is its category.
+- **Kind labels**: `begin` and `end` carry `sources` per category — a call
+  reads `call ▸` / `ret ◂` (`Function call begins` / `returns`), a span
+  `span ▸` / `span ◂`; `switch` reads `switch`. The Events list shows the
+  label, then the title without its arrow, a switch as `cpu 3 → worker-1`
+  (NAV-005).
 - **Query and locate** are over intervals, not edges. Parameters:
   `category` (`sched`/`call`/`span`), `thr` (with optional `pid`; `pid`
   alone selects a process track) or `cpu`, `text` (ASCII case-insensitive
