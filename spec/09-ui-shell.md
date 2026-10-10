@@ -18,8 +18,10 @@ more panel type, not a new layout.
     window), the viewport lock — and the jump box;
   - *right*: the horizontal-zoom pill and the crop pill while they apply, the
     warnings badge only when the trace has warnings, and the connection pill:
-    the local companion's state as a dot and a short label, which opens
-    Connect (connected, it asks before disconnecting).
+    the local companion's state as a dot and a short label. Not connected, a
+    click opens a small popover offering Connect… (the same flow as File →
+    Connect…) and What's heapviz? (the heapviz & AI agents guide); Escape or
+    a click outside closes it. Connected, it asks before disconnecting.
 
   The bar carries no per-panel buttons: windows are shown and hidden from the
   View menu and the command palette.
@@ -316,21 +318,31 @@ declaration ([SHELL-003](#shell-003-panels-are-declared-as-data)), must not
 dock, float, or tab ([SHELL-002](#shell-002-panels-views-and-windows),
 [SHELL-004](#shell-004-docking)), and must not carry per-trace session
 geometry. It is its own surface at the left edge of the workspace, outside the
-dock, toggled from Help → Guide and closable.
+dock, and closable.
 
-Its content must be a concise task list in plain markdown authored under `src/`,
+The surface hosts **multiple guides**, peers switched by tabs at its top. Each
+guide has its own content (its own section files, in its own list) and its own
+scroll position, kept across switches. There are two:
+
+- **Tasks** — the how-to. Help → Guide opens the surface on it (or closes it
+  when it is already showing Tasks).
+- **heapviz & AI agents** — explains, in the user's terms, what the `heapviz`
+  companion is, why to use it, where to install it (pointing at Setup rather
+  than repeating its host-derived commands), how to open and connect a trace,
+  how to enable an AI assistant, its commands, and its loopback-only,
+  capability-guarded access. It is not a section of Tasks, and Tasks does not
+  link to it. It is opened by Help → heapviz & AI agents… (and the palette),
+  the connection pill's "What's heapviz?" while disconnected, Setup's "What is
+  heapviz?" link, and the welcome card's "Work with AI agents" line
+  ([SHELL-010](#shell-010-first-run-onboarding)).
+
+A link from one guide to a section of the other switches to that guide.
+
+Tasks' content must be a concise task list in plain markdown authored under `src/`,
 such that each section read as raw text is complete. It prioritizes actions and
 expected results over tutorial prose. The only non-prose element is a link
 naming a real element id: one form highlights that element in the running app,
 the others act on it.
-
-The guide must include a **heapviz & AI agents** section that explains, in
-the user's terms, what the `heapviz` companion is, why to use it, where to
-install it (pointing at Setup rather than repeating its host-derived
-commands), how to open and connect a trace, how to enable an AI assistant, its
-commands, and its loopback-only, capability-guarded access. Help → heapviz & AI
-agents…, the connection pill's tooltip, and Setup's "What is heapviz?" link
-lead to it.
 
 Content may ship **scenario traces** — small `.heapl` files, each demonstrating
 a specific case the bundled demo does not. A scenario is offered as an ordinary
@@ -353,7 +365,9 @@ whose target id does not exist must report that and change nothing.
 ## SHELL-010: First-run onboarding
 
 An ordinary first visit presents two user goals: try the bundled demo or open a
-trace from the current computer. It describes the browser as the workspace and
+trace from the current computer, plus a visible "Work with AI agents → heapviz &
+AI agents" line that opens that guide
+([SHELL-009](#shell-009-the-guide-surface)). It describes the browser as the workspace and
 `heapviz` as the local companion; implementation terms such as standalone mode,
 bearer capability, and local server are not prerequisites. Setup is always
 reopenable from File → Setup… and contains Windows and Linux install, launch,
@@ -390,7 +404,8 @@ on, and which key runs it.
   ([SHELL-002](#shell-002-panels-views-and-windows)). A group whose domain the
   loaded trace lacks is not shown. Then, after a separator: Time strip,
   Event-index strip, Reset layout, Command palette… (⌘/Ctrl+K).
-- **Help**: Guide, heapviz & AI agents… (opens the guide at that section),
+- **Help**: Guide, heapviz & AI agents… (opens the guide surface on that
+  guide, [SHELL-009](#shell-009-the-guide-surface)),
   Keyboard shortcuts (`?`), Request a feature….
 
 **Menus** follow the menubar pattern: `menubar`, `menu`, `menuitem` /

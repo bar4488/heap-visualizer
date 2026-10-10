@@ -36,23 +36,38 @@ import { heapPanels } from './heap/panels.ts';
 // instead of un-hiding the element behind its back.
 const PANEL_TOGGLE = new Map(heapPanels().map((p) => [p.id, p.toggle]));
 
-// Section files, in reading order. Each is fetched from dist/guide/.
-const SECTIONS = [
-  { file: 'getting-started.md', title: 'Try the demo' },
-  { file: 'the-map.md', title: 'Adjust the map' },
-  { file: 'time.md', title: 'Move through the trace' },
-  { file: 'selecting.md', title: 'Inspect an allocation' },
-  { file: 'filters.md', title: 'Find allocations' },
-  { file: 'tags-and-marks.md', title: 'Save a finding' },
-  { file: 'your-trace.md', title: 'Open a local trace' },
-  { file: 'heapviz-and-agents.md', title: 'heapviz & AI agents' },
-  { file: 'troubleshooting.md', title: 'Fix a connection' },
-  { file: 'the-format.md', title: 'Produce a trace' },
-];
+// The guides the surface hosts, each a peer with its own tab, its own scrolling
+// pane, and its own section files (fetched from dist/guide/) in reading order.
+// "Tasks" is the how-to; "heapviz & AI agents" explains the local companion and
+// lives in its own directory so it is never one of the Tasks sections.
+export type GuideId = 'tasks' | 'agents';
+export const GUIDES: Record<GuideId, { title: string; pane: string; sections: { file: string; title: string }[] }> = {
+  tasks: {
+    title: 'Tasks',
+    pane: 'guide-body',
+    sections: [
+      { file: 'getting-started.md', title: 'Try the demo' },
+      { file: 'the-map.md', title: 'Adjust the map' },
+      { file: 'time.md', title: 'Move through the trace' },
+      { file: 'selecting.md', title: 'Inspect an allocation' },
+      { file: 'filters.md', title: 'Find allocations' },
+      { file: 'tags-and-marks.md', title: 'Save a finding' },
+      { file: 'your-trace.md', title: 'Open a local trace' },
+      { file: 'troubleshooting.md', title: 'Fix a connection' },
+      { file: 'the-format.md', title: 'Produce a trace' },
+    ],
+  },
+  agents: {
+    title: 'heapviz & AI agents',
+    pane: 'guide-agents',
+    sections: [{ file: 'agents/heapviz-and-agents.md', title: 'heapviz & AI agents' }],
+  },
+};
 
 const HIGHLIGHT_MS = 2200;
 
-let loading: Promise<void> | null = null;
+const loading: Partial<Record<GuideId, Promise<void>>> = {};
+let current: GuideId = 'tasks';
 let highlightTimer = 0;
 
 /**
@@ -213,7 +228,7 @@ function act(spec: string) {
   // An app handler may focus a control it just revealed, and focusing scrolls
   // ancestors. Nothing an action does is allowed to move the reader's place in
   // the prose, so the guide's own scroll is pinned across the whole call.
-  const body = $('guide-body');
+  const body = $(GUIDES[current].pane);
   const keep = body.scrollTop;
   try {
     run(spec);
@@ -252,13 +267,13 @@ function run(spec: string) {
   highlight(id);
 }
 
-async function load() {
-  // Called once (toggleGuide keeps the promise): opening and closing quickly
-  // must not start a second round of fetches. A section that fails renders its
-  // own failure, so there is nothing to retry by re-entering here.
-  const body = $('guide-body');
+async function load(id: GuideId) {
+  // Called once per guide (showGuide keeps the promise): opening and closing
+  // quickly must not start a second round of fetches. A section that fails
+  // renders its own failure, so there is nothing to retry by re-entering here.
+  const guide = GUIDES[id];
   const parts: string[] = [];
-  for (const section of SECTIONS) {
+  for (const section of guide.sections) {
     try {
       const resp = await fetch(`guide/${section.file}`, { cache: 'no-cache' });
       if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
@@ -268,35 +283,54 @@ async function load() {
         esc(section.title)} failed to load: ${esc((e as Error).message)}</p></section>`);
     }
   }
-  body.innerHTML = parts.join('\n');
+  $(guide.pane).innerHTML = parts.join('\n');
 }
 
-/** Help → Guide's check mark. */
-export const guideOpen = () => !$('guide').hidden;
-
-export function toggleGuide(open = $('guide').hidden) {
-  $('guide').hidden = !open;
-  if (open && !loading) loading = load();
-}
-
-/** A section's element id: `guide-` plus its file name without `.md`. */
-const sectionId = (file: string) => `guide-${file.replace(/\.md$/, '')}`;
+/** Help → Guide's check mark: the surface is open on Tasks. */
+export const guideOpen = () => !$('guide').hidden && current === 'tasks';
 
 /**
- * Scroll the guide body to a section, moving nothing else: the reader's place
- * in the app stays put (see `scrollParent`).
+ * Open the guide surface on one guide, switching tabs if it is open on the
+ * other. Each guide keeps its own pane, so its scroll position survives a
+ * switch.
  */
-function scrollToSection(id: string) {
-  const section = document.getElementById(id);
-  if (!section) return;
-  const body = $('guide-body');
-  body.scrollTop += section.getBoundingClientRect().top - body.getBoundingClientRect().top;
+export function showGuide(id: GuideId): Promise<void> {
+  current = id;
+  $('guide').hidden = false;
+  for (const gid of Object.keys(GUIDES) as GuideId[]) {
+    $(GUIDES[gid].pane).hidden = gid !== id;
+    const tab = $(`guide-tab-${gid}`);
+    tab.classList.toggle('active', gid === id);
+    tab.setAttribute('aria-selected', String(gid === id));
+  }
+  loading[id] ||= load(id);
+  return loading[id];
 }
 
-/** Open the guide at one section, e.g. Help → heapviz & AI agents. */
-export function showGuidePage(file: string) {
-  toggleGuide(true);
-  void loading.then(() => scrollToSection(sectionId(file)));
+/** Help → Guide: open on Tasks, or close when already showing Tasks. */
+export function toggleGuide(open = !guideOpen()) {
+  if (open) void showGuide('tasks');
+  else $('guide').hidden = true;
+}
+
+/** A section's element id: `guide-` plus its file name without directory or `.md`. */
+export const sectionId = (file: string) => `guide-${file.replace(/^.*\//, '').replace(/\.md$/, '')}`;
+
+/**
+ * Scroll a guide's pane to one of its sections, switching to that guide first
+ * if needed, moving nothing else: the reader's place in the app stays put (see
+ * `scrollParent`).
+ */
+function scrollToSection(id: string) {
+  const owner = (Object.keys(GUIDES) as GuideId[])
+    .find((g) => GUIDES[g].sections.some((s) => sectionId(s.file) === id));
+  if (!owner) return;
+  void showGuide(owner).then(() => {
+    const section = document.getElementById(id);
+    if (!section) return;
+    const body = $(GUIDES[owner].pane);
+    body.scrollTop += section.getBoundingClientRect().top - body.getBoundingClientRect().top;
+  });
 }
 
 export function initGuide() {
@@ -305,11 +339,12 @@ export function initGuide() {
   // guide's persistence: nothing is stored anywhere.
   if (new URLSearchParams(location.search).get('guide')) toggleGuide(true);
   $('guide-close').onclick = () => toggleGuide(false);
-  $('guide-body').addEventListener('click', (ev: any) => {
+  for (const id of Object.keys(GUIDES) as GuideId[]) $(`guide-tab-${id}`).onclick = () => { void showGuide(id); };
+  for (const guide of Object.values(GUIDES)) $(guide.pane).addEventListener('click', (ev: any) => {
     const btn = ev.target.closest('.g-act');
     if (btn) act(btn.dataset.act);
-    // A link to another section (`[Fix a connection](#guide-troubleshooting)`)
-    // scrolls the guide only; the URL fragment belongs to the connection
+    // A link to another section (`[Fix a connection](#guide-troubleshooting)`),
+    // in this guide or the other, scrolls the guide only; the URL fragment belongs to the connection
     // launch (local-server.ts) and is left alone.
     const link = ev.target.closest('a[href^="#guide-"]');
     if (link) { ev.preventDefault(); scrollToSection(link.getAttribute('href').slice(1)); }

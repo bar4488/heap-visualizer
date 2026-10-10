@@ -22,7 +22,7 @@ installDom();
 // guide.ts reads `document` and `devicePixelRatio` through shell/dom.ts at
 // import time, and builds its panel-toggle map at module scope, so it is
 // imported dynamically after the globals exist.
-const { render, inline } = await import('../guide.ts');
+const { render, inline, GUIDES, sectionId } = await import('../guide.ts');
 
 const GUIDE_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'guide');
 
@@ -154,7 +154,11 @@ test('a quote in a link cannot close the attribute it lands in', () => {
 
 // --- the shipped pages -----------------------------------------------------
 
-const pages = readdirSync(GUIDE_DIR).filter((f) => f.endsWith('.md'));
+// Every guide's pages: Tasks at the top level, heapviz & AI agents under agents/.
+const pages = [
+  ...readdirSync(GUIDE_DIR).filter((f) => f.endsWith('.md')),
+  ...readdirSync(join(GUIDE_DIR, 'agents')).filter((f) => f.endsWith('.md')).map((f) => `agents/${f}`),
+];
 
 test('every shipped guide page renders', () => {
   assert.ok(pages.length > 0, 'no guide pages found');
@@ -200,23 +204,52 @@ test('every scenario trace a page links to exists on disk', () => {
   assert.deepEqual(missing, []);
 });
 
-test('every section link and showGuidePage target names a section the guide loads', () => {
-  // `#guide-<file>` links and Help → heapviz & AI agents (main.ts, onboarding)
-  // scroll to a section by file name; one that is not in SECTIONS goes nowhere.
-  const sections = new Set([...readFileSync(join(GUIDE_DIR, '..', 'guide.ts'), 'utf8')
-    .matchAll(/\{ file: '([^']+)\.md'/g)].map((m) => m[1]));
-  for (const page of pages) assert.ok(sections.has(page.replace(/\.md$/, '')), `${page} is not in SECTIONS`);
+test('every shipped page belongs to exactly one guide, and every section link resolves', () => {
+  // A page outside GUIDES is never fetched; one in two guides would be two
+  // copies of the content. `#guide-<file>` links scroll to a section in either
+  // guide, so one naming no section goes nowhere.
+  const owners = new Map<string, string[]>();
+  for (const [id, guide] of Object.entries(GUIDES)) {
+    for (const s of guide.sections) owners.set(s.file, [...(owners.get(s.file) ?? []), id]);
+  }
+  for (const page of pages) assert.equal(owners.get(page)?.length, 1, `${page} is in ${owners.get(page) ?? 'no guide'}`);
+  for (const file of owners.keys()) assert.ok(pages.includes(file), `${file} is listed but not shipped`);
+
+  const ids = new Set([...owners.keys()].map(sectionId));
   const missing: string[] = [];
   for (const page of pages) {
-    for (const m of readFileSync(join(GUIDE_DIR, page), 'utf8').matchAll(/\]\(#guide-([^)]+)\)/g)) {
-      if (!sections.has(m[1])) missing.push(`${page}: ${m[1]}`);
-    }
-  }
-  for (const src of ['main.ts', 'onboarding.ts']) {
-    for (const m of readFileSync(join(GUIDE_DIR, '..', src), 'utf8').matchAll(/showGuidePage\('([^']+)\.md'\)/g)) {
-      if (!sections.has(m[1])) missing.push(`${src}: ${m[1]}`);
+    for (const m of readFileSync(join(GUIDE_DIR, page), 'utf8').matchAll(/\]\(#(guide-[^)]+)\)/g)) {
+      if (!ids.has(m[1])) missing.push(`${page}: ${m[1]}`);
     }
   }
   assert.deepEqual(missing, []);
+});
+
+test('heapviz & AI agents is its own guide, not a Tasks section, and Tasks does not point at it', () => {
+  // The user asked for a separate guide (SHELL-009): its own tab and pane,
+  // reachable from Help, the connection pill, Setup and the welcome card — not
+  // something found by reading or searching the Tasks guide.
+  assert.deepEqual(GUIDES.agents.sections.map((s) => s.file), ['agents/heapviz-and-agents.md']);
+  assert.notEqual(GUIDES.agents.pane, GUIDES.tasks.pane);
+  const src = readFileSync(join(GUIDE_DIR, 'agents', 'heapviz-and-agents.md'), 'utf8');
+  const html = render(src);
+  assert.match(html, /<h2>heapviz &amp; AI agents<\/h2>/);
+  assert.match(html, /data-act="do:btn-setup"/);
+  assert.match(html, /data-act="do:btn-connect"/);
+
+  for (const s of GUIDES.tasks.sections) {
+    const page = readFileSync(join(GUIDE_DIR, s.file), 'utf8');
+    assert.ok(!/#guide-heapviz-and-agents|btn-help-agents/.test(page), `${s.file} points at the agents guide`);
+  }
+
+  const markup = readFileSync(join(GUIDE_DIR, '..', 'index.html'), 'utf8');
+  for (const id of ['guide-tab-tasks', 'guide-tab-agents', GUIDES.tasks.pane, GUIDES.agents.pane, 'conn-pop-what', 'welcome-agents', 'setup-what']) {
+    assert.ok(markup.includes(`id="${id}"`), `index.html lacks #${id}`);
+  }
   assert.match(readFileSync(join(GUIDE_DIR, '..', 'main.ts'), 'utf8'), /id: 'help\.agents'.*group: 'help'/);
+});
+
+test('a section id drops the guide directory', () => {
+  assert.equal(sectionId('troubleshooting.md'), 'guide-troubleshooting');
+  assert.equal(sectionId('agents/heapviz-and-agents.md'), 'guide-heapviz-and-agents');
 });

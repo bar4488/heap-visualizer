@@ -55,11 +55,15 @@
      surface at the left edge of the workspace, outside the dock. -->
 <aside id="guide" hidden>
   <div id="guide-bar">
-    <span id="guide-title">Tasks</span>
+    <div id="guide-tabs" role="tablist" aria-label="Guides">
+      <button id="guide-tab-tasks" role="tab" class="active" aria-selected="true" aria-controls="guide-body">Tasks</button>
+      <button id="guide-tab-agents" role="tab" aria-selected="false" aria-controls="guide-agents">heapviz &amp; AI agents</button>
+    </div>
     <span class="grow"></span>
     <button id="guide-close" title="Close the guide">×</button>
   </div>
-  <div id="guide-body"></div>
+  <div id="guide-body" class="guide-pane" role="tabpanel"></div>
+  <div id="guide-agents" class="guide-pane" role="tabpanel" hidden></div>
   <div id="guide-resize" title="Drag to resize the guide"></div>
 </aside>
 <!-- The dock (shell/layout.ts, Dockview): the views and every window live in
@@ -108,6 +112,12 @@
 
 <div id="tooltip" hidden></div>
 
+<!-- The connection pill's choice while disconnected (main.ts). -->
+<div id="conn-pop" role="menu" aria-label="Local companion" hidden>
+  <button id="conn-pop-connect" role="menuitem">Connect…</button>
+  <button id="conn-pop-what" role="menuitem">What's heapviz?</button>
+</div>
+
 <div id="welcome" hidden>
   <div id="welcome-card">
     <button id="welcome-close" class="welcome-close" title="Close">×</button>
@@ -119,6 +129,7 @@
         <button id="welcome-demo" class="welcome-primary">Try the interactive demo</button>
         <button id="welcome-setup">Open a trace from my computer</button>
       </div>
+      <p class="welcome-agents">Work with AI agents → <a href="#" id="welcome-agents">heapviz &amp; AI agents</a></p>
     </div>
     <div id="welcome-install" hidden>
       <h1>Set up the local companion</h1>
