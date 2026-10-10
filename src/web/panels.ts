@@ -5,9 +5,10 @@
 //
 // A domain module exports one function that receives a PanelContext and calls
 // `ctx.addPanel(record)` once per panel it declares, at startup (before the
-// dock lays out). main.ts lists the modules with the domain each one `needs`;
-// every panel a module adds needs that domain: its toolbar toggle shows, and
-// it starts open, only when the loaded trace has records of the domain.
+// dock lays out). main.ts lists the modules with the domain each one `needs`
+// and the label its View-menu group carries; every panel a module adds needs
+// that domain: its View entry shows, and it starts open, only when the loaded
+// trace has records of the domain.
 //
 // The PanelContext contract (what a module may rely on):
 //
@@ -44,6 +45,10 @@
 //                   shell at once. A module may instead call
 //                   `layout.register` itself and decide its own default
 //                   placement (read `ui.meta.intervals` / `meta.domains`)
+//   addToggle(type, {title, hint?, visible?})  give a panel the module
+//                   registered itself a View-menu entry (and a palette
+//                   command) in the module's group; `visible` defaults to
+//                   present()
 //
 // Modules run once at startup, after the heap's panels are registered and
 // before the first default layout is applied.
@@ -58,7 +63,22 @@ import type { DomainDescriptor, QueryPayload, QueryType, Range, ReplyTo } from '
 export type PanelRecord = {
   id: string;
   title: string;
+  /**
+   * The control that toggles it: a View-menu item's element id (when `group`
+   * is set), a top-bar button's otherwise, or null when it has none.
+   */
   toggle: string | null;
+  /**
+   * The View-menu section its entry goes under: the domain's label ('Heap',
+   * 'Stream', 'Logs', a module's label), or 'workspace' for the views' entries
+   * that follow the domain groups. Absent: no View entry (its control is a
+   * top-bar button, or it has none).
+   */
+  group?: string;
+  /** The View entry's label, when it is not the title ('Time strip'). */
+  label?: string;
+  /** The View entry's tooltip. */
+  hint?: string;
   dock: Placement['dock'];
   open: boolean;
   /** The evidence domain the panel presents; it starts open only when the trace has its records. */
@@ -71,19 +91,15 @@ export type PanelRecord = {
   autoPlace?: { avoid: string[] };
   /** The panel's element, for a panel not in index.html (a domain module's). */
   build?: () => any;
-  /** The hook creates the toolbar button `toggle` names (a domain module's own). */
-  ownToggle?: boolean;
-  /** The toolbar button's tooltip, for a toggle the hook creates. */
-  hint?: string;
   refill: (() => void) | null;
 };
 
 /**
- * A panel a domain module declares. `toggle: true` asks for a toolbar button
- * (`btn-<id>`, labelled with the title), created and shown only when the
- * trace has the domain; a string names an existing button; absent, none.
+ * A panel a domain module declares. `toggle: true` asks for a View-menu entry
+ * (element id `btn-<id>`, labelled with the title) in the module's group,
+ * shown only when the trace has the domain; absent, none.
  */
-export type DomainPanel = Omit<PanelRecord, 'toggle' | 'refill' | 'needs' | 'build' | 'ownToggle'> & {
+export type DomainPanel = Omit<PanelRecord, 'toggle' | 'refill' | 'needs' | 'build' | 'group'> & {
   toggle?: boolean | string | null;
   build: () => any;
   refill?: (() => void) | null;
@@ -105,9 +121,14 @@ export type PanelContext = {
   domain: string;
   present: () => boolean;
   addPanel: (record: DomainPanel) => void;
+  addToggle?: (type: string, entry: { title: string; hint?: string; visible?: () => boolean }) => void;
 };
 
-export type PanelModule = { needs: string; register: (ctx: PanelContext) => void };
+/** A domain module: the domain it needs, its View-menu group label, and its hook. */
+export type PanelModule = { needs: string; label?: string; register: (ctx: PanelContext) => void };
+
+/** The View-menu group a module's entries go under. */
+export const moduleLabel = (mod: PanelModule) => mod.label || mod.needs[0].toUpperCase() + mod.needs.slice(1);
 
 /** Whether `meta` lists records of domain `id` (DOM-004 descriptors). */
 export function domainPresent(domains: DomainDescriptor[] | null | undefined, id: string): boolean {
@@ -134,22 +155,30 @@ export function listeners<A>() {
  */
 export function domainPanels(
   modules: PanelModule[],
-  base: Omit<PanelContext, 'domain' | 'present' | 'addPanel'>,
+  base: Omit<PanelContext, 'domain' | 'present' | 'addPanel' | 'addToggle'> & {
+    addToggle?: (mod: PanelModule, type: string, entry: { title: string; hint?: string; visible?: () => boolean }) => void;
+  },
   taken: string[] = [],
   onAdd: (record: PanelRecord) => void = () => {},
 ): PanelRecord[] {
   const out: PanelRecord[] = [];
   const ids = new Set(taken);
   for (const mod of modules) {
+    const { addToggle, ...rest } = base;
     const ctx: PanelContext = {
-      ...base,
+      ...rest,
+      addToggle: (type, entry) => addToggle?.(mod, type, entry),
       domain: mod.needs,
       present: () => domainPresent(base.ui?.meta?.domains, mod.needs),
       addPanel(rec) {
         if (ids.has(rec.id)) throw new Error(`panel declared twice: ${rec.id}`);
         ids.add(rec.id);
-        const toggle = rec.toggle === true ? `btn-${rec.id}` : (rec.toggle || null);
-        const record: PanelRecord = { ...rec, toggle, ownToggle: rec.toggle === true, needs: mod.needs, refill: rec.refill || null };
+        const menu = rec.toggle === true;
+        const toggle = menu ? `btn-${rec.id}` : typeof rec.toggle === 'string' ? rec.toggle : null;
+        const record: PanelRecord = {
+          ...rec, toggle, needs: mod.needs, refill: rec.refill || null,
+          ...(menu ? { group: moduleLabel(mod) } : {}),
+        };
         out.push(record);
         onAdd(record);
       },

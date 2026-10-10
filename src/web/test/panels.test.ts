@@ -86,9 +86,10 @@ test('a domain module declares its panels through the hook, each needing its dom
   }], base, ['events-panel'], (p) => added.push(p.id));
   assert.deepEqual(seen, ['intervals', true]);
   assert.deepEqual(added, ['flame-panel', 'cpu-panel'], 'each is handed over as it is declared');
-  assert.deepEqual(panels.map((p) => [p.id, p.needs, p.toggle, !!p.ownToggle]), [
-    ['flame-panel', 'intervals', 'btn-flame-panel', true],
-    ['cpu-panel', 'intervals', null, false],
+  // `toggle: true` is a View-menu entry in the module's group
+  assert.deepEqual(panels.map((p) => [p.id, p.needs, p.toggle, p.group]), [
+    ['flame-panel', 'intervals', 'btn-flame-panel', 'Intervals'],
+    ['cpu-panel', 'intervals', null, undefined],
   ]);
   assert.equal(domainPresent(ui.meta.domains as any, 'logs'), false);
   assert.equal(domainPresent(null, 'intervals'), false);

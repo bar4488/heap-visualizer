@@ -17,52 +17,35 @@
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect x='1' y='6' width='5' height='4' fill='%233fb950'/><rect x='7' y='6' width='3' height='4' fill='%23f85149'/><rect x='11' y='6' width='4' height='4' fill='%233fb950'/></svg>">
 </head>
 <body>
+<!-- One slim bar (spec SHELL-001): the menus on the left, playback in the
+     middle, status on the right. The File / View / Help menus and the command
+     palette are built from the action registry (shell/actions.ts) at startup;
+     nothing here lists a panel. -->
 <header id="toolbar">
-  <div class="brand">heap-visualizer</div>
-  <button id="btn-open" title="Open a trace directly in this browser">Open…</button>
-  <input type="file" id="file-input" accept=".heapl,.jsonl,.json,.txt" hidden>
-  <button id="btn-demo" title="Load the bundled demo trace">Demo</button>
-  <button id="btn-guide" title="Guide: what the views show and how to drive them">Guide</button>
-  <button id="btn-connect" title="Paste a connection from the heapviz local companion">Connect…</button>
-  <button id="btn-setup" title="Install or troubleshoot the local companion">Setup</button>
-  <button id="btn-request" title="Ask for a feature">Request…</button>
-  <button id="btn-more" title="More: workspace actions" aria-haspopup="menu" aria-expanded="false" aria-controls="more-menu" aria-label="More">⋯</button>
-  <div id="more-menu" role="menu" aria-label="Workspace" hidden>
-    <button id="btn-view-time" role="menuitemcheckbox" title="Show or hide the time strip">Time strip</button>
-    <button id="btn-view-seq" role="menuitemcheckbox" title="Show or hide the event-index strip">Event-index strip</button>
-    <button id="btn-reset-layout" role="menuitem" title="Put every view, window, dock and size back to the default layout">Reset layout</button>
+  <div class="tb-side tb-left">
+    <div class="brand">heap-visualizer</div>
+    <div id="menubar" aria-label="Main menu"></div>
+    <span id="trace-title" class="title"></span>
   </div>
-  <span id="trace-title" class="title"></span>
-
-  <span class="sep"></span>
-
-  <button id="btn-playcfg" title="Playback controls: step, play/pause (space), mode, speed">Play</button>
-  <button id="btn-lock" title="Lock the viewport: stepping keeps the address view where it is instead of auto-scrolling (L)">🔓</button>
-
-  <span class="sep"></span>
-
-  <button id="hz-reset" hidden title="Horizontal zoom on the address line (ctrl/alt+wheel to zoom around the cursor, shift+wheel or horizontal scroll to pan) — click to reset">×1</button>
-  <button id="btn-layout" title="How the address map is arranged: row bytes, collapsing, row zoom, overlaps">Layout</button>
-  <button id="btn-appearance" title="How the address map is drawn: colors, labels, size format">Appearance</button>
-  <button id="btn-filter">Filter</button>
-  <button id="btn-events" hidden title="Sequenced list of all events">Events</button>
-  <button id="btn-logs" hidden title="The trace's log lines, as a terminal that follows the playhead">Logs</button>
-  <span id="domain-toggles" class="domain-toggles"></span>
-  <button id="btn-analysis" hidden>Marks</button>
-  <button id="crop-indicator" hidden title="Crop is active — click to remove it">✂ <span id="crop-range"></span> ×</button>
-
-  <span class="sep"></span>
-
-  <button id="an-save" hidden title="Download tags, names, colors, and marks (bookmarks/addr marks) as a .heapa.json file">Save…</button>
-  <button id="an-load" hidden title="Load a saved marks file">Load…</button>
+  <div class="tb-center" role="group" aria-label="Playback">
+    <button id="btn-step-back" class="tb-icon" title="Step back one event (←, shift = ×100)" aria-label="Step back">⏮&#xFE0E;</button>
+    <button id="btn-play" class="tb-icon" title="Play / pause (space)" aria-label="Play" disabled>▶</button>
+    <button id="btn-step-fwd" class="tb-icon" title="Step forward one event (→, shift = ×100)" aria-label="Step forward">⏭&#xFE0E;</button>
+    <button id="btn-playcfg" class="tb-speed" title="Playback settings: advance by time or by events, and speed">15s</button>
+    <button id="btn-lock" class="tb-icon" title="Lock the viewport: stepping keeps the address view where it is instead of auto-scrolling (L)" aria-label="Lock the viewport" aria-pressed="false">🔓</button>
+    <span class="sep"></span>
+    <input id="jump-input" placeholder="seq · t:1e6 · 0x…" size="14" aria-label="Jump to"
+      title="Jump to an event index, a time (t: prefix), or an address (0x…) — press g for the search overlay">
+    <button id="btn-jump">Go</button>
+  </div>
+  <div class="tb-side tb-right">
+    <button id="hz-reset" class="pill" hidden title="Horizontal zoom on the address line (ctrl/alt+wheel to zoom around the cursor, shift+wheel or horizontal scroll to pan) — click to reset">×1</button>
+    <button id="crop-indicator" class="pill" hidden title="Crop is active — click to remove it">✂ <span id="crop-range"></span> ×</button>
+    <button id="btn-warnings" class="pill" hidden>⚠ <span id="warn-count"></span></button>
+    <button id="conn-status" class="pill" data-state="standalone" title="Connect this tab to the heapviz local companion"><span class="dot"></span><span id="conn-label">Local: off</span></button>
+  </div>
+  <input type="file" id="file-input" accept=".heapl,.jsonl,.json,.txt" hidden>
   <input type="file" id="analysis-file" accept=".json,.heapa" hidden>
-
-  <span class="sep"></span>
-
-  <input id="jump-input" placeholder="seq · t:1e6 · 0x…" size="12"
-    title="Jump to an event index, a time (t: prefix), or an address (0x…) — press g for the search overlay">
-  <button id="btn-jump">Go</button>
-  <button id="btn-warnings" hidden>⚠ <span id="warn-count"></span></button>
 </header>
 
 <div id="legend" hidden></div>
@@ -89,7 +72,7 @@
     <div class="tl-hoverline" hidden></div>
     <div class="tl-select" hidden></div>
     <div class="tl-select-echo" hidden title="the events selection, converted to time"></div>
-    <div class="tl-crop" hidden title="crop is active — click the ✂ pill in the toolbar to remove it"></div>
+    <div class="tl-crop" hidden title="crop is active — click the ✂ pill in the top bar to remove it"></div>
     <div class="tl-marks"></div>
   </section>
   <section class="tl-strip" id="strip-s">
@@ -98,7 +81,7 @@
     <div class="tl-hoverline" hidden></div>
     <div class="tl-select" hidden></div>
     <div class="tl-select-echo" hidden title="the time selection, converted to events"></div>
-    <div class="tl-crop" hidden title="crop is active — click the ✂ pill in the toolbar to remove it"></div>
+    <div class="tl-crop" hidden title="crop is active — click the ✂ pill in the top bar to remove it"></div>
     <div class="tl-marks"></div>
   </section>
 
@@ -180,11 +163,6 @@
 <div id="play-panel" class="panel" hidden>
   <div class="panel-head"><span class="ph-t"></span> <button class="panel-close">×</button></div>
   <div class="panel-body">
-    <div class="filter-row">
-      <button id="btn-step-back" title="Step back one event (←, shift = ×100)">⏮</button>
-      <button id="btn-play" title="Play / pause (space)" disabled>▶</button>
-      <button id="btn-step-fwd" title="Step forward one event (→, shift = ×100)">⏭</button>
-    </div>
     <div class="filter-row"><label>advance <select id="play-mode" title="Playback advances by wall-clock time or by event index">
       <option value="t">by time</option>
       <option value="seq">by events</option>
@@ -405,6 +383,23 @@
       <button id="request-send" type="button" title="Send the request (ctrl/⌘ enter)">Send</button>
     </div>
     <div id="request-status" class="filter-status" role="status"></div>
+  </div>
+</div>
+
+<!-- The command palette (⌘/Ctrl+K): every action in the registry, fuzzy
+     filtered (shell/menus.ts). -->
+<div id="palette" hidden>
+  <div id="palette-box" role="dialog" aria-label="Command palette">
+    <input id="palette-input" placeholder="Type a command…" autocomplete="off" spellcheck="false"
+      role="combobox" aria-expanded="true" aria-controls="palette-list" aria-autocomplete="list">
+    <div id="palette-list" role="listbox" aria-label="Commands"></div>
+  </div>
+</div>
+
+<div id="shortcuts" hidden>
+  <div id="shortcuts-box" role="dialog" aria-label="Keyboard shortcuts">
+    <div class="sc-head"><span>Keyboard shortcuts</span><button id="shortcuts-close" aria-label="Close">×</button></div>
+    <div id="shortcuts-list"></div>
   </div>
 </div>
 

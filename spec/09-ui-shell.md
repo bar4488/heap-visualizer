@@ -8,12 +8,22 @@ more panel type, not a new layout.
 
 ## SHELL-001: Layout
 
-- **Toolbar** (top): open/demo, trace title, panel toggles (Play, Layout,
-  Appearance, Filter, Events, Logs, Marks), horizontal-zoom pill, crop pill, marks
-  Save/Load, jump box, warnings badge, and an overflow menu (⋯) carrying
-  workspace actions — show/hide the **Time strip** and **Event-index strip**,
-  and **Reset layout** ([SHELL-008](#shell-008-the-default-layout)).
-- **Legend strip** under the toolbar when a color mode needs one.
+- **Top bar**: one row, IDE-style, that never wraps (the trace title gives
+  way first, down to a 1100 px window):
+  - *left*: the app name, then the **File / View / Help** menus
+    ([SHELL-011](#shell-011-actions-menus-and-the-command-palette)), then the
+    trace title;
+  - *center*: the playback transport — step back, play/pause, step forward,
+    the Play-settings button (it names the current speed and toggles the Play
+    window), the viewport lock — and the jump box;
+  - *right*: the horizontal-zoom pill and the crop pill while they apply, the
+    warnings badge only when the trace has warnings, and the connection pill:
+    the local companion's state as a dot and a short label, which opens
+    Connect (connected, it asks before disconnecting).
+
+  The bar carries no per-panel buttons: windows are shown and hidden from the
+  View menu and the command palette.
+- **Legend strip** under the top bar when a color mode needs one.
 - **Workspace**: the dock ([SHELL-004](#shell-004-docking)), with the guide
   surface ([SHELL-009](#shell-009-the-guide-surface)) outside it at the left
   edge.
@@ -30,15 +40,17 @@ Everything in the workspace is a panel in the dock. Two kinds:
   start in the center grid, the two strips stacked above the map. The
   **address map cannot be closed**: its tab has no close button and no amount
   of restoring or resetting can leave the workspace without it. The strips can
-  be closed from their tab and brought back from the overflow menu.
+  be closed from their tab and brought back from the View menu.
 - **Windows** — Play, Layout, Appearance, Filter, Marks, Warnings, Events,
   Logs, Allocation, pinned allocation windows, Event, Request. Every window is
-  closable. Toolbar buttons toggle them.
+  closable. The View menu toggles them (Play and Warnings: their top-bar
+  button; Request: the Help menu).
 
 A panel's tab carries its title (a window that retitles itself, like
 Allocation naming its allocation, retitles its tab), its close button, and is
 its drag handle. A window's own controls (follow, filtered, pin, ＋ mark, a
-line count) stay in a row at its top. A **toolbar toggle** closes its window
+line count) stay in a row at its top. A **toggle** (a View-menu entry, a
+palette command, a top-bar button) closes its window
 when it is on screen, and brings it to the front when it is open but out of
 sight — a tab behind another, or in a collapsed edge group. Where each panel
 is persists per trace via the session
@@ -54,13 +66,13 @@ Behaviors every window has, whatever it contains:
   restored from a session, and every floating group after a viewport resize,
   are held within it.
 - **Keyboard.** A window is a labelled region (named by its title). Opening one
-  from its toolbar toggle moves focus into it, and closing it while focus is
+  from its toggle moves focus into it, and closing it while focus is
   inside (or with focus lost to the page) returns focus to whatever opened it.
   **Escape** closes the window that has focus, unless a control inside it used
   the key first (an open completion list closes on the first Escape, the
   window on the next). Escape never closes a view. Window close buttons carry
-  an accessible name ("Close Filter"); toolbar toggles expose whether their
-  window is open (`aria-pressed`, `aria-checked` in the menu); the dock's own
+  an accessible name ("Close Filter"); toggles expose whether their
+  window is open (`aria-checked` in the View menu, `aria-pressed` on a top-bar button); the dock's own
   collapse and maximize buttons are named and expose their state. A window
   opened by the app rather than by the user — the Allocation window following
   a selection — does not take focus.
@@ -92,14 +104,17 @@ not heap-shaped (Request) is declared to the shell by its own module.
 The table is assembled from per-domain tables: the heap's, and one per
 evidence domain module, which declares its panels through a registration hook
 (`src/web/panels.ts`) at startup. Each module is registered for the domain it
-needs; its panels' toolbar toggles show, and they start open, only for a trace
-that has records of that domain. A new domain's panels need no wiring beyond
+needs, with the label of its View-menu group; its panels' View entries show,
+and they start open, only for a trace that has records of that domain. A new domain's panels need no wiring beyond
 its module's entry in that list.
 
 **The shell's panel API.** Domain code reaches panels only through the shell's
 layout API (`shell/layout.ts`), which owns visibility, placement, focus,
-toolbar toggles and close buttons. It is the only code that talks to the dock
-engine ([D014](../docs/decisions/D014-dockview-for-windowing.md)):
+top-bar toggle buttons and close buttons; it is the only code that talks to
+the dock engine ([D014](../docs/decisions/D014-dockview-for-windowing.md)).
+Each record names its View-menu group (Heap, Stream, Logs, a module's label);
+the View menu's entries are built from the records, never listed by hand
+([SHELL-011](#shell-011-actions-menus-and-the-command-palette)). The API:
 
 - `register(type, {title, singleton, closable, defaultLocation, build, persist,
   toggle, size, floatSize, autoPlace, onOpen, onClose})` declares a type. A
@@ -218,9 +233,10 @@ convenient: **Layout** decides where things land on the map, **Appearance**
 how they are drawn, **Play** how the playhead moves. A setting belongs to
 exactly one of those.
 
-- **Play**: step/play buttons, advance mode (time / events), speed, viewport
-  lock — lock is playback behavior (it decides whether stepping scrolls), not
-  layout ([06-playback-navigation](06-playback-navigation.md)).
+- **Play**: advance mode (time / events) and speed. Stepping, play/pause and
+  the viewport lock sit in the top bar's transport beside it — lock is
+  playback behavior (it decides whether stepping scrolls), not layout
+  ([06-playback-navigation](06-playback-navigation.md)).
 - **Layout**: row bytes, collapse threshold, all-rows, row zoom, overlap
   display mode, freed-nested ghosts ([04-address-map](04-address-map.md)).
 - **Appearance**: color mode, size labels, address labels, size format
@@ -245,7 +261,7 @@ exactly one of those.
 - **Logs**: the trace's log lines as a terminal — virtualized, dimmed past the
   playhead, following it like `tail -f`, narrowed by minimum level and text
   search ([LOG-007](13-domains-and-logs.md#log-007-the-logs-panel)). Its
-  toolbar button appears only for a trace with log records.
+  View entry (the Logs group) appears only for a trace with log records.
 
 The **Event** window is per-event, as the allocation window is: it opens when
 a custom event is stepped onto or clicked, and carries no pin — there is
@@ -285,7 +301,7 @@ the panels that are consulted continuously already docked and open:
 A restored session overrides this **wholly**, not as a patch on top of it.
 
 A newly loaded trace with no session starts from this layout too, keeping
-floating windows' positions. **Reset layout** (toolbar overflow menu) applies
+floating windows' positions. **Reset layout** (View menu, and the palette) applies
 it on demand and completely: every view back in the center, every declared
 window back in its default edge and order or floating at its default spot,
 persisted windows open or closed as declared, edge groups at their default
@@ -300,7 +316,7 @@ declaration ([SHELL-003](#shell-003-panels-are-declared-as-data)), must not
 dock, float, or tab ([SHELL-002](#shell-002-panels-views-and-windows),
 [SHELL-004](#shell-004-docking)), and must not carry per-trace session
 geometry. It is its own surface at the left edge of the workspace, outside the
-dock, toggled from the toolbar and closable.
+dock, toggled from Help → Guide and closable.
 
 Its content must be a concise task list in plain markdown authored under `src/`,
 such that each section read as raw text is complete. It prioritizes actions and
@@ -320,8 +336,10 @@ onto it.
 
 **The guide must reach application state only by driving the real controls** —
 clicking the element, or setting its value and dispatching the event that
-element's own handler is bound to. It must not post to the worker, mutate
-shared UI state, or un-hide a panel behind its toolbar toggle. A guide action
+element's own handler is bound to. A menu item is such a control: the
+guide clicks it by its element id, and points at an item of a closed menu by
+highlighting that menu. It must not post to the worker, mutate shared UI state,
+or un-hide a panel behind its toggle. A guide action
 whose target id does not exist must report that and change nothing.
 
 ## SHELL-010: First-run onboarding
@@ -330,7 +348,7 @@ An ordinary first visit presents two user goals: try the bundled demo or open a
 trace from the current computer. It describes the browser as the workspace and
 `heapviz` as the local companion; implementation terms such as standalone mode,
 bearer capability, and local server are not prerequisites. Setup is always
-reopenable from the toolbar and contains Windows and Linux install, launch,
+reopenable from File → Setup… and contains Windows and Linux install, launch,
 AI-assistant skill, update, and diagnostic commands derived from the current hosted
 origin. The companion is deployment-neutral: setup tells the user to start it,
 then the current website accepts its connection string and connects to it.
@@ -341,3 +359,50 @@ connection path is testable without a user-supplied trace.
 A launch carrying a configured local connection skips the welcome surface.
 Connection failures reopen setup with a specific remedy, and an incompatible
 companion is distinguished from an unreachable or permission-denied one.
+
+## SHELL-011: Actions, menus and the command palette
+
+Every command the top bar offers is one **action** in one registry
+(`src/web/shell/actions.ts`): `{id, label, group, shortcut?, run, checked?,
+enabled?, visible?}`, plus the section and heading it sits under. The File,
+View and Help menus and the command palette are all rendered from it, so
+there is one source of truth for what exists, what it is called, whether it is
+on, and which key runs it.
+
+- **File**: Open trace… (⌘/Ctrl+O), Open demo — separator — Save analysis…
+  (⌘/Ctrl+S), Load analysis… — separator — Connect to heapviz… (Disconnect
+  while connected), Setup…. Opening a file or the demo is unavailable while a
+  local companion drives the tab; Save/Load need a loaded trace.
+- **View**: one entry per window, **grouped by domain under a heading** (Heap:
+  Layout, Appearance, Filter, Marks; Stream: Events; Logs: Logs; Intervals:
+  Tracks, Stacks, Intervals), built from the panel records
+  ([SHELL-003](#shell-003-panels-are-declared-as-data)) — a domain module's
+  panels add their entries through its registration hook. An entry is checked
+  while its window is open; choosing it toggles the window as any toggle does
+  ([SHELL-002](#shell-002-panels-views-and-windows)). A group whose domain the
+  loaded trace lacks is not shown. Then, after a separator: Time strip,
+  Event-index strip, Reset layout, Command palette… (⌘/Ctrl+K).
+- **Help**: Guide, Keyboard shortcuts (`?`), Request a feature….
+
+**Menus** follow the menubar pattern: `menubar`, `menu`, `menuitem` /
+`menuitemcheckbox` (with `aria-checked`), a heading per group. Arrow keys move
+between menus and items (skipping disabled ones, wrapping), Enter or Space
+runs the item, Escape closes. Once one menu is open, hovering another trigger
+opens that one instead. A click outside closes the menu. A menu used with the
+mouse leaves focus where it was, so the playback keys keep working; one
+entered from the keyboard returns focus to its trigger on Escape. Menu items
+keep stable element ids — the ids the old toolbar buttons had — for the guide
+([SHELL-009](#shell-009-the-guide-surface)).
+
+The **command palette** (⌘/Ctrl+K, or View → Command palette…) lists every
+visible, enabled action — every menu item, every window ("Show Logs" /
+"Hide Logs"), and palette-only commands (Go to seq, time or address…, Search,
+Play / pause, the viewport lock, Playback settings, Warnings) — fuzzy filtered
+as the user types (a subsequence of the label, word starts and runs ranked
+first), each with where it lives and its shortcut. Up/Down (wrapping) and
+Page Up/Down move, Enter runs, Escape or a click outside closes and gives
+focus back.
+
+**Shortcuts** run their action wherever focus is, except while typing in an
+input, a select or a text area; they never take a key the playback and view
+keys use ([NAV-007](06-playback-navigation.md#nav-007-keyboard-summary)).

@@ -86,7 +86,6 @@ export function resetLogsPanel() {
   st.query = DEFAULT_QUERY;
   $('log-level').value = '0';
   $('log-search').value = '';
-  $('btn-logs').hidden = !logsPresent();
   $('log-follow').checked = true;
   st.revealSeq = -1;
   queryChanged();

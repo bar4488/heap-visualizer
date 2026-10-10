@@ -15,11 +15,13 @@ import {
   $, $$, $1, dpr, onDprChange, setHtml, toCss, toCssLen,
 } from './shell/dom.ts';
 import { layout } from './shell/layout.ts';
+import { actions } from './shell/actions.ts';
+import { initMenus } from './shell/menus.ts';
 import { createDockview, themeDark } from 'dockview-core';
 import { showTooltip, hideTooltip, positionTooltipNearMouse } from './shell/tooltip.ts';
 import { heapPanels } from './heap/panels.ts';
 import {
-  domainPanels, domainPresent, listeners, type PanelModule, type PanelRecord, type ViewRanges,
+  domainPanels, domainPresent, listeners, moduleLabel, type PanelModule, type PanelRecord, type ViewRanges,
 } from './panels.ts';
 import { registerIntervalPanels } from './intervals/index.ts';
 import { groupWarnings, warningDetail } from './warnings-model.ts';
@@ -30,7 +32,7 @@ import {
   renderAddrMarkLines, setAddrMarkYs, addBookmark, updateMarkers,
   requestAllocInfo, buildMarks, applyMarks, loadCanonicalAnalysis,
   commitCanonicalAnalysis, commitTagMembers, replaceAllocationTags, resetStandaloneAnalysis,
-  seedStandaloneAnalysis,
+  seedStandaloneAnalysis, saveMarks,
 } from './heap/analysis.ts';
 import {
   isServerAnalysis, persistentId, subscribeAnalysisServerHealth, useServerAnalysis,
@@ -51,9 +53,9 @@ import {
   applyFilterCompletion, utf8Offset,
   insertAllocationReference,
 } from './filter-completion.ts';
-import { initGuide } from './guide.ts';
+import { guideOpen, initGuide, toggleGuide } from './guide.ts';
 import { initRequest } from './request.ts';
-import { initOnboarding, setOnboardingConnectionStatus } from './onboarding.ts';
+import { initOnboarding, setOnboardingConnectionStatus, showInstall } from './onboarding.ts';
 import { loadHighlighter, paintHighlight } from './highlight.ts';
 import {
   customFieldRef, hasTopLevelPredicate, quoteFilterString, toggleFilterPredicate,
@@ -171,6 +173,9 @@ let serverLoadGeneration = 0;
 let serverTraceController: AbortController | null = null;
 let serverStreaming = false;
 let serverConfigured = false;
+// Opening a file or the demo in this tab is the standalone path; a tab driven
+// by the local companion does not offer it (the File menu greys them out).
+let standaloneFiles = true;
 
 subscribeAnalysisServerHealth((state) => {
   if (serverConfigured) setLocalServerRuntimeHealth($('st-server'), state);
@@ -206,7 +211,10 @@ const UI: UIState = {
   xview: { zoom: 1, pan: 0 },
 };
 
-void initLocalServerMode($('st-server'), $('btn-connect'), async (config, status) => {
+// The companion's Connect/Disconnect control. local-server.ts owns its label
+// and click; the File menu and the top bar's connection pill drive it.
+const connectBtn = document.createElement('button');
+void initLocalServerMode($('st-server'), connectBtn, async (config, status) => {
   setOnboardingConnectionStatus(status);
   const mine = ++serverLoadGeneration;
   serverTraceController?.abort();
@@ -221,8 +229,7 @@ void initLocalServerMode($('st-server'), $('btn-connect'), async (config, status
       pendingServerTraceId = null;
       worker.postMessage({ type: 'load-cancel' });
     }
-    $('btn-open').hidden = false;
-    $('btn-demo').hidden = false;
+    standaloneFiles = true;
     if (wasConfigured && UI.loaded) {
       try {
         await resetStandaloneAnalysis();
@@ -236,8 +243,7 @@ void initLocalServerMode($('st-server'), $('btn-connect'), async (config, status
   }
   serverConfigured = !!config;
   useServerAnalysis(config);
-  $('btn-open').hidden = true;
-  $('btn-demo').hidden = true;
+  standaloneFiles = false;
   if (!config || status.state !== 'connected') return;
   if (renderedServerTraceId === status.session.trace.id) {
     useServerAnalysis(config, status.session.trace.id);
@@ -420,13 +426,11 @@ async function handleFile(f) {
   }
 }
 
-$('btn-open').onclick = () => $('file-input').click();
 $('file-input').onchange = (ev) => {
   const f = ev.target.files[0];
   if (f) handleFile(f);
   ev.target.value = '';
 };
-$('btn-demo').onclick = () => loadURL('demo.heapl');
 
 // Only a drag carrying files is a trace being dropped: a panel's tab dragged
 // around the dock is a drag too, and must not raise the overlay.
@@ -616,12 +620,7 @@ function onLoaded(m) {
   clearSelection();
   syncTagDatalist();
   updateMarkers();
-  $('btn-analysis').hidden = false;
-  $('btn-analysis').classList.remove('active');
   $('btn-mark').hidden = false;
-  $('btn-events').hidden = false;
-  $('an-save').hidden = false;
-  $('an-load').hidden = false;
   $('btn-play').disabled = false;
   UI.xview = { zoom: 1, pan: 0 };
   updateHzButton();
@@ -635,9 +634,7 @@ function onLoaded(m) {
   const wc = m.meta.warnTotal;
   $('btn-warnings').hidden = wc === 0;
   $('warn-count').textContent = fmtNum(wc);
-
-  // a domain module's toggle shows only for a trace with that domain
-  for (const p of PANELS) if (p.ownToggle) $(p.toggle).hidden = !needsMet(p);
+  $('btn-warnings').title = `${fmtNum(wc)} warnings: malformed or suspicious input — click for the list`;
   lastView = '';
 
   // every panel refills itself from the new trace, in table order — the UI
@@ -682,7 +679,8 @@ function onState(m) {
     UI.tlT = m.tlT;
     UI.tlS = m.tlS;
   }
-  $('btn-play').textContent = m.playing ? '⏸' : '▶';
+  $('btn-play').textContent = m.playing ? '⏸\uFE0E' : '▶\uFE0E';
+  $('btn-play').setAttribute('aria-label', m.playing ? 'Pause' : 'Play');
   $('st-pos').textContent =
     `seq ${fmtNum(m.seq)} / ${fmtNum(m.n)} · t ${fmtTime(m.t)}`;
   $('st-live').innerHTML =
@@ -773,8 +771,19 @@ function buildSpeedSelect() {
     }
     sel.value = '1000';
   }
+  speedLabel();
 }
 $('play-mode').onchange = buildSpeedSelect;
+$('play-speed').addEventListener('change', speedLabel);
+
+// The top bar's Play-settings button names the current speed, so the setting
+// is visible without opening the window.
+function speedLabel() {
+  const opt = $('play-speed').selectedOptions?.[0];
+  const text = opt ? opt.textContent : '';
+  $('btn-playcfg').textContent = text.replace(/^trace in /, '').replace(' ev/s', '/s') || 'speed';
+  $('btn-playcfg').title = `Playback settings: advance ${$('play-mode').value === 't' ? 'by time' : 'by events'}, ${text}`;
+}
 
 function playRate() {
   const mode = $('play-mode').value;
@@ -799,6 +808,7 @@ function toggleLock() {
   UI.locked = !UI.locked;
   $('btn-lock').textContent = UI.locked ? '🔒' : '🔓';
   $('btn-lock').classList.toggle('active', UI.locked);
+  $('btn-lock').setAttribute('aria-pressed', String(UI.locked));
   worker.postMessage({ type: 'set', key: 'locked', value: UI.locked });
   $('st-info').textContent = UI.locked
     ? 'viewport locked — stepping will not scroll the address view'
@@ -1603,23 +1613,54 @@ function needsMet(p: PanelRecord): boolean {
   return domainPresent(UI.meta?.domains, p.needs);
 }
 
+/**
+ * A panel's View-menu entry and palette command (spec SHELL-011): checked
+ * while it is open, and toggled like the old toolbar button — closed when on
+ * screen, brought to the front when open out of sight. `section` is the
+ * domain group; 'workspace' is the unheaded run after the groups.
+ */
+function addPanelAction(type: string, o: {
+  label: string; section: string; el?: string | null; hint?: string;
+  visible?: () => boolean; enabled?: () => boolean;
+}) {
+  const workspace = o.section === 'workspace';
+  actions.add({
+    id: `panel.${type}`,
+    label: o.label,
+    group: 'view',
+    section: o.section,
+    heading: workspace ? undefined : o.section,
+    rank: workspace ? 1 : 0,
+    el: o.el || undefined,
+    hint: o.hint,
+    run: () => layout.toggle(type, '', { focus: true }),
+    checked: () => layout.isOpen(type),
+    visible: o.visible,
+    enabled: o.enabled,
+    paletteLabel: () => `${layout.isOpen(type) && layout.isShown(type) ? 'Hide' : 'Show'} ${o.label}`,
+    keywords: 'panel window toggle',
+  });
+}
+
+// Marks and Events have nothing to show before a trace is loaded.
+const NEEDS_TRACE = new Set(['analysis-panel', 'events-panel']);
+
 function registerPanel(p: PanelRecord) {
-  // a domain module's toolbar toggle is made here, beside the Logs toggle,
-  // and shown only for a trace that has the domain (onLoaded)
-  if (p.ownToggle) {
-    const btn = document.createElement('button');
-    btn.id = p.toggle;
-    btn.hidden = true;
-    btn.textContent = p.title;
-    if (p.hint) btn.title = p.hint;
-    $('domain-toggles').appendChild(btn);
+  // a panel with a View-menu group is toggled from that menu (and the
+  // palette); one without keeps its top-bar button, which the shell wires
+  if (p.group) {
+    addPanelAction(p.id, {
+      label: p.label || p.title, section: p.group, el: p.toggle, hint: p.hint,
+      visible: () => needsMet(p),
+      enabled: NEEDS_TRACE.has(p.id) ? () => UI.loaded : undefined,
+    });
   }
   layout.register(p.id, {
     title: p.title,
     singleton: !p.multi,
     persist: p.persist !== false,
     closable: p.closable !== false,
-    toggle: p.toggle,
+    toggle: p.group ? null : p.toggle,
     size: p.size,
     floatSize: p.float,
     autoPlace: p.autoPlace || null,
@@ -1638,7 +1679,7 @@ for (const p of HEAP_PANELS) registerPanel(p);
 // run after the heap's panels are registered and before the first layout, so
 // a module may also call `ctx.layout.register` itself.
 const PANEL_MODULES: PanelModule[] = [
-  { needs: 'intervals', register: registerIntervalPanels },
+  { needs: 'intervals', label: 'Intervals', register: registerIntervalPanels },
 ];
 domainPanels(PANEL_MODULES, {
   layout,
@@ -1655,41 +1696,127 @@ domainPanels(PANEL_MODULES, {
     if (at) openSelPopover(at.x, at.y);
   },
   onLoad: (fn) => loadListeners.add(fn),
+  // a panel a module registered with the shell itself gets its View entry here
+  addToggle: (mod, type, entry) => addPanelAction(type, {
+    label: entry.title, section: moduleLabel(mod), el: `btn-${type}`, hint: entry.hint,
+    visible: entry.visible || (() => domainPresent(UI.meta?.domains, mod.needs)),
+  }),
 }, HEAP_PANELS.map((p) => p.id), (p) => {
   PANELS.push(p);
   registerPanel(p);
 });
 layout.resetLayout({ keepFloating: true });
 
-// the toolbar's overflow menu: shell actions that are not panels
+// The top bar (spec SHELL-001, SHELL-011): every File, View and Help command
+// is one action in the registry; the menus and the command palette are both
+// rendered from it. Panel toggles were added above, from the panel table.
 {
-  const btn = $('btn-more');
-  const menu = $('more-menu');
-  const setMenu = (on) => {
-    menu.hidden = !on;
-    btn.setAttribute('aria-expanded', String(on));
-    if (on) {
-      const r = btn.getBoundingClientRect();
-      menu.style.top = `${r.bottom + 4}px`;
-      menu.style.left = `${Math.max(4, Math.min(r.left, innerWidth - 200))}px`;
-      menu.querySelector('button')?.focus();
-    }
+  const loaded = () => UI.loaded;
+  const files = () => standaloneFiles;
+  actions.add({
+    id: 'file.open', label: 'Open trace…', group: 'file', section: 'open', shortcut: 'Mod+O', el: 'btn-open',
+    hint: 'Open a trace directly in this browser', enabled: files, run: () => $('file-input').click(),
+  });
+  actions.add({
+    id: 'file.demo', label: 'Open demo', group: 'file', section: 'open', el: 'btn-demo',
+    hint: 'Load the bundled demo trace', enabled: files, run: () => loadURL('demo.heapl'),
+  });
+  actions.add({
+    id: 'file.save', label: 'Save analysis…', group: 'file', section: 'analysis', shortcut: 'Mod+S', el: 'an-save',
+    hint: 'Download tags, names, colors, and marks (bookmarks/addr marks) as a .heapa.json file',
+    enabled: loaded, run: () => void saveMarks(), keywords: 'marks tags heapa export download',
+  });
+  actions.add({
+    id: 'file.load', label: 'Load analysis…', group: 'file', section: 'analysis', el: 'an-load',
+    hint: 'Load a saved marks file', enabled: loaded, run: () => $('analysis-file').click(),
+    keywords: 'marks tags heapa import',
+  });
+  actions.add({
+    id: 'file.connect', group: 'file', section: 'connect', el: 'btn-connect',
+    label: () => (connectBtn.textContent === 'Disconnect' ? 'Disconnect from heapviz' : 'Connect to heapviz…'),
+    hint: 'Paste the Browser connection printed by the heapviz local companion',
+    run: () => connectBtn.click(), keywords: 'local companion server',
+  });
+  actions.add({
+    id: 'file.setup', label: 'Setup…', group: 'file', section: 'connect', el: 'btn-setup',
+    hint: 'Install or troubleshoot the local companion', run: showInstall, keywords: 'install heapviz companion',
+  });
+
+  actions.add({
+    id: 'view.reset', label: 'Reset layout', group: 'view', section: 'workspace', rank: 1, el: 'btn-reset-layout',
+    hint: 'Put every view, window, dock and size back to the default layout',
+    run: () => {
+      layout.resetLayout();
+      $('st-info').textContent = 'layout reset — views, windows, docks and sizes are back to the default';
+    },
+  });
+  actions.add({
+    id: 'view.palette', label: 'Command palette…', group: 'view', section: 'workspace', rank: 1,
+    shortcut: 'Mod+K', el: 'btn-palette', run: () => menus.openPalette(),
+  });
+  // palette-only: what the top bar already shows, and the jump box
+  actions.add({
+    id: 'go.seq', label: 'Go to seq, time or address…', group: 'palette', keywords: 'jump seek event index',
+    enabled: loaded, run: () => { $('jump-input').focus(); $('jump-input').select(); },
+  });
+  actions.add({
+    id: 'go.search', label: 'Search marks, names and warnings…', group: 'palette', keywords: 'find g',
+    enabled: loaded, run: () => openSearchOverlay(),
+  });
+  actions.add({
+    id: 'play.toggle', label: 'Play / pause', group: 'palette', enabled: loaded, run: togglePlay, keywords: 'playback',
+  });
+  actions.add({
+    id: 'play.lock', label: 'Lock / unlock the viewport', group: 'palette', run: toggleLock, keywords: 'scroll follow',
+  });
+  actions.add({
+    id: 'panel.play-panel', label: 'Playback settings', group: 'palette', keywords: 'speed mode play',
+    run: () => layout.toggle('play-panel', '', { focus: true }),
+  });
+  actions.add({
+    id: 'panel.warnings-panel', label: 'Warnings', group: 'palette',
+    visible: () => !!UI.meta?.warnTotal, run: () => layout.toggle('warnings-panel', '', { focus: true }),
+    paletteLabel: () => `${layout.isOpen('warnings-panel') ? 'Hide' : 'Show'} Warnings`,
+  });
+
+  actions.add({
+    id: 'help.guide', label: 'Guide', group: 'help', el: 'btn-guide',
+    hint: 'What the views show and how to drive them', checked: guideOpen, run: () => toggleGuide(),
+  });
+  actions.add({
+    id: 'help.shortcuts', label: 'Keyboard shortcuts', group: 'help', shortcut: '?', el: 'btn-shortcuts',
+    run: () => menus.openShortcuts(),
+  });
+  actions.add({
+    id: 'help.request', label: 'Request a feature…', group: 'help', el: 'btn-request',
+    hint: 'Ask for a feature', run: () => layout.toggle('request-panel', '', { focus: true }),
+  });
+}
+const menus = initMenus(actions, $('menubar'), [
+  { group: 'file', label: 'File' },
+  { group: 'view', label: 'View' },
+  { group: 'help', label: 'Help' },
+]);
+
+// The connection pill mirrors the status line's companion state (local-server.ts
+// writes it) and opens Connect; connected, it asks before disconnecting.
+{
+  const pill = $('conn-status');
+  const status = $('st-server');
+  const LABEL: Record<string, string> = {
+    standalone: 'Local: off', connecting: 'Connecting…', connected: 'heapviz',
   };
-  btn.onclick = () => setMenu(menu.hidden);
-  document.addEventListener('pointerdown', (e) => {
-    if (!menu.hidden && !menu.contains(e.target) && !btn.contains(e.target)) setMenu(false);
-  });
-  menu.addEventListener('keydown', (e) => {
-    if (e.key !== 'Escape') return;
-    e.preventDefault();
-    e.stopPropagation();
-    setMenu(false);
-    btn.focus();
-  });
-  $('btn-reset-layout').onclick = () => {
-    setMenu(false);
-    layout.resetLayout();
-    $('st-info').textContent = 'layout reset — views, windows, docks and sizes are back to the default';
+  const sync = () => {
+    const state = status.dataset.state || 'standalone';
+    pill.dataset.state = state;
+    $('conn-label').textContent = LABEL[state] || 'Connection issue';
+    pill.title = `${status.title || status.textContent} — click to ${state === 'connected' ? 'disconnect' : 'connect'}`;
+  };
+  new MutationObserver(sync).observe(status, { attributes: true, childList: true, characterData: true, subtree: true });
+  sync();
+  pill.onclick = () => {
+    if (pill.dataset.state === 'connected' && !confirm('Disconnect this tab from the heapviz local companion?')) return;
+    actions.run('file.connect');
   };
 }
 

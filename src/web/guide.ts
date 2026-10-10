@@ -29,11 +29,11 @@ import type { El } from './shell/dom.ts';
 import { esc } from './fmt.ts';
 import { heapPanels } from './heap/panels.ts';
 
-// Panel id -> the toolbar button that opens it, read from the panel table
-// rather than from a second list of ids here (spec SHELL-003). This is the one
-// thing the guide needs to know about panels: how to point at one that is
-// closed, by clicking the real toggle instead of un-hiding the element behind
-// its back.
+// Panel id -> the control that opens it (its View-menu item, or a top-bar
+// button), read from the panel table rather than from a second list of ids
+// here (spec SHELL-003). This is the one thing the guide needs to know about
+// panels: how to point at one that is closed, by clicking the real toggle
+// instead of un-hiding the element behind its back.
 const PANEL_TOGGLE = new Map(heapPanels().map((p) => [p.id, p.toggle]));
 
 // Section files, in reading order. Each is fetched from dist/guide/.
@@ -162,6 +162,16 @@ function highlight(id: string) {
   if (toggle) $(toggle).click();
   if (el.hidden) { note(`guide: "${id}" is not available yet`); return; }
 
+  // An item of a closed menu (File → Open demo) cannot be seen: ring the menu
+  // that holds it instead, which is where the reader will find it.
+  const menu = el.closest('[role=menu]');
+  const ring = menu?.hidden ? $(menu.id.replace(/-list$/, '')) || el : el;
+  if (ring !== el) {
+    ring.classList.add('g-target');
+    highlightTimer = window.setTimeout(() => ring.classList.remove('g-target'), HIGHLIGHT_MS);
+    return;
+  }
+
   el.classList.add('g-target');
   // `scrollIntoView` scrolls every scrollable ancestor, and a docked panel's
   // chain reaches the workspace — enough to shift the reader's place in the
@@ -262,14 +272,15 @@ async function load() {
   body.innerHTML = parts.join('\n');
 }
 
+/** Help → Guide's check mark. */
+export const guideOpen = () => !$('guide').hidden;
+
 export function toggleGuide(open = $('guide').hidden) {
   $('guide').hidden = !open;
-  $('btn-guide').classList.toggle('active', open);
   if (open && !loaded) void load();
 }
 
 export function initGuide() {
-  $('btn-guide').onclick = () => toggleGuide();
   // A scenario link navigates to `?trace=…&guide=1`, so the reader lands back
   // in the guide with that trace loading. The parameter is the whole of the
   // guide's persistence: nothing is stored anywhere.

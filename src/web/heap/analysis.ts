@@ -601,8 +601,6 @@ function wireAnalysisPanel() {
   });
 
   $('btn-mark').onclick = addBookmark;
-  $('an-save').onclick = saveMarks;
-  $('an-load').onclick = () => $('analysis-file').click();
   $('analysis-file').onchange = async (ev) => {
     const f = ev.target.files[0];
     if (f) {
