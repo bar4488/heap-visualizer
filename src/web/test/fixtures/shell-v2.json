@@ -1,0 +1,187 @@
+{
+ "version": 2,
+ "dock": {
+  "grid": {
+   "root": {
+    "type": "branch",
+    "data": [
+     {
+      "type": "branch",
+      "data": [
+       {
+        "type": "leaf",
+        "data": {
+         "views": [
+          "strip-t"
+         ],
+         "activeView": "strip-t",
+         "id": "4"
+        },
+        "size": 100
+       },
+       {
+        "type": "leaf",
+        "data": {
+         "views": [
+          "strip-s"
+         ],
+         "activeView": "strip-s",
+         "id": "5"
+        },
+        "size": 100
+       },
+       {
+        "type": "leaf",
+        "data": {
+         "views": [
+          "addr-scroll"
+         ],
+         "activeView": "addr-scroll",
+         "id": "6"
+        },
+        "size": 399
+       }
+      ],
+      "size": 1174
+     }
+    ],
+    "size": 599
+   },
+   "width": 1174,
+   "height": 599,
+   "orientation": "HORIZONTAL"
+  },
+  "panels": {
+   "events-panel": {
+    "id": "events-panel",
+    "contentComponent": "events-panel",
+    "title": "Events"
+   },
+   "layout-panel": {
+    "id": "layout-panel",
+    "contentComponent": "layout-panel",
+    "title": "Layout"
+   },
+   "appearance-panel": {
+    "id": "appearance-panel",
+    "contentComponent": "appearance-panel",
+    "title": "Appearance"
+   },
+   "filter-panel": {
+    "id": "filter-panel",
+    "contentComponent": "filter-panel",
+    "title": "Filter"
+   },
+   "analysis-panel": {
+    "id": "analysis-panel",
+    "contentComponent": "analysis-panel",
+    "title": "Marks"
+   },
+   "intervals-state": {
+    "id": "intervals-state",
+    "contentComponent": "intervals-state",
+    "title": "Stacks"
+   },
+   "logs-panel": {
+    "id": "logs-panel",
+    "contentComponent": "logs-panel",
+    "title": "Logs"
+   },
+   "intervals-tracks": {
+    "id": "intervals-tracks",
+    "contentComponent": "intervals-tracks",
+    "title": "Tracks"
+   },
+   "strip-t": {
+    "id": "strip-t",
+    "contentComponent": "strip-t",
+    "title": "Time"
+   },
+   "strip-s": {
+    "id": "strip-s",
+    "contentComponent": "strip-s",
+    "title": "Event index"
+   },
+   "addr-scroll": {
+    "id": "addr-scroll",
+    "contentComponent": "addr-scroll",
+    "tabComponent": "fixed",
+    "title": "Address map"
+   },
+   "detail-panel": {
+    "id": "detail-panel",
+    "contentComponent": "detail-panel",
+    "title": "Allocation"
+   }
+  },
+  "activeGroup": "7",
+  "floatingGroups": [
+   {
+    "data": {
+     "views": [
+      "detail-panel"
+     ],
+     "activeView": "detail-panel",
+     "id": "7"
+    },
+    "position": {
+     "top": 143,
+     "left": 552,
+     "width": 300,
+     "height": 340
+    }
+   }
+  ],
+  "edgeGroups": {
+   "left": {
+    "size": 300,
+    "visible": true,
+    "collapsedSize": 35,
+    "group": {
+     "views": [
+      "events-panel"
+     ],
+     "activeView": "events-panel",
+     "id": "edge-left",
+     "headerPosition": "left"
+    }
+   },
+   "right": {
+    "size": 300,
+    "visible": true,
+    "collapsed": true,
+    "collapsedSize": 35,
+    "group": {
+     "views": [
+      "layout-panel",
+      "appearance-panel",
+      "filter-panel",
+      "analysis-panel",
+      "intervals-state"
+     ],
+     "activeView": "layout-panel",
+     "id": "edge-right",
+     "headerPosition": "right"
+    }
+   },
+   "bottom": {
+    "size": 240,
+    "visible": true,
+    "collapsedSize": 35,
+    "group": {
+     "views": [
+      "logs-panel",
+      "intervals-tracks"
+     ],
+     "activeView": "logs-panel",
+     "id": "edge-bottom"
+    }
+   }
+  }
+ },
+ "homes": {
+  "intervals-list": {
+   "edge": "left"
+  }
+ }
+}

@@ -290,7 +290,7 @@ titled **Logs**, rendered as a terminal:
   copyable as plain lines.
 
 Default layout ([SHELL-008](09-ui-shell.md#shell-008-the-default-layout)):
-docked in the bottom edge group, open when the loaded trace has log
+docked in the bottom edge, open when the loaded trace has log
 records and closed otherwise.
 
 ## LOG-008: Logs in the agent API

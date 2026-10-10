@@ -1,9 +1,12 @@
 // Shell: the panel API. The one door domain code uses to show, hide, place and
 // persist windows. It owns every panel's visibility, its placement on open,
 // its toolbar toggle and close button, focus and Escape, and the layout part
-// of the session. Behind it is Dockview (dockview-core, D014): a grid of
-// split/tabbed groups in the center, an edge group on the left, right and
-// bottom, and floating groups. Domain code never sees the engine.
+// of the session. Behind it is Dockview (dockview-core, D014): one grid of
+// split/tabbed groups — the center, with the left, right and bottom edges as
+// ordinary columns and rows around it, so an edge splits like the rest — and
+// floating groups over all of it. Which edge a group is in is read off the
+// grid's shape (layout-plan.ts `regionsOf`); collapsing an edge to a rail of
+// its tabs is the shell's. Domain code never sees the engine.
 //
 // Domain code declares a panel *type* with `layout.register(type, spec)` and
 // then speaks only in types and keys: `open`, `close`, `toggle`, `reveal`,
@@ -24,13 +27,18 @@
 // window's controls still exist. A parked element is `hidden`; an adopted one
 // is not. No popout windows: they would take elements out of this document.
 //
+// A window's per-window actions (a pin) live in its tab, not in a row of its
+// own: the elements in its `.panel-head` marked `.tab-action` are moved into
+// its tab while it is in the dock, and back when it leaves.
+//
 // Still domain-agnostic: no panel is named here.
 
 import type { DockviewApi } from 'dockview-core';
 import { $ } from './dom.ts';
-import { placeFloat, type Box, type Point } from './float-place.ts';
+import { clampBox, placeFloat, type Box, type Point } from './float-place.ts';
 import {
-  EDGES, defaultPlan, legacyPlan, type Edge, type Home, type Plan, type TypeInfo,
+  EDGES, RAIL, bottomReference, defaultPlan, dockFromEdgeGroups, legacyPlan, regionsOf,
+  type Edge, type EdgeState, type Home, type Plan, type Region, type TypeInfo,
 } from './layout-plan.ts';
 
 export type { Edge, Home } from './layout-plan.ts';
@@ -80,7 +88,7 @@ export type OpenOptions = {
   freshPosition?: boolean;
   /** A viewport point it opens beside, when it floats from scratch (the clicked allocation). */
   near?: Point | null;
-  /** Put it in this edge group, the center, or floating (null). */
+  /** Put it in this edge, the center, or floating (null). */
   dock?: Home;
   /** Put it where another window is or was (`placeOf`): pin and unpin swap a window in place. */
   place?: Place | null;
@@ -98,11 +106,15 @@ type Registered = PanelSpec & { singleton: boolean; persist: boolean; closable: 
 type Instance = { type: string; key: string; id: string; el: any; open: boolean; seen: boolean };
 /** Where a window is or was, so it reopens there; opaque to domain code. */
 export type Place = Slot;
-type Slot = { edge: Edge } | { center: true } | { group: string } | { float: { left: number; top: number; width: number; height: number } };
+// (an edge slot names the group it was in too, so a window reopens in its
+// half of a split edge while that half is there)
+type Slot = { edge: Edge; group?: string } | { center: true } | { group: string } | { float: { left: number; top: number; width: number; height: number } };
 
 const EDGE_SIZE: Record<Edge, number> = { left: 300, right: 300, bottom: 240 };
 const FLOAT_SIZE = { width: 340, height: 320 };
-const edgeGroupId = (e: Edge) => `edge-${e}`;
+// an expanded group's own minimum, as the engine has it
+const GROUP_MIN = 100;
+const NO_MAX = Number.MAX_SAFE_INTEGER;
 
 const types = new Map<string, Registered>();
 const instances = new Map<string, Instance>(); // by instance id, in creation order
@@ -117,8 +129,19 @@ let host: any = null;
 let parking: any = null;
 let batch = 0; // >0 while the shell itself rearranges the dock
 let syncQueued = false;
-let dragging = false;
-const edgeWasEmpty: Record<Edge, boolean> = { left: true, right: true, bottom: true };
+// what the grid does not keep about each edge: collapsed, and the size it
+// expands to (persisted beside the dock's own serialization)
+const edgeState: Record<Edge, { collapsed: boolean; size: number }> = {
+  left: { collapsed: false, size: EDGE_SIZE.left },
+  right: { collapsed: false, size: EDGE_SIZE.right },
+  bottom: { collapsed: false, size: EDGE_SIZE.bottom },
+};
+let regions = new Map<string, Region>(); // grid group id -> its region, in grid order
+// the panels each edge held at the last sync: one dropped into a collapsed edge expands it
+let edgePanels: Record<Edge, Set<string>> = { left: new Set(), right: new Set(), bottom: new Set() };
+const railed = new Set<string>(); // groups the shell has pinned to a rail's size
+const tabs = new Map<string, WindowTab>(); // panel id -> its tab
+const actionBars = new Set<GroupActions>();
 
 const instanceId = (t: Registered, type: string, key: string) => (t.singleton ? type : `${type}:${key}`);
 
@@ -188,6 +211,7 @@ class Adopt {
     placeholders.delete(this.id);
     this.element.appendChild(inst.el);
     inst.el.hidden = false;
+    tabs.get(this.id)?.refresh();
   }
 
   init(params) {
@@ -208,26 +232,90 @@ class Adopt {
   }
 }
 
-// A tab with no close button, for a view that must always exist.
-class FixedTab {
+// A panel's tab: its title, its window's actions (the `.tab-action` elements
+// of its head, moved in while it is docked — a pin), and its close button —
+// none for a view that must always exist. The engine's own tab, plus the
+// actions; the same classes, so it looks the same.
+class WindowTab {
   readonly element: any;
   private content: any;
-  private sub: { dispose(): void } | null = null;
+  private actions: any;
+  private close: any = null;
+  private id = '';
+  private subs: { dispose(): void }[] = [];
+  private moved: { el: any; parent: any; next: any }[] = [];
 
-  constructor() {
+  constructor(closable: boolean) {
     this.element = document.createElement('div');
     this.element.className = 'dv-default-tab';
     this.content = document.createElement('div');
     this.content.className = 'dv-default-tab-content';
+    this.actions = document.createElement('span');
+    this.actions.className = 'dock-tab-actions';
     this.element.appendChild(this.content);
+    this.element.appendChild(this.actions);
+    if (closable) {
+      this.close = document.createElement('div');
+      this.close.className = 'dv-default-tab-action';
+      this.close.setAttribute('role', 'button');
+      this.close.setAttribute('tabindex', '-1');
+      this.close.innerHTML = '<svg height="11" width="11" viewBox="0 0 28 28" aria-hidden="true" focusable="false" class="dv-svg"><path d="M2.1 27.3L0 25.2L11.55 13.65L0 2.1L2.1 0L13.65 11.55L25.2 0L27.3 2.1L15.75 13.65L27.3 25.2L25.2 27.3L13.65 15.75L2.1 27.3Z"></path></svg>';
+      this.element.appendChild(this.close);
+    }
   }
 
   init(params) {
-    this.content.textContent = params.title || '';
-    this.sub = params.api?.onDidTitleChange?.((e) => { this.content.textContent = e.title; }) || null;
+    this.id = params.api?.id ?? '';
+    this.setTitle(params.title || '');
+    const sub = params.api?.onDidTitleChange?.((e) => this.setTitle(e.title));
+    if (sub) this.subs.push(sub);
+    if (this.close) {
+      // (pressed, the tab must not start a drag or take the group's focus)
+      this.close.addEventListener('pointerdown', (e) => e.preventDefault());
+      this.close.addEventListener('click', (e) => {
+        if (e.defaultPrevented) return;
+        e.preventDefault();
+        params.api.close();
+      });
+    }
+    // an action pressed in the tab acts; it does not drag or select the tab
+    for (const type of ['pointerdown', 'mousedown']) {
+      this.actions.addEventListener(type, (e) => e.stopPropagation());
+    }
+    this.actions.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') e.stopPropagation();
+    });
+    if (this.id) tabs.set(this.id, this);
+    this.refresh();
   }
 
-  dispose() { this.sub?.dispose(); }
+  private setTitle(t: string) {
+    this.content.textContent = t;
+    this.close?.setAttribute('aria-label', `Close ${t}`);
+  }
+
+  /** Take the window's actions in (again, once a placeholder's window is back). */
+  refresh() {
+    const inst = instances.get(this.id);
+    const head = inst?.el?.querySelector?.('.panel-head');
+    if (!head) return;
+    for (const a of [...head.querySelectorAll('.tab-action')]) {
+      this.moved.push({ el: a, parent: a.parentElement, next: a.nextSibling });
+      this.actions.appendChild(a);
+    }
+  }
+
+  dispose() {
+    for (const s of this.subs) s.dispose();
+    this.subs = [];
+    if (tabs.get(this.id) === this) tabs.delete(this.id);
+    // the actions go back to the window, which keeps them while it is closed
+    for (const { el, parent, next } of this.moved.reverse()) {
+      if (el.parentElement !== this.actions) continue;
+      parent.insertBefore(el, next && next.parentElement === parent ? next : null);
+    }
+    this.moved = [];
+  }
 }
 
 let titleSeq = 0;
@@ -312,17 +400,20 @@ function register(type: string, s: PanelSpec) {
 
 /**
  * Create the dock in `host` (once, at startup, after nothing else has to be
- * registered first — types can be registered before or after). The edge
- * groups always exist; an empty one is hidden, and shown as a drop target
- * while a panel is dragged.
+ * registered first — types can be registered before or after). An edge with
+ * nothing in it takes no room: it is not there until a window is put in it,
+ * by the shell or by a tab dropped on the dock's outer edge.
  */
 function init(hostEl: any, eng: Engine) {
   host = hostEl;
   api = eng.createDockview(hostEl, {
     theme: eng.theme,
     defaultRenderer: 'always',
+    defaultTabComponent: 'window',
     // (no popouts: a window's controls are found by id, and a popout would
-    // move them into another document — so no 'popout' in the tab menu)
+    // move them into another document — so no 'popout' in the tab menu.)
+    // Floating windows float over the whole dock, edges included: the edges
+    // are part of the one grid, which is the floating area.
     floatingGroupBounds: 'boundedWithinViewport',
     // a floating window moves by the empty part of its tab strip, like a
     // window by its title bar; dragging a tab (or Shift-dragging the strip)
@@ -332,7 +423,7 @@ function init(hostEl: any, eng: Engine) {
     // the map, last in the center column, takes the room a resize adds
     proportionalLayout: false,
     createComponent: (o) => new Adopt(o.id),
-    createTabComponent: (o) => (o.name === 'fixed' ? new FixedTab() : undefined),
+    createTabComponent: (o) => new WindowTab(o.name !== 'fixed'),
     createRightHeaderActionComponent: (group) => new GroupActions(group),
     getTabContextMenuItems: (p) => {
       const id = p?.panel?.id;
@@ -349,38 +440,19 @@ function init(hostEl: any, eng: Engine) {
       return closable ? [float, 'maximize', 'separator', 'close'] : [float, 'maximize'];
     },
   });
-  for (const e of EDGES) {
-    const g = api.addEdgeGroup(e, { id: edgeGroupId(e), initialSize: EDGE_SIZE[e], collapsed: true });
-    g.onDidCollapsedChange?.(later);
-    api.setEdgeGroupVisible(e, false);
-  }
-  bottomTabsOnTop();
   api.onDidAddPanel(later);
   api.onDidRemovePanel(later);
+  api.onDidAddGroup?.(later);
+  api.onDidRemoveGroup?.(later);
+  api.onDidMovePanel?.(later);
   api.onDidLayoutChange?.(later);
-  // while a panel is in hand, an empty edge shows as a strip to drop it on
-  const startDrag = () => {
-    dragging = true;
-    syncEdges();
-  };
-  api.onWillDragPanel?.(startDrag);
-  api.onWillDragGroup?.(startDrag);
-  const endDrag = () => {
-    if (!dragging) return;
-    dragging = false;
-    setTimeout(sync, 0);
-  };
-  if (typeof window !== 'undefined') {
-    window.addEventListener('dragend', endDrag, true);
-    window.addEventListener('drop', endDrag, true);
-    window.addEventListener('pointerup', endDrag, true);
-  }
   sync();
   return api;
 }
 
-// The buttons at the end of a group's tab strip: collapse/expand on an edge
-// group, maximize/restore on a grid group.
+// The buttons at the end of a group's tab strip: collapse/expand on the last
+// group of an edge (it collapses the whole edge), maximize/restore on a center
+// group. A tab clicked in a collapsed edge expands it.
 class GroupActions {
   readonly element: any;
   private group: any;
@@ -395,10 +467,21 @@ class GroupActions {
   init(params) {
     const g = params?.group || this.group;
     this.group = g;
+    actionBars.add(this);
     const render = () => this.render();
-    for (const ev of [g.api.onDidLocationChange, g.api.onDidCollapsedChange, api?.onDidMaximizedGroupChange]) {
+    for (const ev of [g.api.onDidLocationChange, api?.onDidMaximizedGroupChange]) {
       const s = ev?.(render);
       if (s) this.subs.push(s);
+    }
+    const el = g.element;
+    if (el?.addEventListener) {
+      const onTab = (e) => {
+        const r = regions.get(g.id);
+        if (!r || r === 'center' || !edgeState[r].collapsed) return;
+        if (e.target?.closest?.('.dv-tab')) setEdgeCollapsed(r, false);
+      };
+      el.addEventListener('click', onTab);
+      this.subs.push({ dispose: () => el.removeEventListener('click', onTab) });
     }
     render();
   }
@@ -406,21 +489,25 @@ class GroupActions {
   render() {
     const g = this.group;
     const loc = g.api.location;
+    const region = loc.type === 'grid' ? regions.get(g.id) || 'center' : null;
     this.element.textContent = '';
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'dock-action';
-    if (loc.type === 'edge') {
-      const collapsed = g.api.isCollapsed();
-      const side = loc.position as Edge;
+    if (region && region !== 'center') {
+      const side = region;
+      // one button per edge, at the end of its last group
+      const own = [...regions].filter(([, r]) => r === side).map(([id]) => id);
+      if (own[own.length - 1] !== g.id) return;
+      const collapsed = edgeState[side].collapsed;
       const name = side === 'bottom' ? 'bottom dock' : `${side} dock`;
       btn.setAttribute('aria-label', `${collapsed ? 'Expand' : 'Collapse'} ${name}`);
       btn.setAttribute('aria-expanded', String(!collapsed));
       btn.title = collapsed ? 'Expand' : 'Collapse';
       const glyph = { left: ['›', '‹'], right: ['‹', '›'], bottom: ['˄', '˅'] }[side] || ['+', '−'];
       btn.textContent = collapsed ? glyph[0] : glyph[1];
-      btn.onclick = () => setEdgeCollapsed(side, !g.api.isCollapsed());
-    } else if (loc.type === 'grid') {
+      btn.onclick = () => setEdgeCollapsed(side, !edgeState[side].collapsed);
+    } else if (region === 'center') {
       const max = g.api.isMaximized();
       btn.setAttribute('aria-label', max ? 'Restore group' : 'Maximize group');
       btn.setAttribute('aria-pressed', String(max));
@@ -436,51 +523,237 @@ class GroupActions {
   dispose() {
     for (const s of this.subs) s.dispose();
     this.subs = [];
+    actionBars.delete(this);
   }
 }
 
-function edgeGroup(e: Edge) {
-  return api.getGroup(edgeGroupId(e));
+// ---------------------------------------------------------------------------
+// the edges
+
+// The group holding the view that cannot be closed (the map) — what the
+// regions are read relative to — else one holding any center view.
+function anchorGroup(): string | null {
+  const grid = (p) => (p?.group?.api.location.type === 'grid' ? p.group.id : null);
+  const center = [...types.entries()].filter(([, t]) => t.singleton && defaultsOf(t).dock === 'center');
+  for (const [type, t] of center) if (!t.closable && grid(api.getPanel(type))) return grid(api.getPanel(type));
+  for (const [type] of center) if (grid(api.getPanel(type))) return grid(api.getPanel(type));
+  return null;
 }
 
-// The engine puts an edge group's tab strip on that edge's side, so the
-// bottom group's tabs would sit under its content. Every other group reads
-// top-down; so does this one. Applied at creation and after a restore, which
-// may carry the engine's side placement in an older saved layout.
-function bottomTabsOnTop() {
-  const g = edgeGroup('bottom');
-  if (g?.api?.getHeaderPosition?.() !== 'top') g?.api?.setHeaderPosition?.('top');
+function dockJSON() {
+  try {
+    return api.toJSON();
+  } catch {
+    return null;
+  }
 }
 
-function edgeCount(e: Edge) {
-  return edgeGroup(e)?.panels.length || 0;
+/** Read every grid group's region off the grid's shape now. */
+function refreshRegions() {
+  regions = regionsOf(dockJSON()?.grid, anchorGroup());
+}
+
+function regionOf(g): Region | null {
+  if (!g || g.api.location.type !== 'grid') return null;
+  return regions.get(g.id) || 'center';
+}
+
+/** An edge's groups, in grid order (fresh: the shell may have just changed the grid). */
+function edgeGroups(e: Edge) {
+  refreshRegions();
+  return [...regions].filter(([, r]) => r === e).map(([id]) => api.getGroup(id)).filter(Boolean);
+}
+
+const across = (e: Edge) => e !== 'bottom'; // its size is a width
+
+function acrossOf(g, e: Edge) {
+  const s = across(e) ? g.api.width : g.api.height;
+  return Number.isFinite(s) ? s : 0;
+}
+
+function sizeOfEdge(e: Edge) {
+  const g = edgeGroups(e)[0];
+  const s = g ? acrossOf(g, e) : 0;
+  return s > RAIL + 1 ? s : edgeState[e].size;
+}
+
+function setAcross(g, e: Edge, n: number) {
+  g.api.setSize(across(e) ? { width: n } : { height: n });
+}
+
+// What each edge group measures across its edge (a side column's width, the
+// bottom row's height) when last seen expanded: what it expands back to, and
+// what it keeps when the engine shares out room among the root's columns (a
+// tab dropped on the dock's outer edge makes a new one).
+const groupSize = new Map<string, number>();
+let knownGroups = new Set<string>();
+
+function recordSizes(e: Edge) {
+  if (edgeState[e].collapsed) return;
+  for (const g of edgeGroups(e)) {
+    const n = acrossOf(g, e);
+    if (n > RAIL + 1) groupSize.set(g.id, n);
+  }
+}
+
+// A collapsed edge is its groups pinned to the thickness of their tab strip:
+// a rail of tab titles (written vertically on the left and right).
+function railOf(g, e: Edge) {
+  const strip = g.element?.querySelector?.('.dv-tabs-and-actions-container');
+  const n = strip ? (across(e) ? strip.offsetWidth : strip.offsetHeight) : 0;
+  return n > 0 ? n : RAIL;
+}
+
+function rail(g, e: Edge) {
+  const n = railOf(g, e);
+  g.api.setConstraints?.(across(e) ? { minimumWidth: n, maximumWidth: n } : { minimumHeight: n, maximumHeight: n });
+  setAcross(g, e, n);
+  railed.add(g.id);
+}
+
+function unrail(g) {
+  g.api.setConstraints?.({ minimumWidth: GROUP_MIN, maximumWidth: NO_MAX, minimumHeight: GROUP_MIN, maximumHeight: NO_MAX });
+  railed.delete(g.id);
+}
+
+/**
+ * Put an edge's groups in its collapse state. Expanding gives each group back
+ * its size, unless `keepSize` (a restore: the grid already has it).
+ */
+function applyEdge(e: Edge, keepSize = false) {
+  const gs = edgeGroups(e);
+  if (!gs.length) return;
+  if (edgeState[e].collapsed) {
+    for (const g of gs) rail(g, e);
+    return;
+  }
+  for (const g of gs) unrail(g);
+  if (keepSize) return;
+  // (twice: sizing one column can take room from a neighbour sized before it)
+  for (let pass = 0; pass < 2; pass++) {
+    for (const g of gs) setAcross(g, e, groupSize.get(g.id) || edgeState[e].size);
+  }
 }
 
 function setEdgeCollapsed(e: Edge, collapsed: boolean) {
-  const g = edgeGroup(e);
-  if (!g || g.api.isCollapsed() === collapsed) return;
-  if (collapsed) g.api.collapse();
-  else g.api.expand();
+  const st = edgeState[e];
+  if (st.collapsed === collapsed || !edgeGroups(e).length) return;
+  if (collapsed) {
+    recordSizes(e);
+    st.size = sizeOfEdge(e);
+  }
+  st.collapsed = collapsed;
+  withBatch(() => applyEdge(e));
   // its windows come into sight or go out of it
   sync();
 }
 
-// An edge group with nothing in it is hidden — except during a drag, when it
-// is the place to drop. One that fills up from empty opens expanded.
-function syncEdges() {
-  if (!api) return;
+// Where a new edge goes: a column at the dock's left or right, or a row under
+// the center (between the side edges).
+function newEdgePosition(e: Edge) {
+  if (e !== 'bottom') return { direction: e };
+  const ref = bottomReference(dockJSON()?.grid, anchorGroup());
+  return ref && api.getGroup(ref) ? { referenceGroup: ref, direction: 'below' } : { direction: 'below' };
+}
+
+// Add a panel to an edge: into the group it was in (`group`) while that is
+// still part of the edge, else the edge's first group, else a new edge.
+function addToEdge(o: any, e: Edge, group?: string) {
+  const gs = edgeGroups(e);
+  const into = gs.find((g) => g.id === group) || gs[0];
+  if (into) {
+    o.position = { referenceGroup: into.id, direction: 'within' };
+    return api.addPanel(o);
+  }
+  edgeState[e].collapsed = false;
+  o.position = newEdgePosition(e);
+  const panel = api.addPanel(o);
+  const g = panel.group;
+  headerFor(g, e);
+  setAcross(g, e, edgeState[e].size);
+  groupSize.set(g.id, edgeState[e].size);
+  return panel;
+}
+
+// The anchor (the map) takes the room a resize adds or removes, as it did when
+// the edges were outside the grid — not the last row and column, which are
+// now the bottom and right edges. Dockview has a layout priority per view but
+// sets it for a group only at creation, so the shell sets the group's own
+// field (`_priority`: dockview-core 8.4.1, pinned — D014) and nudges it with
+// an empty constraint change, which makes the splits above it re-read it.
+function prioritize() {
+  const anchor = anchorGroup();
+  for (const g of api.groups || []) {
+    if (g.api.location.type !== 'grid' || !('_priority' in g || g.id === anchor)) continue;
+    const want = g.id === anchor ? 'high' : undefined;
+    if (g._priority === want) continue;
+    g._priority = want;
+    g.api.setConstraints?.({});
+  }
+}
+
+// The side edges' tab strips run down their outer side; every other group's
+// across its top.
+function headerFor(g, region: Region | null) {
+  const want = region === 'left' || region === 'right' ? region : 'top';
+  if (g?.api?.getHeaderPosition?.() !== want) g?.api?.setHeaderPosition?.(want);
+}
+
+/**
+ * The edges after any change: their regions re-read, every group's tab strip
+ * on its side, an edge that is empty no longer collapsed, a group that has
+ * left a collapsed edge (dragged out whole) no longer railed — and one that
+ * a panel was dropped into, collapsed, expanded. `quiet`: a restore or the
+ * shell's own rearranging, where a panel arriving is not a drop.
+ */
+function syncEdges(quiet = false) {
+  refreshRegions();
+  for (const g of api.groups || []) headerFor(g, regionOf(g));
+  withBatch(prioritize);
+  const now: Record<Edge, Set<string>> = { left: new Set(), right: new Set(), bottom: new Set() };
+  for (const [id, r] of regions) {
+    if (r === 'center') continue;
+    for (const p of api.getGroup(id)?.panels || []) now[r].add(p.id);
+  }
   for (const e of EDGES) {
-    const n = edgeCount(e);
-    const want = n > 0 || dragging;
-    if (api.isEdgeGroupVisible(e) !== want) api.setEdgeGroupVisible(e, want);
-    if (n === 0) {
-      if (!dragging) edgeWasEmpty[e] = true;
-      if (!edgeGroup(e)?.api.isCollapsed()) edgeGroup(e)?.api.collapse();
-    } else if (edgeWasEmpty[e]) {
-      edgeWasEmpty[e] = false;
-      edgeGroup(e)?.api.expand(); // (no sync: this is part of one)
+    const st = edgeState[e];
+    if (!now[e].size) {
+      st.collapsed = false;
+      continue;
+    }
+    if (st.collapsed && !quiet && [...now[e]].some((id) => !edgePanels[e].has(id))) {
+      st.collapsed = false;
+      withBatch(() => applyEdge(e));
+    } else if (st.collapsed) {
+      // a group that joined the edge (a tab dropped on its outer side)
+      for (const g of edgeGroups(e)) if (!railed.has(g.id)) withBatch(() => rail(g, e));
     }
   }
+  for (const id of [...railed]) {
+    const g = api.getGroup(id);
+    const r = g ? regionOf(g) : null;
+    if (!g) railed.delete(id);
+    else if (!r || r === 'center' || !edgeState[r].collapsed) withBatch(() => unrail(g));
+  }
+  // A group the user just made (a tab dropped on a group's edge, or on the
+  // dock's outer edge): the engine shares the room out evenly among the root's
+  // columns, so the edges that were there get their size back, and a new edge
+  // column takes an edge's size — the center gives or takes the difference.
+  const fresh = [...regions.keys()].filter((id) => !knownGroups.has(id));
+  if (fresh.length && knownGroups.size && !quiet) {
+    withBatch(() => {
+      for (const e of EDGES) {
+        if (edgeState[e].collapsed) continue;
+        const gs = edgeGroups(e);
+        for (const g of gs) if (fresh.includes(g.id)) setAcross(g, e, edgeState[e].size);
+        for (const g of gs) if (!fresh.includes(g.id) && groupSize.get(g.id)) setAcross(g, e, groupSize.get(g.id));
+      }
+    });
+  }
+  for (const e of EDGES) recordSizes(e);
+  knownGroups = new Set(regions.keys());
+  edgePanels = now;
+  for (const bar of actionBars) bar.render();
 }
 
 function syncToggle(type: string) {
@@ -492,10 +765,11 @@ function syncToggle(type: string) {
   btn.setAttribute(btn.getAttribute('role') === 'menuitemcheckbox' ? 'aria-checked' : 'aria-pressed', on);
 }
 
-/** Open and actually on screen: its tab in front, its edge group not collapsed. */
+/** Open and actually on screen: its tab in front, its edge not collapsed. */
 function inSight(panel) {
   if (!panel) return false;
-  if (panel.group?.api.location.type === 'edge' && panel.group.api.isCollapsed()) return false;
+  const r = regionOf(panel.group);
+  if (r && r !== 'center' && edgeState[r].collapsed) return false;
   return panel.api.isVisible !== false;
 }
 
@@ -527,7 +801,8 @@ function floatBoxOf(g): Box | null {
 function slotOf(panel): Slot {
   const g = panel.group;
   const loc = g?.api.location;
-  if (loc?.type === 'edge') return { edge: loc.position };
+  const r = regionOf(g);
+  if (r && r !== 'center') return { edge: r, group: g.id };
   if (loc?.type === 'floating') {
     const b = floatBoxOf(g);
     if (b) return { float: b };
@@ -547,7 +822,7 @@ const focusReturn = new Set<string>();
  * shell calls it after its own changes; a user's drag or close reaches it
  * from the engine's events.
  */
-function sync() {
+function sync(quiet = false) {
   syncQueued = false;
   if (!api || batch) return;
   const changed: Instance[] = [];
@@ -558,7 +833,7 @@ function sync() {
     inst.open = !!panel;
     changed.push(inst);
   }
-  syncEdges();
+  syncEdges(quiet === true);
   for (const type of types.keys()) syncToggle(type);
   const sighted: Instance[] = [];
   for (const inst of instances.values()) {
@@ -600,8 +875,9 @@ function withBatch<T>(fn: () => T): T {
 // ---------------------------------------------------------------------------
 // placing
 
-// The box floating positions are measured from: the grid between the edge
-// groups (Dockview's own root), or the whole dock before it has one.
+// The box floating positions are measured from, and floating windows are
+// held inside: the whole dock — its center and its edges, which are all one
+// grid (Dockview's own root) — or the host before there is one.
 function hostRect() {
   const grid = host?.querySelector?.('.dv-dockview');
   const r = (grid || host)?.getBoundingClientRect?.();
@@ -667,8 +943,9 @@ function centerPosition(type: string) {
   if (next) return { referencePanel: next, direction: 'above' };
   const prev = center.slice(0, Math.max(0, i)).reverse().find((k) => api.getPanel(k));
   if (prev) return { referencePanel: prev, direction: 'below' };
-  const any = api.groups.find((g) => g.api.location.type === 'grid');
-  return any ? { referenceGroup: any.id, direction: 'within' } : undefined;
+  refreshRegions();
+  const any = [...regions].find(([, r]) => r === 'center');
+  return any ? { referenceGroup: any[0], direction: 'within' } : undefined;
 }
 
 // A center view with a declared height (the strips) gets it; the rest of the
@@ -683,7 +960,7 @@ function panelOptions(id: string, type: string, title: string) {
     id,
     component: type,
     title,
-    tabComponent: t.closable ? undefined : 'fixed',
+    tabComponent: t.closable ? 'window' : 'fixed',
   };
 }
 
@@ -691,13 +968,14 @@ function addTo(id: string, type: string, title: string, where: Slot, extra: any 
   const t = spec(type);
   const o: any = { ...panelOptions(id, type, title), ...extra };
   if ('edge' in where) {
-    api.setEdgeGroupVisible(where.edge, true);
-    o.position = { referenceGroup: edgeGroupId(where.edge), direction: 'within' };
+    return addToEdge(o, where.edge, where.group);
   } else if ('group' in where && api.getGroup(where.group)) {
     o.position = { referenceGroup: where.group, direction: 'within' };
   } else if ('float' in where) {
-    const f = where.float;
-    o.floating = { position: { left: Math.max(0, f.left), top: Math.max(0, f.top) }, width: f.width, height: f.height };
+    // (held inside the dock: a spot saved on a larger screen comes back in reach)
+    const hr = hostRect();
+    const f = clampBox(where.float, { width: hr.width, height: hr.height });
+    o.floating = { position: { left: f.left, top: f.top }, width: f.width, height: f.height };
   } else if ('center' in where) {
     const pos = centerPosition(type);
     if (pos) o.position = pos;
@@ -811,7 +1089,7 @@ function isOpen(type: string, key = '') {
   return api ? !!api.getPanel(inst.id) : inst.open;
 }
 
-/** Open and actually on screen: its tab in front, its edge group expanded. */
+/** Open and actually on screen: its tab in front, its edge expanded. */
 function isShown(type: string, key = '') {
   const inst = find(type, key);
   return !!inst && inSight(api?.getPanel(inst.id));
@@ -828,8 +1106,8 @@ function toggle(type: string, key = '', opts: OpenOptions = {}) {
 function reveal(type: string, key = '', opts: OpenOptions = {}) {
   const el = open(type, key, opts);
   const panel = api.getPanel(find(type, key).id);
-  const loc = panel?.group?.api.location;
-  if (loc?.type === 'edge') setEdgeCollapsed(loc.position, false);
+  const r = regionOf(panel?.group);
+  if (r && r !== 'center') setEdgeCollapsed(r, false);
   return el;
 }
 
@@ -849,8 +1127,8 @@ function location(type: string, key = ''): { dock: Home; open: boolean } | null 
   if (!inst) return null;
   const panel = api?.getPanel(inst.id);
   if (!panel) return { dock: null, open: false };
-  const loc = panel.group.api.location;
-  return { dock: loc.type === 'edge' ? loc.position : loc.type === 'grid' ? 'center' : null, open: true };
+  refreshRegions();
+  return { dock: regionOf(panel.group), open: true };
 }
 
 /** Where a window is now (or was last), to open another one in its place. */
@@ -908,30 +1186,28 @@ function applyPlan(plan: Plan, { keepFloating = false, keepMulti = true } = {}) 
       api.addPanel(o);
       prev = id;
     }
-    // (sized once the column is whole: each add splits its neighbour)
+    // each edge one group: the bottom first, so it runs under the center
+    // only, then the side columns either side of both
+    railed.clear();
+    groupSize.clear();
+    for (const e of ['bottom', 'left', 'right'] as Edge[]) {
+      const { ids, size, collapsed } = plan.edges[e];
+      edgeState[e] = { collapsed: false, size: size || EDGE_SIZE[e] };
+      let first = true;
+      for (const id of ids) {
+        const type = id.split(':')[0];
+        if (!types.has(type)) continue;
+        addToEdge({ ...panelOptions(id, type, titleFor(id, type)), inactive: !first }, e);
+        first = false;
+      }
+      edgeState[e].collapsed = !!collapsed && !first;
+    }
+    prioritize();
+    for (const e of EDGES) applyEdge(e);
+    // (sized once the grid is whole: each add splits its neighbour)
     for (const id of plan.center) {
       const t = types.get(id.split(':')[0]);
       if (t) sizeView(api.getPanel(id), t);
-    }
-    for (const e of EDGES) {
-      const { ids, size, collapsed } = plan.edges[e];
-      ids.forEach((id, i) => {
-        const type = id.split(':')[0];
-        if (!types.has(type)) return;
-        api.addPanel({
-          ...panelOptions(id, type, titleFor(id, type)),
-          position: { referenceGroup: edgeGroupId(e), direction: 'within' },
-          inactive: i > 0,
-        });
-      });
-      const g = edgeGroup(e);
-      api.setEdgeGroupVisible(e, ids.length > 0);
-      if (ids.length) {
-        if (collapsed) g.api.collapse();
-        else g.api.expand();
-        g.api.setSize(e === 'bottom' ? { height: size || EDGE_SIZE[e] } : { width: size || EDGE_SIZE[e] });
-      }
-      edgeWasEmpty[e] = ids.length === 0;
     }
     for (const { id, at } of plan.floating) {
       const inst = instances.get(id);
@@ -956,12 +1232,12 @@ function applyPlan(plan: Plan, { keepFloating = false, keepMulti = true } = {}) 
       addTo(inst.id, inst.type, titleOf(inst), s, { inactive: true });
     }
   });
-  sync();
+  sync(true);
 }
 
 /**
  * Put every window back where the declarations say (SHELL-008): the views
- * stacked in the center, docked windows in their edge group in declaration
+ * stacked in the center, docked windows in their edge's one group in declaration
  * order, floating ones at their default spot, edges at the default size and
  * expanded. A persisted window's open state goes back to its default; a
  * transient one (an allocation or event window) keeps its open state and is
@@ -974,36 +1250,55 @@ function resetLayout({ keepFloating = false } = {}) {
   applyPlan(defaultPlan(typeInfos()), { keepFloating });
 }
 
-const SHELL_VERSION = 2;
+const SHELL_VERSION = 3;
 
-/** The shell's half of the session: the dock's own serialization, and where closed windows reopen. */
+/**
+ * The shell's half of the session: the dock's own serialization (the one
+ * grid, edges and their splits included, and the floating windows), each
+ * edge's collapse and the size it expands to, and where closed windows reopen.
+ */
 function serialize() {
   const homes = {};
   for (const inst of instances.values()) {
     const t = spec(inst.type);
     if (!t.singleton || !t.persist || api?.getPanel(inst.id)) continue;
     const s = slots.get(inst.id);
-    if (s && !('group' in s)) homes[inst.id] = s;
+    if (s && !('group' in s && !('edge' in s))) homes[inst.id] = s;
   }
-  return { version: SHELL_VERSION, dock: api ? api.toJSON() : null, homes };
+  const edges: Partial<Record<Edge, EdgeState>> = {};
+  if (api) {
+    for (const e of EDGES) {
+      if (!edgeGroups(e).length) continue;
+      const st = edgeState[e];
+      recordSizes(e);
+      const groups: Record<string, number> = {};
+      for (const g of edgeGroups(e)) if (groupSize.has(g.id)) groups[g.id] = groupSize.get(g.id);
+      edges[e] = { collapsed: st.collapsed, size: st.collapsed ? st.size : sizeOfEdge(e), groups };
+    }
+  }
+  return { version: SHELL_VERSION, dock: api ? api.toJSON() : null, edges, homes };
 }
 
 /**
  * The layout from a session's shell section: the dock's own serialization
- * (version 2), or a version-1 `{ windows, drawers }` read through the one
- * legacy path. Panels the session saved whose window is not back yet (a
+ * (version 3; a version 2 one, with the engine's edge groups, is read as one
+ * first — layout-plan.ts `dockFromEdgeGroups`), or a version-1
+ * `{ windows, drawers }` read through the one legacy path. Panels the session saved whose window is not back yet (a
  * pinned allocation window, recreated after a worker round-trip) hold their
  * slot as a placeholder until `open(…, { restoring: true })` fills it or
  * `dropPlaceholders` gives up on it.
  */
 function restore(snapshot) {
   if (!snapshot || typeof snapshot !== 'object' || !api) return;
-  if (snapshot.version === SHELL_VERSION && snapshot.dock) {
+  if ((snapshot.version === SHELL_VERSION || snapshot.version === 2) && snapshot.dock) {
+    const { dock, edges } = snapshot.version === 2
+      ? dockFromEdgeGroups(snapshot.dock)
+      : { dock: snapshot.dock, edges: snapshot.edges || {} };
     const keep = [...instances.values()].filter((i) => !spec(i.type).persist && spec(i.type).singleton && api.getPanel(i.id));
     let ok = true;
     withBatch(() => {
       try {
-        api.fromJSON(snapshot.dock, { reuseExistingPanels: true });
+        api.fromJSON(dock, { reuseExistingPanels: true });
       } catch {
         ok = false;
       }
@@ -1031,18 +1326,25 @@ function restore(snapshot) {
         if (!api.getPanel(inst.id)) addTo(inst.id, inst.type, titleOf(inst), { float: defaultFloat(inst, spec(inst.type)) });
       }
       ensureFixed();
-      bottomTabsOnTop();
       slots.clear();
       for (const [id, s] of Object.entries(snapshot.homes || {})) {
         if (instances.has(id) && s && typeof s === 'object') slots.set(id, s as Slot);
       }
-      for (const e of EDGES) edgeWasEmpty[e] = edgeCount(e) === 0;
+      railed.clear();
+      groupSize.clear();
+      for (const e of EDGES) {
+        const saved: EdgeState = edges?.[e] || {};
+        for (const [id, n] of Object.entries(saved.groups || {})) if (Number(n) > RAIL) groupSize.set(id, Number(n));
+        const size = Number(saved.size);
+        edgeState[e] = { collapsed: !!saved.collapsed, size: size > RAIL ? size : EDGE_SIZE[e] };
+        applyEdge(e, true);
+      }
     });
     if (!ok) {
       resetLayout();
       return;
     }
-    sync();
+    sync(true);
     return;
   }
   if (snapshot.windows || snapshot.drawers) {

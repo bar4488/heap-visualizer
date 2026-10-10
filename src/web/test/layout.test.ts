@@ -7,6 +7,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import { installDom, El } from './dom-stub.ts';
 import { createFakeDockview } from './fake-dockview.ts';
@@ -14,6 +15,7 @@ import { createFakeDockview } from './fake-dockview.ts';
 const doc: any = installDom();
 
 const { layout, defaultPlan, legacyPlan } = await import('../shell/layout.ts');
+const { regionsOf, bottomReference, dockFromEdgeGroups } = await import('../shell/layout-plan.ts');
 
 function panelEl(id = null) {
   const el = id ? doc.getElementById(id) : new El('div');
@@ -57,7 +59,17 @@ const api: any = layout.init(new El('main'), { createDockview: createFakeDockvie
 
 const el = (type, key = '') => layout.element(type, key);
 const where = (type, key = '') => layout.location(type, key);
-const edgeIds = (side) => api.getGroup(`edge-${side}`).panels.map((p) => p.id);
+// an edge's groups and panels, read off the grid the way the shell reads them
+const regions = () => regionsOf(api.toJSON().grid, api.getPanel('view-map')?.group.id ?? null);
+const edgeGroups = (side) => [...regions()].filter(([, r]) => r === side).map(([id]) => api.getGroup(id));
+const edgeIds = (side) => edgeGroups(side).flatMap((g) => g.panels.map((p) => p.id));
+// the collapse button at the end of an edge's last group
+const edgeButton = (side) => {
+  const gs = edgeGroups(side);
+  const kids = gs[gs.length - 1].actions.element.children;
+  return kids[kids.length - 1];
+};
+const collapsed = (side) => edgeGroups(side).every((g) => g.constraints.maximumWidth < 100 || g.constraints.maximumHeight < 100);
 
 test('register adopts a singleton: parked and hidden, titled, labelled', () => {
   const a = el('a-panel');
@@ -78,12 +90,15 @@ test('resetLayout: views stacked in the center, windows in their edge in order, 
   assert.deepEqual(where('view-map'), { dock: 'center', open: true });
   assert.deepEqual(edgeIds('right'), ['a-panel', 'b-panel']);
   assert.deepEqual(edgeIds('left'), ['l-panel']);
-  assert.equal(api.getGroup('edge-right').activePanel.id, 'a-panel', 'the first tab is in front');
+  assert.equal(edgeGroups('right').length, 1, 'each edge one group');
+  assert.equal(edgeGroups('right')[0].activePanel.id, 'a-panel', 'the first tab is in front');
   assert.equal(layout.isOpen('c-panel'), false);
   assert.equal(el('c-panel').hidden, true, 'a closed window is parked, hidden');
   assert.equal(el('a-panel').hidden, false);
-  assert.equal(api.isEdgeGroupVisible('right'), true);
-  assert.equal(api.isEdgeGroupVisible('bottom'), false, 'an empty edge is hidden');
+  assert.deepEqual(edgeIds('bottom'), [], 'an empty edge takes no room');
+  // the side edges' tab strips run down their outer side
+  assert.equal(edgeGroups('left')[0].api.getHeaderPosition(), 'left');
+  assert.equal(edgeGroups('right')[0].api.getHeaderPosition(), 'right');
   assert.equal(toggleBtn.getAttribute('aria-pressed'), 'true');
   assert.deepEqual(api.getGroup(api.getPanel('view-t').group.id).size, { height: 80 }, 'a view with a declared height gets it');
 });
@@ -99,13 +114,12 @@ test('open/close/toggle own visibility, the edge, the toggle state and the hooks
   layout.close('a-panel'); // already closed: no second hook
   assert.deepEqual(closed, ['a']);
   layout.close('b-panel');
-  assert.equal(api.isEdgeGroupVisible('right'), false, 'an edge with nothing open vanishes');
+  assert.deepEqual(edgeIds('right'), [], 'an edge with nothing open vanishes');
 
   // reopening returns it to the edge it was in
   layout.open('a-panel');
   assert.deepEqual(where('a-panel'), { dock: 'right', open: true });
-  assert.equal(api.isEdgeGroupVisible('right'), true);
-  assert.equal(api.getGroup('edge-right').api.isCollapsed(), false, 'an edge that fills up opens expanded');
+  assert.equal(layout.isShown('a-panel'), true, 'an edge that fills up opens expanded');
   layout.open('a-panel'); // already open: no second open hook
   assert.deepEqual(opened, ['a']);
 
@@ -126,12 +140,14 @@ test('a toggle brings an open window that is out of sight to the front, and clos
 
   // a collapsed edge: the toolbar toggle expands it rather than closing, and
   // the window coming back into sight runs its open hooks (a list catches up)
-  api.getGroup('edge-right').api.collapse();
+  edgeButton('right').onclick();
+  assert.equal(collapsed('right'), true);
+  assert.equal(edgeButton('right').getAttribute('aria-label'), 'Expand right dock');
   assert.equal(layout.isShown('a-panel'), false);
   opened.length = 0;
   toggleBtn.onclick();
   assert.equal(layout.isOpen('a-panel'), true);
-  assert.equal(api.getGroup('edge-right').api.isCollapsed(), false);
+  assert.equal(collapsed('right'), false);
   assert.deepEqual(opened, ['a']);
   toggleBtn.onclick();
   assert.equal(layout.isOpen('a-panel'), false);
@@ -211,7 +227,7 @@ test('serialize -> restore puts every window back, and a saved pinned window kee
   layout.open('c-panel', '', { dock: 'bottom' });
   layout.close('b-panel');
   const saved = layout.serialize();
-  assert.equal(saved.version, 2);
+  assert.equal(saved.version, 3);
 
   layout.resetLayout();
   layout.closeAll('pin');
@@ -265,12 +281,14 @@ test('opening an open window in another window\'s place moves it there (unpin in
 test('a restore cannot lose the view that must always exist, and a broken one falls back to the default', () => {
   layout.resetLayout();
   const saved = layout.serialize();
-  saved.dock.groups = saved.dock.groups.map((g) => ({ ...g, views: g.views.filter((v) => v !== 'view-map') }));
+  const drop = (n) => (n.type === 'leaf' ? { ...n, data: { ...n.data, views: n.data.views.filter((v) => v !== 'view-map') } }
+    : { ...n, data: n.data.map(drop) });
+  saved.dock.grid.root = drop(saved.dock.grid.root);
   layout.restore(saved);
   assert.deepEqual(where('view-map'), { dock: 'center', open: true });
 
   layout.close('a-panel');
-  layout.restore({ version: 2, dock: { garbage: true } });
+  layout.restore({ version: 3, dock: { garbage: true } });
   assert.equal(layout.isOpen('a-panel'), true, 'reset to the default');
 });
 
@@ -332,18 +350,126 @@ test('restoring a pre-dock session through the shell docks and floats as it said
     drawers: { left: ['b-panel', 'pin:5'], right: [], widthLeft: 333, widthRight: 300, collapsedLeft: false, collapsedRight: false },
   });
   assert.deepEqual(edgeIds('left'), ['b-panel', 'pin:5']);
-  assert.equal(api.getGroup('edge-left').size.width, 333);
+  assert.equal(edgeGroups('left')[0].size.width, 333);
   assert.deepEqual(where('a-panel'), { dock: null, open: true });
   assert.equal(layout.isOpen('l-panel'), false);
   assert.equal(api.getPanel('c-panel').group.api.boundingBox.left, 50);
   layout.open('pin', '5', { restoring: true, dock: 'left', data: {} });
   assert.deepEqual(edgeIds('left'), ['b-panel', 'pin:5']);
-  assert.equal(layout.serialize().version, 2, 'and it is written back as a dock layout');
+  assert.equal(layout.serialize().version, 3, 'and it is written back as a dock layout');
   layout.closeAll('pin');
 });
 
-test('the bottom edge group reads top-down: its tab strip sits above its content', () => {
-  assert.equal(api.getGroup('edge-bottom').api.getHeaderPosition(), 'top');
-  // the side edges keep the engine's placement
-  assert.equal(api.getGroup('edge-left').api.getHeaderPosition(), 'left');
+test('the bottom edge reads top-down, and runs under the center only', () => {
+  layout.resetLayout();
+  layout.open('c-panel', '', { dock: 'bottom' });
+  const [bottom] = edgeGroups('bottom');
+  assert.equal(bottom.api.getHeaderPosition(), 'top');
+  // under the map, inside the center column: not below the side edges
+  const json = api.toJSON().grid;
+  assert.equal(json.orientation, 'HORIZONTAL');
+  const mid = json.root.data.find((n) => n.type === 'branch');
+  assert.equal(mid.data[mid.data.length - 1].data.id, bottom.id);
+  layout.close('c-panel');
+});
+
+// (engine events reach the shell on the next microtask)
+const settle = () => new Promise((resolve) => queueMicrotask(() => resolve(null)));
+
+test('an edge splits: a group dropped on an edge group\'s side stays in that edge, and collapses with it', async () => {
+  layout.resetLayout();
+  // (as a drag would: the engine makes a new group beside L's)
+  api.addPanel({ id: 'c-panel', component: 'c-panel', title: 'C', position: { referenceGroup: api.getPanel('l-panel').group.id, direction: 'below' } });
+  await settle();
+  assert.deepEqual(where('c-panel'), { dock: 'left', open: true });
+  assert.equal(edgeGroups('left').length, 2);
+  assert.equal(api.getPanel('c-panel').group.api.getHeaderPosition(), 'left', 'its tabs run down the side too');
+  // the edge's collapse button (on its last group) collapses both
+  edgeButton('left').onclick();
+  assert.equal(collapsed('left'), true);
+  assert.equal(layout.isShown('c-panel'), false);
+  assert.equal(layout.isShown('l-panel'), false);
+
+  // the split and the collapse survive the session
+  const saved = JSON.parse(JSON.stringify(layout.serialize()));
+  assert.equal(saved.edges.left.collapsed, true);
+  layout.resetLayout();
+  assert.equal(edgeGroups('left').length, 1, 'reset: one group per edge again');
+  assert.equal(layout.isOpen('c-panel'), false);
+  layout.restore(saved);
+  assert.equal(edgeGroups('left').length, 2);
+  assert.deepEqual(where('c-panel'), { dock: 'left', open: true });
+  assert.equal(collapsed('left'), true);
+
+  // a window opened into a collapsed edge expands it, every group of it
+  layout.reveal('l-panel');
+  assert.equal(collapsed('left'), false);
+  assert.equal(layout.isShown('c-panel'), true);
+  layout.close('c-panel');
+});
+
+test('a tab dropped on the dock\'s outer edge makes a new edge column; the map split stays center', async () => {
+  layout.resetLayout();
+  api.addPanel({ id: 'c-panel', component: 'c-panel', title: 'C', position: { direction: 'left' } });
+  await settle();
+  assert.deepEqual(where('c-panel'), { dock: 'left', open: true });
+  assert.deepEqual(edgeIds('left'), ['c-panel', 'l-panel']);
+  layout.close('c-panel');
+  api.addPanel({ id: 'c-panel', component: 'c-panel', title: 'C', position: { referenceGroup: api.getPanel('view-map').group.id, direction: 'right' } });
+  assert.deepEqual(where('c-panel'), { dock: 'center', open: true });
+  layout.close('c-panel');
+});
+
+test('a tab dropped into a collapsed edge expands it', async () => {
+  layout.resetLayout();
+  edgeButton('right').onclick();
+  assert.equal(collapsed('right'), true);
+  api.addPanel({ id: 'c-panel', component: 'c-panel', title: 'C', position: { referenceGroup: api.getPanel('a-panel').group.id, direction: 'within' } });
+  await settle();
+  assert.equal(collapsed('right'), false);
+  assert.equal(layout.isShown('c-panel'), true);
+  layout.close('c-panel');
+});
+
+test('regions: read off the grid relative to the anchor', () => {
+  const leaf = (id) => ({ type: 'leaf' as const, data: { id } });
+  const branch = (...data) => ({ type: 'branch' as const, data });
+  // left | [strip / map / bottom-left | bottom-right] | right-top / right-bottom
+  const grid = {
+    orientation: 'HORIZONTAL' as const,
+    root: branch(leaf('L'), branch(leaf('S'), branch(leaf('M'), leaf('X')), branch(leaf('B1'), leaf('B2'))), branch(leaf('R1'), leaf('R2'))),
+  };
+  assert.deepEqual(Object.fromEntries(regionsOf(grid, 'M')), {
+    L: 'left', S: 'center', M: 'center', X: 'center', B1: 'bottom', B2: 'bottom', R1: 'right', R2: 'right',
+  });
+  // a root with one split child (as the engine leaves them) reads the same as that child
+  const wrapped = { orientation: 'VERTICAL' as const, root: branch(grid.root) };
+  assert.deepEqual(regionsOf(wrapped, 'M'), regionsOf(grid, 'M'));
+  // no side edges: a vertical root — above the map is center, below it bottom
+  const v = { orientation: 'VERTICAL' as const, root: branch(leaf('S'), leaf('M'), leaf('B')) };
+  assert.deepEqual(Object.fromEntries(regionsOf(v, 'M')), { S: 'center', M: 'center', B: 'bottom' });
+  // where a new bottom edge goes: below the last group of the map's column
+  assert.equal(bottomReference({ orientation: 'HORIZONTAL', root: branch(leaf('L'), branch(leaf('S'), leaf('M')), leaf('R')) }, 'M'), 'M');
+  assert.equal(bottomReference(v, 'M'), null, 'or below everything');
+});
+
+test('a v2 dock (the engine\'s edge groups) becomes the one grid: edges either side of the center, the bottom under it', () => {
+  const v2 = JSON.parse(readFileSync(new URL('./fixtures/shell-v2.json', import.meta.url), 'utf8'));
+  const { dock, edges } = dockFromEdgeGroups(v2.dock);
+  assert.equal(dock.edgeGroups, undefined);
+  assert.equal(dock.grid.orientation, 'HORIZONTAL');
+  const ids = (n) => (n.type === 'leaf' ? [n.data.id] : n.data.flatMap(ids));
+  assert.deepEqual(dock.grid.root.data.map(ids), [['edge-left'], ['4', '5', '6', 'edge-bottom'], ['edge-right']]);
+  const reg = regionsOf(dock.grid, '6');
+  assert.deepEqual(Object.fromEntries(reg), {
+    'edge-left': 'left', 4: 'center', 5: 'center', 6: 'center', 'edge-bottom': 'bottom', 'edge-right': 'right',
+  });
+  // each edge keeps its tabs and side, and its size and collapse
+  assert.equal(dock.grid.root.data[0].data.headerPosition, 'left');
+  assert.deepEqual(dock.grid.root.data[2].data.views, ['layout-panel', 'appearance-panel', 'filter-panel', 'analysis-panel', 'intervals-state']);
+  assert.deepEqual(edges, { left: { collapsed: false, size: 300 }, right: { collapsed: true, size: 300 }, bottom: { collapsed: false, size: 240 } });
+  // floating windows stay where they were on screen: measured from the whole dock now
+  assert.equal(dock.floatingGroups[0].position.left, v2.dock.floatingGroups[0].position.left + 300);
+  // a layout with no edge groups is left as it is
+  assert.equal(dockFromEdgeGroups(dock).dock, dock);
 });

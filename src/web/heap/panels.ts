@@ -23,7 +23,7 @@
 //           presents ('Heap', 'Stream', 'Logs'), or 'workspace' for the views'
 //           entries after the domain groups. Absent: no View entry
 //   label   optional: the View entry's label when it is not the title
-//   dock    where this panel starts: an edge group ('left' | 'right' |
+//   dock    where this panel starts: an edge ('left' | 'right' |
 //           'bottom'), the center grid ('center', stacked in table order), or
 //           null to start floating
 //   open    whether it starts visible
@@ -71,7 +71,7 @@ import type { PanelRecord } from '../panels.ts';
 type HeapPanel = Omit<PanelRecord, 'refill'>;
 
 // Table order is also the top-to-bottom order of the center views and the
-// tab order within each edge group.
+// tab order within each edge's default group.
 const PANELS: HeapPanel[] = [
   { id: 'strip-t', title: 'Time', toggle: 'btn-view-time', group: 'workspace', label: 'Time strip', dock: 'center', open: true, size: 96 },
   { id: 'strip-s', title: 'Event index', toggle: 'btn-view-seq', group: 'workspace', label: 'Event-index strip', dock: 'center', open: true, size: 96 },
