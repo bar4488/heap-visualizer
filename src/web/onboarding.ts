@@ -1,6 +1,6 @@
 import { $, $$ } from './shell/dom.ts';
 import { actions } from './shell/actions.ts';
-import { showGuidePage, toggleGuide } from './guide.ts';
+import { showGuide, toggleGuide } from './guide.ts';
 import type { LocalServerStatus } from './local-server.ts';
 
 const SEEN_KEY = 'heapviz:onboarding-seen';
@@ -81,10 +81,12 @@ export function initOnboarding(serverConfigured: () => boolean) {
     $('welcome').hidden = true;
     actions.run('file.connect');
   };
-  $('setup-what').onclick = (ev: Event) => {
+  // Setup's "What is heapviz?" and the welcome card's "Work with AI agents"
+  // line both open the heapviz & AI agents guide (SHELL-009).
+  $('setup-what').onclick = $('welcome-agents').onclick = (ev: Event) => {
     ev.preventDefault();
     $('welcome').hidden = true;
-    showGuidePage('heapviz-and-agents.md');
+    void showGuide('agents');
   };
   $('setup-linux').onclick = () => selectOS('linux');
   $('setup-windows').onclick = () => selectOS('windows');

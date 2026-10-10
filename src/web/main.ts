@@ -53,7 +53,7 @@ import {
   applyFilterCompletion, utf8Offset,
   insertAllocationReference,
 } from './filter-completion.ts';
-import { guideOpen, initGuide, showGuidePage, toggleGuide } from './guide.ts';
+import { guideOpen, initGuide, showGuide, toggleGuide } from './guide.ts';
 import { initRequest } from './request.ts';
 import { initOnboarding, setOnboardingConnectionStatus, showInstall } from './onboarding.ts';
 import { loadHighlighter, paintHighlight } from './highlight.ts';
@@ -1786,7 +1786,7 @@ layout.resetLayout({ keepFloating: true });
   actions.add({
     id: 'help.agents', label: 'heapviz & AI agents…', group: 'help', el: 'btn-help-agents',
     hint: 'What the heapviz companion is, how to install it, and how AI assistants use it',
-    run: () => showGuidePage('heapviz-and-agents.md'),
+    run: () => { void showGuide('agents'); },
     keywords: 'companion cli install local server claude opencode skill assistant',
   });
   actions.add({
@@ -1805,7 +1805,8 @@ const menus = initMenus(actions, $('menubar'), [
 ]);
 
 // The connection pill mirrors the status line's companion state (local-server.ts
-// writes it) and opens Connect; connected, it asks before disconnecting.
+// writes it). Not connected, a click offers Connect… or the heapviz & AI agents
+// guide; connected, it asks before disconnecting.
 {
   const pill = $('conn-status');
   const status = $('st-server');
@@ -1816,15 +1817,46 @@ const menus = initMenus(actions, $('menubar'), [
     const state = status.dataset.state || 'standalone';
     pill.dataset.state = state;
     $('conn-label').textContent = LABEL[state] || 'Connection issue';
-    pill.title = `${status.title || status.textContent} — click to ${state === 'connected' ? 'disconnect' : 'connect'}`
-      + '\nWhat\'s this? Help → heapviz & AI agents';
+    pill.title = `${status.title || status.textContent} — click to ${
+      state === 'connected' ? 'disconnect' : 'connect, or to learn what heapviz is'}`;
   };
   new MutationObserver(sync).observe(status, { attributes: true, childList: true, characterData: true, subtree: true });
   sync();
-  pill.onclick = () => {
-    if (pill.dataset.state === 'connected' && !confirm('Disconnect this tab from the heapviz local companion?')) return;
-    actions.run('file.connect');
+
+  const pop = $('conn-pop');
+  const items = [$('conn-pop-connect'), $('conn-pop-what')];
+  const closePop = (refocus = false) => {
+    if (pop.hidden) return;
+    pop.hidden = true;
+    pill.setAttribute('aria-expanded', 'false');
+    if (refocus) pill.focus();
   };
+  pill.setAttribute('aria-haspopup', 'menu');
+  pill.onclick = () => {
+    if (pill.dataset.state === 'connected') {
+      if (confirm('Disconnect this tab from the heapviz local companion?')) actions.run('file.connect');
+      return;
+    }
+    if (!pop.hidden) { closePop(); return; }
+    pop.hidden = false;
+    pill.setAttribute('aria-expanded', 'true');
+    const r = pill.getBoundingClientRect();
+    pop.style.top = `${r.bottom + 4}px`;
+    pop.style.left = `${Math.max(4, Math.min(innerWidth - pop.offsetWidth - 4, r.right - pop.offsetWidth))}px`;
+    items[0].focus();
+  };
+  items[0].onclick = () => { closePop(); actions.run('file.connect'); };
+  items[1].onclick = () => { closePop(); void showGuide('agents'); };
+  pop.addEventListener('keydown', (e: KeyboardEvent) => {
+    if (e.key === 'Escape') { e.stopPropagation(); closePop(true); return; }
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    e.preventDefault();
+    const at = items.indexOf(document.activeElement as typeof items[0]);
+    items[(at + (e.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length].focus();
+  });
+  document.addEventListener('pointerdown', (e) => {
+    if (!pop.contains(e.target as Node) && !pill.contains(e.target as Node)) closePop();
+  });
 }
 
 // ---------------------------------------------------------------------------
