@@ -223,7 +223,7 @@ export async function initLocalServerMode(
       onStatus(config, status);
       return;
     }
-    const value = window.prompt('Paste the connection string printed by heapviz:');
+    const value = window.prompt('Paste the Browser connection printed by heapviz open.\n\nNo heapviz yet? Cancel, then see Help → heapviz & AI agents.');
     if (value === null) return;
     const next = parseLocalServerConnection(value);
     if (!next) {

@@ -53,7 +53,7 @@ import {
   applyFilterCompletion, utf8Offset,
   insertAllocationReference,
 } from './filter-completion.ts';
-import { guideOpen, initGuide, toggleGuide } from './guide.ts';
+import { guideOpen, initGuide, showGuidePage, toggleGuide } from './guide.ts';
 import { initRequest } from './request.ts';
 import { initOnboarding, setOnboardingConnectionStatus, showInstall } from './onboarding.ts';
 import { loadHighlighter, paintHighlight } from './highlight.ts';
@@ -1784,6 +1784,12 @@ layout.resetLayout({ keepFloating: true });
     hint: 'What the views show and how to drive them', checked: guideOpen, run: () => toggleGuide(),
   });
   actions.add({
+    id: 'help.agents', label: 'heapviz & AI agents…', group: 'help', el: 'btn-help-agents',
+    hint: 'What the heapviz companion is, how to install it, and how AI assistants use it',
+    run: () => showGuidePage('heapviz-and-agents.md'),
+    keywords: 'companion cli install local server claude opencode skill assistant',
+  });
+  actions.add({
     id: 'help.shortcuts', label: 'Keyboard shortcuts', group: 'help', shortcut: '?', el: 'btn-shortcuts',
     run: () => menus.openShortcuts(),
   });
@@ -1810,7 +1816,8 @@ const menus = initMenus(actions, $('menubar'), [
     const state = status.dataset.state || 'standalone';
     pill.dataset.state = state;
     $('conn-label').textContent = LABEL[state] || 'Connection issue';
-    pill.title = `${status.title || status.textContent} — click to ${state === 'connected' ? 'disconnect' : 'connect'}`;
+    pill.title = `${status.title || status.textContent} — click to ${state === 'connected' ? 'disconnect' : 'connect'}`
+      + '\nWhat\'s this? Help → heapviz & AI agents';
   };
   new MutationObserver(sync).observe(status, { attributes: true, childList: true, characterData: true, subtree: true });
   sync();
