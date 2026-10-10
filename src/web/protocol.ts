@@ -54,8 +54,16 @@ export type TraceMeta = {
 export type DomainDescriptor = {
   id: string;
   name: string;
-  /** Record types: the wire letter (`"M"`) and the kind name (`"malloc"`). */
-  kinds: { op: string; kind: string }[];
+  /**
+   * Record types: the wire letter (`"M"`), the kind name (`"malloc"`), and
+   * what the UI calls it — `label` (`"alloc"`) and `description`
+   * (`"Allocation"`), optionally refined per summary `source` (an interval's
+   * `call` begin reads `call ▸`). Labels are absent from an older core.
+   */
+  kinds: {
+    op: string; kind: string; label?: string; description?: string;
+    sources?: Record<string, { label?: string; description?: string }>;
+  }[];
   shape: 'allocation' | 'point' | 'interval' | string;
   /** Records of this domain on the spine. */
   count: number;

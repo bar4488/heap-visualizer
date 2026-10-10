@@ -112,6 +112,12 @@ fn the_generic_abi_answers_for_every_domain() {
     let ids: Vec<&str> = all.as_array().unwrap().iter().map(|d| d["id"].as_str().unwrap()).collect();
     assert_eq!(ids, ["heap", "marks", "logs", "intervals"]);
     assert_eq!(all[2]["count"], 2);
+    // every kind carries a display label and a phrase, not only its letter
+    assert_eq!(all[0]["kinds"][0], serde_json::json!({"op":"M","kind":"malloc","label":"alloc","description":"Allocation"}));
+    assert_eq!(all[1]["kinds"][0]["label"], "mark");
+    assert_eq!(all[3]["kinds"][0]["sources"]["call"]["label"], "call ▸");
+    assert_eq!(all[3]["kinds"][1]["sources"]["call"]["label"], "ret ◂");
+    assert_eq!(all[3]["kinds"][2]["label"], "switch");
     assert_eq!(engine.domain_state("marks", 5).unwrap()["last"]["seq"], 2);
 }
 

@@ -10,9 +10,12 @@
 import { esc } from '../fmt.ts';
 import { customFieldsSection } from './custom-fields.ts';
 
-/** The label shown in the window's head. */
+/**
+ * The label shown in the window's head, in the Events list's vocabulary: an
+ * `E` record is a mark (NAV-005).
+ */
 export function eventWindowTitle(event) {
-  return event && event.title ? `Event · ${event.title}` : 'Event';
+  return event && event.title ? `Mark · ${event.title}` : 'Mark';
 }
 
 /**

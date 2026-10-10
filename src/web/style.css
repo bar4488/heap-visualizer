@@ -756,15 +756,10 @@ input[type="color"] {
   color: var(--fg-dim); width: 58px; flex: none; text-align: left;
   font-variant-numeric: tabular-nums;
 }
-.ev-row .ev-op { width: 14px; flex: none; font-weight: 700; }
-.ev-row .ev-op.m { color: var(--green); }
-.ev-row .ev-op.f { color: var(--red); }
-.ev-row .ev-op.r { color: #d29922; }
 .ev-row .ev-addr { color: var(--accent); }
 .ev-row .ev-size { color: var(--fg); }
 .ev-row .ev-site { color: var(--fg-dim); overflow: hidden; text-overflow: ellipsis; }
 /* a custom event: a landmark in the stream, not an allocation operation */
-.ev-row .ev-op.e { color: #bc8cff; }
 .ev-row .ev-label {
   color: #d2a8ff; overflow: hidden; text-overflow: ellipsis; font-style: italic;
 }
@@ -772,9 +767,6 @@ input[type="color"] {
 .ev-row.ev-custom:hover { background: rgba(188, 140, 255, 0.16); }
 
 /* any other domain's record: its generic summary (DOM-004) */
-.ev-row .ev-op.b { color: #56d364; }
-.ev-row .ev-op.x { color: #f0883e; }
-.ev-row .ev-op.c { color: #a5d6ff; }
 .ev-row .ev-thr { flex: none; color: var(--fg-dim); max-width: 120px; overflow: hidden; text-overflow: ellipsis; }
 .ev-row .ev-src { flex: none; margin-left: auto; color: var(--fg-dim); font-size: 10.5px; }
 .ev-row.ev-generic .ev-label { color: var(--fg); font-style: normal; }
@@ -1038,7 +1030,6 @@ input[type="color"] {
 @keyframes log-reveal { from { background: rgba(88,166,255,0.35); } to { background: transparent; } }
 
 /* a log record in the Events list: level and message instead of geometry */
-.ev-row .ev-op.l { color: var(--term-logger); }
 .ev-row .ev-lv { flex: none; font-weight: 700; color: var(--fg-dim); white-space: pre; }
 .ev-row .ev-msg { overflow: hidden; text-overflow: ellipsis; color: var(--fg); }
 .ev-row.ev-log { background: rgba(121, 192, 255, 0.05); }
@@ -1048,3 +1039,34 @@ input[type="color"] {
 .ev-row.ev-log.lv-4 .ev-lv, .ev-row.ev-log.lv-4 .ev-msg,
 .ev-row.ev-log.lv-5 .ev-lv, .ev-row.ev-log.lv-5 .ev-msg { color: var(--red); }
 .ev-row.ev-log.lv-5 .ev-msg { font-weight: 700; }
+
+/* --- Events list: kind labels and domain accents (NAV-005) ----------------
+   A row's record type reads as a word (alloc, free, call ▸, switch, a log
+   level), in a fixed-width chip tinted by its domain; a thin bar on the left
+   repeats the domain's color, as its chip at the top of the panel does. */
+.ev-row, .ev-chip { --dom: var(--fg-dim); }
+.ev-row[data-domain="heap"], .ev-chip.d-heap { --dom: #3fb950; }
+.ev-row[data-domain="marks"], .ev-chip.d-marks { --dom: #bc8cff; }
+.ev-row[data-domain="logs"], .ev-chip.d-logs { --dom: #79c0ff; }
+.ev-row[data-domain="intervals"], .ev-chip.d-intervals { --dom: #f0883e; }
+.ev-row { box-shadow: inset 2px 0 0 color-mix(in srgb, var(--dom) 70%, transparent); }
+.ev-row.cur { box-shadow: inset 3px 0 0 var(--dom); }
+.ev-row .ev-kind {
+  flex: none; width: 8ch; box-sizing: content-box; padding: 0 4px;
+  height: 14px; line-height: 14px; border-radius: 3px; overflow: hidden;
+  font-size: 10.5px; font-weight: 600; white-space: pre; text-overflow: clip;
+  color: var(--dom); background: color-mix(in srgb, var(--dom) 13%, transparent);
+  cursor: help;
+}
+.ev-row[data-domain="heap"] .ev-kind.k-malloc { color: var(--green); }
+.ev-row[data-domain="heap"] .ev-kind.k-free { color: var(--red); }
+.ev-row[data-domain="heap"] .ev-kind.k-realloc { color: #d29922; }
+.ev-row[data-domain="intervals"] .ev-kind.k-begin { color: #56d364; }
+.ev-row[data-domain="intervals"] .ev-kind.k-end { color: #f0883e; }
+.ev-row[data-domain="intervals"] .ev-kind.k-switch { color: #a5d6ff; }
+.ev-chip::before {
+  content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+  margin-right: 5px; vertical-align: 1px; background: var(--dom); opacity: 0.4;
+}
+.ev-chip.on::before { opacity: 1; }
+.ev-row.ev-log.lv-0 .ev-kind, .ev-row.ev-log.lv-1 .ev-kind { color: var(--fg-dim); }
