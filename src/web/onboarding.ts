@@ -1,6 +1,6 @@
 import { $, $$ } from './shell/dom.ts';
 import { actions } from './shell/actions.ts';
-import { toggleGuide } from './guide.ts';
+import { showGuidePage, toggleGuide } from './guide.ts';
 import type { LocalServerStatus } from './local-server.ts';
 
 const SEEN_KEY = 'heapviz:onboarding-seen';
@@ -80,6 +80,11 @@ export function initOnboarding(serverConfigured: () => boolean) {
   $('welcome-connect').onclick = () => {
     $('welcome').hidden = true;
     actions.run('file.connect');
+  };
+  $('setup-what').onclick = (ev: Event) => {
+    ev.preventDefault();
+    $('welcome').hidden = true;
+    showGuidePage('heapviz-and-agents.md');
   };
   $('setup-linux').onclick = () => selectOS('linux');
   $('setup-windows').onclick = () => selectOS('windows');

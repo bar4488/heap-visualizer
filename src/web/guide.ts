@@ -45,14 +45,14 @@ const SECTIONS = [
   { file: 'filters.md', title: 'Find allocations' },
   { file: 'tags-and-marks.md', title: 'Save a finding' },
   { file: 'your-trace.md', title: 'Open a local trace' },
-  { file: 'opencode.md', title: 'Connect an AI assistant' },
+  { file: 'heapviz-and-agents.md', title: 'heapviz & AI agents' },
   { file: 'troubleshooting.md', title: 'Fix a connection' },
   { file: 'the-format.md', title: 'Produce a trace' },
 ];
 
 const HIGHLIGHT_MS = 2200;
 
-let loaded = false;
+let loading: Promise<void> | null = null;
 let highlightTimer = 0;
 
 /**
@@ -253,17 +253,16 @@ function run(spec: string) {
 }
 
 async function load() {
-  // Set before the first await: opening and closing quickly must not start a
-  // second round of fetches. A section that fails renders its own failure, so
-  // there is nothing to retry by re-entering here.
-  loaded = true;
+  // Called once (toggleGuide keeps the promise): opening and closing quickly
+  // must not start a second round of fetches. A section that fails renders its
+  // own failure, so there is nothing to retry by re-entering here.
   const body = $('guide-body');
   const parts: string[] = [];
   for (const section of SECTIONS) {
     try {
       const resp = await fetch(`guide/${section.file}`, { cache: 'no-cache' });
       if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
-      parts.push(`<section class="g-section">${render(await resp.text())}</section>`);
+      parts.push(`<section class="g-section" id="${sectionId(section.file)}">${render(await resp.text())}</section>`);
     } catch (e) {
       parts.push(`<section class="g-section"><p class="g-fail">${
         esc(section.title)} failed to load: ${esc((e as Error).message)}</p></section>`);
@@ -277,7 +276,27 @@ export const guideOpen = () => !$('guide').hidden;
 
 export function toggleGuide(open = $('guide').hidden) {
   $('guide').hidden = !open;
-  if (open && !loaded) void load();
+  if (open && !loading) loading = load();
+}
+
+/** A section's element id: `guide-` plus its file name without `.md`. */
+const sectionId = (file: string) => `guide-${file.replace(/\.md$/, '')}`;
+
+/**
+ * Scroll the guide body to a section, moving nothing else: the reader's place
+ * in the app stays put (see `scrollParent`).
+ */
+function scrollToSection(id: string) {
+  const section = document.getElementById(id);
+  if (!section) return;
+  const body = $('guide-body');
+  body.scrollTop += section.getBoundingClientRect().top - body.getBoundingClientRect().top;
+}
+
+/** Open the guide at one section, e.g. Help → heapviz & AI agents. */
+export function showGuidePage(file: string) {
+  toggleGuide(true);
+  void loading.then(() => scrollToSection(sectionId(file)));
 }
 
 export function initGuide() {
@@ -289,6 +308,11 @@ export function initGuide() {
   $('guide-body').addEventListener('click', (ev: any) => {
     const btn = ev.target.closest('.g-act');
     if (btn) act(btn.dataset.act);
+    // A link to another section (`[Fix a connection](#guide-troubleshooting)`)
+    // scrolls the guide only; the URL fragment belongs to the connection
+    // launch (local-server.ts) and is left alone.
+    const link = ev.target.closest('a[href^="#guide-"]');
+    if (link) { ev.preventDefault(); scrollToSection(link.getAttribute('href').slice(1)); }
   });
 
   // Width drag, the one piece of dock behavior worth having here. Panels get

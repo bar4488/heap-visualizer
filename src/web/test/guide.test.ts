@@ -199,3 +199,24 @@ test('every scenario trace a page links to exists on disk', () => {
   }
   assert.deepEqual(missing, []);
 });
+
+test('every section link and showGuidePage target names a section the guide loads', () => {
+  // `#guide-<file>` links and Help → heapviz & AI agents (main.ts, onboarding)
+  // scroll to a section by file name; one that is not in SECTIONS goes nowhere.
+  const sections = new Set([...readFileSync(join(GUIDE_DIR, '..', 'guide.ts'), 'utf8')
+    .matchAll(/\{ file: '([^']+)\.md'/g)].map((m) => m[1]));
+  for (const page of pages) assert.ok(sections.has(page.replace(/\.md$/, '')), `${page} is not in SECTIONS`);
+  const missing: string[] = [];
+  for (const page of pages) {
+    for (const m of readFileSync(join(GUIDE_DIR, page), 'utf8').matchAll(/\]\(#guide-([^)]+)\)/g)) {
+      if (!sections.has(m[1])) missing.push(`${page}: ${m[1]}`);
+    }
+  }
+  for (const src of ['main.ts', 'onboarding.ts']) {
+    for (const m of readFileSync(join(GUIDE_DIR, '..', src), 'utf8').matchAll(/showGuidePage\('([^']+)\.md'\)/g)) {
+      if (!sections.has(m[1])) missing.push(`${src}: ${m[1]}`);
+    }
+  }
+  assert.deepEqual(missing, []);
+  assert.match(readFileSync(join(GUIDE_DIR, '..', 'main.ts'), 'utf8'), /id: 'help\.agents'.*group: 'help'/);
+});

@@ -324,6 +324,14 @@ expected results over tutorial prose. The only non-prose element is a link
 naming a real element id: one form highlights that element in the running app,
 the others act on it.
 
+The guide must include a **heapviz & AI agents** section that explains, in
+the user's terms, what the `heapviz` companion is, why to use it, where to
+install it (pointing at Setup rather than repeating its host-derived
+commands), how to open and connect a trace, how to enable an AI assistant, its
+commands, and its loopback-only, capability-guarded access. Help → heapviz & AI
+agents…, the connection pill's tooltip, and Setup's "What is heapviz?" link
+lead to it.
+
 Content may ship **scenario traces** — small `.heapl` files, each demonstrating
 a specific case the bundled demo does not. A scenario is offered as an ordinary
 link to `?trace=…` autoload ([TOOL-002](10-tooling.md)), so the guide has no
@@ -382,7 +390,8 @@ on, and which key runs it.
   ([SHELL-002](#shell-002-panels-views-and-windows)). A group whose domain the
   loaded trace lacks is not shown. Then, after a separator: Time strip,
   Event-index strip, Reset layout, Command palette… (⌘/Ctrl+K).
-- **Help**: Guide, Keyboard shortcuts (`?`), Request a feature….
+- **Help**: Guide, heapviz & AI agents… (opens the guide at that section),
+  Keyboard shortcuts (`?`), Request a feature….
 
 **Menus** follow the menubar pattern: `menubar`, `menu`, `menuitem` /
 `menuitemcheckbox` (with `aria-checked`), a heading per group. Arrow keys move
