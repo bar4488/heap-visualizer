@@ -105,3 +105,13 @@
 .ivl-lrow.c-sched .c-cat { color: var(--term-warn, #e3b341); }
 .ivl-lrow.open { background: var(--ivl-cur); box-shadow: inset 2px 0 0 var(--accent); }
 .ivl-lrow.future { opacity: 0.38; }
+
+/* the selected interval (IVL-UI-005): outlined wherever it is listed */
+.ivl-frame.sel, .ivl-lrow.sel, .ivl-cpu.sel td {
+  outline: 1px solid var(--accent); outline-offset: -1px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.ivl-window .ivl-link { color: var(--accent); text-decoration: none; cursor: pointer; }
+.ivl-window .ivl-link:hover { text-decoration: underline; }
+.ivl-window .ivl-open { color: var(--term-warn, #e3b341); }
+.ivl-window .k { width: 72px; }

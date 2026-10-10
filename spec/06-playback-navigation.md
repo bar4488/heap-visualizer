@@ -77,7 +77,9 @@ text, then the **secondary** text, dim, and last the seq when shown.
   ellipsizes from its end only once the secondary is gone.
 - **Tooltip:** hovering a row gives what it shortens or leaves out — the full
   seq, `t`, the full address, and the thread with its pid — and what a click
-  does.
+  does. The row's and the kind chip's tooltips are the app's own tooltip
+  (styled as on the timelines and Tracks), shown after the pointer rests for
+  a moment, with the normal pointer — no native `title`, no help cursor.
 - **Columns:** a `cols ▾` menu in the panel header shows or hides the thread,
   the address and the seq (small, dim, right-aligned, no thousands
   separators). The thread and address are shown and the seq hidden by
@@ -117,6 +119,11 @@ replaces no allocation.
   height is capped (~12 M px) and index-mapped beyond that, so billion-row
   traces still scroll. (Browsers clamp element heights; the cap is a
   workaround, and position-in-list is approximate past it by design.)
+- Clicking an interval edge row (`call ▸`, `ret ◂`, `span ▸`, `span ◂`,
+  `switch`) seeks there and selects its interval — the call or span it
+  begins or ends, the run slice a switch starts — which opens the Interval
+  window and marks the interval's two edge rows
+  ([IVL-UI-005](14-intervals.md#ivl-ui-005-the-interval-selection-and-the-interval-window)).
 - Click = jump+select; clicking the *current* event instead flashes exactly
   where it is on the map (rect flash + expanding ping ring — the answer to
   "where is this 16-byte allocation?"). A custom event is nowhere on the map,

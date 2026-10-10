@@ -3,10 +3,12 @@
 // top, innermost at the bottom), the open spans as a parent tree, and what
 // every CPU is running. Asked once per playhead move, coalesced under one
 // requestLatest key, so playback never builds a backlog. Clicking a frame,
-// span or slice seeks to its begin.
+// span or slice seeks to its begin and selects it (IVL-UI-005); the selected
+// interval is highlighted while it is open at the playhead.
 
 import { esc } from '../fmt.ts';
 import { orderStateThreads, seekSeqFor, spanTree, threadLabel } from './intervals-model.ts';
+import { intervalSelection, isSelected } from './selection.ts';
 import { panelElement, present, shown, type Shared } from './shared.ts';
 import type { IntervalState } from './types.ts';
 
@@ -21,6 +23,8 @@ export function createStatePanel(sh: Shared) {
 
   let askedSeq = NaN;
   let last: IntervalState | null = null;
+
+  const sel = (ivl: number | undefined) => (isSelected(sh.sel, ivl) ? ' sel' : '');
 
   function render() {
     if (!present(sh)) {
@@ -37,7 +41,7 @@ export function createStatePanel(sh: Shared) {
       out.push(`<div class="ivl-th"><div class="ivl-th-name">${esc(threadLabel(t))}</div>`);
       t.stack.forEach((f, i) => {
         const inner = i === t.stack.length - 1;
-        out.push(`<div class="ivl-frame${inner ? ' inner' : ''}" data-seq="${f.seq}" style="padding-left:${8 + Math.min(i, 40) * 10}px" title="begun at seq ${f.seq}">`
+        out.push(`<div class="ivl-frame${inner ? ' inner' : ''}${sel(f.ivl)}" data-seq="${f.seq}" data-ivl="${f.ivl}" style="padding-left:${8 + Math.min(i, 40) * 10}px" title="begun at seq ${f.seq}">`
           + `${esc(f.name ?? '?')} <span class="dim">#${f.seq}</span></div>`);
       });
       out.push('</div>');
@@ -48,7 +52,7 @@ export function createStatePanel(sh: Shared) {
     for (const n of tree) {
       const sp = n.span;
       const orphan = n.orphan ? ` <span class="dim" title="its parent has closed">↖ ${esc(sp.parentSpan ?? sp.parent)}</span>` : '';
-      out.push(`<div class="ivl-frame ivl-spanrow" data-seq="${sp.seq}" style="padding-left:${8 + Math.min(n.indent, 40) * 10}px">`
+      out.push(`<div class="ivl-frame ivl-spanrow${sel(sp.ivl)}" data-seq="${sp.seq}" data-ivl="${sp.ivl}" style="padding-left:${8 + Math.min(n.indent, 40) * 10}px">`
         + `${esc(sp.name ?? sp.span ?? '?')} <span class="dim">${sp.span !== null && sp.span !== undefined ? `[${esc(sp.span)}] ` : ''}#${sp.seq}</span>${orphan}</div>`);
     }
     if (s.cpus.length) {
@@ -59,7 +63,8 @@ export function createStatePanel(sh: Shared) {
           : `<span class="dim">${c.state}</span>`;
         const since = c.since !== undefined ? `<span class="dim">since #${c.since}</span>` : '';
         const seq = c.since !== undefined ? ` data-seq="${c.since}"` : '';
-        out.push(`<tr class="ivl-cpu ${c.state}"${seq}><td>cpu ${c.cpu}</td><td>${what}</td><td>${since}</td></tr>`);
+        const ivl = c.ivl !== undefined ? ` data-ivl="${c.ivl}"` : '';
+        out.push(`<tr class="ivl-cpu ${c.state}${sel(c.ivl)}"${seq}${ivl}><td>cpu ${c.cpu}</td><td>${what}</td><td>${since}</td></tr>`);
       }
       out.push('</tbody></table>');
     }
@@ -87,6 +92,7 @@ export function createStatePanel(sh: Shared) {
     const row = (e.target as HTMLElement).closest?.('[data-seq]') as HTMLElement | null;
     if (!row) return;
     sh.ctx.post({ type: 'jump', seq: seekSeqFor(+row.dataset.seq) });
+    if (row.dataset.ivl !== undefined) sh.ctx.selectInterval?.(intervalSelection(+row.dataset.ivl, { x: e.clientX, y: e.clientY }));
   });
 
   return {
@@ -95,5 +101,6 @@ export function createStatePanel(sh: Shared) {
     reset() { askedSeq = NaN; last = null; render(); },
     traceReady() { askedSeq = NaN; render(); ask(); },
     playhead() { ask(); },
+    selected() { if (shown(sh, TYPE)) render(); },
   };
 }

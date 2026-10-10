@@ -236,6 +236,11 @@ pub struct Request {
     pub cpu: Value,
     /// Interval queries: minimum duration, in trace time units.
     pub min_dur: Value,
+    /// Interval queries: one interval, by its id.
+    pub ivl: Value,
+    /// Interval queries: the interval the edge record at this seq begins
+    /// (`B`, `C`) or ends (`X`).
+    pub edge: Value,
 }
 
 pub fn clamp_u32(v: f64) -> u32 {

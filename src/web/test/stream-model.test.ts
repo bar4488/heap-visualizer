@@ -104,8 +104,8 @@ test('a row says what the record is first, then where', () => {
   assert.ok(at('ev-kind') < at('ev-main') && at('ev-main') < at('ev-sub') && at('ev-sub') < at('ev-seq'));
   assert.match(html, /<span class="ev-seq">0<\/span>/);
   // the row's tooltip carries what the row shortens or leaves out
-  assert.match(html, /title="seq 0 · t 1 · addr 0x555555ea41a0 · thread worker-1 \(pid 7\)\nclick: seek here and select the allocation"/);
-  assert.match(renderRow({ ...HEAP_M, seq: 70777 }, ctx), /title="seq 70777 /);
+  assert.match(html, /data-tip="seq 0 · t 1 · addr 0x555555ea41a0 · thread worker-1 \(pid 7\)\nclick: seek here and select the allocation"/);
+  assert.match(renderRow({ ...HEAP_M, seq: 70777 }, ctx), /data-tip="seq 70777 /);
 });
 
 test('the columns menu shows or hides the seq, address and thread', () => {
@@ -130,7 +130,7 @@ test('the columns menu shows or hides the seq, address and thread', () => {
 
 test('rows of every shape: heap geometry, a log line, a landmark, and a generic summary', () => {
   const heap = renderRow(HEAP_M, ctx);
-  assert.match(heap, /class="ev-kind k-malloc" title="Allocation of 64 B at 0x1000 \(site json_node\)">alloc</);
+  assert.match(heap, /class="ev-kind k-malloc" data-tip="Allocation of 64 B at 0x1000 \(site json_node\)">alloc</);
   assert.match(heap, /ev-addr">0x1000</);
   assert.match(heap, /ev-size">64 B</);
   assert.match(heap, /ev-site">json_node</);
@@ -238,4 +238,20 @@ test('the interval domain is counted as the residual, never by its locate', () =
   const asked: string[] = [];
   maskRank(plan, 5, (d, s) => { asked.push(d); return rankOf(d, s); });
   assert.deepEqual(asked, ['logs']);
+});
+
+test('tooltips are the app tooltip\'s data-tip, never a native title, and say the record in plain words', () => {
+  const rows = [HEAP_M, LOG, MARK, edge(3, 'begin', 'call', '→ handle_upload')].map((ev) => renderRow(ev, ctx));
+  for (const html of rows) assert.doesNotMatch(html, /\stitle="/);
+  assert.match(rows[3], /class="ev-kind k-begin" data-tip="Function call begins on thread worker-1: handle_upload"/);
+});
+
+test('an interval edge row selects its interval on click, and is marked while that interval is selected', () => {
+  const ev = edge(3, 'end', 'span', '← request');
+  const html = renderRow(ev, ctx);
+  assert.match(html, /data-edge="1"/);
+  assert.match(html, /click: seek here and open this interval/);
+  assert.doesNotMatch(html, / picked/);
+  assert.match(renderRow(ev, { ...ctx, pickedSeqs: new Set([3]) }), /class="ev-row ev-generic d-intervals[^"]* picked"/);
+  assert.doesNotMatch(renderRow(MARK, ctx), /data-edge/);
 });

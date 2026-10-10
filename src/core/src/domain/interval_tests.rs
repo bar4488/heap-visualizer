@@ -407,6 +407,19 @@ fn the_registry_serves_intervals() {
     assert_eq!(engine.domain_locate_json(r#"{"domain":"intervals","seq":7}"#), r#"{"row":5,"total":8}"#);
     let q: Value = serde_json::from_str(&engine.domain_query_json(r#"{"domain":"intervals","thr":99}"#)).unwrap();
     assert_eq!(q["total"], 0);
+    // one interval by id, or by an edge that begins or ends it
+    let mut one = |req: &str| -> Value { serde_json::from_str(&engine.domain_query_json(req)).unwrap() };
+    let q = one(r#"{"domain":"intervals","ivl":5}"#);
+    assert_eq!((q["total"].as_u64(), q["rows"][0]["ivl"].as_u64(), q["rows"][0]["name"].as_str()), (Some(1), Some(5), Some("parse")));
+    let q = one(r#"{"domain":"intervals","edge":7}"#);
+    assert_eq!(q["rows"][0]["ivl"], 5, "the B at seq 7 begins parse");
+    let q = one(r#"{"domain":"intervals","edge":15}"#);
+    assert_eq!((q["rows"][0]["name"].as_str(), q["rows"][0]["end"].as_u64()), (Some("parse"), Some(15)), "the X at seq 15 ends it");
+    let q = one(r#"{"domain":"intervals","edge":14}"#);
+    assert_eq!((q["rows"][0]["category"].as_str(), q["rows"][0]["seq"].as_u64()), (Some("sched"), Some(14)), "a C begins the slice it switches to");
+    assert_eq!(one(r#"{"domain":"intervals","edge":5}"#)["total"], 0, "a heap record is no edge");
+    assert_eq!(one(r#"{"domain":"intervals","ivl":99}"#)["total"], 0);
+    assert_eq!(one(r#"{"domain":"intervals","ivl":5,"category":"call"}"#)["total"], 0, "other operands still apply");
 
     let state: Value = serde_json::from_str(&engine.domain_state_json(r#"{"domain":"intervals","seq":13}"#)).unwrap();
     assert_eq!(state["spans"].as_array().unwrap().len(), 2);

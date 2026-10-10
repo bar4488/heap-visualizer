@@ -3,7 +3,8 @@
 // track, text and minimum duration, in start order either way. The list is
 // virtualized as the Logs terminal is (the same capped spacer and row window,
 // from logs-model.ts), fetched one window at a time under one requestLatest
-// key. Clicking a row seeks to the interval's begin.
+// key. Clicking a row seeks to the interval's begin and selects it
+// (IVL-UI-005); the selected interval's row is highlighted.
 
 import { esc } from '../fmt.ts';
 import { firstRow, fmtRelTime, logLayout, rowWindow } from '../logs/logs-model.ts';
@@ -11,6 +12,7 @@ import {
   DEFAULT_LIST_QUERY, cpuKey, fmtDur, listParams, normalizeListQuery, orderTracks, pageFor, parseDur, rowPosition,
   sameListQuery, sameSelection, seekSeqFor, shownLabel, threadKey, threadLabel, trackText, type ListQuery,
 } from './intervals-model.ts';
+import { intervalSelection, isSelected } from './selection.ts';
 import { panelElement, present, shown, type Shared } from './shared.ts';
 import type { IntervalRow } from './types.ts';
 
@@ -105,7 +107,8 @@ export function createListPanel(sh: Shared) {
       const pos = rowPosition(r, applied);
       const name = r.category === 'span' && r.span ? `${r.name ?? ''} [${r.span}]` : (r.name ?? '?');
       const indent = r.category === 'call' ? Math.min(r.depth, 20) : 0;
-      return `<div class="ivl-lrow ${pos} c-${r.category}" data-seq="${r.seq}">`
+      const sel = isSelected(sh.sel, r.ivl) ? ' sel' : '';
+      return `<div class="ivl-lrow ${pos} c-${r.category}${sel}" data-seq="${r.seq}" data-ivl="${r.ivl}">`
         + `<span class="c-t">${fmtRelTime(r.t - t0, unit())}</span>`
         + `<span class="c-dur">${r.open ? '≥' : ''}${fmtDur(r.dur, unit())}</span>`
         + `<span class="c-cat">${CAT_LABEL[r.category] ?? r.category}</span>`
@@ -151,6 +154,7 @@ export function createListPanel(sh: Shared) {
     const row = (e.target as HTMLElement).closest?.('.ivl-lrow') as HTMLElement | null;
     if (!row || window.getSelection?.()?.toString()) return;
     sh.ctx.post({ type: 'jump', seq: seekSeqFor(+row.dataset.seq) });
+    sh.ctx.selectInterval?.(intervalSelection(+row.dataset.ivl, { x: e.clientX, y: e.clientY }));
   });
 
   let lastApplied = NaN;
@@ -167,6 +171,7 @@ export function createListPanel(sh: Shared) {
       queryChanged();
     },
     traceReady() { fillTracks(); queryChanged(); },
+    selected() { if (shown(sh, TYPE)) render(); },
     playhead() {
       // re-mark open/past/future; the rows themselves do not change
       const a = sh.playhead?.seq ?? 0;

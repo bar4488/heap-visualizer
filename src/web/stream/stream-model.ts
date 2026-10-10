@@ -145,11 +145,15 @@ export function kindTooltip(ev: EventRow, ctx: Pick<RowContext, 'domains' | 'nam
   return `${k.description}${on}${what ? `: ${what}` : ''}`;
 }
 
-/** The kind cell: a fixed-width label, tinted by domain, explained on hover. */
+/**
+ * The kind cell: a fixed-width label, tinted by domain, explained on hover.
+ * Its text is in `data-tip`, which the panel shows in the app's own tooltip
+ * after a short delay (shell/tooltip.ts `hoverTips`), not as a native title.
+ */
 function kindCell(ev: EventRow, ctx: RowContext, text?: string, extra = ''): string {
   const k = kindInfo(ev, ctx.domains);
   const cls = `ev-kind k-${esc(k.kind)}${extra}`;
-  return `<span class="${cls}" title="${esc(kindTooltip(ev, ctx))}">${esc(text ?? k.label)}</span>`;
+  return `<span class="${cls}" data-tip="${esc(kindTooltip(ev, ctx))}">${esc(text ?? k.label)}</span>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -249,6 +253,8 @@ export type RowContext = {
   curSeq: number;
   /** The optional fields shown; DEFAULT_COLUMNS when absent. */
   columns?: EventColumns;
+  /** The selected interval's edges (IVL-UI-005): their rows are marked. */
+  pickedSeqs?: ReadonlySet<number>;
 };
 
 /** What a row says: what the record is first, then where. */
@@ -299,7 +305,7 @@ export function renderRow(ev: EventRow, ctx: RowContext): string {
   const domain = rowDomain(ev);
   const text = rowText(ev, ctx);
   const attrs = `data-seq="${ev.seq}" data-domain="${esc(domain)}"`;
-  const tip = (click: string) => `title="${esc(rowTooltip(ev, ctx, click))}"`;
+  const tip = (click: string) => `data-tip="${esc(rowTooltip(ev, ctx, click))}"`;
   const thr = cols.thread && text.thread ? `<span class="ev-thr">${esc(text.thread)}</span>` : '';
   const addr = cols.addr && text.addr ? `<span class="ev-addr">${esc(text.addr)}</span>` : '';
   const second = thr || addr ? `<span class="ev-sub">${[thr, addr].filter(Boolean).join(' ')}</span>` : '';
@@ -316,12 +322,16 @@ export function renderRow(ev: EventRow, ctx: RowContext): string {
       + `${kindCell(ev, ctx)}<span class="ev-main ev-label">${title}</span>${second}${seq}</div>`;
   }
   // any other domain's record: its generic summary — details, then the
-  // source when the kind label does not already say it
+  // source when the kind label does not already say it. An interval edge
+  // also selects its interval (IVL-UI-005).
   if (domain !== 'heap') {
     const k = kindInfo(ev, ctx.domains);
     const title = text.primary ? esc(text.primary) : `<span class="dim">${esc(k.kind)}</span>`;
     const source = ev.source && !k.sourced ? `<span class="ev-src">${esc(ev.source)}</span>` : '';
-    return `<div class="ev-row ev-generic d-${esc(domain)}${cur}" ${attrs} data-custom="1" ${tip('seek here')}>`
+    const edge = domain === 'intervals';
+    const picked = edge && ctx.pickedSeqs?.has(ev.seq) ? ' picked' : '';
+    return `<div class="ev-row ev-generic d-${esc(domain)}${cur}${picked}" ${attrs} data-custom="1"${edge ? ' data-edge="1"' : ''}`
+      + ` ${tip(edge ? 'seek here and open this interval' : 'seek here')}>`
       + `${kindCell(ev, ctx)}<span class="ev-main ev-label">${title}</span>${source}${second}${seq}</div>`;
   }
   const size = typeof ev.size === 'number' ? `<span class="ev-size">${esc(ctx.fmtAllocSize(ev.size))}</span>` : '';

@@ -35,6 +35,11 @@
 //   select(axis, range, at?)  the strips' range selection (TL-004 shift+drag):
 //                   a range sets it (band and mirror), null clears it, and
 //                   `at` {x, y} (client px) ends it and opens its popover
+//   selectInterval(sel)   set the interval selection (IVL-UI-005): `{ivl}` or
+//                   an edge `{ivl: null, seq}`, or null to clear; shared with
+//                   the Events list and kept apart from the allocation one
+//   onIntervalSelect(fn)  fn(sel) whenever the interval selection changes;
+//                   returns an unsubscribe function
 //   onLoad(fn)      fn(meta) at the end of every trace load, after `ui.meta`
 //                   is the new trace's and every panel's refill has run, and
 //                   after the default layout is applied; returns an
@@ -58,6 +63,7 @@
 
 import type { Placement } from './shell/layout.ts';
 import type { DomainDescriptor, QueryPayload, QueryType, Range, ReplyTo } from './protocol.ts';
+import type { IntervalSelection } from './intervals/selection.ts';
 
 /** One panel: the record SHELL-003 asks for (see heap/panels.ts for each field). */
 export type PanelRecord = {
@@ -118,6 +124,8 @@ export type PanelContext = {
   setView: (axis: 't' | 'seq', range: Range) => void;
   select?: (axis: 't' | 'seq', range: Range | null, at?: { x: number; y: number }) => void;
   onLoad: (fn: (meta: any) => void) => () => void;
+  selectInterval?: (sel: IntervalSelection | null) => void;
+  onIntervalSelect?: (fn: (sel: IntervalSelection | null) => void) => () => void;
   domain: string;
   present: () => boolean;
   addPanel: (record: DomainPanel) => void;

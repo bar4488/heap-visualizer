@@ -1,7 +1,9 @@
 // Interval domain (spec/14, IVL-UI): the entry point main.ts calls once.
 // It declares the three panels to the shell — State, Tracks and Intervals —
-// fetches the trace's interval summary once per loaded trace, and fans the
-// playhead and the strips' view out to the panels.
+// and the Interval window, fetches the trace's interval summary once per
+// loaded trace, and fans the playhead, the strips' view and the interval
+// selection (IVL-UI-005) out to the panels. A selection made from an edge
+// (the Events list) is resolved to its interval here, once, for all of them.
 //
 // Everything is reached through `ctx` (layout, rpc, the UI snapshot and two
 // subscriptions), so this module names no other domain and no element of
@@ -12,6 +14,8 @@ import { createListPanel } from './list-panel.ts';
 import { createStatePanel } from './state-panel.ts';
 import { createTracksPanel } from './tracks-panel.ts';
 import { present, type Shared } from './shared.ts';
+import { resolved, selectionQuery, type IntervalSelection } from './selection.ts';
+import { createIntervalWindow, WINDOW_TYPE } from './window-panel.ts';
 import type { IntervalCtx, Views } from './types.ts';
 import type { PanelContext } from '../panels.ts';
 
@@ -31,11 +35,12 @@ export function registerIntervalPanels(panelCtx: PanelContext) {
   // The panels read the worker replies through the typed view in types.ts;
   // the wire itself is protocol.ts's, which main.ts's rpc helpers enforce.
   const ctx = panelCtx as unknown as IntervalCtx;
-  const sh: Shared = { ctx, trace: { gen: 0, total: -1, tracks: { threads: [], cpus: [] } }, playhead: null };
+  const sh: Shared = { ctx, trace: { gen: 0, total: -1, tracks: { threads: [], cpus: [] } }, playhead: null, sel: null, selRow: null };
   const tracks = createTracksPanel(sh);
   const state = createStatePanel(sh);
   const list = createListPanel(sh);
   const panels = { 'intervals-tracks': tracks, 'intervals-state': state, 'intervals-list': list };
+  const win = createIntervalWindow(sh);
 
   for (const p of PANELS) {
     const impl = panels[p.type];
@@ -52,8 +57,66 @@ export function registerIntervalPanels(panelCtx: PanelContext) {
     panelCtx.addToggle?.(p.type, { title: p.title, hint: p.hint, visible: () => present(sh) });
   }
 
+  // the Interval window: one, following the selection; floating and not
+  // persisted, as the Event window is
+  ctx.layout.register(WINDOW_TYPE, {
+    title: 'Interval',
+    singleton: true,
+    persist: false,
+    floatSize: { width: 380, height: 360 },
+    autoPlace: { avoid: ['pinned-detail'] },
+    defaultLocation: () => ({ dock: null, open: false }),
+    build: () => win.el,
+  });
+
+  // --- the interval selection (IVL-UI-005) ---------------------------------
+  let selGen = 0;
+  const select = (sel: IntervalSelection | null) => {
+    if (ctx.selectInterval) ctx.selectInterval(sel);
+    else onSelect(sel);
+  };
+  const fanSelection = (reveal: boolean) => {
+    tracks.selected(reveal);
+    state.selected();
+    list.selected();
+  };
+  function onSelect(sel: IntervalSelection | null) {
+    sh.sel = sel;
+    if (!sel) {
+      selGen++;
+      sh.selRow = null;
+      fanSelection(false);
+      return;
+    }
+    const row = sh.selRow;
+    if (row && sel.ivl === row.ivl) {
+      // resolved (or re-selected): every panel shows it
+      if (sel.begin === undefined) { select(resolved(sel, row)); return; }
+      fanSelection(true);
+      win.show(sel.at);
+      return;
+    }
+    const q = selectionQuery(sel);
+    if (!q || !ctx.ui.loaded) return;
+    const gen = ++selGen;
+    const traceGen = sh.trace.gen;
+    void ctx.request('domain-query', { domain: 'intervals', query: { ...q, from: 0, count: 1 } }).then((m) => {
+      if (gen !== selGen || traceGen !== sh.trace.gen) return;
+      const r = m.available ? m.result?.rows[0] : undefined;
+      if (!r) return; // an edge that pairs with nothing: the seek alone
+      sh.selRow = r;
+      select(resolved(sel, r));
+    });
+  }
+  ctx.onIntervalSelect?.(onSelect);
+
   let lastMeta: unknown = undefined;
   const newTrace = () => {
+    selGen++;
+    sh.sel = null;
+    sh.selRow = null;
+    win.reset();
+    if (ctx.ui.intervalSel) select(null);
     const tr = sh.trace;
     tr.gen++;
     tr.total = -1;

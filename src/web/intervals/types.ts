@@ -5,6 +5,8 @@
 // result}` envelope. When protocol.ts gains these queries, replace this file's
 // `IvlQueries` with imports from there; nothing else here names the wire.
 
+import type { IntervalSelection } from './selection.ts';
+
 /** A [lo, hi] range on one axis. */
 export type Range = { lo: number; hi: number };
 
@@ -87,6 +89,10 @@ export type IntervalParams = {
   minDur?: number;
   seqLo?: number;
   seqHi?: number;
+  /** One interval, by id. */
+  ivl?: number;
+  /** The interval the edge record at this seq begins or ends. */
+  edge?: number;
 };
 
 export type QueryResult<R> = { total: number; from: number; rows: R[] };
@@ -149,6 +155,7 @@ export type IntervalCtx = {
     isOpen(type: string, key?: string): boolean;
     isShown?(type: string, key?: string): boolean;
     reveal(type: string, key?: string, opts?: any): any;
+    close?(type: string, key?: string): void;
     onOpen(type: string, fn: (key: string, el: any) => void): void;
   };
   post: (m: any) => void;
@@ -161,6 +168,8 @@ export type IntervalCtx = {
     /** The strips' range selection and its mirror on the other axis (kind 0 = time, 1 = events). */
     sel?: { kind: number; lo: number; hi: number } | null;
     selMirror?: { kind: number; lo: number; hi: number } | null;
+    /** The interval selection (IVL-UI-005). */
+    intervalSel?: IntervalSelection | null;
   };
   onState(fn: (s: Playhead) => void): void;
   onView(fn: (v: Views | { tlT: Range; tlS: Range }) => void): void;
@@ -170,4 +179,8 @@ export type IntervalCtx = {
   select?: (axis: Axis, r: Range | null, at?: { x: number; y: number }) => void;
   /** Optional: a trace finished loading. Without it the panels notice a new `ui.meta`. */
   onLoad?: (fn: () => void) => void;
+  /** The interval selection (IVL-UI-005), shared with the Events list: set it (null clears). */
+  selectInterval?: (sel: IntervalSelection | null) => void;
+  /** fn(selection) whenever the interval selection changes, from any panel. */
+  onIntervalSelect?: (fn: (sel: IntervalSelection | null) => void) => void;
 };

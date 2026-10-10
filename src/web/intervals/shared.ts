@@ -2,7 +2,8 @@
 // summary (fetched once per trace), the playhead, and the DOM scaffolding of a
 // panel. index.ts owns one of these and hands it to each panel.
 
-import type { IntervalCtx, Playhead, Tracks } from './types.ts';
+import type { IntervalSelection } from './selection.ts';
+import type { IntervalCtx, IntervalRow, Playhead, Tracks } from './types.ts';
 
 export type Trace = {
   /** Bumped per loaded trace; a reply for an older one is dropped. */
@@ -16,6 +17,9 @@ export type Shared = {
   ctx: IntervalCtx;
   trace: Trace;
   playhead: Playhead | null;
+  /** The interval selection (IVL-UI-005), and its interval once fetched. */
+  sel: IntervalSelection | null;
+  selRow: IntervalRow | null;
 };
 
 /** Whether the loaded trace has intervals: from the load meta if the worker attached it, else from `domains`. */
