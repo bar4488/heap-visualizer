@@ -29,7 +29,8 @@
 //
 // A window's per-window actions (a pin) live in its tab, not in a row of its
 // own: the elements in its `.panel-head` marked `.tab-action` are moved into
-// its tab while it is in the dock, and back when it leaves.
+// its tab while it is in the dock, and back when it leaves. Its tab reads its
+// `.ph-t` text, and shows that element's `title` attribute as its tooltip.
 //
 // Still domain-agnostic: no panel is named here.
 
@@ -90,8 +91,14 @@ export type OpenOptions = {
   near?: Point | null;
   /** Put it in this edge, the center, or floating (null). */
   dock?: Home;
-  /** Put it where another window is or was (`placeOf`): pin and unpin swap a window in place. */
+  /** Put it where another window is or was (`placeOf`). */
   place?: Place | null;
+  /**
+   * Open it as a tab in the group that window is in — docked or floating —
+   * when that window is open (a pinned allocation window opens beside the
+   * live one). Otherwise it is placed as if this were not given.
+   */
+  beside?: { type: string; key?: string } | null;
   /** Recreating a window a session restored: take its saved slot, change no collapse state. */
   restoring?: boolean;
 };
@@ -107,8 +114,11 @@ type Instance = { type: string; key: string; id: string; el: any; open: boolean;
 /** Where a window is or was, so it reopens there; opaque to domain code. */
 export type Place = Slot;
 // (an edge slot names the group it was in too, so a window reopens in its
-// half of a split edge while that half is there)
-type Slot = { edge: Edge; group?: string } | { center: true } | { group: string } | { float: { left: number; top: number; width: number; height: number } };
+// half of a split edge while that half is there; a floating slot names its
+// group, so a window that shared a floating window as a tab reopens in it
+// while it is there, and at its box once it is gone)
+type Slot = { edge: Edge; group?: string } | { center: true } | { group: string }
+  | { float: { left: number; top: number; width: number; height: number }; group?: string };
 
 const EDGE_SIZE: Record<Edge, number> = { left: 300, right: 300, bottom: 240 };
 const FLOAT_SIZE = { width: 340, height: 320 };
@@ -292,10 +302,19 @@ class WindowTab {
   private setTitle(t: string) {
     this.content.textContent = t;
     this.close?.setAttribute('aria-label', `Close ${t}`);
+    this.refreshTip();
   }
 
-  /** Take the window's actions in (again, once a placeholder's window is back). */
+  /** The tooltip: the window's `.ph-t` title attribute (the whole of what a short tab title stands for). */
+  refreshTip() {
+    const tip = instances.get(this.id)?.el?.querySelector?.('.ph-t')?.getAttribute?.('title') || '';
+    if (tip) this.content.setAttribute('title', tip);
+    else this.content.removeAttribute?.('title');
+  }
+
+  /** Take the window's actions and tooltip in (again, once a placeholder's window is back). */
   refresh() {
+    this.refreshTip();
     const inst = instances.get(this.id);
     const head = inst?.el?.querySelector?.('.panel-head');
     if (!head) return;
@@ -340,7 +359,8 @@ function adopt(type: string, t: Registered, key: string, el: any): Instance {
       if (typeof MutationObserver !== 'undefined') {
         new MutationObserver(() => {
           engineOrNull()?.getPanel(id)?.api.setTitle(titleOf(inst));
-        }).observe(titleEl, { childList: true, characterData: true, subtree: true });
+          tabs.get(id)?.refreshTip();
+        }).observe(titleEl, { childList: true, characterData: true, subtree: true, attributes: true, attributeFilter: ['title'] });
       }
     }
     el.setAttribute('role', 'region');
@@ -416,29 +436,33 @@ function init(hostEl: any, eng: Engine) {
     // are part of the one grid, which is the floating area.
     floatingGroupBounds: 'boundedWithinViewport',
     // a floating window moves by the empty part of its tab strip, like a
-    // window by its title bar; dragging a tab (or Shift-dragging the strip)
-    // docks it. (The engine's default is a separate thin bar above the tabs,
-    // which leaves the strip itself docking the window when it is dragged.)
+    // window by its title bar; dragging a tab takes that one tab out — onto a
+    // group or an edge it docks there, onto a view (the empty workspace) it
+    // floats on its own where it is dropped, and Shift-dragging it floats it
+    // as it goes. Shift-dragging the strip docks the whole window. (The
+    // engine's default is a separate thin bar above the tabs, which leaves the
+    // strip itself docking the window when it is dragged.)
     floatingGroupDragHandle: 'tabbar',
     // the map, last in the center column, takes the room a resize adds
     proportionalLayout: false,
     createComponent: (o) => new Adopt(o.id),
     createTabComponent: (o) => new WindowTab(o.name !== 'fixed'),
     createRightHeaderActionComponent: (group) => new GroupActions(group),
-    getTabContextMenuItems: (p) => {
-      const id = p?.panel?.id;
-      const inst = id ? instances.get(id) : null;
-      const closable = !inst || spec(inst.type).closable;
-      // Float through the shell, so it lands clear of the other floating
-      // windows at its own float size (the engine's own puts every one at
-      // the same spot)
-      const float = inst ? {
-        label: 'Float',
-        disabled: p.panel.group?.api.location.type === 'floating',
-        action: () => floatPanel(p.panel, inst),
-      } : 'float';
-      return closable ? [float, 'maximize', 'separator', 'close'] : [float, 'maximize'];
-    },
+    getTabContextMenuItems: (p) => tabMenu(p?.panel),
+  });
+  // a window's tab dropped on the body of a view (the address map, a strip:
+  // the empty workspace) floats it there, rather than making it a tab over
+  // the view
+  api.onWillDrop?.((e) => {
+    const data = e.getData?.();
+    const panel = data?.panelId ? api.getPanel(data.panelId) : null;
+    if (!panel || e.kind !== 'content' || e.position !== 'center' || !holdsView(e.group)) return;
+    const inst = instances.get(panel.id);
+    if (!inst || isView(inst.type)) return;
+    e.preventDefault();
+    const at = { x: e.nativeEvent?.clientX ?? 0, y: e.nativeEvent?.clientY ?? 0 };
+    // (after the engine has finished with the drag)
+    setTimeout(() => floatPanelAt(panel, inst, at), 0);
   });
   api.onDidAddPanel(later);
   api.onDidRemovePanel(later);
@@ -804,9 +828,7 @@ function slotOf(panel): Slot {
   const r = regionOf(g);
   if (r && r !== 'center') return { edge: r, group: g.id };
   if (loc?.type === 'floating') {
-    const b = floatBoxOf(g);
-    if (b) return { float: b };
-    return { float: { left: 40, top: 40, ...FLOAT_SIZE } };
+    return { float: floatBoxOf(g) || { left: 40, top: 40, ...FLOAT_SIZE }, group: g.id };
   }
   return { group: g.id };
 }
@@ -918,9 +940,69 @@ function defaultFloat(inst: Instance, t: Registered, near: Point | null = null) 
 // The tab menu's Float: the panel floats at its own float size, clear of the
 // floating windows already there.
 function floatPanel(panel, inst: Instance) {
-  const b = defaultFloat(inst, spec(inst.type));
+  floatInto(panel, defaultFloat(inst, spec(inst.type)));
+}
+
+// A tab dropped on the empty workspace: it floats with its tab under the
+// pointer, at its own float size, held inside the dock.
+function floatPanelAt(panel, inst: Instance, at: Point) {
+  if (!api.getPanel(panel.id)) return;
+  const hr = hostRect();
+  const size = floatSize(spec(inst.type));
+  floatInto(panel, clampBox({ left: at.x - hr.left - 24, top: at.y - hr.top - 12, ...size }, { width: hr.width, height: hr.height }));
+}
+
+function floatInto(panel, b: Box) {
   withBatch(() => api.addFloatingGroup(panel, { position: { left: b.left, top: b.top }, width: b.width, height: b.height }));
+  panel.api.setActive?.();
   sync();
+}
+
+// A view is a center singleton (the map, the strips): what the workspace is
+// made of, as opposed to a window.
+function isView(type: string) {
+  const t = types.get(type);
+  return !!t && t.singleton && defaultsOf(t).dock === 'center';
+}
+
+function holdsView(g) {
+  return !!g && g.api?.location?.type === 'grid' && (g.panels || []).some((p) => isView(String(p.id).split(':')[0]));
+}
+
+// How many tabs the floating window holding `g` has (all its groups: a
+// floating window can be split).
+function tabsInWindow(g) {
+  const frame = g?.element?.closest?.('.dv-resize-container');
+  if (!frame) return g?.panels?.length ?? 0;
+  return (api.groups || []).filter((x) => frame.contains(x.element)).reduce((n, x) => n + x.panels.length, 0);
+}
+
+/**
+ * A tab's context menu. A window: Float (from the grid) or Move to new window
+ * (from a floating window that holds other tabs), Split right and Split down
+ * (the tab out into a new group beside its own — inside a floating window
+ * too, which the engine keeps as a grid of its own), Maximize, Close. Float
+ * goes through the shell, so the window lands clear of the other floating
+ * windows at its own float size (the engine's own puts every one at the same
+ * spot).
+ */
+function tabMenu(panel) {
+  const inst = panel?.id ? instances.get(panel.id) : null;
+  const closable = !inst || spec(inst.type).closable;
+  if (!inst) return closable ? ['float', 'maximize', 'separator', 'close'] : ['float', 'maximize'];
+  const g = panel.group;
+  const floating = g?.api.location.type === 'floating';
+  const items: any[] = [floating ? {
+    label: 'Move to new window',
+    disabled: tabsInWindow(g) < 2,
+    action: () => floatPanel(panel, inst),
+  } : { label: 'Float', action: () => floatPanel(panel, inst) }];
+  const alone = (g?.panels?.length ?? 0) < 2;
+  for (const [label, position] of [['Split right', 'right'], ['Split down', 'bottom']]) {
+    items.push({ label, disabled: alone, action: () => { panel.api.moveTo({ group: g, position }); later(); } });
+  }
+  items.push('maximize');
+  return closable ? [...items, 'separator', 'close'] : items;
 }
 
 function fromViewport(at: At, t: Registered) {
@@ -995,6 +1077,14 @@ function addTo(id: string, type: string, title: string, where: Slot, extra: any 
 
 function slotFor(inst: Instance, t: Registered, opts: OpenOptions): Slot {
   if (opts.place) return opts.place;
+  if (opts.beside) {
+    const other = find(opts.beside.type, opts.beside.key || '');
+    const g = other ? api.getPanel(other.id)?.group : null;
+    if (g) {
+      const r = regionOf(g);
+      return r && r !== 'center' ? { edge: r, group: g.id } : { group: g.id };
+    }
+  }
   if (opts.dock !== undefined) {
     if (opts.dock === 'center') return { center: true };
     if (opts.dock) return { edge: opts.dock };
@@ -1170,7 +1260,8 @@ function applyPlan(plan: Plan, { keepFloating = false, keepMulti = true } = {}) 
   }
   const floatSlot = (inst: Instance) => {
     const s = slots.get(inst.id);
-    return keepFloating && s && 'float' in s ? s : null;
+    // (its box: every group is about to go)
+    return keepFloating && s && 'float' in s ? { float: s.float } : null;
   };
   const prior = new Map([...instances.values()].map((i) => [i.id, floatSlot(i)]));
   withBatch(() => {
@@ -1228,7 +1319,7 @@ function applyPlan(plan: Plan, { keepFloating = false, keepMulti = true } = {}) 
     for (const { inst, slot } of keep) {
       if (api.getPanel(inst.id)) continue;
       const t = spec(inst.type);
-      const s = keepFloating && slot && 'float' in slot ? slot : { float: defaultFloat(inst, t) };
+      const s = keepFloating && slot && 'float' in slot ? { float: slot.float } : { float: defaultFloat(inst, t) };
       addTo(inst.id, inst.type, titleOf(inst), s, { inactive: true });
     }
   });
@@ -1263,7 +1354,9 @@ function serialize() {
     const t = spec(inst.type);
     if (!t.singleton || !t.persist || api?.getPanel(inst.id)) continue;
     const s = slots.get(inst.id);
-    if (s && !('group' in s && !('edge' in s))) homes[inst.id] = s;
+    if (!s) continue;
+    if ('float' in s) homes[inst.id] = { float: s.float };
+    else if (!('group' in s && !('edge' in s))) homes[inst.id] = s;
   }
   const edges: Partial<Record<Edge, EdgeState>> = {};
   if (api) {

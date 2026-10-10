@@ -255,9 +255,18 @@ export function restoreMarksAutosave() {
     if (!raw) return false;
     const obj = JSON.parse(raw);
     if (!obj || obj.heapVisualizerAnalysis !== 1) return false;
-    d.applyMarks(obj, true);
+    // The blob's session snapshot is as old as the last marks change; the
+    // session's own key is written every two seconds and on unload. The newer
+    // one is applied (once: applyMarks applies the session it is given), or
+    // a window moved after the last rename would come back where it was.
+    let session = obj.session;
+    try {
+      const own = sessionKey() ? localStorage.getItem(sessionKey()) : null;
+      if (own) session = JSON.parse(own);
+    } catch { /* corrupt: the blob's own snapshot stands */ }
+    d.applyMarks({ ...obj, session }, true);
     // a pre-session marks blob still needs the standalone session restored
-    return !!obj.session;
+    return !!session;
   } catch { /* corrupt/unavailable: ignore, nothing to restore */ }
   return false;
 }

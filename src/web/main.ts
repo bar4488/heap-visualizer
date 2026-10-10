@@ -62,6 +62,7 @@ import {
 } from './filter-actions.ts';
 import { customFieldsSection } from './heap/custom-fields.ts';
 import { eventWindowBody, eventWindowTitle } from './heap/event-window.ts';
+import { LIVE, PINNED, pinAllocation, pinnedTitle, unpinAllocation } from './heap/alloc-windows.ts';
 import {
   initLocalServerMode, setLocalServerRuntimeHealth, type LocalServerConfig,
   hostedMinimumVersion,
@@ -84,7 +85,7 @@ type Selection = { kind: Domain; lo: number; hi: number };
  *
  * The optional fields are the ones filled in after the literal below — either
  * at startup (`worker`, `seek`, `drawers`) or when a trace loads and the user
- * starts working (`fileName`, `detailInfo`, `tlLocalAt`, `detailWasPinned`).
+ * starts working (`fileName`, `detailInfo`, `tlLocalAt`).
  */
 type UIState = {
   meta: TraceMeta | null;
@@ -136,7 +137,6 @@ type UIState = {
   detailInfo?: AllocInfo | null;
   /** When the user last zoomed a strip locally; see onState. */
   tlLocalAt?: number;
-  detailWasPinned?: boolean;
 };
 
 // Mirrored from src/core/src/render.rs (CAT / RAMP): the engine paints
@@ -1075,6 +1075,7 @@ function refreshAllocSizeDisplays() {
 // the worker draws in-allocation labels; it needs the user-assigned names,
 // and so does the core, which resolves `named("x")` against them
 function sendNames() {
+  retitleAllocationWindows();
   worker.postMessage({
     type: 'names',
     names: [...UI.names.entries()].map(([e, v]) => [e, v.name]),
@@ -2491,10 +2492,8 @@ function buildDetailBody(root, info) {
   }
   q('.d-name').onchange = () => {
     const v = q('.d-name').value.trim();
+    // (the windows' titles follow once the name lands: sendNames)
     void commitCanonicalAnalysis({ type: 'setAllocationName', creator: info.e, name: v || null });
-    // keep the enclosing window's title in sync with the name
-    const t = root.closest('.panel')?.querySelector('.ph-t');
-    if (t) t.textContent = detailTitle(info);
     markDirty();
   };
   q('.d-tag-apply').onclick = async () => {
@@ -2536,9 +2535,30 @@ function buildDetailBody(root, info) {
   };
 }
 
-function detailTitle(info) {
+// An allocation window's title and tooltip (SHELL-005): the live window's tab
+// reads "Allocation"; a pinned one's the allocation's name, else `#<id>`. The
+// tooltip has the rest. The shell shows `.ph-t`'s text in the tab and its
+// `title` attribute as the tab's tooltip.
+function titleAllocWindow(win, info, title) {
+  const t = win.querySelector('.ph-t');
+  if (!t) return;
   const name = UI.names.get(info.e)?.name;
-  return name ? `Allocation · ${name}` : 'Allocation';
+  const tip = [
+    `${title === 'Allocation' ? 'Allocation (follows the selection)' : 'Pinned allocation'}: ${name ? `“${name}” ` : ''}id ${info.id}`,
+    `${info.addr} – ${info.end} · ${fmtAllocSize(info.size)}`,
+    info.site ? `site ${info.site}` : '',
+    `born seq ${fmtNum(info.seq)}${info.deathSeq !== null ? ` · dies seq ${fmtNum(info.deathSeq)}` : ' · never freed'}`,
+  ].filter(Boolean).join('\n');
+  if (t.textContent !== title) t.textContent = title;
+  if (t.getAttribute('title') !== tip) t.setAttribute('title', tip);
+}
+
+// Every allocation window's title, after a rename.
+function retitleAllocationWindows() {
+  if (UI.detailInfo) titleAllocWindow($(LIVE), UI.detailInfo, 'Allocation');
+  for (const { el } of layout.instancesOf(PINNED)) {
+    if (el._allocInfo) titleAllocWindow(el, el._allocInfo, pinnedTitle(el._allocInfo, UI.names.get(el._allocInfo.e)?.name));
+  }
 }
 
 // The Event window: the same chrome as the Allocation panel, for a record
@@ -2553,29 +2573,31 @@ function fillEventPanel(event) {
   layout.open('event-panel');
 }
 
-// `place`: open the live panel there (where a window being unpinned stood —
-// `layout.placeOf`), moving it if it is open elsewhere. `near`: the viewport
-// point of the selection, which a window placed from scratch opens beside.
-// Otherwise an open live panel stays exactly where it is and only its content
+// The live Allocation window shows `info`. `place`: where it opens if it is
+// closed (where a window being unpinned stood — `layout.placeOf`). `near`: the
+// viewport point of the selection, which a window placed from scratch opens
+// beside. An open live window stays exactly where it is and only its content
 // changes, so it never jumps while selection moves.
 function fillDetailPanel(info, place = null, near = null) {
-  const panel = $('detail-panel');
-  if (!info) { layout.close('detail-panel'); return; }
-  // never two windows for the same allocation: if it is already pinned,
-  // bring that window to the front instead of opening a duplicate
-  if (layout.isOpen('pinned-detail', String(info.e))) {
-    layout.close('detail-panel');
-    layout.reveal('pinned-detail', String(info.e));
+  const panel = $(LIVE);
+  if (!info) { layout.close(LIVE); return; }
+  // never two windows for one allocation: one that is pinned has its window
+  // brought to the front instead (the live window is left as it is)
+  if (layout.isOpen(PINNED, String(info.e))) {
+    layout.reveal(PINNED, String(info.e));
     return;
   }
   UI.detailInfo = info;
-  panel.querySelector('.ph-t').textContent = detailTitle(info);
+  titleAllocWindow(panel, info, 'Allocation');
   buildDetailBody($('detail-body'), info);
-  // only place it from scratch when the live panel was just vacated by a
-  // pin (so a fresh window doesn't land on the pinned one), or has never been
-  // open; a plain close (× or Escape) reopens the window where the user left it
-  layout.open('detail-panel', '', place ? { place } : { freshPosition: UI.detailWasPinned, near });
-  UI.detailWasPinned = false;
+  layout.open(LIVE, '', place ? { place } : { near });
+}
+
+// Select `info` and show it in the live window (an unpinned allocation).
+function selectAllocation(info, place = null) {
+  UI.selected = info.e;
+  worker.postMessage({ type: 'set', key: 'selected', value: info.e });
+  fillDetailPanel(info, place);
 }
 
 // A pinned-allocation window's element: the shell calls this when
@@ -2586,46 +2608,39 @@ function buildPinnedWindow(info) {
   win.className = 'panel pinned-detail';
   win.dataset.e = info.e;
   win._allocInfo = info;
-  win.innerHTML = `<div class="panel-head"><span class="ph-t">${esc(detailTitle(info))}</span>
+  win.innerHTML = `<div class="panel-head"><span class="ph-t"></span>
       <span class="head-actions">
         <button class="d-pin tab-action pinned" type="button" aria-pressed="true" aria-label="Unpin this allocation window"
-          title="Unpin — return this to the live Allocation panel">${$('d-pin').innerHTML}</button>
+          title="Unpin: close this window and show the allocation in the live Allocation window">${$('d-pin').innerHTML}</button>
         <button class="panel-close">×</button>
       </span></div>
     <div class="panel-body detail-body"></div>`;
+  titleAllocWindow(win, info, pinnedTitle(info, UI.names.get(info.e)?.name));
   buildDetailBody(win.querySelector('.panel-body'), info);
   // (the pin is shown in the window's tab, so it is kept by reference)
   win._pin = $1('.d-pin', win);
-  win._pin.onclick = () => {
-    const place = layout.placeOf('pinned-detail', String(info.e));
-    layout.close('pinned-detail', String(info.e));
-    fillDetailPanel(info, place);
-  };
+  win._pin.onclick = () => unpinAllocation(layout, info, (place) => selectAllocation(info, place));
   return win;
 }
 
-// Open a pinned-allocation window for `info`. `place` says where: in the
-// live window's place (`place`), floating `at` a spot, or docked (`dock`,
-// with `restoring` from a session). Shared by the interactive pin button and
-// by session restore (see applySession).
+// Open a pinned-allocation window for `info` where `place` says: docked
+// (`dock`, with `restoring` from a session), or floating `at` a spot. Used by
+// session restore (see applySession); the pin button goes through
+// `pinAllocation`.
 function createPinnedWindow(info, place = {}) {
-  return layout.open('pinned-detail', String(info.e), { data: info, ...place });
+  return layout.open(PINNED, String(info.e), { data: info, ...place });
 }
 
-// Pin the current allocation window: it stays exactly where it is (as a
-// pinned window, orange pin), and the next selection opens a fresh live
-// Allocation panel. Clicking a pinned window's pin returns it to the live
-// panel; × closes it. Any number of windows can be pinned.
+// Pin the live window's allocation: a pinned window for it opens as a tab
+// beside the live one, which stays and shows the next selection
+// (heap/alloc-windows.ts). Clicking a pinned window's pin unpins it; × closes
+// it. Any number of windows can be pinned, each on its own.
 $('d-pin').onclick = () => {
   const info = UI.detailInfo;
   if (!info) return;
-  // identical chrome to the live panel, in its place — the orange pin is the
-  // only tell
-  const hadFocus = document.activeElement === $('d-pin') || $('detail-panel').contains(document.activeElement);
-  const win = createPinnedWindow(info, { place: layout.placeOf('detail-panel') });
-  UI.detailWasPinned = true;
-  layout.close('detail-panel');
-  // the pin button was pressed in a window that is now gone: keyboard focus
-  // carries over to the same button in the window that replaced it
-  if (hadFocus) win._pin?.focus({ preventScroll: true });
+  const hadFocus = document.activeElement === $('d-pin') || $(LIVE).contains(document.activeElement);
+  const win = pinAllocation(layout, info);
+  // the pressed pin's tab is now behind the pinned one: keyboard focus
+  // carries over to the pinned window's pin
+  if (hadFocus) win?._pin?.focus({ preventScroll: true });
 };
