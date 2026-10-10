@@ -311,6 +311,24 @@ input { font-family: ui-monospace, monospace; }
 }
 .dock-action:hover { color: var(--fg); border-color: var(--border); }
 
+/* A window's own actions, in its tab (a pin): small icon buttons between the
+   title and the close button. Pressed (a pinned window) they show orange, and
+   so does the tab's top edge — the pinned window's one tell. */
+.dock-tab-actions { display: inline-flex; align-items: center; gap: 2px; margin-left: 4px; }
+.dock-tab-actions:empty { display: none; }
+#dock .tab-action {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; padding: 0;
+  background: none; border: 1px solid transparent; border-radius: 3px;
+  color: var(--fg-dim); opacity: 0.75; cursor: pointer;
+}
+#dock .tab-action:hover { opacity: 1; color: var(--fg); border-color: var(--border); }
+#dock .tab-action:focus-visible { outline: 1px solid var(--accent); outline-offset: 0; opacity: 1; }
+#dock .tab-action[aria-pressed='true'] { opacity: 1; color: #d29922; background: rgba(210, 137, 34, 0.18); }
+#dock .dv-tab:has(.tab-action[aria-pressed='true']) { box-shadow: inset 0 2px 0 #d29922; }
+/* the side edges' tabs run down the strip: their actions turn with them */
+#dock .dv-groupview-header-vertical .dock-tab-actions { margin: 4px 0 0; }
+
 /* a panel's content: the adopted element fills it */
 .dock-adopt { width: 100%; height: 100%; overflow: hidden; display: flex; flex-direction: column; }
 .dock-adopt > * { flex: 1 1 auto; min-height: 0; }
@@ -329,7 +347,7 @@ input { font-family: ui-monospace, monospace; }
 }
 .dock-adopt > .panel .panel-head > .ph-t,
 .dock-adopt > .panel .panel-close { display: none; }
-.dock-adopt > .panel .panel-head:not(:has(.head-actions, .log-count)) { display: none; }
+.dock-adopt > .panel .panel-head:not(:has(.head-actions > :not(.panel-close, [hidden]), .log-count)) { display: none; }
 .dock-adopt > .panel .panel-body { flex: 1 1 auto; min-height: 0; }
 
 /* the views */

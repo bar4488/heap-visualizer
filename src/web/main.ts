@@ -1581,7 +1581,7 @@ $$('input[name=fmode]').forEach((radio) => {
 
 // ---------------------------------------------------------------------------
 // panel wiring. The windowing itself — the dock (Dockview, D014), tabs,
-// splits, edge groups, floating, visibility, placement and persistence —
+// splits, edges, floating, visibility, placement and persistence —
 // lives in web/shell/ and knows nothing about heaps; this file only declares
 // panels to it (shell/layout.ts) and asks it to open and close them.
 // ---------------------------------------------------------------------------
@@ -2547,12 +2547,15 @@ function buildPinnedWindow(info) {
   win._allocInfo = info;
   win.innerHTML = `<div class="panel-head"><span class="ph-t">${esc(detailTitle(info))}</span>
       <span class="head-actions">
-        <button class="d-pin pinned" title="Unpin — return this to the live Allocation panel">📌</button>
+        <button class="d-pin tab-action pinned" type="button" aria-pressed="true" aria-label="Unpin this allocation window"
+          title="Unpin — return this to the live Allocation panel">${$('d-pin').innerHTML}</button>
         <button class="panel-close">×</button>
       </span></div>
     <div class="panel-body detail-body"></div>`;
   buildDetailBody(win.querySelector('.panel-body'), info);
-  $1('.d-pin', win).onclick = () => {
+  // (the pin is shown in the window's tab, so it is kept by reference)
+  win._pin = $1('.d-pin', win);
+  win._pin.onclick = () => {
     const place = layout.placeOf('pinned-detail', String(info.e));
     layout.close('pinned-detail', String(info.e));
     fillDetailPanel(info, place);
@@ -2577,11 +2580,11 @@ $('d-pin').onclick = () => {
   if (!info) return;
   // identical chrome to the live panel, in its place — the orange pin is the
   // only tell
-  const hadFocus = $('detail-panel').contains(document.activeElement);
+  const hadFocus = document.activeElement === $('d-pin') || $('detail-panel').contains(document.activeElement);
   const win = createPinnedWindow(info, { place: layout.placeOf('detail-panel') });
   UI.detailWasPinned = true;
   layout.close('detail-panel');
   // the pin button was pressed in a window that is now gone: keyboard focus
   // carries over to the same button in the window that replaced it
-  if (hadFocus) $1('.d-pin', win)?.focus({ preventScroll: true });
+  if (hadFocus) win._pin?.focus({ preventScroll: true });
 };

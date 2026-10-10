@@ -129,3 +129,155 @@ export function legacyPlan(legacy: { windows?: any; drawers?: any }, types: Type
   }
   return plan;
 }
+
+// ---------------------------------------------------------------------------
+// the dock's regions
+//
+// The dock is one grid: the edges are ordinary columns and rows around the
+// center, so they split like any other part of it. Which edge a group belongs
+// to is read off the grid's shape (the engine's own serialization of it,
+// `toJSON().grid`), relative to the *anchor* — the group holding the view
+// that cannot be closed (the address map):
+//
+// - in the root split, what lies before the anchor's branch is the left edge
+//   and what lies after it the right edge (a horizontal root), or the center
+//   and the bottom edge (a vertical root);
+// - one level down, inside the anchor's branch, the same with the axes
+//   swapped: above the anchor is still the center, below it the bottom edge
+//   (or left and right, under a vertical root);
+// - anything deeper is the center: a split the user made inside it.
+//
+// So dropping a tab on the dock's outer left edge adds to the left edge,
+// splitting an edge group keeps both halves in that edge, and splitting the
+// map keeps both halves in the center.
+
+export type Region = Edge | 'center';
+export type Orientation = 'HORIZONTAL' | 'VERTICAL';
+export type GridLeaf = { type: 'leaf'; data: { id: string; views?: string[]; [k: string]: any }; size?: number; visible?: boolean };
+export type GridBranch = { type: 'branch'; data: GridNode[]; size?: number; visible?: boolean };
+export type GridNode = GridLeaf | GridBranch;
+export type Grid = { root: GridNode; orientation: Orientation; width?: number; height?: number };
+
+const flip = (o: Orientation): Orientation => (o === 'HORIZONTAL' ? 'VERTICAL' : 'HORIZONTAL');
+
+function leafIds(n: GridNode, out: string[] = []) {
+  if (!n) return out;
+  if (n.type === 'leaf') out.push(n.data?.id);
+  else for (const c of n.data || []) leafIds(c, out);
+  return out;
+}
+
+const holds = (n: GridNode, id: string | null) => !!id && leafIds(n).includes(id);
+
+// A split with one child that is itself a split says the same as that child
+// alone, with the axes swapped: the engine leaves such roots behind.
+function unwrap(grid: Grid): Grid {
+  let { root, orientation } = grid;
+  while (root?.type === 'branch' && root.data.length === 1 && root.data[0].type === 'branch') {
+    root = root.data[0];
+    orientation = flip(orientation);
+  }
+  return { ...grid, root, orientation };
+}
+
+/** Every grid group's region, in the grid's own order (left to right, top to bottom). */
+export function regionsOf(grid: Grid | null | undefined, anchor: string | null): Map<string, Region> {
+  const out = new Map<string, Region>();
+  if (!grid?.root) return out;
+  const g = unwrap(grid);
+  const found = new Map<string, Region>();
+  const mark = (n: GridNode, r: Region) => { for (const id of leafIds(n)) found.set(id, r); };
+  // the children of a split either side of the one holding the anchor
+  const sides = (kids: GridNode[], o: Orientation): GridNode | null => {
+    const i = kids.findIndex((k) => holds(k, anchor));
+    if (i < 0) return null;
+    kids.forEach((k, j) => {
+      if (j === i) return;
+      if (o === 'HORIZONTAL') mark(k, j < i ? 'left' : 'right');
+      else mark(k, j < i ? 'center' : 'bottom');
+    });
+    return kids[i];
+  };
+  if (g.root.type === 'branch') {
+    const mid = sides(g.root.data, g.orientation);
+    if (mid?.type === 'branch') sides(mid.data, flip(g.orientation));
+  }
+  for (const id of leafIds(g.root)) out.set(id, found.get(id) || 'center');
+  return out;
+}
+
+/**
+ * Where a new bottom edge goes: below this group (the last one in the
+ * anchor's column, so the bottom edge spans the center but not the side
+ * edges), or — null — below the whole grid.
+ */
+export function bottomReference(grid: Grid | null | undefined, anchor: string | null): string | null {
+  if (!grid?.root) return null;
+  const g = unwrap(grid);
+  if (g.root.type !== 'branch' || g.orientation !== 'HORIZONTAL') return null;
+  const mid = g.root.data.find((k) => holds(k, anchor));
+  if (!mid) return null;
+  if (mid.type === 'leaf') return mid.data.id;
+  const last = mid.data[mid.data.length - 1];
+  return last?.type === 'leaf' ? last.data.id : null;
+}
+
+/** What the grid does not keep about an edge: whether it is collapsed, and the size it expands to. */
+export type EdgeState = { collapsed?: boolean; size?: number; groups?: Record<string, number> };
+
+/** The width (or height) of a collapsed edge: its tab strip. */
+export const RAIL = 27;
+
+/**
+ * A version-2 dock layout (the engine's edge groups: one group per side,
+ * outside the grid) as a version-3 one (the edges as columns and rows of the
+ * one grid). The center keeps its tree; the bottom group goes under it, the
+ * left and right groups either side of both; each keeps its id, tabs, active
+ * tab and size. An edge that was collapsed is so in the returned edge state.
+ * Floating windows keep their spot on screen: they were measured from the
+ * old center, and are now measured from the whole dock.
+ */
+export function dockFromEdgeGroups(dock: any): { dock: any; edges: Partial<Record<Edge, EdgeState>> } {
+  const edges: Partial<Record<Edge, EdgeState>> = {};
+  if (!dock || typeof dock !== 'object' || !dock.edgeGroups || !dock.grid?.root) return { dock, edges };
+  const { edgeGroups, ...rest } = dock;
+  const old = unwrap(dock.grid);
+  const width = old.width || 0;
+  const height = old.height || 0;
+  const leaf = (e: Edge): GridLeaf | null => {
+    const g = edgeGroups[e];
+    if (!g || g.visible === false || !g.group || !(g.group.views || []).length) return null;
+    const size = Number.isFinite(g.size) && g.size > 0 ? g.size : e === 'bottom' ? 240 : 300;
+    edges[e] = { collapsed: !!g.collapsed, size };
+    const data = { ...g.group };
+    if (e === 'bottom') delete data.headerPosition;
+    else data.headerPosition = e;
+    return { type: 'leaf', data, size };
+  };
+  const left = leaf('left');
+  const right = leaf('right');
+  const bottom = leaf('bottom');
+  // the old center as children of a split along `o`: its root's children
+  // when the root runs the same way, else the root itself
+  const center = (o: Orientation, size: number): GridNode[] => {
+    if (old.root.type === 'branch' && old.orientation === o) return old.root.data;
+    return [{ ...old.root, size }];
+  };
+  const middle: GridNode[] = bottom
+    ? [{ type: 'branch', size: width, data: [...center('VERTICAL', height), bottom] }]
+    : center('HORIZONTAL', width);
+  const shown = (e: Edge) => (edges[e] ? (edges[e].collapsed ? RAIL : edges[e].size) : 0);
+  const total = { width: width + shown('left') + shown('right'), height: height + shown('bottom') };
+  const grid: Grid = {
+    root: { type: 'branch', size: total.height, data: [...(left ? [left] : []), ...middle, ...(right ? [right] : [])] },
+    orientation: 'HORIZONTAL',
+    width: total.width,
+    height: total.height,
+  };
+  const out: any = { ...rest, grid };
+  if (Array.isArray(dock.floatingGroups)) {
+    out.floatingGroups = dock.floatingGroups.map((f) => (Number.isFinite(f?.position?.left)
+      ? { ...f, position: { ...f.position, left: f.position.left + shown('left') } } : f));
+  }
+  return { dock: out, edges };
+}

@@ -2,9 +2,10 @@
 
 The chrome around the views. Guiding stance: the views own the screen;
 everything else is a **window** the user summons, places, and dismisses. Views
-and windows alike are **panels in one dock** — a split/tab grid with edge
-groups and floating groups — so a new view (a flame graph, a span view) is one
-more panel type, not a new layout.
+and windows alike are **panels in one dock** — one split/tab grid, the center
+with the left, right and bottom edges around it, and floating groups over all
+of it — so a new view (a flame graph, a span view) is one more panel type, not
+a new layout.
 
 ## SHELL-001: Layout
 
@@ -47,12 +48,16 @@ Everything in the workspace is a panel in the dock. Two kinds:
   button; Request: the Help menu).
 
 A panel's tab carries its title (a window that retitles itself, like
-Allocation naming its allocation, retitles its tab), its close button, and is
-its drag handle. A window's own controls (follow, filtered, pin, ＋ mark, a
-line count) stay in a row at its top. A **toggle** (a View-menu entry, a
+Allocation naming its allocation, retitles its tab), the window's own
+**actions** (the Allocation window's pin — small icon buttons between the
+title and the close button, each a real button with an accessible name,
+reachable by Tab and pressed with Enter or Space), its close button, and is
+its drag handle. A window's other controls (follow, filtered, ＋ mark, a line
+count) stay in a row at its top; a window with none of them shown has no such
+row, so a floating window's only header is its tab strip. A **toggle** (a View-menu entry, a
 palette command, a top-bar button) closes its window
 when it is on screen, and brings it to the front when it is open but out of
-sight — a tab behind another, or in a collapsed edge group. Where each panel
+sight — a tab behind another, or in a collapsed edge. Where each panel
 is persists per trace via the session
 ([ANL-007](07-analysis.md#anl-007-persistence--heapa-files-and-autosave)), and
 starts from the default layout ([SHELL-008](#shell-008-the-default-layout)).
@@ -62,9 +67,10 @@ Behaviors every window has, whatever it contains:
 - **Below the overlays.** The dock is one stacking context: no floating group,
   however raised, can sit above an overlay (tooltip, selection popover, menu,
   search, drop and progress overlays, setup).
-- **Reachable.** A floating group stays inside the workspace: positions
-  restored from a session, and every floating group after a viewport resize,
-  are held within it.
+- **Reachable.** A floating group floats over the whole dock — the center and
+  the edges alike — and stays inside it: never over the top bar or the status
+  bar, and positions restored from a session, and every floating group after a
+  viewport resize, are held within it.
 - **Keyboard.** A window is a labelled region (named by its title). Opening one
   from its toggle moves focus into it, and closing it while focus is
   inside (or with focus lost to the page) returns focus to whatever opened it.
@@ -89,7 +95,7 @@ against an id that is not in the table is an error, not a step that silently
 never runs.
 
 Each record must also carry that panel's place in the default layout — the
-center grid, an edge group, or floating — whether it starts open, and whether
+center grid, an edge, or floating — whether it starts open, and whether
 it can be closed ([SHELL-008](#shell-008-the-default-layout)). Windows that are
 opened per selection or per event (Allocation, its pinned clones, Event) are
 declared in the same table, marked as not persisted: a restored session does
@@ -121,7 +127,7 @@ the View menu's entries are built from the records, never listed by hand
   singleton's element is adopted at once; a multi-instance type's
   `build(key, data)` makes an element per key.
 - `open(type, key?, options)`, `close`, `toggle`, `reveal` (open, bring its tab
-  to the front, and expand a collapsed edge group holding it), `isOpen`,
+  to the front, and expand a collapsed edge holding it), `isOpen`,
   `isShown`. Options cover moving focus, a floating position, a home (an edge,
   the center, floating), another window's place (`placeOf` — pinning and
   unpinning swap a window in place), and replaying a restore. Every open and
@@ -154,29 +160,43 @@ corners; dragging its tab (or Shift-dragging the strip) docks it. A grid group
 can be **maximized** (its header button or the tab menu) to fill the dock, and
 restored. Panels never leave the page: there are no popout windows.
 
-Around the grid are three **edge groups** — left, right, bottom:
+The grid has three **edges** around its center — left, right, bottom. They
+are part of the one grid, not separate docks:
 
-- An edge group is one group of tabs along that side, resizable at its inner
-  edge. The bottom group's tab strip sits above its content, as every grid
-  group's does.
-- It **collapses** to a rail of its tab titles (written vertically on the
-  left and right), from a button at the end of its tab strip; collapsing never
-  closes, undocks or reorders its panels, and expanding restores its size.
-  Collapse persists with the session. Opening or revealing a window that lives
-  there expands it.
-- An edge group with no panels **is not shown**; while a tab is being dragged,
-  empty edges show as rails so a panel can be dropped onto them, and one that
-  fills up from empty opens expanded.
+- The left and right edges are columns at the dock's sides, full height; the
+  bottom edge is a row under the center, between them. Each is resizable at
+  its inner side. The side edges' tab strips run down their outer side (titles
+  written vertically); the bottom edge's sits above its content, as every
+  center group's does.
+- An edge **splits** like the rest of the grid: dropping a tab on the top or
+  bottom half of a side edge's group splits that edge into a top and a bottom
+  group (the left or right half of a bottom edge group splits it side by
+  side), each with its own tabs. Dropping a tab on the dock's outer edge makes
+  a new column (or row) of that edge. Which edge a group belongs to follows
+  from where it sits relative to the address map: before or after the map's
+  column at the root (left, right), below the map inside that column
+  (bottom); a split inside the center stays center.
+- An edge **collapses** to a rail of its tab titles — every group of it at
+  once — from a button at the end of its last group's tab strip; collapsing
+  never closes, undocks or reorders its panels, and expanding gives each group
+  back its size. Collapse persists with the session. Opening or revealing a
+  window that lives there, clicking one of its tabs on the rail, or dropping a
+  tab into it expands it.
+- An edge with no panels **takes no room**; a tab dropped on the dock's outer
+  edge starts it again, expanded. A resize of the window goes to the center
+  (the address map), not to an edge.
 
 Closing a panel keeps its place: reopening it from its toggle returns it to
-the edge group, the grid group or the floating position it was in (or, if
-that group is gone, to its default home).
+the group it was in — in an edge, the same half of a split edge, while that
+group is there, else that edge —, the center group, or the floating position
+it was in (or, if that group is gone, to its default home).
 
 **The dock layout in the session.** The shell's half of the session is a
-`shell` section with its own `version`. Version 2 is the dock engine's own
-serialization of the whole layout — groups, splits and their sizes, tabs and
-the active one, edge groups' sizes and collapse, floating groups' positions —
-plus where closed windows reopen. A restore replaces the layout wholly. A
+`shell` section with its own `version`. Version 3 is the dock engine's own
+serialization of the whole layout — the one grid's groups, splits (edges'
+splits included) and their sizes, tabs and the active one, floating groups'
+positions — plus each edge's collapse and the size each of its groups expands
+to, and where closed windows reopen. A restore replaces the layout wholly. A
 saved panel whose window does not exist yet (a pinned allocation window, which
 comes back after a worker round-trip) holds its slot until it is recreated
 there, and the slot is dropped if it never is. A saved panel for a window that
@@ -184,10 +204,17 @@ is not persisted, or that this build does not know, is not restored; windows
 that are not persisted keep their open state across a restore. Restoring a
 layout that lacks a view that cannot be closed adds the view back.
 
+A version-2 section (written when the edges were the engine's own edge
+groups, one per side, outside the grid) is read once, through one path, into
+version 3: each edge group becomes that edge's one group in the grid — its
+tabs, active tab and size kept, collapsed if it was — around the old center,
+and floating windows keep their place on screen. It is written back in the
+current shape.
+
 A session written before the dock (shell version 1: `windows` with each
 window's floating position and visibility, and `drawers` with the left and
 right drawers' order, widths and collapse) is read once, through one path,
-into a dock layout: each drawer becomes that edge group (its order the tab
+into a dock layout: each drawer becomes that edge's group (its order the tab
 order, its width the group's size, its collapse kept), docked pinned windows
 keep their slot, windows the old session knew about but did not dock float
 where they were, a window docked but closed reopens in that edge, and anything
@@ -198,10 +225,15 @@ default. It is written back in the current shape.
 
 One **live** Allocation panel follows selection (click, step, search-jump).
 While it is open it stays exactly where it is — a new selection changes its
-content, never its place or size. **Pinning** (📌) detaches the current window
+content, never its place or size. **Pinning** — the pin icon in the window's
+tab ([SHELL-002](#shell-002-panels-views-and-windows)), "Pin this allocation
+window" — detaches the current window
 in place — the pinned window takes the live window's place in the dock at the
-same position and size, identical chrome, the orange pin the only tell — and
-the next selection opens a fresh live panel placed from scratch. Selecting an
+same position and size, identical chrome, the orange pin the only tell (its
+pin pressed, shown orange, and an orange line along the top of its tab;
+"Unpin this allocation window") — and the next selection opens a fresh live
+panel placed from scratch. Keyboard focus on the pin carries over to the
+pinned window's pin. Selecting an
 already-pinned allocation raises its window instead of duplicating it.
 Unpinning returns the window's content to the live panel, in the pinned
 window's place (moving the live panel there if it is open elsewhere). Pinned
@@ -209,7 +241,8 @@ windows dock like any other window and are restored from the session by
 creator event index, each into its saved slot — a floating one at its saved
 position and size.
 
-**Placing a floating window from scratch.** A live panel that floats from
+**Placing a floating window from scratch.** The area a floating window is
+placed in is the whole dock, edges included. A live panel that floats from
 scratch (its first opening, or after a pin) opens at its declared float size
 **beside the selection** it shows — to the right of the clicked point, else
 the left, below, above — never covering that point. It takes the nearest spot
@@ -304,8 +337,8 @@ A newly loaded trace with no session starts from this layout too, keeping
 floating windows' positions. **Reset layout** (View menu, and the palette) applies
 it on demand and completely: every view back in the center, every declared
 window back in its default edge and order or floating at its default spot,
-persisted windows open or closed as declared, edge groups at their default
-size and expanded. Windows opened per selection (Allocation, pinned clones,
+persisted windows open or closed as declared, each edge one group again
+(splits undone) at its default size and expanded. Windows opened per selection (Allocation, pinned clones,
 Event) keep their open state and are only moved — floated, on screen. The
 result is autosaved like any other layout change.
 

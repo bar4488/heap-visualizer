@@ -12,8 +12,9 @@ The shell's panel API (`src/web/shell/layout.ts`,
 [SHELL-003](../../spec/09-ui-shell.md#shell-003-panels-are-declared-as-data))
 is implemented on **Dockview**, through its framework-free core package
 `dockview-core`. The views (address map, time strip, event-index strip) and
-every window are panels in one dock: a split/tab grid in the center, an edge
-group on the left, right and bottom, and floating groups
+every window are panels in one dock: one split/tab grid — the center, with
+the left, right and bottom edges as ordinary columns and rows around it — and
+floating groups over all of it
 ([SHELL-004](../../spec/09-ui-shell.md#shell-004-docking)).
 
 - **Only `shell/layout.ts` talks to the engine.** Domain code keeps calling
@@ -53,9 +54,9 @@ build injects at load — so `build.sh` lifts that string out into
 theme maps Dockview's `--dv-*` variables onto its own tokens in `style.css`.
 
 An upgrade is therefore a deliberate act: bump the exact version, rebuild, and
-look at the dock in a browser (drag, tabs, edge collapse, floating, a restored
-session), since the CSS extraction and the JSON format are the parts most
-likely to move. `dockview-core`'s README calls it an internal package and
+look at the dock in a browser (drag, tabs, splitting and collapsing an edge,
+floating, a restored session), since the CSS extraction, the JSON format and
+the group `_priority` field are the parts most likely to move. `dockview-core`'s README calls it an internal package and
 points at `dockview`; we take the core directly because `dockview` only
 re-exports it, and the core is the one file with no imports to vendor.
 
@@ -72,10 +73,33 @@ history (undo/redo), pinned tabs, multi-row tab overflow and overflow
 search/MRU, the DnD compass, and keyboard navigation/docking.
 
 Where the free set falls short we build the small piece ourselves rather than
-reach for a paid module: edge groups collapse and expand from a button the
-shell renders in the group's header (`collapse()`/`expand()` are free); an
-empty edge group is hidden, and shown as a drop rail only while a tab is being
-dragged.
+reach for a paid module: collapsing an edge to a rail is the shell's (below).
+
+## Edges are grid columns, not engine edge groups
+
+The engine's own edge groups (`addEdgeGroup`) were used at first. They hold
+one group per side, outside the grid, so an edge could only take tabs — never
+split into top and bottom like an IDE's tool-window areas — and floating
+groups were bounded by the center grid, not the whole workspace. So the
+edges are now ordinary columns and rows of the one grid, and the shell does
+the rest:
+
+- **Which edge a group is in** is read off the grid's shape
+  (`toJSON().grid`), relative to the group holding the address map
+  (`layout-plan.ts` `regionsOf`, pure and tested): before or after the map's
+  column at the root is left or right, below the map inside it is bottom,
+  anything deeper is center. So a drop on an edge group's side splits that
+  edge, a drop on the dock's outer edge adds a column to it, and a split of
+  the map stays center.
+- **Collapse** pins each group of the edge to its tab strip's thickness with
+  `setConstraints` (free) and gives each its size back on expand; the shell
+  keeps the collapse and the sizes beside the engine's JSON in the session.
+- **The map takes resizes**: the shell sets the map group's layout priority
+  to high. Dockview sets a group's priority only at creation, so this writes
+  the group's `_priority` field and nudges the tree with an empty constraint
+  change — an internal of this pinned version, to check on upgrade.
+- Version-2 sessions (with the engine's `edgeGroups`) are read once into this
+  shape (`dockFromEdgeGroups`).
 
 ## No popouts
 

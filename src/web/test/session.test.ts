@@ -5,6 +5,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import { installDom, El } from './dom-stub.ts';
 import { createFakeDockview } from './fake-dockview.ts';
@@ -145,7 +146,7 @@ test('buildSession captures every field the format promises', () => {
   assert.equal(h.filter.source, 'alloc.size >= 1KiB and alloc.size <= 1MiB');
   assert.equal(h.filter.mode, 2);
   // the shell's section is the dock's own serialization, opaque here
-  assert.equal(s.shell.version, 2);
+  assert.equal(s.shell.version, 3);
   assert.ok(s.shell.dock);
 });
 
@@ -285,7 +286,7 @@ function v1Session() {
   };
 }
 
-test('a v1 session (drawers, floating windows, pinned) reads into a dock layout and writes back as v2', async () => {
+test('a v1 session (drawers, floating windows, pinned) reads into a dock layout and writes back as v3', async () => {
   const restoreUi = { ...makeUI(), meta: {} };
   initSession({
     ...makeDeps(restoreUi, []),
@@ -300,19 +301,18 @@ test('a v1 session (drawers, floating windows, pinned) reads into a dock layout 
   assert.deepEqual(layout.location('events-panel'), { dock: 'right', open: true });
   assert.deepEqual(layout.location('pinned-detail', '42'), { dock: 'left', open: true });
   const shell = buildSession().shell;
-  const left = shell.dock.groups.find((g) => g.id === 'edge-left');
-  assert.deepEqual(left.views, ['filter-panel', 'pinned-detail:42']);
-  assert.equal(left.size.width, 420);
-  assert.equal(left.collapsed, true);
+  const left = shell.dock.grid.root.data[0];
+  assert.deepEqual(left.data.views, ['filter-panel', 'pinned-detail:42']);
+  assert.deepEqual(shell.edges.left, { collapsed: true, size: 420, groups: { [left.data.id]: 420 } });
   // windows the old drawers did not dock float, closed ones stay closed
   assert.deepEqual(layout.location('layout-panel'), { dock: null, open: true });
   assert.equal(layout.isOpen('warnings-panel'), false);
-  assert.deepEqual(shell.dock.groups.find((g) => g.views.includes('play-panel')).box.left, 40);
+  assert.deepEqual(shell.dock.floatingGroups.find((g) => g.data.views.includes('play-panel')).position.left, 40);
   assert.deepEqual(layout.location('pinned-detail', '7'), { dock: null, open: true });
   // the views the old session never placed take their default
   assert.deepEqual(layout.location('addr-scroll'), { dock: 'center', open: true });
   // and it is written back in the current shape
-  assert.equal(shell.version, 2);
+  assert.equal(shell.version, 3);
   assert.deepEqual(buildSession().heap.pinned, [{ e: 42 }, { e: 7 }]);
 
   // which round-trips
@@ -326,6 +326,41 @@ test('a v1 session (drawers, floating windows, pinned) reads into a dock layout 
   layout.closeAll('pinned-detail');
   initSession(makeDeps(ui, posted));
 });
+
+// A session written with the engine's own edge groups (shell version 2: one
+// group per side, outside the grid), as the app saved it — the edges come
+// back as columns and rows of the one grid, collapse and sizes kept.
+test('a v2 session (edge groups) reads into the one grid and writes back as v3', async () => {
+  const shell = JSON.parse(readFileSync(new URL('./fixtures/shell-v2.json', import.meta.url), 'utf8'));
+  assert.equal(shell.version, 2);
+  layout.resetLayout();
+  applySession({ heapVisualizerSession: 1, heap: { version: HEAP_SESSION_VERSION, pinned: [] }, shell });
+  assert.deepEqual(layout.location('events-panel'), { dock: 'left', open: true });
+  for (const id of ['layout-panel', 'appearance-panel', 'filter-panel', 'analysis-panel']) {
+    assert.deepEqual(layout.location(id), { dock: 'right', open: true }, id);
+  }
+  assert.deepEqual(layout.location('addr-scroll'), { dock: 'center', open: true });
+  assert.deepEqual(layout.location('strip-t'), { dock: 'center', open: true });
+  // the right edge was collapsed: its windows are open but out of sight
+  assert.equal(layout.isShown('layout-panel'), false);
+  assert.equal(layout.isShown('events-panel'), true);
+  const out = buildSession().shell;
+  assert.equal(out.version, 3);
+  assert.equal(out.dock.edgeGroups, undefined);
+  assert.equal(out.edges.right.collapsed, true);
+  assert.equal(out.edges.right.size, 300);
+  assert.equal(out.edges.left.collapsed, false);
+  // panels this build has no window for (another domain's) are not restored
+  assert.equal(out.dock.panels['intervals-state'], undefined);
+  // and the v3 it was written as round-trips
+  layout.resetLayout();
+  applySession(JSON.parse(JSON.stringify(buildSessionWith(out))));
+  assert.deepEqual(buildSession().shell, out);
+});
+
+function buildSessionWith(shell) {
+  return { ...buildSession(), shell };
+}
 
 test('a v1 drawer layout wholly overrides panels docked by default', () => {
   const s = v1Session();
