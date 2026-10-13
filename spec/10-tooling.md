@@ -183,9 +183,31 @@ wrong-method and unknown-route errors), per-route request-body limits,
 advertised limits matching enforced ones, and the private-network preflight
 response.
 
-Rendering, pointer interaction and the real worker round trip are still
-verified by hand — against `dist/`, after a build — and there is no fixed
-script.
+`npm run test:browser` runs the **browser smoke suite** (`tests/browser/`,
+Playwright, `playwright.config.ts`): the wiring no unit test reaches — the dock
+engine, canvases drawn by the worker and its wasm, menus, pointer drags — along
+a few short flows against the built `dist/`, served by `serve.py`. It needs
+`./build.sh` first and says so when the build is missing; it uses the system
+Chromium (`HEAPVIZ_CHROMIUM` overrides). The flows:
+
+- the demo loads: the address map and both strips paint, the Heap, Logs and
+  Intervals domain chips are present, and no page or console error is raised
+  (every flow fails on one);
+- pinning replaces the live Allocation window with `#<id>`; pinning a second
+  leaves the first untouched;
+- unpinning closes only that window and shows the allocation in the live one;
+- two pinned tabs combine into one floating window, and Move to new window
+  takes one out again;
+- a tab dropped on the lower half of the left edge splits it top/bottom;
+- a reload restores the pinned windows, their grouping and the split edge;
+- View → Logs toggles the Logs panel, and the palette's Reset layout restores it;
+- a `call ▸` row in Events opens the Interval window and marks Tracks/Stacks;
+- the Logs panel marks the playhead's line after a jump and during play.
+
+It stays small and fast (under a minute) and outside the unit loop: neither
+`node --test` nor `tsconfig.test.json` loads it. A change to UI wiring gets a
+flow here or extends one; everything else stays a unit test. Visual judgment
+— does it look right — is still a person's.
 `window.__heap_visualizer` exposes UI state for console poking.
 
 ## TOOL-004: Agent-analysis benchmark corpus

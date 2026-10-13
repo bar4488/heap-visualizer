@@ -19,8 +19,9 @@ Keep process lightweight. Spend time on the product, not repository ceremony.
 - Update documentation only when commands, public behavior, architecture, or an
   important operational constraint changed.
 - Write planning or design documents only when they materially help the work.
-- Do not add browser automation or new dependencies unless the task requires
-  them.
+- Do not add new dependencies unless the task requires them. Browser
+  automation belongs in the committed smoke suite (`tests/browser/`), not in
+  ad-hoc scripts or the unit tests.
 
 ## Tests
 
@@ -28,6 +29,10 @@ Keep process lightweight. Spend time on the product, not repository ceremony.
   regression test that fails without the fix.
 - Keep them cheap and focused: unit-level, fast, deterministic, no network.
   Prefer testing pure logic and engine behavior over UI plumbing.
+- UI wiring the unit tests cannot reach (the dock engine, canvases and the
+  worker, menus, pointer flows) gets a browser smoke flow, or extends one, in
+  `tests/browser/`; run it with `npm run test:browser` after `./build.sh`.
+  Keep that suite small (a handful of short flows, under a minute).
 - Don't sink a lot of time into testing. A few tests that pin the important
   behavior beat exhaustive coverage; if something is hard to test, note the gap
   and move on.
@@ -45,6 +50,7 @@ node --test 'src/web/**/*.test.ts'
 node_modules/.bin/tsc -p tsconfig.test.json
 python3 -m unittest discover -s src/server
 ./build.sh
+npm run test:browser   # after ./build.sh; UI wiring changes
 ```
 
 Use `source "$HOME/.cargo/env"` first when Cargo is not on `PATH`. Report what
