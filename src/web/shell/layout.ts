@@ -732,7 +732,12 @@ function headerFor(g, region: Region | null) {
  */
 function syncEdges(quiet = false) {
   refreshRegions();
-  for (const g of api.groups || []) headerFor(g, regionOf(g));
+  for (const g of api.groups || []) {
+    const r = regionOf(g);
+    headerFor(g, r);
+    // a stable hook for the browser smoke suite: which edge a group is in
+    if (g.element?.dataset) g.element.dataset.region = r || 'floating';
+  }
   withBatch(prioritize);
   const now: Record<Edge, Set<string>> = { left: new Set(), right: new Set(), bottom: new Set() };
   for (const [id, r] of regions) {

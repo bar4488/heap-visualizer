@@ -6,7 +6,8 @@ belongs in [spec/](../spec/README.md); this file is operational.
 ## Build
 
 ```sh
-npm install         # typescript + @types/node (dev), dockview-core (vendored), once
+npm install         # typescript, @types/node, @playwright/test (dev; no browser
+                    # download), dockview-core (vendored), once
 ./build.sh          # everything into dist/: the wasm, the compiled web layer,
                     # the vendored dock engine, and a generated demo trace
 ./build.sh web      # skip the cargo build; recompile only the web layer
@@ -187,6 +188,30 @@ cargo test --manifest-path src/local-server/Cargo.toml # the local data-server t
 
 Each command prints its own test count; do not maintain duplicate counts here.
 
+### Browser smoke suite
+
+```sh
+./build.sh                  # the suite serves dist/ as built; it builds nothing
+npm run test:browser        # type-checks tests/browser, then runs Playwright
+HEAPVIZ_CHROMIUM=/path/to/chrome npm run test:browser   # another browser binary
+npx playwright test -g pin  # one flow; --headed / --debug to watch it
+```
+
+A few short flows through the real page (`tests/browser/*.spec.ts`, shared
+steps in `helpers.ts`): the demo loads and paints, allocation windows pin,
+unpin, combine and split apart, an edge splits, a reload restores the layout,
+the menus and palette, an interval click, the Logs playhead. It is separate
+from the unit loop: `node --test` and `tsconfig.test.json` never see it
+(`tsconfig.browser.json` checks it).
+
+`playwright.config.ts` starts `./serve.py 8699` (or reuses a server already on
+that port, outside CI) and fails at once, naming `./build.sh`, when
+`dist/demo.heapl` or the wasm is missing. It uses the system Chromium,
+`/usr/bin/chromium`, unless `HEAPVIZ_CHROMIUM` names another; with neither,
+it falls back to Playwright's own (`npx playwright install chromium`).
+`npm install` downloads no browser. A failing flow leaves a screenshot and a
+trace under `test-results/` (`npx playwright show-trace <zip>`).
+
 **Invoke the compiler as `node_modules/.bin/tsc`, not `npx tsc`.** `typescript`
 is a devDependency, so with `node_modules/` absent npx fetches an unrelated
 package from the registry whose entire content is a message saying it is not
@@ -218,9 +243,9 @@ What it does not cover yet: see [Verify a web change](#verify-a-web-change).
 ## Verify a web change
 
 Rendering, pointer interaction, the real dock engine (dragging tabs, edge
-groups, floating), and the real worker round trip are not yet covered by any
-suite. Run the available checks and say precisely what they
-did and did not establish.
+groups, floating), and the real worker round trip are covered only by the
+browser smoke suite, and only along its few flows. Run the available checks
+and say precisely what they did and did not establish.
 
 ```sh
 cargo test --manifest-path src/core/Cargo.toml
@@ -228,7 +253,7 @@ cargo test --manifest-path src/filter-dsl/Cargo.toml
 node --test 'src/web/**/*.test.ts'
 node_modules/.bin/tsc -p tsconfig.test.json
 ./build.sh web
-./serve.py &     # then: curl -s -o /dev/null -w '%{http_code}\n' localhost:8630/main.js
+npm run test:browser
 ```
 
 For a change meant to preserve behavior — a translation, a rename, a config
@@ -262,6 +287,7 @@ in the final result rather than blocking otherwise verified work.
 | `dist/` | The served tree. Generated; not in git. |
 | `src/server/` | The feature-request service: `store.py` (the JSONL), `app.py` (static tree + API), `admin.html` (the review panel). Stdlib only, and it never sees trace data. |
 | `gen.py` | Synthetic `.heapl` trace generator. |
+| `tests/browser/` | The browser smoke suite (Playwright), run against `dist/` by `npm run test:browser`. |
 
 **No module imports `UI`.** Modules receive what they need via `init*(deps)`.
 That is what keeps the coupling written down and the persisted shapes testable.

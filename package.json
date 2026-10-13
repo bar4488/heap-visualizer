@@ -2,7 +2,11 @@
   "name": "heap-visualizer",
   "private": true,
   "type": "module",
+  "scripts": {
+    "test:browser": "tsc -p tsconfig.browser.json && playwright test"
+  },
   "devDependencies": {
+    "@playwright/test": "1.64.0",
     "@types/node": "^26.1.1",
     "typescript": "^5.9.0"
   },
