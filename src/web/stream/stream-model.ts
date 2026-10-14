@@ -384,50 +384,69 @@ export function includedDomains(chips: DomainChip[], excluded: ReadonlySet<strin
 // something other than its records — the interval domain's is over intervals,
 // its records are edges — cannot; it is counted as the residual: every
 // record no other domain claims. At most one domain can be the residual.
+//
+// The **filtered** toggle narrows the heap rows only (NAV-005): the filter
+// is a language over allocations (DOM-003), so a log line or an interval
+// edge has nothing to pass or fail, and stays governed by its chip. The heap
+// is then counted by the rank of the engine's filtered heap list, under the
+// key `FILTERED_HEAP`, instead of by its locate.
+
+/** The rank key of the heap rows the applied filter keeps. */
+export const FILTERED_HEAP = 'heap~';
 
 export type MaskPlan = {
   /** Records the list holds. */
   total: number;
-  /** Domains counted directly, added. */
+  /** Rank keys counted directly, added. */
   add: string[];
-  /** Domains counted directly, subtracted from `seq + 1` (residual included). */
+  /** Rank keys counted directly, subtracted. */
   sub: string[];
-  /** Whether the count is `seq + 1 − Σ sub` rather than `Σ add`. */
+  /** Whether the count starts from `seq + 1` (the residual) rather than 0. */
   residual: boolean;
 };
 
 const countsByLocate = (d: DomainDescriptor) => d.shape !== 'interval';
 
 /**
- * The plan for a list including `included`, or null when the list is the
- * whole spine (nothing with records is left out) or the descriptors cannot
- * support it (two residual domains).
+ * The plan for a list including `included` (undefined: every domain), or
+ * null when the list is the whole spine (nothing with records is left out
+ * and nothing is filtered) or the descriptors cannot support it (two
+ * residual domains).
+ *
+ * `filteredHeap`, when given, is how many heap rows the filtered toggle
+ * keeps: the heap is counted by `FILTERED_HEAP` and every other domain as
+ * before.
  */
-export function maskPlan(domains: DomainDescriptor[] | null | undefined, included: string[] | undefined): MaskPlan | null {
-  if (!included || !domains) return null;
+export function maskPlan(
+  domains: DomainDescriptor[] | null | undefined,
+  included: string[] | undefined,
+  filteredHeap?: number,
+): MaskPlan | null {
+  if (!domains) return null;
   const present = domains.filter((d) => d.count > 0);
-  const inc = present.filter((d) => included.includes(d.id));
-  if (inc.length === present.length) return null;
+  const inc = included ? present.filter((d) => included.includes(d.id)) : present;
+  const heapFiltered = filteredHeap !== undefined && inc.some((d) => d.id === 'heap');
+  if (inc.length === present.length && !heapFiltered) return null;
   const residuals = present.filter((d) => !countsByLocate(d));
   if (residuals.length > 1) return null;
-  const total = inc.reduce((n, d) => n + d.count, 0);
-  const residualIn = residuals.length === 1 && included.includes(residuals[0].id);
+  const counted = (d: DomainDescriptor) => (heapFiltered && d.id === 'heap' ? filteredHeap! : d.count);
+  const total = inc.reduce((n, d) => n + counted(d), 0);
+  const residualIn = residuals.length === 1 && inc.includes(residuals[0]);
   if (residualIn) {
-    return { total, add: [], sub: present.filter((d) => !included.includes(d.id)).map((d) => d.id), residual: true };
+    const sub = present.filter((d) => !inc.includes(d)).map((d) => d.id);
+    // every heap row is in `seq + 1`; trade them for the ones kept
+    if (heapFiltered) return { total, add: [FILTERED_HEAP], sub: [...sub, 'heap'], residual: true };
+    return { total, add: [], sub, residual: true };
   }
-  return { total, add: inc.map((d) => d.id), sub: [], residual: false };
+  return { total, add: inc.map((d) => (heapFiltered && d.id === 'heap' ? FILTERED_HEAP : d.id)), sub: [], residual: false };
 }
 
 /** Records the list holds at or before `seq` (0 for seq < 0). */
 export function maskRank(plan: MaskPlan, seq: number, rankOf: (domain: string, seq: number) => number): number {
   if (seq < 0) return 0;
-  if (plan.residual) {
-    let n = seq + 1;
-    for (const d of plan.sub) n -= rankOf(d, seq);
-    return n;
-  }
-  let n = 0;
+  let n = plan.residual ? seq + 1 : 0;
   for (const d of plan.add) n += rankOf(d, seq);
+  for (const d of plan.sub) n -= rankOf(d, seq);
   return n;
 }
 

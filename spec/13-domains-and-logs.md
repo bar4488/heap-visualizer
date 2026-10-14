@@ -56,6 +56,17 @@ Each domain provides, within the core:
   allocations and must not match another domain's records;
 - bounded, paged reads for the browser and the agent API.
 
+**Cross-domain predicates stay allocation predicates.** The filter may read
+another domain as context for an allocation — `"parse" in malloc.calls`
+asks which intervals were open when the allocation was born
+([ANL-013](07-analysis.md#anl-013-filtering-by-interval-context)) — but the
+answer is always a set of allocations. A log line or an interval edge is
+never a match, and the filtered Events list narrows heap rows only
+([NAV-005](06-playback-navigation.md#nav-005-the-events-panel)). Such a field
+is a column of the record it describes, derived at load from the other
+domain's store and empty when that domain has no records, so a trace
+without it pays nothing.
+
 Domain-specific behavior is implemented once, in the core
 ([D011](../docs/decisions/D011-analysis-changes-have-one-core-implementation.md));
 the worker and DOM present it.
@@ -264,9 +275,12 @@ The engine's Events-list JSON (`hp_events_json`, `hp_events_filtered_json`,
 
 `op` 4 is the log op; `level` is 0–5; `logger` and `thr` are `null` when
 absent; `extra` (the custom fields) is present only when the record has any.
-`e` is `null` because a log record touches no allocation. While an
-allocation filter is active the filtered list omits log rows, as it omits `E`
-rows (DOM-003). `hp_meta_json` reports the log record count as `nLog`.
+`e` is `null` because a log record touches no allocation. The engine's
+filtered list (`hp_events_filtered_*`) holds heap rows only, since only an
+allocation passes or fails a filter (DOM-003); the Events list's filtered
+toggle narrows its heap rows with it and keeps log and `E` rows, which only
+their domain chips govern
+([NAV-005](06-playback-navigation.md#nav-005-the-events-panel)). `hp_meta_json` reports the log record count as `nLog`.
 
 ## LOG-007: The Logs panel
 

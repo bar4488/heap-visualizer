@@ -130,12 +130,17 @@ replaces no allocation.
   so re-clicking one reopens its window instead of flashing.
 - **Follow** (default on) keeps the current event scrolled into view during
   stepping/playback.
-- **Filtered** (default off) lists only events whose allocation passes the
-  active Filter — a `free` follows the allocation it frees, so an allocation's
-  birth and death both stay in the list; a custom event has no allocation and
-  drops out. Rows keep their real seq; the
-  engine owns the filtered index (count, slice, seq→row position), rebuilt
-  lazily after any filter or tag change.
+- **Filtered** (default off) narrows the **heap rows** to those whose
+  allocation passes the active Filter — a `free` follows the allocation it
+  frees, so an allocation's birth and death both stay in the list. Every
+  other row — marks, logs, interval edges — has no allocation to pass or
+  fail ([DOM-003](13-domains-and-logs.md#dom-003-what-a-domain-provides)),
+  so the toggle leaves it alone: it stays listed or not by its domain chip
+  only. With the heap chip off, the toggle changes nothing. Rows keep their
+  real seq; the engine owns the filtered heap index (count, slice, seq→row
+  position and its rank, `hp_events_filtered_heap_rank`), rebuilt lazily
+  after any filter or tag change, and the list counts each other domain by
+  its own locate, as it does when a chip is off.
 - Arrow keys step the selection (along the filtered rows when the toggle is
   on); dragging vertically makes a seq range selection feeding the same
   popover as timeline shift-drag ([07-analysis](07-analysis.md)).

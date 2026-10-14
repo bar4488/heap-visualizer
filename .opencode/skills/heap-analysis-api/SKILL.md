@@ -55,7 +55,14 @@ fields include `alloc.size`, `alloc.freed`, `alloc.lifetime`, `alloc.tags`,
 `malloc.seq`, `malloc.time`, `malloc.site`, `malloc.thread`, `free.seq`, and
 `free.time`. Producer-defined fields use `malloc.fields.<name>`; deallocation
 fields use `free.fields.<name>`. Use `and`, `or`, `not`, comparisons, `in`, set
-literals, and `is None`/`is not None`. A filter input is always an object:
+literals, and `is None`/`is not None`.
+
+In a trace with intervals, `malloc.calls` is the call stack open on the
+allocating thread, `malloc.spans`/`malloc.span_ids` the thread's current span
+and its ancestors, and `free.calls`/`free.spans`/`free.span_ids` the same at
+the free (missing when never freed). Their only operation is membership of a
+string constant: `"parse_body" in malloc.calls`. Without intervals they are
+empty, so `in` is false. A filter input is always an object:
 
 ```json
 {"source":"malloc.site == \"example_site\" and not alloc.freed"}

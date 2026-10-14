@@ -6,7 +6,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  DEFAULT_COLUMNS, domainChips, genericStatusText, includedDomains, kindInfo, kindTooltip, maskPlan, maskRank, maskSeqAt,
+  DEFAULT_COLUMNS, domainChips, FILTERED_HEAP, genericStatusText, includedDomains, kindInfo, kindTooltip, maskPlan, maskRank, maskSeqAt,
   parseColumns, renderRow, rowDomain, rowText, shortAddr, threadLabel, threadNames, threadPhrase, toggleColumn,
 } from '../stream/stream-model.ts';
 import type { DomainDescriptor } from '../protocol.ts';
@@ -229,6 +229,33 @@ test('a list with domains left out maps positions to seqs exactly', () => {
     });
     assert.equal(maskSeqAt(plan, want.length, SPINE.length, rankOf), SPINE.length, 'past the end');
   }
+});
+
+test('the filtered toggle narrows heap rows only, and other domains stay listed by their chips', () => {
+  // heap rows at seqs 0 1 4 6 8 10; the applied filter keeps 1, 6 and 10
+  const kept = new Set([1, 6, 10]);
+  const rank = (d: string, seq: number) => (d === FILTERED_HEAP
+    ? SPINE.slice(0, seq + 1).filter((dom, s) => dom === 'heap' && kept.has(s)).length
+    : rankOf(d, seq));
+  const shown = (included: string[]) => listed(included).filter((seq) => SPINE[seq] !== 'heap' || kept.has(seq));
+  for (const included of [undefined, ['heap'], ['heap', 'logs'], ['heap', 'intervals'], ['logs', 'intervals'], ['intervals']]) {
+    const plan = maskPlan(DOMAINS, included, kept.size);
+    const all = included ?? ['heap', 'logs', 'intervals'];
+    const want = shown(all);
+    const label = all.join('+');
+    assert.ok(plan, label);
+    assert.equal(plan.total, want.length, label);
+    want.forEach((seq, k) => {
+      assert.equal(maskSeqAt(plan, k, SPINE.length, rank), seq, `${label} #${k}`);
+      assert.equal(maskRank(plan, seq - 1, rank), k, `${label} rank of ${seq}`);
+    });
+    // logs and interval edges are never dropped by the filter
+    for (const seq of listed(all.filter((d) => d !== 'heap'))) assert.ok(want.includes(seq), `${label} keeps ${seq}`);
+  }
+  // with the heap chip off the filter has nothing to narrow
+  assert.deepEqual(maskPlan(DOMAINS, ['logs'], kept.size), maskPlan(DOMAINS, ['logs']));
+  // the heap rows the filtered list keeps are counted by its own rank
+  assert.deepEqual(maskPlan(DOMAINS, ['heap'], kept.size)?.add, [FILTERED_HEAP]);
 });
 
 test('the interval domain is counted as the residual, never by its locate', () => {

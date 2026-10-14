@@ -5,7 +5,7 @@ import { fmtBytes, fmtAllocSize as fmtAllocSizeMode, clampView } from './fmt.ts'
 import { paintPlayhead } from './timeline-interaction.ts';
 import { QUERY_FAILURE, queryFailureReply } from './query-failure.ts';
 import type { DomainDescriptor, EventRow, FromWorker, SettingKey, ToWorker } from './protocol.ts';
-import { maskPlan, maskRank, maskSeqAt, rowDomain } from './stream/stream-model.ts';
+import { FILTERED_HEAP, maskPlan, maskRank, maskSeqAt, rowDomain } from './stream/stream-model.ts';
 
 // Shadows the global: nothing leaves this worker that the protocol does not
 // describe, and the main thread's switch is written against the same union.
@@ -111,15 +111,46 @@ function callJson(name: string, input: unknown) {
 // the Events list with domains left out (stream/stream-model.ts has the math)
 // ---------------------------------------------------------------------------
 
-/** Records of `domain` at or before `seq`, from its locate. */
+/**
+ * Records of `domain` at or before `seq`, from its locate — or, for
+ * `FILTERED_HEAP`, the heap rows the applied filter keeps.
+ */
 function domainRank(domain: string, seq: number): number {
+  if (domain === FILTERED_HEAP) return E.hp_events_filtered_heap_rank(seq + 1);
   const r = callJson('hp_domain_locate', { domain, seq });
   return Math.max(0, (r?.row ?? -1) + 1);
 }
 
-/** One page of the list holding only `plan`'s domains, from position `from`. */
-function maskedEvents(plan, included: string[], from: number, count: number): EventRow[] {
-  const keep = new Set(included);
+/**
+ * The Events list's plan (stream-model.ts). The filtered toggle narrows the
+ * heap rows only (NAV-005), so it takes part only when the applied filter
+ * actually drops a heap row. A list of nothing but the filtered heap rows is
+ * the engine's own filtered list, which answers it directly (`filteredList`).
+ */
+function eventsPlan(m) {
+  let filteredHeap: number | undefined;
+  if (m.filtered && has('hp_events_filtered_heap_rank')) {
+    const kept = E.hp_events_filtered_heap_rank(S.n);
+    const heap = (S.domains || []).find((d) => d.id === 'heap')?.count ?? kept;
+    if (kept !== heap) filteredHeap = kept;
+  }
+  const plan = has('hp_domain_locate') ? maskPlan(S.domains, m.domains, filteredHeap) : null;
+  const heapOnly = !!plan && !plan.residual && plan.add.length === 1 && plan.add[0] === FILTERED_HEAP;
+  // no plan (two residual domains): the engine's heap-only filtered list
+  const fallback = !plan && filteredHeap !== undefined;
+  return { plan: heapOnly ? null : plan, filteredList: heapOnly || fallback };
+}
+
+/** One page of the list holding only `plan`'s records, from position `from`. */
+function maskedEvents(plan, included: string[] | undefined, from: number, count: number): EventRow[] {
+  const keep = included ? new Set(included) : null;
+  const heapFiltered = plan.add.includes(FILTERED_HEAP);
+  const kept = (ev: EventRow) => {
+    const domain = rowDomain(ev);
+    if (keep && !keep.has(domain)) return false;
+    if (!heapFiltered || domain !== 'heap') return true;
+    return E.hp_events_filtered_heap_rank(ev.seq + 1) > E.hp_events_filtered_heap_rank(ev.seq);
+  };
   const rows: EventRow[] = [];
   let seq = maskSeqAt(plan, from, S.n, domainRank);
   let scanned = 0;
@@ -135,7 +166,7 @@ function maskedEvents(plan, included: string[], from: number, count: number): Ev
     E.hp_events_json(seq, chunk);
     const evs: EventRow[] = retJson();
     for (const ev of evs) {
-      if (ev && keep.has(rowDomain(ev))) {
+      if (ev && kept(ev)) {
         rows.push(ev);
         if (rows.length >= count) break;
       }
@@ -1057,20 +1088,15 @@ async function handleMessage(m: ToWorker) {
         postMessage(QUERY_FAILURE.events(m, ''));
         break;
       }
-      // filtered mode indexes into the engine's filtered event list; `total`
-      // sizes the panel's virtual scroll either way
+      // an indexed list (domains left out, or heap rows filtered) maps
+      // positions through its plan; `total` sizes the panel's virtual scroll
       let total = S.n;
-      const plan = has('hp_domain_locate') ? maskPlan(S.domains, m.domains) : null;
-      if (plan && m.filtered && !m.domains.includes('heap')) {
-        // the filtered list holds heap records only (DOM-003)
-        postMessage({ type: 'events', reqId: m.reqId, from: m.from, events: [], total: 0 });
-        break;
-      }
-      if (plan && !m.filtered) {
+      const { plan, filteredList } = eventsPlan(m);
+      if (plan) {
         postMessage({ type: 'events', reqId: m.reqId, from: m.from, events: maskedEvents(plan, m.domains, m.from, m.count), total: plan.total });
         break;
       }
-      if (m.filtered) {
+      if (filteredList) {
         total = E.hp_events_filtered_count();
         E.hp_events_filtered_json(m.from, m.count);
       } else {
@@ -1085,14 +1111,15 @@ async function handleMessage(m: ToWorker) {
         postMessage(QUERY_FAILURE['ev-pos'](m, ''));
         break;
       }
-      const plan = has('hp_domain_locate') ? maskPlan(S.domains, m.domains) : null;
-      if (plan && m.filtered && !m.domains.includes('heap')) {
-        postMessage({ type: 'ev-pos', reqId: m.reqId, pos: 0, total: 0 });
-        break;
-      }
-      if (plan && !m.filtered) {
+      const { plan, filteredList } = eventsPlan(m);
+      if (plan) {
         // the position of the first listed record at or after seq
         postMessage({ type: 'ev-pos', reqId: m.reqId, pos: maskRank(plan, m.seq - 1, domainRank), total: plan.total });
+        break;
+      }
+      if (!filteredList) {
+        // the whole spine: nothing is left out and the filter drops nothing
+        postMessage({ type: 'ev-pos', reqId: m.reqId, pos: Math.min(m.seq, S.n), total: S.n });
         break;
       }
       postMessage({

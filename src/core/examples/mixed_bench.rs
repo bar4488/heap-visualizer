@@ -3,7 +3,8 @@
 //! Generates one deterministic heap workload in memory and loads it several
 //! times: heap-only, with structured log lines interleaved at 10x and 100x
 //! the heap record count, and (a v2 trace) with interval edges — nested
-//! calls on four threads, spans, and context switches on four CPUs — at 10x.
+//! calls on four threads, spans, and context switches on four CPUs — at 10x
+//! and 100x.
 //! The heap records are identical in all of them, so every heap operation
 //! below asks the same question of each trace and the mixed columns should
 //! match the heap-only one.
@@ -241,7 +242,7 @@ struct Row {
 fn main() {
     let mut heap = 50_000u32;
     let mut ratios = vec![0u32, 10, 100];
-    let mut interval_ratios = vec![10u32];
+    let mut interval_ratios = vec![10u32, 100];
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -288,6 +289,8 @@ fn main() {
         ("interval window: thread, whole trace", "us"),
         ("interval window: thread, 1% of time", "us"),
         ("interval window: cpu, whole trace", "us"),
+        ("filter apply: \"parse\" in malloc.calls", "ms"),
+        ("filter apply: \"request\" in free.spans", "ms"),
     ];
     let mixes: Vec<Mix> = ratios
         .iter()
@@ -385,6 +388,20 @@ fn main() {
         let by_tag = apply_filter(source);
         eprintln!("  filtered events: by size {by_size}, by tag {by_tag}");
         clear_filter();
+        // interval-context predicates (ANL-013): a name resolved once, the
+        // interval chains marked once, then one bit test per allocation
+        let mut context_hits = Vec::new();
+        for (k, source) in ["\"parse\" in malloc.calls", "\"request\" in free.spans"].iter().enumerate() {
+            let d = time(5, clear_filter, || {
+                feed(source.as_bytes());
+                hp_filter_apply(source.len() as u32);
+            });
+            rows[20 + k].values.push(ms(d));
+            clear_filter();
+            context_hits.push(apply_filter(source));
+            clear_filter();
+        }
+        eprintln!("  filtered events: by calls {}, by spans {}", context_hits[0], context_hits[1]);
 
         // timelines: whole-trace view
         let total = n as f64;
@@ -460,7 +477,7 @@ fn main() {
                 eprintln!("  window {k}: {drawn} rows drawn (last request)");
             }
         } else {
-            for row in &mut rows[15..] {
+            for row in &mut rows[15..20] {
                 row.values.push(f64::NAN);
             }
         }

@@ -259,6 +259,62 @@ fn usable_row(s: &Store, h: usize) -> u64 {
     s.dom.heap.usable.get(h).copied().unwrap_or(0)
 }
 
+/// One of the interval-context columns (`HeapContext`): which record's
+/// context, and which kind of interval it points at.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CtxCol {
+    BirthCall,
+    BirthSpan,
+    DeathCall,
+    DeathSpan,
+}
+
+impl CtxCol {
+    /// The column a context field reads, and whether its members are span
+    /// ids rather than names.
+    fn of(ns: Ns, name: &str) -> Option<(Self, bool)> {
+        let death = match ns {
+            Ns::Malloc => false,
+            Ns::Free => true,
+            Ns::Alloc => return None,
+        };
+        let (call, by_id) = match name {
+            "calls" => (true, false),
+            "spans" => (false, false),
+            "span_ids" => (false, true),
+            _ => return None,
+        };
+        Some((
+            match (death, call) {
+                (false, true) => CtxCol::BirthCall,
+                (false, false) => CtxCol::BirthSpan,
+                (true, true) => CtxCol::DeathCall,
+                (true, false) => CtxCol::DeathSpan,
+            },
+            by_id,
+        ))
+    }
+
+    /// The innermost interval per heap row; empty when the trace has none
+    /// of this kind.
+    fn slice(self, s: &Store) -> &[u32] {
+        let ctx = &s.dom.intervals.heap_ctx;
+        match self {
+            CtxCol::BirthCall => &ctx.call,
+            CtxCol::BirthSpan => &ctx.span,
+            CtxCol::DeathCall => &ctx.death_call,
+            CtxCol::DeathSpan => &ctx.death_span,
+        }
+    }
+
+    const fn category(self) -> u8 {
+        match self {
+            CtxCol::BirthCall | CtxCol::DeathCall => crate::domain::interval::CAT_CALL,
+            CtxCol::BirthSpan | CtxCol::DeathSpan => crate::domain::interval::CAT_SPAN,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StrOp {
     Contains,
@@ -391,6 +447,11 @@ enum Pred {
     /// A string method whose receiver is a dictionary column but whose
     /// argument is not constant. Also rare.
     DictStrOp { left: DictCol, right: DictCol, op: StrOp },
+    /// `"x" in malloc.calls` and its kin (ANL-013). `marks` holds one bit per
+    /// interval, set while lowering on every interval whose parent chain
+    /// carries the name; per row this is one id load from the context
+    /// column and one bit test, with no walk up a stack.
+    Context { col: CtxCol, marks: Box<[u64]> },
 }
 
 impl Pred {
@@ -402,7 +463,10 @@ impl Pred {
         match self {
             Pred::Const(_) | Pred::TagWord(_) | Pred::TagAny => 0,
             Pred::TagsEq(want) => 1 + want.len() as u32,
-            Pred::Dict { .. } | Pred::DictPresent { .. } | Pred::Present { .. } => 2,
+            Pred::Dict { .. }
+            | Pred::DictPresent { .. }
+            | Pred::Present { .. }
+            | Pred::Context { .. } => 2,
             Pred::U64Cmp { .. } => 3,
             Pred::NumCmp { .. } => 4,
             Pred::NumIn { left, set } => 4 + left.cost() + set.len().max(1).ilog2(),
@@ -568,6 +632,14 @@ fn join(op: BinaryOp, parts: Vec<Pred>) -> Pred {
 }
 
 fn presence(inner: &Expr, ctx: &Ctx, negated: bool) -> Result<Pred, EvalError> {
+    // `free.calls is None`: the context of a death is missing exactly when
+    // there is no death
+    if matches!(context_col(inner), Some((CtxCol::DeathCall | CtxCol::DeathSpan, _))) {
+        return Ok(Pred::Present {
+            col: NumCol::DeathSeq,
+            want: negated,
+        });
+    }
     if let Some(col) = num_col(inner)? {
         return Ok(Pred::Present { col, want: negated });
     }
@@ -646,6 +718,18 @@ fn membership(expr: &Expr, left: &Expr, right: &Expr, ctx: &Ctx) -> Result<Pred,
                 )?,
             ],
         ));
+    }
+    // `"x" in malloc.calls` — the interval context, marked once per Apply
+    if let Some((col, by_id)) = context_col(right) {
+        return Ok(match constant(left, ctx)? {
+            Some(Value::String(name)) => context_pred(col, by_id, &name, ctx.store),
+            _ => {
+                return Err(EvalError::at(
+                    expr,
+                    "`in` an interval context requires a constant string",
+                ))
+            }
+        });
     }
     // `"x" in alloc.tags` — a set-typed field, not a literal
     if is_tags(right) {
@@ -1033,6 +1117,45 @@ fn reference_target(expr: &Expr, ctx: &Ctx) -> Result<u32, EvalError> {
     reference_event(expr, ctx)
 }
 
+/// The interval-context column a path about this allocation names.
+fn context_col(expr: &Expr) -> Option<(CtxCol, bool)> {
+    match own_leaf(expr)? {
+        Leaf::Builtin { ns, name } => CtxCol::of(ns, name),
+        Leaf::Custom { .. } => None,
+    }
+}
+
+/// Lower `"<name>" in <context column>`.
+///
+/// The name resolves to its interned id once. Then one pass over the
+/// intervals in begin order marks each interval of the column's kind whose
+/// own name (or span id) is that one, or whose parent is marked — a parent
+/// always begins before its child, so it is decided first. A row then
+/// matches when its innermost interval is marked: O(intervals + rows) per
+/// Apply, and no per-allocation stack walk.
+fn context_pred(col: CtxCol, by_id: bool, name: &str, s: &Store) -> Pred {
+    let st = &s.dom.intervals;
+    if col.slice(s).is_empty() {
+        return Pred::Const(false);
+    }
+    let dictionary = if by_id { &st.span_ids } else { &st.edges.labels };
+    let Some(id) = dictionary.iter().position(|n| n == name) else {
+        return Pred::Const(false);
+    };
+    let id = id as u32;
+    let keys = if by_id { &st.span } else { &st.name };
+    let category = col.category();
+    let n = st.len() as usize;
+    let mut marks = bitmap(n);
+    let rows = st.cat.iter().zip(keys).zip(&st.parent).enumerate();
+    for (i, ((&cat, &key), &parent)) in rows {
+        if cat == category && (key == id || (parent != NONE_U32 && get_bit(&marks, parent))) {
+            set_bit(&mut marks, i);
+        }
+    }
+    Pred::Context { col, marks }
+}
+
 fn is_tags(expr: &Expr) -> bool {
     matches!(
         own_leaf(expr),
@@ -1362,6 +1485,13 @@ fn word_of(p: &Pred, s: &Store, fv: &FieldValues, block: usize, active: u64) -> 
                 _ => false,
             }
         }),
+        Pred::Context { col, marks } => {
+            let ids = col.slice(s);
+            each(active, block, |h| {
+                let id = ids[h as usize];
+                id != NONE_U32 && get_bit(marks, id)
+            })
+        }
     }
 }
 

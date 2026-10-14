@@ -118,6 +118,46 @@ pub struct IntervalStore {
     pub span_win: BTreeMap<u16, WindowTree>,
     pub cpu_win: BTreeMap<u16, WindowTree>,
     pub by_cat: [u32; NCAT],
+    /// Per name (an index into `edges.labels`): a bitmask of the categories
+    /// (`1 << CAT_*`) of the intervals carrying it, built at finish — what
+    /// filter completion offers as observed call and span names.
+    pub name_cats: Vec<u8>,
+    /// The interval context of every heap record (ANL-013), built at finish.
+    pub heap_ctx: HeapContext,
+}
+
+/// The interval context of each heap record, by heap row: the innermost call
+/// frame open on the record's thread when it happened, and the thread's
+/// current span — the most recently begun span on that thread still open.
+/// `death_*` is the same read at the record that freed a creator.
+///
+/// What the filter's `malloc.calls`, `malloc.spans`, `free.calls`, … read
+/// (ANL-013): the innermost interval stands for its whole parent chain, so a
+/// predicate marks the intervals whose chain qualifies once per Apply and
+/// tests one bit per allocation.
+///
+/// Lazy, like the heap's optional columns: the call columns are empty unless
+/// the trace has a call interval, the span columns unless it has a span, so
+/// a trace without intervals pays nothing. Empty reads as `NONE_U32`.
+#[derive(Default)]
+pub struct HeapContext {
+    /// Per heap row: the innermost open call on its thread (NONE_U32: none).
+    pub call: Vec<u32>,
+    /// Per heap row: its thread's current span (NONE_U32: none).
+    pub span: Vec<u32>,
+    /// Per creator heap row: `call` of the record that freed it (NONE_U32:
+    /// never freed, or no open call there).
+    pub death_call: Vec<u32>,
+    /// Per creator heap row: `span` of the record that freed it.
+    pub death_span: Vec<u32>,
+}
+
+impl HeapContext {
+    /// Column `col` at heap row `h`, NONE_U32 when the column is empty.
+    #[inline]
+    pub fn at(col: &[u32], h: usize) -> u32 {
+        col.get(h).copied().unwrap_or(NONE_U32)
+    }
 }
 
 impl IntervalStore {
@@ -501,7 +541,94 @@ impl Builder {
         let (calls, spans, cpus) = (build(&st.calls), build(&st.track_spans), build(&st.cpus));
         let st = &mut s.dom.intervals;
         (st.call_win, st.span_win, st.cpu_win) = (calls, spans, cpus);
+        let mut name_cats = vec![0u8; st.edges.labels.len()];
+        for (i, &name) in st.name.iter().enumerate() {
+            if name != NONE_U32 {
+                name_cats[name as usize] |= 1 << st.cat[i];
+            }
+        }
+        st.name_cats = name_cats;
+        build_heap_context(s);
     }
+}
+
+/// Record each heap record's interval context (`HeapContext`) in one merge
+/// of the heap rows with the intervals, both in seq order.
+///
+/// Intervals are stored in begin order, so walking them alongside the heap
+/// rows sees every begin before the records that follow it. Per thread the
+/// last call begun is remembered and, at a heap record, walked up its parent
+/// chain to the nearest frame still open (proper nesting keeps every
+/// ancestor of that one open, IVL-005); the frame found replaces the
+/// remembered one, since a closed frame never reopens, so the walk is
+/// amortized O(1). Spans keep a per-thread stack in begin order whose closed
+/// tops are popped lazily, leaving the latest-begun open span on top.
+/// O(heap rows + intervals), and nothing at all without calls or spans.
+fn build_heap_context(s: &mut Store) {
+    let st = &s.dom.intervals;
+    let has_calls = st.by_cat[CAT_CALL as usize] > 0;
+    let has_spans = st.by_cat[CAT_SPAN as usize] > 0;
+    let rows = s.heap_len() as usize;
+    if (!has_calls && !has_spans) || rows == 0 {
+        s.dom.intervals.heap_ctx = HeapContext::default();
+        return;
+    }
+    let tracks = s.thrs.len();
+    let mut cur_call = vec![NONE_U32; tracks];
+    let mut span_stack: Vec<Vec<u32>> = vec![Vec::new(); tracks];
+    let mut call = if has_calls { vec![NONE_U32; rows] } else { Vec::new() };
+    let mut span = if has_spans { vec![NONE_U32; rows] } else { Vec::new() };
+    let open = |i: u32, e: u32| st.end[i as usize] == NONE_U32 || st.end[i as usize] > e;
+    let n = st.len() as usize;
+    let mut i = 0usize;
+    for h in 0..rows {
+        let e = s.heap_seq(h);
+        while i < n && st.begin[i] < e {
+            let track = st.track[i] as usize;
+            if track < tracks {
+                match st.cat[i] {
+                    CAT_CALL => cur_call[track] = i as u32,
+                    CAT_SPAN => span_stack[track].push(i as u32),
+                    _ => {}
+                }
+            }
+            i += 1;
+        }
+        let track = s.thr_idx[e as usize] as usize;
+        if track >= tracks {
+            continue;
+        }
+        if has_calls {
+            let mut f = cur_call[track];
+            while f != NONE_U32 && !open(f, e) {
+                f = st.parent[f as usize];
+            }
+            cur_call[track] = f;
+            call[h] = f;
+        }
+        if has_spans {
+            let stack = &mut span_stack[track];
+            while stack.last().is_some_and(|&top| !open(top, e)) {
+                stack.pop();
+            }
+            span[h] = stack.last().copied().unwrap_or(NONE_U32);
+        }
+    }
+    // a creator's death context is the freeing record's own
+    let hc = &s.dom.heap;
+    let death_of = |col: &[u32]| -> Vec<u32> {
+        if col.is_empty() {
+            return Vec::new();
+        }
+        (0..rows)
+            .map(|h| match hc.death[h] {
+                NONE_U32 => NONE_U32,
+                d => s.heap_row(d).map_or(NONE_U32, |r| col[r]),
+            })
+            .collect()
+    };
+    let (death_call, death_span) = (death_of(&call), death_of(&span));
+    s.dom.intervals.heap_ctx = HeapContext { call, span, death_call, death_span };
 }
 
 // --------------------------------------------------------------- queries

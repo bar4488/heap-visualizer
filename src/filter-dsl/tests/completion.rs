@@ -287,3 +287,24 @@ fn a_callee_is_read_back_over_groups_and_counts_only_its_own_commas() {
         CompletionSite::CallArgument { .. }
     ));
 }
+
+#[test]
+fn a_string_before_in_completes_against_the_collection_after_it() {
+    let collection = |source: &str, cursor: usize| match context(source, cursor).site {
+        CompletionSite::Element { collection } => collection,
+        other => panic!("{source:?}: {other:?}"),
+    };
+    let got = collection(r#""pa" in malloc.calls"#, 3);
+    assert!(matches!(&got.kind, ExprKind::Field { name, .. } if name == "calls"));
+    let got = collection(r#"x and "" in named("r").free.spans and y"#, 7);
+    assert!(matches!(&got.kind, ExprKind::Field { name, .. } if name == "spans"));
+    let ctx = context(r#""pa" in malloc.calls"#, 3);
+    assert_eq!(ctx.replacement, Span::new(0, 4));
+    assert_eq!(ctx.prefix, "pa");
+    // an operand on the left still wins, and no collection means no site
+    assert!(matches!(
+        context(r#"malloc.site == "" in x"#, 16).site,
+        CompletionSite::Operand { .. }
+    ));
+    assert!(completion_context(r#""pa" == malloc.site"#, 2).is_none());
+}

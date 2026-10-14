@@ -3,6 +3,8 @@
 //! 8-slot u32 return area at `hp_ret()`, and structured results are JSON
 //! strings (ptr/len in ret[0]/ret[1]).
 
+#[cfg(test)]
+mod context_filter_tests;
 mod filter_eval;
 mod filter_plan;
 #[cfg(test)]
@@ -1807,6 +1809,21 @@ pub extern "C" fn hp_events_filtered_pos(seq: u32) -> u32 {
     let a = unsafe { &mut *app() };
     if !ev_filter_active(a) {
         return seq.min(a.store.len());
+    }
+    ensure_ev_filtered(a);
+    a.ev_filtered.partition_point(|&e| e < seq) as u32
+}
+
+/// Heap records in spine `[0, seq)` the active filter keeps — every heap
+/// record when no filter is active. The Events list's filtered toggle
+/// narrows only the heap rows (NAV-005), so it counts them with this rank
+/// and every other domain with its own.
+#[no_mangle]
+pub extern "C" fn hp_events_filtered_heap_rank(seq: u32) -> u32 {
+    let a = unsafe { &mut *app() };
+    let seq = seq.min(a.store.len());
+    if !ev_filter_active(a) {
+        return a.store.heap_rank(seq);
     }
     ensure_ev_filtered(a);
     a.ev_filtered.partition_point(|&e| e < seq) as u32

@@ -17,6 +17,10 @@ pub enum CompletionSite {
     CallArgument { callee: Expr, index: usize },
     SetDelimiter,
     AfterIs { negated: bool },
+    /// A string standing left of `in <collection>` — `"|" in malloc.calls`.
+    /// The member is written before the collection it belongs to, so this is
+    /// the one site read from the source *after* the cursor.
+    Element { collection: Expr },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -39,7 +43,8 @@ pub fn completion_context(source: &str, cursor: usize) -> Option<CompletionConte
 
     if let Some((replacement, prefix)) = string_at_cursor(source, cursor) {
         let site = operand_context(source, replacement.start)
-            .or_else(|| call_argument_context(source, replacement.start));
+            .or_else(|| call_argument_context(source, replacement.start))
+            .or_else(|| element_context(source, replacement.end));
         return site.map(|site| CompletionContext {
             replacement,
             prefix,
@@ -374,6 +379,50 @@ fn operand_site(
     let left_source = &source[meaningful[start].span.start..meaningful[op].span.start];
     let left = parse(left_source.trim()).ok()?;
     Some(CompletionSite::Operand { left, kind })
+}
+
+/// `in <chain>` directly after `value_end`: the collection a string being
+/// typed is tested for membership in.
+fn element_context(source: &str, value_end: usize) -> Option<CompletionSite> {
+    let rest = &source[value_end..];
+    let tokens = crate::lexer::lex_lossy(rest);
+    let mut tokens = tokens.iter();
+    if !matches!(tokens.next()?.kind, TokenKind::In) {
+        return None;
+    }
+    let first = tokens.next()?;
+    if !matches!(first.kind, TokenKind::Identifier(_)) {
+        return None;
+    }
+    // the postfix chain: `.name`, `(…)` and `[…]` groups, nothing looser
+    let mut end = first.span.end;
+    let mut depth = 0usize;
+    let mut expect_name = false;
+    for token in tokens {
+        if depth > 0 {
+            if is_opening(&token.kind) {
+                depth += 1;
+            } else if is_closing(&token.kind) {
+                depth -= 1;
+                if depth == 0 {
+                    end = token.span.end;
+                }
+            }
+            continue;
+        }
+        match &token.kind {
+            TokenKind::Identifier(_) if expect_name => {
+                end = token.span.end;
+                expect_name = false;
+            }
+            _ if expect_name => return None,
+            TokenKind::Dot => expect_name = true,
+            TokenKind::LeftParen | TokenKind::LeftBracket => depth = 1,
+            _ => break,
+        }
+    }
+    let collection = parse(rest[first.span.start..end].trim()).ok()?;
+    Some(CompletionSite::Element { collection })
 }
 
 fn call_argument_context(source: &str, value_start: usize) -> Option<CompletionSite> {

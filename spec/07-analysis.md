@@ -67,10 +67,27 @@ whole characters.
 **Every field is reached through one of three objects.** `alloc` is the
 allocation — `id`, `address`, `end`, `span`, `size`, `usable`, `tags`,
 `freed`, `lifetime`. `malloc` is the record that created it — `seq`, `time`,
-`site`, `thread`, `stack`. `free` is the record that ended it — `seq`, `time`,
-both missing when it was never freed. There are no bare field names and no
-aliases; a bare name that used to be one must be a diagnostic naming its
-object.
+`site`, `thread`, `stack`, and the interval context it happened in, `calls`,
+`spans`, `span_ids` ([ANL-013](#anl-013-filtering-by-interval-context)).
+`free` is the record that ended it — `seq`, `time`, `calls`, `spans`,
+`span_ids`, all missing when it was never freed. There are no bare field
+names and no aliases; a bare name that used to be one must be a diagnostic
+naming its object.
+
+| Object | Field | Type |
+|--------|-------|------|
+| `alloc` | `id`, `address`, `end`, `size` | integer |
+| `alloc` | `usable`, `lifetime` | integer, optional |
+| `alloc` | `span` | address range |
+| `alloc` | `tags` | string set, empty when untagged ([ANL-009](#anl-009-filtering-by-tag)) |
+| `alloc` | `freed` | bool |
+| `malloc` | `seq`, `time` | integer |
+| `malloc` | `site`, `stack` | string, optional |
+| `malloc` | `thread` | integer, optional |
+| `malloc` | `calls`, `spans`, `span_ids` | string collection, empty without intervals ([ANL-013](#anl-013-filtering-by-interval-context)) |
+| `free` | `seq`, `time` | integer, optional |
+| `free` | `calls`, `spans`, `span_ids` | string collection, optional |
+| `malloc`, `free` | `fields.<key>` | per the catalog ([ANL-010](#anl-010-filtering-on-custom-trace-fields)) |
 
 `alloc.end` is the **requested** end, `address + size` — the end every
 surface displays ([ANL-006](#anl-006-the-allocation-panel-and-pinned-windows)),
@@ -122,7 +139,7 @@ text.
 
 The focused editor offers contextual completion from the same core catalog
 that checks the expression: executable fields, type-valid operators and
-members, and observed site/thread/tag values. The attached list opens while
+members, and observed site/thread/tag values and call/span names. The attached list opens while
 typing; **Ctrl/⌘+Space** also opens it at an empty source. Up/Down selects,
 Tab inserts without applying, Enter inserts after deliberate list navigation,
 and Escape closes it. Completion never advertises a language surface the
@@ -305,6 +322,62 @@ has the empty set.
 
 The tag legend chip writes `"<name>" in alloc.tags` and the untagged chip
 writes `alloc.tags == {}` ([ANL-003](#anl-003-filter)).
+
+## ANL-013: Filtering by interval context
+
+An allocation can be filtered by what was running when it was born or freed,
+read from the interval domain ([spec/14](14-intervals.md)). The filter is
+still over allocations ([DOM-003](13-domains-and-logs.md#dom-003-what-a-domain-provides)):
+these are fields of the two records, not a second subject.
+
+| Field | Members |
+|-------|---------|
+| `malloc.calls` | the names of the call frames open on the allocating record's thread — its call stack, outermost to innermost |
+| `malloc.spans` | the name of the thread's **current span** — the most recently begun span begun on that thread and still open — and of each of its ancestors by `parent` |
+| `malloc.span_ids` | the same spans' ids |
+| `free.calls`, `free.spans`, `free.span_ids` | the same, read at the record that freed the allocation, on its thread |
+
+"Open" is IVL-005's: at a record with seq *e*, an interval is open when its
+begin precedes *e* and its end, if any, follows it. The span chain follows
+`parent` whether or not an ancestor is still open, and across threads, so
+an allocation on a worker inside a `parse` span whose parent is a `request`
+span begun elsewhere has both names; a span open on the thread but not on
+the current span's chain is not a member. A call or span without a name
+contributes no member.
+
+```python
+"parse_body" in malloc.calls
+"request" in malloc.spans and not "request" in free.spans
+"r42" in malloc.span_ids
+```
+
+- **The one operation is membership** of a string constant: `"x" in
+  malloc.calls`, under `not`, `and`, `or` like any predicate. Equality,
+  `len()`, a non-constant left operand, and `is None` on a `malloc` field
+  are diagnostics naming the membership form. There is no collection method;
+  a substring of a call name is not a member.
+- **Missing data.** In a trace without intervals (any v1 trace), or without
+  calls or spans, the `malloc` fields are **empty**, never missing, as
+  `alloc.tags` is: `"x" in malloc.calls` is false and its `not` is true. The
+  `free` fields are **missing** on an allocation never freed, so
+  `free.calls is None` is how to ask for that and `"x" in free.calls` is
+  false there; on a freed allocation they are empty when nothing was open.
+  A name the trace never carries matches nothing and is not a diagnostic.
+- **Completion and the schema.** The fields are completed under `malloc.`
+  and `free.`, and listed by `/api/v1/filter/schema` as type
+  `string-collection`. Typing the string in front of `in malloc.calls` (or
+  `spans`, `span_ids`, either object) completes observed call names, span
+  names, or span ids, bounded as site completion is.
+
+**Cost.** At load, when the trace has calls or spans, the core records per
+heap record the innermost open call and the current span on its thread (one
+merge of heap rows and intervals in seq order, amortized O(1) per row), and
+per creator the same at its death record; a trace without intervals keeps
+no column. An Apply resolves the name to its interned id once, marks in one
+pass over the intervals in begin order every interval whose parent chain
+carries it (a parent begins before its child), and tests one bit per
+allocation — O(intervals + allocations) with no per-allocation stack walk
+([D008](../docs/decisions/D008-the-filter-evaluator-is-a-lowered-plan.md)).
 
 ## ANL-004: Crop
 
