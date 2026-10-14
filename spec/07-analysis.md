@@ -55,6 +55,15 @@ Python's semantics are followed except where three-valued logic requires
 otherwise: an operation on a missing value is false rather than an error, per
 the missing rule below.
 
+**An expression has bounded size and depth.** Source is at most 16 KiB of
+UTF-8, at most 32 parentheses and calls deep, and calls take at most 16
+arguments. Its syntax tree is at most 128 operations deep, counting every
+operator, call, field, index and literal on the longest path from the root —
+so a run of 200 `-`, or `or` joining 200 terms, is a diagnostic rather than a
+tree the checker and evaluator recurse through. Parentheses add no depth, and
+a long list of alternatives is one `in {…}`. Every diagnostic's span covers
+whole characters.
+
 **Every field is reached through one of three objects.** `alloc` is the
 allocation — `id`, `address`, `end`, `span`, `size`, `usable`, `tags`,
 `freed`, `lifetime`. `malloc` is the record that created it — `seq`, `time`,
@@ -62,6 +71,14 @@ allocation — `id`, `address`, `end`, `span`, `size`, `usable`, `tags`,
 both missing when it was never freed. There are no bare field names and no
 aliases; a bare name that used to be one must be a diagnostic naming its
 object.
+
+`alloc.end` is the **requested** end, `address + size` — the end every
+surface displays ([ANL-006](#anl-006-the-allocation-panel-and-pinned-windows)),
+so a predicate written from a shown value matches it. `alloc.span` is
+`address..end`, half-open. The slack band a producer's `usable` adds is never
+part of either; it is reached through `alloc.usable`. `malloc.site`,
+`malloc.thread` and `malloc.stack` are optional: missing on a record that
+carries none.
 
 `named("x")` yields an allocation exposing those same three objects, so
 `named("x").alloc.address` is how one of its fields is read.
@@ -223,7 +240,9 @@ An **integer** literal is decimal or `0x` hexadecimal. A **float** literal is
 decimal carrying a fraction or an exponent — `0.5`, `1e-3`, `2.5e6`. Both take
 the unit suffixes, which multiply the value: `1.5MiB` and `1572864` are the
 same operand. A decimal point is only ever a decimal point when a digit
-follows it, so `0..10` is a range between two integers.
+follows it, so `0..10` reads as two integers around the removed `..`, whose
+diagnostic names `range(lo, hi)`. The hexadecimal prefix is lowercase `0x`;
+`0X10` is a diagnostic saying so.
 
 Unary minus applies to numbers and binds after field access but before addition:
 `-2.5`, `-malloc.fields.drift`, and `-(alloc.size - 1)` are numbers. Negative
@@ -231,7 +250,7 @@ constants are valid set and range members. Unary plus is not part of the
 language.
 
 Integer and float operands must mix freely under ordering, equality, `in` a
-range, `in` a set, `contains`, and arithmetic. Where they mix:
+range, `in` a set, and arithmetic. Where they mix:
 
 - **Comparison must be exact.** An integer operand must not be converted to a
   double before comparing. An integer beyond 2^53 has no exact double, and
@@ -282,7 +301,7 @@ has the empty set.
 - `alloc.tags == {}` must match every untagged allocation and nothing else.
 - `alloc.tags == "a"` and `alloc.tags is None` must be diagnostics, not silently true or
   false. There is no scalar `tag` field, and no operation on `tags` may mean
-  "any one membership satisfies this" other than `contains`.
+  "any one membership satisfies this" other than `in`.
 
 The tag legend chip writes `"<name>" in alloc.tags` and the untagged chip
 writes `alloc.tags == {}` ([ANL-003](#anl-003-filter)).
@@ -342,7 +361,11 @@ Two deliberately different persistence channels:
   names, colors, bookmarks, address marks, saved filters, plus trace
   fingerprint, playhead, and key view settings. Manually exported/imported as **`.heapa.json`** (a
   single JSON object marked `heapVisualizerAnalysis: 1`). Dropping one onto
-  the page restores it; a trace-size mismatch warns but applies anyway.
+  the page restores it; a trace-size mismatch warns but applies anyway. An
+  imported document is stored in the same normalized form the individual
+  edits produce (ids and names trimmed, colors and addresses canonical), so
+  an imported `" root "` is named `root`; two entries normalizing to one id
+  reject the import.
   Anchoring by event index is what makes the file portable — it is only
   meaningful against the same trace.
 - **Session** — working state, not a deliverable: layout settings, filter,

@@ -54,30 +54,65 @@ pub(crate) struct Token {
 /// This exists for highlighting, which runs on every keystroke over source
 /// that is usually half-written. It shares the whole token definition with
 /// `lex` so the two can never disagree about what a word is.
+///
+/// Recovery is linear in the source. A failed number is invalid as a whole —
+/// every character the attempt read — so the scan resumes after it rather
+/// than re-reading a suffix of the same digits. A failed string is invalid
+/// only at its opening quote, so the text after it still colours; but any
+/// later quote before the point where that attempt failed would fail the same
+/// way (it was an escaped `\"` inside the first attempt, and the two scans
+/// agree from there on), so it is marked without being read again.
 pub(crate) fn lex_lossy(source: &str) -> Vec<Token> {
     let mut lexer = Lexer {
         source,
         offset: 0,
         tokens: Vec::new(),
     };
+    let mut failed_string_until = 0;
     while lexer.offset < source.len() {
         lexer.skip_whitespace();
         if lexer.offset == source.len() {
             break;
         }
         let start = lexer.offset;
-        if lexer.token().is_err() {
-            // step over exactly one character, so a bad byte costs one token
-            // and never loops
-            let width = lexer.rest().chars().next().map_or(1, char::len_utf8);
-            lexer.offset = start + width;
-            lexer.tokens.push(Token {
-                kind: TokenKind::Invalid,
-                span: Span::new(start, lexer.offset),
-            });
+        let first = source[start..].chars().next().expect("not at the end");
+        let quote = first == '"';
+        if !(quote && start < failed_string_until) && lexer.token().is_ok() {
+            continue;
         }
+        let read = lexer.offset;
+        let mut end = start + first.len_utf8();
+        if first.is_ascii_digit() {
+            // the number and whatever suffix the attempt read, up to the end
+            // of the word it sits in
+            let word = source[start..]
+                .bytes()
+                .take_while(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+                .count();
+            end = end.max(read).max(start + word);
+        } else if quote {
+            failed_string_until = failed_string_until.max(read);
+        }
+        lexer.offset = end;
+        lexer.tokens.push(Token {
+            kind: TokenKind::Invalid,
+            span: Span::new(start, end),
+        });
     }
     lexer.tokens
+}
+
+/// `span` widened to whole characters of `source`, and kept within it.
+pub(crate) fn char_span(source: &str, span: Span) -> Span {
+    let mut start = span.start.min(source.len());
+    while !source.is_char_boundary(start) {
+        start -= 1;
+    }
+    let mut end = span.end.clamp(start, source.len());
+    while !source.is_char_boundary(end) {
+        end += 1;
+    }
+    Span::new(start, end)
 }
 
 pub(crate) fn lex(source: &str) -> Result<Vec<Token>, ParseError> {
@@ -297,6 +332,16 @@ impl Lexer<'_> {
             "us" => Some(Unit::Microseconds),
             "ms" => Some(Unit::Milliseconds),
             "s" => Some(Unit::Seconds),
+            // `0X10` reads as a zero in unit `X`, which is not what was meant
+            _ if !hexadecimal
+                && &self.source[start..number_end] == "0"
+                && suffix.starts_with('X') =>
+            {
+                return Err(ParseError::new(
+                    "a hexadecimal literal is written with a lowercase `0x`",
+                    Span::new(start, number_end + 1),
+                ));
+            }
             _ => {
                 return Err(ParseError::new(
                     format!("unknown numeric unit `{suffix}`"),
@@ -452,7 +497,7 @@ impl Lexer<'_> {
         if !raw.iter().all(u8::is_ascii_hexdigit) {
             return Err(ParseError::new(
                 "Unicode escape must contain four hexadecimal digits",
-                Span::new(self.offset, self.offset + 4),
+                char_span(self.source, Span::new(self.offset, self.offset + 4)),
             ));
         }
         let raw = std::str::from_utf8(raw).expect("hexadecimal digits are UTF-8");

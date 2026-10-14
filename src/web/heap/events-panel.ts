@@ -13,6 +13,8 @@ import { $, $$, toCss } from '../shell/dom.ts';
 import { raisePanel } from '../shell/panels.ts';
 import { refreshDrawerDividers } from '../shell/drawers.ts';
 import { esc, fmtNum } from '../fmt.ts';
+import { OP_LOG, levelBadge, levelIndex } from '../logs/logs-model.ts';
+import { revealLogSeq } from '../logs/logs-panel.ts';
 
 let d = null;
 
@@ -78,7 +80,14 @@ export function onEventsSlice(m) {
   $('events-rows').innerHTML = m.events.map((ev) => {
     const cur = ev.seq === curSeq ? ' cur' : '';
     const head = `<span class="ev-seq">${fmtNum(ev.seq)}</span>`
-      + `<span class="ev-op ${['m', 'f', 'r', 'e'][ev.op]}">${['M', 'F', 'R', 'E'][ev.op]}</span>`;
+      + `<span class="ev-op ${['m', 'f', 'r', 'e', 'l'][ev.op]}">${['M', 'F', 'R', 'E', 'L'][ev.op]}</span>`;
+    // a log line: its level and message, in place of geometry (LOG-006)
+    if (ev.op === OP_LOG) {
+      return `
+    <div class="ev-row ev-log lv-${levelIndex(ev.level)}${cur}" data-seq="${ev.seq}" data-log="1" title="click: seek here and show this line in Logs">
+      ${head}<span class="ev-lv">${levelBadge(ev.level)}</span><span class="ev-msg">${esc(ev.msg ?? '')}</span>
+    </div>`;
+    }
     // a custom event has no geometry to show: its label takes the width of the
     // address, size and site columns together (TRACE-010)
     if (ev.op === OP_EVENT) {
@@ -98,7 +107,10 @@ export function onEventsSlice(m) {
   $$('.ev-row', $('events-rows')).forEach((row) => {
     row.onclick = () => {
       const seq = +row.dataset.seq;
-      if (d.ui.state && seq === d.ui.state.seq - 1 && !row.dataset.custom) {
+      if (row.dataset.log) {
+        d.post({ type: 'jump', seq: seq + 1, select: true });
+        revealLogSeq(seq);
+      } else if (d.ui.state && seq === d.ui.state.seq - 1 && !row.dataset.custom) {
         // already the current event: flash exactly where it is on the map
         d.post({ type: 'flash-event', seq });
       } else {

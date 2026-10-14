@@ -151,7 +151,10 @@ a freshly generated capability in its URL fragment, and the UI must retain it
 only for that tab. The capability must be required as a bearer value by every
 data request. CORS may admit a syntactically valid browser origin so any
 compatible deployment can connect; possession of the capability, not the web
-origin, is the authority.
+origin, is the authority. Every response to a request with a valid loopback
+Host and Origin carries that CORS treatment, including authentication,
+body-limit, wrong-method, and unknown-route errors, so the browser can read why
+a request failed. Errors use `{error:{code,message}}`.
 
 Connected mode must not move rendering onto the server. The browser worker,
 WASM engine and OffscreenCanvas remain the complete rendering path; no frame,
@@ -224,8 +227,12 @@ references, cap tags at 255, and atomically remove all membership when deleting
 a tag.
 
 `GET /api/v1/analysis` must return the active `traceId` and canonical document.
+It is the complete synchronization snapshot and so is exempt from the agent
+response limit ([API-001](12-agent-api.md#api-001-progressive-bounded-evidence)).
 `POST /api/v1/analysis/changes` must accept that trace identity, an expected
-revision, and one core change; stale identities or revisions conflict. A
+revision, and one core change; stale identities or revisions conflict. Its
+request body may be large enough for a complete tag-member list (32 MiB);
+every other route keeps the 32 KiB request limit. A
 successful response contains only the canonical committed change and new
 revision. The server must persist the resulting document under its data
 directory, keyed by trace digest, with an atomic durable replacement before it

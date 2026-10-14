@@ -2,7 +2,8 @@
 """gen.py - synthetic heap-event stream generator for heap-visualizer.
 
 Emits a JSONL (.heapl) stream of malloc/free/realloc events conforming to
-spec/02-trace-format.md v1. It simulates a free-list allocator serving a workload made
+spec/02-trace-format.md v1, interleaved with structured `L` log lines
+(spec/13-domains-and-logs.md) unless --no-logs is given. It simulates a free-list allocator serving a workload made
 of allocation "sites" (each with a characteristic size range and lifetime) and
 sprinkles in same-timestamp bursts so the temporal and sequential timelines in
 the viewer visibly diverge.
@@ -86,6 +87,25 @@ PHASES: list[str | None] = [
     "phase: teardown",
     None,
 ]
+
+
+# Log lines the simulated program writes (on unless --no-logs). Each phase
+# opens with an info line; the request stream is the steady background; the
+# warn/error lines are tied to heap moments a reader would want to correlate
+# with the map.
+LOG_PHASES: list[tuple[str, str]] = [
+    ("startup", "warming caches and loading assets"),
+    ("request", "serving traffic"),
+    ("render", "rendering image tiles"),
+    ("teardown", "draining connections"),
+]
+LOG_PATHS: list[str] = [
+    "/api/items", "/api/items/{id}", "/api/search", "/static/app.js",
+    "/api/tiles/{id}", "/healthz",
+]
+LOG_EVERY = 160          # operations between request log lines, on average
+LOG_PEAK_STEP = 8 << 20  # a warn each time peak live bytes crosses a multiple
+LOG_BUDGET = 64 << 20    # past this, each new high-water mark is also an error
 
 
 def _log_uniform(rng: random.Random, lo: int, hi: int) -> int:
@@ -205,6 +225,12 @@ class Generator:
         self._cur_live_bytes = 0
         self.min_addr = args.arena_base
         self.max_addr = args.arena_base
+        # Log content draws from its own stream, so the heap records are the
+        # same with and without logs; only their seq numbers shift.
+        self.log_rng = random.Random(args.seed * 7919 + 17)
+        self.n_log = 0
+        self._log_peak_step = 0
+        self._log_req = 0
 
     # -- id / time helpers --------------------------------------------------
 
@@ -442,6 +468,78 @@ class Generator:
         self.n_custom += 1
         self._emit(out, rec)
 
+    # -- log lines ------------------------------------------------------------
+
+    def _log(self, out, level: str, logger: str, msg: str, thr: int | None = None,
+             **fields) -> None:
+        """One `L` record at the current time, with optional custom fields."""
+        if thr is None:
+            thr = self.log_rng.randrange(self.args.threads)
+        rec: dict = {"t": self.t, "op": "L", "level": level, "logger": logger,
+                     "msg": msg, "thr": thr}
+        rec.update(fields)
+        self.n_log += 1
+        self._emit(out, rec)
+
+    def _log_startup(self, out) -> None:
+        a = self.args
+        self._log(out, "info", "app", "heapviz-demo 0.3.1 starting", thr=0, pid=4242)
+        self._log(out, "debug", "app.config", "loaded config from /etc/demo/app.toml",
+                  thr=0, threads=a.threads, arena=self._hexaddr(a.arena_base))
+        self._log(out, "trace", "mem.arena", "arena reserved", thr=0,
+                  base=self._hexaddr(a.arena_base), row_bytes=a.row_bytes)
+        self._log(out, "info", "net.http", "listening on 0.0.0.0:8080", thr=0,
+                  workers=a.threads)
+
+    def _log_phase(self, out, i: int) -> None:
+        name, what = LOG_PHASES[i]
+        self._log(out, "info", "app.phase", f"phase {name}: {what}", thr=0,
+                  phase=name, live=len(self.live))
+
+    def _log_request(self, out) -> None:
+        r = self.log_rng
+        self._log_req += 1
+        path = r.choice(LOG_PATHS).replace("{id}", str(r.randint(1, 9999)))
+        method = "POST" if path == "/api/search" and r.random() < 0.5 else "GET"
+        ms = round(r.expovariate(1 / 18.0) + 0.4, 1)
+        roll = r.random()
+        thr = r.randrange(self.args.threads)  # one request, one worker thread
+        if roll < 0.012:
+            self._log(out, "warn", "net.http", f"retrying {method} {path}", thr=thr,
+                      attempt=r.randint(2, 3), backoff_ms=r.choice([50, 100, 200]))
+            self._log(out, "error", "net.http", f"{method} {path} failed: upstream timeout", thr=thr,
+                      status=504, ms=round(ms + 3000, 1), request=self._log_req)
+        elif roll < 0.04:
+            slow = round(ms + 250, 1)
+            self._log(out, "warn", "net.http", f"{method} {path} slow: {slow} ms", thr=thr,
+                      status=200, ms=slow, request=self._log_req)
+        elif roll < 0.10:
+            self._log(out, "debug", "net.http", f"{method} {path} cache hit", thr=thr,
+                      request=self._log_req)
+        else:
+            status = 404 if r.random() < 0.03 else 200
+            self._log(out, "info", "net.http", f"{method} {path} {status} in {ms} ms", thr=thr,
+                      status=status, ms=ms, request=self._log_req)
+
+    def _log_heap_moments(self, out, before_peak: int) -> None:
+        """Warn when the heap does something a reader should look at."""
+        step = self.peak_live_bytes // LOG_PEAK_STEP
+        if self.peak_live_bytes > before_peak and step > self._log_peak_step:
+            self._log_peak_step = step
+            mib = self.peak_live_bytes / (1 << 20)
+            self._log(out, "warn", "mem.monitor", f"heap high-water mark {mib:.1f} MiB",
+                      live_bytes=self._cur_live_bytes, live=len(self.live))
+            if step * LOG_PEAK_STEP >= LOG_BUDGET:
+                self._log(out, "error", "mem.monitor",
+                          f"live heap over budget ({mib:.1f} of {LOG_BUDGET >> 20} MiB)",
+                          live_bytes=self._cur_live_bytes, budget=LOG_BUDGET)
+        # the allocation just made: a very large image tile is worth a line
+        last = self.live.get(self.next_id - 1)
+        if last is not None and last.site == "image_tile" and last.size >= 60_000 \
+                and self.log_rng.random() < 0.08:
+            self._log(out, "debug", "render.tiles", f"large tile buffer {last.size} B",
+                      thr=last.thr, id=last.id, addr=self._hexaddr(last.addr))
+
     def _drain_due_frees(self, out) -> None:
         """Emit every scheduled free whose time has arrived."""
         while self.pending and self.pending[0][0] <= self.t:
@@ -457,15 +555,30 @@ class Generator:
 
         # one landmark per --events-every operations, plus one at the start
         every = args.events_every if args.events else 0
+        logs = args.logs
+        phase_len = max(1, args.ops // len(LOG_PHASES))
+        if logs:
+            self._log_startup(out)
         for i in range(args.ops):
             self._advance_time()
             self._drain_due_frees(out)
             if every and i % every == 0:
                 self._do_custom_event(out)
+            if logs and i % phase_len == 0 and i // phase_len < len(LOG_PHASES):
+                self._log_phase(out, i // phase_len)
+            before_peak = self.peak_live_bytes
             if self.rng.random() < args.realloc_rate:
                 self._do_realloc(out)
             else:
                 self._do_malloc(out)
+            if logs:
+                self._log_heap_moments(out, before_peak)
+                if self.log_rng.random() < 1.0 / LOG_EVERY:
+                    self._log_request(out)
+
+        if logs:
+            self._log(out, "info", "app", "shutting down: freeing remaining allocations",
+                      thr=0, live=len(self.live), live_bytes=self._cur_live_bytes)
 
         # flush all remaining scheduled frees in time order
         while self.pending:
@@ -475,6 +588,12 @@ class Generator:
                 self._do_free(out, aid)
 
         self.n_leak = len(self.live)
+        if logs:
+            level = "warn" if self.n_leak else "info"
+            self._log(out, level, "mem.monitor",
+                      f"exit: {self.n_leak} allocations still live "
+                      f"({self._cur_live_bytes} bytes)",
+                      thr=0, leaked=self.n_leak, live_bytes=self._cur_live_bytes)
 
     def _emit_header(self, out) -> None:
         header = {
@@ -502,14 +621,14 @@ class Generator:
         span = self.max_addr - self.min_addr
         return (
             "heap-visualizer gen.py summary\n"
-            "  events        : %d (M=%d F=%d R=%d E=%d)\n"
+            "  events        : %d (M=%d F=%d R=%d E=%d L=%d)\n"
             "  leaked allocs : %d (%d bytes still live at end)\n"
             "  peak live     : %d bytes (%.2f MiB)\n"
             "  address span  : %s .. %s (%d bytes, %.2f MiB)\n"
             "  final t       : %d %s\n"
             % (
                 self.seq,
-                self.n_malloc, self.n_free, self.n_realloc, self.n_custom,
+                self.n_malloc, self.n_free, self.n_realloc, self.n_custom, self.n_log,
                 self.n_leak, self._cur_live_bytes,
                 self.peak_live_bytes, self.peak_live_bytes / (1 << 20),
                 self._hexaddr(self.min_addr), self._hexaddr(self.max_addr),
@@ -565,6 +684,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "not allocations, just labels a reader can navigate by")
     p.add_argument("--events-every", type=int, default=25, dest="events_every",
                    help="operations between custom events, with --events")
+    p.add_argument("--no-logs", action="store_false", dest="logs",
+                   help="omit the structured `L` log lines (startup, phases, "
+                        "requests, and warnings tied to heap moments) that are "
+                        "otherwise interleaved with the heap records")
     p.add_argument("--quiet", action="store_true",
                    help="suppress the stderr summary")
     return p.parse_args(argv)

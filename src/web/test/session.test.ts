@@ -10,7 +10,9 @@ import { installDom, El } from './dom-stub.ts';
 
 const doc = installDom();
 
-const { initSession, buildSession, applySession } = await import('../session.ts');
+const {
+  initSession, buildSession, applySession, resetSessionSnapshot, HEAP_SESSION_VERSION,
+} = await import('../session.ts');
 const {
   drawersState, dockPanel, dockPanelAt, refreshDrawerDividers, setDrawerCollapsed,
 } = await import('../shell/drawers.ts');
@@ -318,4 +320,45 @@ test('applySession seeks to the saved playhead', () => {
   s.heap.playhead = 777;
   applySession(s);
   assert.deepEqual(posted.filter((m) => m.type === 'seek'), [{ type: 'seek', seq: 777 }]);
+});
+
+test('a pinned-window restore stops when a new trace loads mid-restore', async () => {
+  const pending = [];
+  const created = [];
+  const restoreUi = { ...makeUI(), meta: {} };
+  initSession({
+    ...makeDeps(restoreUi, []),
+    requestAllocInfo: (e) => new Promise((resolve) => pending.push(() => resolve({ e }))),
+    createPinnedWindow: (info) => { created.push(info.e); return new El('div'); },
+  });
+  const blob = {
+    heapVisualizerSession: 1,
+    heap: { version: HEAP_SESSION_VERSION, pinned: [{ e: 1 }, { e: 2 }] },
+  };
+  const drain = async () => {
+    while (pending.length) {
+      pending.shift()();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  };
+
+  // control: an undisturbed restore recreates every window
+  applySession(blob);
+  await drain();
+  assert.deepEqual(created, [1, 2]);
+
+  // a new trace (onLoaded resets the session snapshot) ends the old restore
+  created.length = 0;
+  applySession(blob);
+  resetSessionSnapshot();
+  await drain();
+  assert.deepEqual(created, []);
+
+  // so does a newer restore: only its windows are created
+  applySession(blob);
+  applySession({ ...blob, heap: { ...blob.heap, pinned: [{ e: 3 }] } });
+  await drain();
+  assert.deepEqual(created, [3]);
+
+  initSession(makeDeps(ui, posted));
 });

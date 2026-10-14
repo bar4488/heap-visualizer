@@ -61,25 +61,25 @@ impl NumCol {
     fn get(self, s: &Store, e: u32) -> Option<i128> {
         let i = e as usize;
         Some(match self {
-            NumCol::Id => s.id[i] as i128,
-            NumCol::Addr => s.addr[i] as i128,
-            NumCol::End => s.addr[i].saturating_add(s.span(e)) as i128,
-            NumCol::Size => s.size[i] as i128,
+            NumCol::Id => s.id(e) as i128,
+            NumCol::Addr => s.addr(e) as i128,
+            NumCol::End => s.end(e) as i128,
+            NumCol::Size => s.size(e) as i128,
             NumCol::Seq => e as i128,
             NumCol::Time => s.t[i] as i128,
             NumCol::Usable => match s.usable_at(e) {
                 0 => return None,
                 v => v as i128,
             },
-            NumCol::Lifetime => match s.death[i] {
+            NumCol::Lifetime => match s.death(e) {
                 NONE_U32 => return None,
                 d => s.t[d as usize] as i128 - s.t[i] as i128,
             },
-            NumCol::DeathSeq => match s.death[i] {
+            NumCol::DeathSeq => match s.death(e) {
                 NONE_U32 => return None,
                 d => d as i128,
             },
-            NumCol::DeathTime => match s.death[i] {
+            NumCol::DeathTime => match s.death(e) {
                 NONE_U32 => return None,
                 d => s.t[d as usize] as i128,
             },
@@ -113,14 +113,29 @@ enum U64Col {
 }
 
 impl U64Col {
+    /// The column as a slice indexed by spine index. Heap columns are one
+    /// only while heap rows are spine indexes (a heap-only trace); otherwise
+    /// the scan reads them per event through the store's accessors.
     fn slice(self, s: &Store) -> Option<&[u64]> {
+        let unmapped = s.hrank.is_empty();
         Some(match self {
-            U64Col::Id => &s.id,
-            U64Col::Addr => &s.addr,
-            U64Col::Size => &s.size,
+            U64Col::Id if unmapped => &s.heap.id,
+            U64Col::Addr if unmapped => &s.heap.addr,
+            U64Col::Size if unmapped => &s.heap.size,
             U64Col::Time => &s.t,
-            U64Col::Seq => return None,
+            _ => return None,
         })
+    }
+
+    #[inline]
+    fn at(self, s: &Store, e: u32) -> u64 {
+        match self {
+            U64Col::Id => s.id(e),
+            U64Col::Addr => s.addr(e),
+            U64Col::Size => s.size(e),
+            U64Col::Time => s.t[e as usize],
+            U64Col::Seq => u64::from(e),
+        }
     }
 }
 
@@ -180,7 +195,7 @@ impl DictCol {
     #[inline]
     fn str_at<'a>(self, s: &'a Store, fv: &'a FieldValues, e: u32) -> Option<&'a str> {
         match self {
-            DictCol::Site => match s.site[e as usize] {
+            DictCol::Site => match s.site(e) {
                 NONE_U32 => None,
                 id => Some(&s.sites[id as usize]),
             },
@@ -895,7 +910,7 @@ fn range_bounds(expr: &Expr, ctx: &Ctx) -> Result<(Operand, Operand), EvalError>
     match &expr.kind {
         ExprKind::Range { start, end } => Ok((operand(start, ctx)?, operand(end, ctx)?)),
         _ => match resolve_path(expr) {
-            // `alloc.span` is the allocation's half-open rendered range
+            // `alloc.span` is the allocation's half-open requested range
             Some(Path {
                 subject: None,
                 leaf: Leaf::Builtin {
@@ -916,9 +931,9 @@ fn range_bounds(expr: &Expr, ctx: &Ctx) -> Result<(Operand, Operand), EvalError>
             }) => {
                 let e = reference_target(subject, ctx)?;
                 Ok((
-                    Operand::Const(Value::Int(ctx.store.addr[e as usize] as i128)),
+                    Operand::Const(Value::Int(ctx.store.addr(e) as i128)),
                     Operand::Const(Value::Int(
-                        ctx.store.addr[e as usize].saturating_add(ctx.store.span(e)) as i128,
+                        ctx.store.end(e) as i128,
                     )),
                 ))
             }
@@ -1244,6 +1259,16 @@ fn word_of(p: &Pred, s: &Store, fv: &FieldValues, block: usize, active: u64) -> 
             found
         }
         Pred::Not(inner) => active & !word_of(inner, s, fv, block, active),
+        // Tag bitsets are blocked by heap row; a block of spine indexes is one
+        // of them only while the two coincide.
+        Pred::TagWord(tag) if !s.hrank.is_empty() => {
+            each(active, block, |e| s.has_tag(e, *tag))
+        }
+        Pred::TagAny if !s.hrank.is_empty() => each(active, block, |e| s.has_tags(e)),
+        Pred::TagsEq(want) if !s.hrank.is_empty() => each(active, block, |e| {
+            want.iter().all(|&tag| s.has_tag(e, tag))
+                && s.tag_ids(e).all(|tag| want.contains(&tag))
+        }),
         Pred::TagWord(tag) => active & tag_word(s, *tag, block),
         Pred::TagAny => active & s.tag_any.get(block).copied().unwrap_or(0),
         Pred::TagsEq(want) => {
@@ -1292,15 +1317,21 @@ fn word_of(p: &Pred, s: &Store, fv: &FieldValues, block: usize, active: u64) -> 
         // every optional column is a sentinel test, so it never needs the
         // general numeric read
         Pred::Present { col, want } => match col {
-            NumCol::DeathSeq | NumCol::DeathTime | NumCol::Lifetime => {
-                let death = &s.death;
+            NumCol::DeathSeq | NumCol::DeathTime | NumCol::Lifetime if s.hrank.is_empty() => {
+                let death = &s.heap.death;
                 each(active, block, |e| {
                     (death[e as usize] != NONE_U32) == *want
                 })
             }
-            NumCol::Usable if !s.usable.is_empty() => {
-                let usable = &s.usable;
+            NumCol::DeathSeq | NumCol::DeathTime | NumCol::Lifetime => {
+                each(active, block, |e| (s.death(e) != NONE_U32) == *want)
+            }
+            NumCol::Usable if !s.heap.usable.is_empty() && s.hrank.is_empty() => {
+                let usable = &s.heap.usable;
                 each(active, block, |e| (usable[e as usize] != 0) == *want)
+            }
+            NumCol::Usable if !s.heap.usable.is_empty() => {
+                each(active, block, |e| (s.usable_at(e) != 0) == *want)
             }
             NumCol::Usable => each(active, block, |_| !*want),
             _ => each(active, block, |e| col.get(s, e).is_some() == *want),
@@ -1335,11 +1366,16 @@ fn dict_word(
     active: u64,
     hit: impl Fn(u32) -> bool,
 ) -> u64 {
+    // Heap dictionary columns are slices over spine indexes only while the
+    // heap row is the spine index; a trace with other domains reads them
+    // per event through the accessors instead.
+    let unmapped = s.hrank.is_empty();
     match col {
-        DictCol::Site => {
-            let ids = &s.site;
+        DictCol::Site if unmapped => {
+            let ids = &s.heap.site;
             each(active, block, |e| hit(ids[e as usize]))
         }
+        DictCol::Site => each(active, block, |e| hit(s.site(e))),
         DictCol::Thread => {
             let ids = &s.thr_idx;
             each(active, block, |e| match ids[e as usize] {
@@ -1347,17 +1383,20 @@ fn dict_word(
                 t => hit(u32::from(t)),
             })
         }
-        DictCol::Stack if !s.stack.is_empty() => {
-            let ids = &s.stack;
+        DictCol::Stack if !s.heap.stack.is_empty() && unmapped => {
+            let ids = &s.heap.stack;
             each(active, block, |e| hit(ids[e as usize]))
+        }
+        DictCol::Stack if !s.heap.stack.is_empty() => {
+            each(active, block, |e| hit(s.stack_at(e)))
         }
         // a lazy column the trace never materialized: every event is missing
         DictCol::Stack => each(active, block, |_| hit(NONE_U32)),
         DictCol::Field {
             root: FieldRoot::Alloc,
             ..
-        } if !s.extra.is_empty() => {
-            let ids = &s.extra;
+        } if !s.heap.extra.is_empty() && unmapped => {
+            let ids = &s.heap.extra;
             each(active, block, |e| hit(ids[e as usize]))
         }
         DictCol::Field { root, .. } => each(active, block, |e| hit(custom_fragment(root, s, e))),
@@ -1398,7 +1437,7 @@ fn u64_word(col: U64Col, op: BinaryOp, rhs: u64, s: &Store, block: usize, active
     each(active, block, |e| {
         let v = match col.slice(s) {
             Some(column) => column[e as usize],
-            None => u64::from(e),
+            None => col.at(s, e),
         };
         match op {
             BinaryOp::Equal => v == rhs,

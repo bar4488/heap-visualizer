@@ -10,6 +10,31 @@ const BASELINE: [u8; 3] = [0x30, 0x36, 0x3d];
 const GREEN_DIM: [u8; 3] = [0x1c, 0x4a, 0x28];
 const RED_DIM: [u8; 3] = [0x58, 0x2b, 0x28];
 
+/// Log lane colors by level (LOG-002 order): trace and debug dim, info
+/// neutral blue, warn yellow, error red, fatal bright magenta-red.
+pub const LOG_COLORS: [[u8; 3]; crate::logs::NLEVEL] = [
+    [0x44, 0x4c, 0x56],
+    [0x6e, 0x76, 0x81],
+    [0x58, 0xa6, 0xff],
+    [0xd2, 0x99, 0x22],
+    [0xf8, 0x51, 0x49],
+    [0xff, 0x3d, 0x9a],
+];
+
+/// Height of the tag lanes along each strip edge.
+fn tag_lane_px(h: u32) -> i64 {
+    ((h / 14) as i64).clamp(2, 5)
+}
+
+/// Pixel rows `[y0, y1)` of the log lane: directly above the bottom tag
+/// lane's space, which stays reserved whether or not anything is tagged so
+/// the lane does not jump when tagging starts.
+pub fn log_lane_rows(h: u32) -> (i64, i64) {
+    let y1 = h as i64 - tag_lane_px(h);
+    let lane = ((h / 20) as i64).clamp(2, 4);
+    (y1 - lane, y1)
+}
+
 /// Event-index boundary for pixel column edge `c` of `w`, view [lo, hi).
 fn boundary(s: &Store, kind: u32, w: u32, c: u32, lo: f64, hi: f64) -> u32 {
     let n = s.len();
@@ -42,8 +67,8 @@ pub fn bin(s: &Store, kind: u32, w: u32, lo: f64, hi: f64) -> Bins {
     let mut r = vec![0u32; w as usize];
     for c in 0..w as usize {
         let (a, b) = (from[c] as usize, from[c + 1] as usize);
-        g[c] = s.green_pre[b] - s.green_pre[a];
-        r[c] = s.red_pre[b] - s.red_pre[a];
+        g[c] = s.green_before(b as u32) - s.green_before(a as u32);
+        r[c] = s.red_before(b as u32) - s.red_before(a as u32);
     }
     Bins { g, r, from }
 }
@@ -110,6 +135,21 @@ pub fn render(
         put(x, mid, BASELINE);
     }
 
+    // --- log lane (LOG-005): a thin band just above the bottom tag lane,
+    // colored by the most severe log level in each column. Two binary
+    // searches per column over the log store's prefix sums; a trace without
+    // logs skips it.
+    if !s.logs.is_empty() {
+        let (y0, y1) = log_lane_rows(h);
+        for x in 0..w as usize {
+            if let Some(level) = s.logs.max_level(bins.from[x], bins.from[x + 1]) {
+                for y in y0..y1 {
+                    put(x as i64, y, LOG_COLORS[level as usize]);
+                }
+            }
+        }
+    }
+
     // --- tag lanes: creations on top, frees on the bottom ---
     // Untagged traces (the common case) skip this entirely. With tags, each
     // column is a binary search over the sorted tagged-event indexes instead
@@ -120,7 +160,7 @@ pub fn render(
     }
     s.ensure_tag_index();
     let (alloc_idx, free_idx) = (&s.tag_alloc_idx, &s.tag_free_idx);
-    let lane = ((h / 14) as i64).clamp(2, 5);
+    let lane = tag_lane_px(h);
     for x in 0..w as usize {
         let (a, b) = (bins.from[x], bins.from[x + 1]);
         // first tagged event in [a, b) of each kind, as before
@@ -133,7 +173,7 @@ pub fn render(
         let free_c = free_idx
             .get(i)
             .filter(|&&e| e < b)
-            .map(|&e| cfg.tag_color(s.first_tag(s.target[e as usize])));
+            .map(|&e| cfg.tag_color(s.first_tag(s.target(e))));
         if let Some(c) = alloc_c {
             for y in 0..lane {
                 put(x as i64, y, c);
@@ -165,12 +205,24 @@ pub fn hover(s: &Store, kind: u32, w: u32, x: u32, lo: f64, hi: f64) -> String {
     }
     let a = boundary(s, kind, w, x, lo, hi);
     let b = boundary(s, kind, w, x + 1, lo, hi);
-    let g = s.green_pre[b as usize] - s.green_pre[a as usize];
-    let r = s.red_pre[b as usize] - s.red_pre[a as usize];
+    let g = s.green_before(b) - s.green_before(a);
+    let r = s.red_before(b) - s.red_before(a);
     let v0 = lo + (hi - lo) * x as f64 / w as f64;
     let v1 = lo + (hi - lo) * (x + 1) as f64 / w as f64;
-    format!(
-        "{{\"g\":{},\"r\":{},\"from\":{},\"to\":{},\"seqFrom\":{},\"seqTo\":{}}}",
+    let mut out = format!(
+        "{{\"g\":{},\"r\":{},\"from\":{},\"to\":{},\"seqFrom\":{},\"seqTo\":{}",
         g, r, v0, v1, a, b
-    )
+    );
+    // the column's log records by level (LOG-005), only when the trace has any
+    if !s.logs.is_empty() {
+        let by_level = s.logs.counts(a, b);
+        out.push_str(&format!(
+            ",\"logs\":{{\"count\":{},\"byLevel\":",
+            by_level.iter().sum::<u32>()
+        ));
+        crate::logs::push_levels(&mut out, &by_level);
+        out.push('}');
+    }
+    out.push('}');
+    out
 }

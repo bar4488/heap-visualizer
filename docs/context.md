@@ -53,7 +53,7 @@ service warns on every start that it is running on it. The service itself has
 no default: `python3 src/server/app.py` with nothing set serves the review
 routes 503 rather than open, which is the rule a hand-run process keeps.
 
-`build.sh` generates `dist/demo.heapl` when it is missing. For a different
+`build.sh` generates `dist/demo.heapl` when it is missing or older than `gen.py`. For a different
 trace:
 
 ```sh
@@ -196,18 +196,19 @@ needs `npm install`.
 actually touches — that is what makes the persisted round-trips testable
 without a browser.
 
-What the web suite covers is deliberately narrow: `fmt.ts` in full (`clampView`
-included — it is the one function both threads run on the same input),
-`normAddr`, the panel table, the filter-action source rewrites, the guide's
-markdown renderer, the session round-trip, and the `.heapa` round-trip.
+The web suite covers, among others: `fmt.ts` in full (`clampView` included —
+it is the one function both threads run on the same input), `normAddr`, the
+panel table, the filter-action source rewrites, the guide's markdown renderer,
+the session round-trip, the `.heapa` round-trip, and request coalescing. Grow
+it with each change: extract logic that can be tested into importable modules
+and test it there (see `AGENTS.md` → Tests).
 
-What it does not cover, and what no suite will: see
-[Verify a web change](#verify-a-web-change).
+What it does not cover yet: see [Verify a web change](#verify-a-web-change).
 
 ## Verify a web change
 
-Rendering, pointer interaction, and the real worker round trip are **not**
-covered by either suite. Run the available checks and say precisely what they
+Rendering, pointer interaction, and the real worker round trip are not yet
+covered by any suite. Run the available checks and say precisely what they
 did and did not establish.
 
 ```sh

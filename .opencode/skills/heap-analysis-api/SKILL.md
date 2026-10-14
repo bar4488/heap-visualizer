@@ -30,8 +30,13 @@ strings; creator event indices and sequence bounds are JSON integers.
 4. Query compact allocation matches.
 5. Fetch allocation detail for representative or boundary creators.
 6. Request focused stream context only when neighboring events matter.
+7. If the overview reports `logs.records > 0`, read the program's own logs
+   around interesting sequence ranges (see Logs).
 
 Prefer bounded semantic endpoints over paging the entire allocation set.
+`capabilities.limits` in the session response lists every page, body, and
+response limit. A response over 256 KiB is refused with
+`413 response_too_large`; repeat with a smaller page, limit, or range.
 
 ## Filters
 
@@ -132,6 +137,18 @@ Custom records appear as `operation:"event"` with their producer-supplied
 semantics. Custom-record fields beyond the title are not returned by this
 endpoint.
 
+## Logs
+
+`GET /api/v1/logs?minLevel=warn&text=timeout&seqLo=0&seqHi=5000&from=0&count=50`
+pages the trace's structured log records (`L`) in sequence order. Every
+parameter is optional: `minLevel` is `trace`…`fatal` (records at or above it),
+`text` a case-insensitive substring of message or logger (at most 1 KiB),
+`seqLo`/`seqHi` an inclusive sequence range, `count` at most 200. Items carry
+`seq`, `t` (string), `thr`, `level`, `logger`, `msg`, and `fields`; follow
+`next` for the next page. Logs are evidence about what the program was doing
+at a sequence, not proof that it caused a heap event — correlate by sequence
+range, e.g. errors near a growth window found with the timeline.
+
 ## Warnings
 
 `GET /api/v1/warnings?from=0&count=100` returns warning items with `kind`,
@@ -141,8 +158,13 @@ not infer warning positions from later allocation detail. The envelope reports
 
 ## Canonical analysis mutations
 
-First read `GET /api/v1/analysis?traceId=<url-encoded-trace-id>` and use its
-current document revision. Ordinary mutations go to
+First read `GET /api/v1/analysis/summary` and use its `analysisRevision`. It
+also lists every existing tag (`id`, `name`, `color`) and counts the other
+analysis objects; read per-allocation names, colors, and tags through allocation
+query or detail. Do not read `GET /api/v1/analysis`: it is the browser's
+complete synchronization snapshot, grows with tag membership, and is not
+size-bounded. After a successful write, use the returned `revision` for the next
+write instead of rereading. Ordinary mutations go to
 `POST /api/v1/analysis/changes`:
 
 ```json
@@ -181,5 +203,5 @@ After creating a tag, atomically tag a filter result with
 Operations are `add`, `remove`, and `replace`. The tag must already exist.
 Success returns `revision`, `matched`, `changed`, and `snapshotRequired:true`.
 Use the new revision for subsequent writes. A `409 revision_conflict` includes
-`currentRevision`; reread analysis before retrying. Reusing the same request ID
+`currentRevision`; reread `/api/v1/analysis/summary` before retrying. Reusing the same request ID
 with the same body is idempotent.

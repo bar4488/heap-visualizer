@@ -850,3 +850,73 @@ input[type="color"] {
   0% { box-shadow: 0 0 0 2px rgba(88,166,255,0.5); }
   100% { box-shadow: 0 0 0 11px rgba(88,166,255,0); }
 }
+
+/* ---------- Logs panel (LOG-007): a terminal, whatever the theme ---------- */
+:root {
+  --term-bg: #0a0c10;
+  --term-fg: #d0d7de;
+  --term-dim: #6e7681;
+  --term-info: #56d364;
+  --term-warn: #e3b341;
+  --term-error: #ff6b61;
+  --term-logger: #79c0ff;
+  --term-cur: #1d2a3a;
+}
+#logs-panel { width: 520px; }
+#logs-panel:not(.docked) { height: 40vh; }
+#logs-panel .head-actions { display: flex; gap: 10px; align-items: center; }
+#logs-panel .head-actions label { font-weight: 400; }
+#logs-panel .log-count {
+  color: var(--fg-dim); font-weight: 400; font-size: 11px;
+  margin-right: auto; padding-left: 8px; font-variant-numeric: tabular-nums;
+}
+#logs-panel .log-bar { display: flex; gap: 6px; padding: 5px 8px; border-bottom: 1px solid var(--border); }
+#logs-panel .log-bar input { flex: 1; min-width: 0; }
+#logs-scroll {
+  position: relative; overflow: auto; flex: 1; min-height: 0;
+  background: var(--term-bg); color: var(--term-fg);
+  border-radius: 0 0 8px 8px;
+}
+#logs-scroll:focus { outline: none; }
+#logs-spacer { width: 1px; }
+#logs-rows {
+  position: absolute; left: 0; top: 0; min-width: 100%;
+  font: 11.5px ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+}
+#logs-empty {
+  position: absolute; left: 12px; top: 8px;
+  color: var(--term-dim); font: 11.5px ui-monospace, monospace;
+}
+.log-line {
+  height: 18px; line-height: 18px; padding: 0 10px 0 12px;
+  white-space: pre; cursor: pointer; user-select: text;
+}
+.log-line:hover { background: #ffffff0d; }
+.log-line .lg-t, .log-line .lg-thr, .log-line .lg-f { color: var(--term-dim); }
+.log-line .lg-lv { font-weight: 700; }
+.log-line .lg-name { color: var(--term-logger); }
+/* trace/debug dim, info default, warn yellow, error red, fatal red bold */
+.log-line.lv-0 .lg-lv, .log-line.lv-0 .lg-msg,
+.log-line.lv-1 .lg-lv, .log-line.lv-1 .lg-msg { color: var(--term-dim); }
+.log-line.lv-2 .lg-lv { color: var(--term-info); }
+.log-line.lv-3 .lg-lv, .log-line.lv-3 .lg-msg { color: var(--term-warn); }
+.log-line.lv-4 .lg-lv, .log-line.lv-4 .lg-msg,
+.log-line.lv-5 .lg-lv, .log-line.lv-5 .lg-msg { color: var(--term-error); }
+.log-line.lv-5 .lg-msg { font-weight: 700; }
+/* the playhead: its line is marked; lines after it have not happened yet */
+.log-line.cur { background: var(--term-cur); box-shadow: inset 2px 0 0 var(--accent); }
+.log-line.future { opacity: 0.38; }
+.log-line.reveal { animation: log-reveal 1.4s ease-out; }
+@keyframes log-reveal { from { background: rgba(88,166,255,0.35); } to { background: transparent; } }
+
+/* a log record in the Events list: level and message instead of geometry */
+.ev-row .ev-op.l { color: var(--term-logger); }
+.ev-row .ev-lv { flex: none; font-weight: 700; color: var(--fg-dim); white-space: pre; }
+.ev-row .ev-msg { overflow: hidden; text-overflow: ellipsis; color: var(--fg); }
+.ev-row.ev-log { background: rgba(121, 192, 255, 0.05); }
+.ev-row.ev-log.lv-0 .ev-msg, .ev-row.ev-log.lv-1 .ev-msg { color: var(--fg-dim); }
+.ev-row.ev-log.lv-2 .ev-lv { color: var(--green); }
+.ev-row.ev-log.lv-3 .ev-lv, .ev-row.ev-log.lv-3 .ev-msg { color: #d29922; }
+.ev-row.ev-log.lv-4 .ev-lv, .ev-row.ev-log.lv-4 .ev-msg,
+.ev-row.ev-log.lv-5 .ev-lv, .ev-row.ev-log.lv-5 .ev-msg { color: var(--red); }
+.ev-row.ev-log.lv-5 .ev-msg { font-weight: 700; }

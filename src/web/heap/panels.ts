@@ -16,6 +16,8 @@
 //   dock    the drawer this panel starts docked in ('left' | 'right'), or null
 //           to start floating
 //   open    whether it starts visible
+//   needs   optional: the evidence domain the panel presents ('logs'); it then
+//           starts open only when the loaded trace has records of that domain
 //   build   refills the panel from a freshly loaded trace, or null when its
 //           content is static markup
 //
@@ -40,6 +42,8 @@ const PANELS = [
   { id: 'analysis-panel', title: 'Marks', toggle: 'btn-analysis', dock: 'right', open: true },
   { id: 'warnings-panel', title: 'Warnings', toggle: 'btn-warnings', dock: null, open: false },
   { id: 'events-panel', title: 'Events', toggle: null, dock: 'left', open: true },
+  // wires its own button for the same reason Events does (spec LOG-007)
+  { id: 'logs-panel', title: 'Logs', toggle: null, dock: 'left', open: true, needs: 'logs' as const },
 ];
 
 // The records, with each panel's build function attached. `builders` is keyed

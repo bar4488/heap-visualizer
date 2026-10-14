@@ -455,18 +455,12 @@ async fn run_server(config: OpenConfig) -> Result<(), String> {
     let listener = TcpListener::bind(address)
         .await
         .map_err(|error| format!("cannot listen on {address}: {error}"))?;
+    // Registered before the connection string is printed, so a stop request
+    // that arrives as soon as it is visible still removes the snapshot.
+    let shutdown = shutdown_signal()?;
 
-    let channel = fetch_channel().await.ok().map(|(_, channel)| channel);
     println!("✓ Loaded {}", config.trace.display());
     println!("✓ Local analysis is ready at {api_url}");
-    if let Some(channel) = &channel {
-        if version_is_newer(&channel.latest_version, env!("CARGO_PKG_VERSION")) {
-            eprintln!(
-                "! heapviz {} is available; run `heapviz update`",
-                channel.latest_version
-            );
-        }
-    }
     let connection = connection_string(&api_url, &token);
     println!(
         "\nBrowser connection — copy the ENTIRE line, including everything after #:\n{connection}"
@@ -475,16 +469,85 @@ async fn run_server(config: OpenConfig) -> Result<(), String> {
         "\nAI assistant — copy the ENTIRE instruction below (the URL without #… will not work):\nUse the heap-analysis-api skill to inspect the active trace. Connect with this complete connection string, including its capability after #: {connection}"
     );
     println!("\nKeep this window open. Press Ctrl+C to stop.");
+    // The update check is advisory and may take its full timeout; it must not
+    // delay the connection string or the start of serving.
+    tokio::spawn(async {
+        if let Ok((_, channel)) = fetch_channel().await {
+            if version_is_newer(&channel.latest_version, env!("CARGO_PKG_VERSION")) {
+                eprintln!(
+                    "! heapviz {} is available; run `heapviz update`",
+                    channel.latest_version
+                );
+            }
+        }
+    });
 
+    // Returning drops the router and its trace snapshot, which deletes the
+    // temporary copy of the trace; held long-polls are cancelled, not awaited.
     tokio::select! {
         result = async { axum::serve(listener, router(state)).await } => {
             result.map_err(|error| format!("server failed: {error}"))
         }
-        signal = tokio::signal::ctrl_c() => {
-            signal.map_err(|error| format!("cannot listen for Ctrl+C: {error}"))
-        }
+        () = shutdown => Ok(()),
     }
 }
+
+/// Resolves on Ctrl+C everywhere, and also on SIGTERM and SIGHUP on Unix
+/// (service managers, `kill`, a closed terminal), so every ordinary stop
+/// request removes the trace snapshot.
+#[cfg(unix)]
+fn shutdown_signal() -> Result<impl std::future::Future<Output = ()>, String> {
+    use tokio::signal::unix::{signal, SignalKind};
+    let register = |kind: SignalKind, name: &str| {
+        signal(kind).map_err(|error| format!("cannot listen for {name}: {error}"))
+    };
+    let mut interrupt = register(SignalKind::interrupt(), "SIGINT")?;
+    let mut terminate = register(SignalKind::terminate(), "SIGTERM")?;
+    let mut hangup = register(SignalKind::hangup(), "SIGHUP")?;
+    Ok(async move {
+        tokio::select! {
+            _ = interrupt.recv() => {}
+            _ = terminate.recv() => {}
+            _ = hangup.recv() => {}
+        }
+    })
+}
+
+#[cfg(not(unix))]
+fn shutdown_signal() -> Result<impl std::future::Future<Output = ()>, String> {
+    Ok(async {
+        // If the handler cannot be installed, keep serving rather than exit.
+        if tokio::signal::ctrl_c().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    })
+}
+
+/// Waits for running copies of heapviz to exit, then replaces the executable.
+/// The wait is bounded so a forgotten `heapviz open` cannot leave the script
+/// polling forever; on timeout the verified download stays beside the
+/// executable and the next `heapviz update` starts over.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn windows_replace_script(pending: &std::path::Path, current: &std::path::Path) -> String {
+    let (pending, current) = (pending.display(), current.display());
+    format!(
+        "@echo off\r\n\
+         set /a tries=0\r\n\
+         :retry\r\n\
+         move /Y \"{pending}\" \"{current}\" >nul 2>nul && goto done\r\n\
+         set /a tries+=1\r\n\
+         if %tries% geq {WINDOWS_REPLACE_ATTEMPTS} goto failed\r\n\
+         timeout /t 1 /nobreak >nul\r\n\
+         goto retry\r\n\
+         :failed\r\n\
+         echo heapviz update: \"{current}\" is still in use; close heapviz and run heapviz update again.\r\n\
+         :done\r\n\
+         del \"%~f0\"\r\n"
+    )
+}
+
+/// About ten minutes at one attempt per second.
+const WINDOWS_REPLACE_ATTEMPTS: u32 = 600;
 
 fn platform_download(channel: &Channel) -> Option<&Download> {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -554,7 +617,7 @@ async fn update() -> Result<(), String> {
     #[cfg(windows)]
     {
         let script = current.with_extension("heapviz-update.cmd");
-        let body = format!("@echo off\r\n:retry\r\nmove /Y \"{}\" \"{}\" >nul 2>nul || (timeout /t 1 /nobreak >nul & goto retry)\r\ndel \"%~f0\"\r\n", pending.display(), current.display());
+        let body = windows_replace_script(&pending, &current);
         fs::write(&script, body).map_err(|error| error.to_string())?;
         ProcessCommand::new("cmd")
             .args(["/C", "start", "", "/MIN", script.to_string_lossy().as_ref()])
@@ -615,6 +678,18 @@ mod tests {
                 force: false
             }
         ));
+    }
+
+    #[test]
+    fn windows_replacement_retries_a_bounded_number_of_times() {
+        let script = windows_replace_script(
+            std::path::Path::new("C:\\heapviz.heapviz-update"),
+            std::path::Path::new("C:\\heapviz.exe"),
+        );
+        assert!(script.contains(&format!("if %tries% geq {WINDOWS_REPLACE_ATTEMPTS} goto failed")));
+        assert!(script.contains("move /Y \"C:\\heapviz.heapviz-update\" \"C:\\heapviz.exe\""));
+        assert!(script.ends_with("del \"%~f0\"\r\n"));
+        assert!(script.lines().all(|line| !line.starts_with(' ')));
     }
 
     #[test]

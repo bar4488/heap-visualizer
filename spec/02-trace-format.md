@@ -24,8 +24,21 @@ bytes.
   timestamps, and byte sizes occupy their full unsigned 64-bit columns; a
   browser-facing surface must not round an id through a JavaScript number.
 - **Addresses are strings** (`"0x555555550000"`), because a 64-bit address does
-  not fit safely in a JSON double. Hex, `0x`-prefixed, lowercase preferred;
-  consumers tolerate uppercase, a missing prefix, and plain decimal.
+  not fit safely in a JSON double. Hex, `0x`-prefixed, lowercase preferred.
+  Consumers read an address string by one rule: a `0x`/`0X` prefix means hex
+  (either case, at most 16 digits); otherwise a string of decimal digits only
+  is **decimal**, and digits mixed with `a`–`f` (either case) are hex. So a
+  prefixless all-digit hex address such as `"10002000"` reads as decimal —
+  producers writing hex must use the prefix. Anything else (including a
+  decimal value past 2^64 − 1) is not an address.
+- **A key's meaning depends on the record's `op`.** A field this spec defines
+  for some record types (`v`, `unit`, `title`, `row_bytes`, `arena_base`,
+  `meta` on `H`; `title` on `E`; `old_id`, `old_addr`, `old_size` on `R`) is
+  read as that field only on those records; on any other record it is an
+  ordinary custom field, kept and catalogued like any other, and its value's
+  shape never makes the line malformed.
+- **A repeated key** within one object reads as its last occurrence, as
+  JSON parsers conventionally do.
 - Empty lines and lines whose first non-whitespace character is `#` are
   ignored, so hand-authored files can carry comments and separators.
 
@@ -41,6 +54,7 @@ skipped (forward compatibility).
 | `F`  | **Free** — an existing allocation ends. |
 | `R`  | **Realloc** — one allocation ends and a new one begins, atomically. |
 | `E`  | **Custom event** — a producer's own landmark; not an allocation ([TRACE-010](#trace-010-custom-event-record-e)). |
+| `L`  | **Log** — a structured log line; the log evidence domain ([LOG-001](13-domains-and-logs.md#log-001-the-log-record-l)). |
 
 ## TRACE-003: Header record `H`
 
@@ -147,7 +161,11 @@ overlapping allocations, double frees, unknown ids, reused ids, zero sizes,
 and malformed lines are all rendered as best as possible and surfaced as
 warnings ([MODEL-005](03-core-model.md#model-005-warnings)). The only records dropped
 entirely are unparseable lines, records with no/unknown `op`, creator records
-with no `addr`, and `F` with the null id.
+with no `addr`, `F` with the null id, and `L` records without a string `msg`
+([LOG-001](13-domains-and-logs.md#log-001-the-log-record-l)). A dropped record
+leaves no other trace: it takes no event index, does not move the clock
+([TRACE-007](#trace-007-ordering-seq-and-timestamps)), catalogues no site,
+thread, stack or custom field, and raises no warning except its own.
 
 ## TRACE-010: Custom event record `E`
 

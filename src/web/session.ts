@@ -190,11 +190,19 @@ function applyHeapView(obj) {
 // re-fetches each pinned allocation's info by creator event index (the trace
 // itself, not the info blob, is what's persisted) and recreates its window,
 // docked or floating exactly as saved
+// A restore spans one worker round-trip per window, so a newer restore or a
+// newly loaded trace can arrive in between; either one ends this one rather
+// than letting it recreate windows for events of a trace no longer shown.
+let pinnedRestoreGeneration = 0;
+
 async function restorePinnedWindows(pinned) {
+  const generation = ++pinnedRestoreGeneration;
   if (!pinned || !pinned.length) return;
+  const meta = d.ui.meta;
   $$('.pinned-detail').forEach((w) => w.remove()); // avoid dupes on repeated restore
   for (const pw of pinned) {
     const info = await d.requestAllocInfo(pw.e);
+    if (generation !== pinnedRestoreGeneration || d.ui.meta !== meta || !d.ui.loaded) return;
     if (!info) continue; // stale/unknown event (e.g. mismatched trace): skip
     const win = d.createPinnedWindow(info, null);
     win.style.left = pw.left; win.style.top = pw.top; win.style.right = pw.right; win.style.bottom = pw.bottom;
@@ -208,6 +216,7 @@ let lastSessionJson = null;
 // saveSessionNow — the previous snapshot describes a different trace
 export function resetSessionSnapshot() {
   lastSessionJson = null;
+  pinnedRestoreGeneration++;
 }
 
 export function saveSessionNow() {

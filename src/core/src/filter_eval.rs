@@ -56,10 +56,12 @@ impl<'a> Ctx<'a> {
     fn allocation(&self, id: u64) -> Result<u32, usize> {
         let mut found = None;
         let mut count = 0;
-        for (event, (&candidate, &op)) in self.store.id.iter().zip(&self.store.op).enumerate() {
-            if candidate == id && matches!(op, OP_M | OP_R) {
+        let s = self.store;
+        for (row, &candidate) in s.heap.id.iter().enumerate() {
+            let event = s.heap_seq(row);
+            if candidate == id && matches!(s.op[event as usize], OP_M | OP_R) {
                 count += 1;
-                found.get_or_insert(event as u32);
+                found.get_or_insert(event);
             }
         }
         match (count, found) {
@@ -324,7 +326,7 @@ fn ns_fields(ns: Ns) -> &'static [(&'static str, &'static str, Type)] {
         Ns::Malloc => &[
             ("seq", "integer", Type::Int),
             ("site", "string, optional", Type::String),
-            ("stack", "string", Type::String),
+            ("stack", "string, optional", Type::String),
             ("thread", "integer, optional", Type::Int),
             ("time", "time", Type::Int),
         ],
@@ -447,42 +449,41 @@ fn resolve_fragment(fragment: &str, keys: &[String]) -> Vec<Value> {
         let Some((vlo, vhi)) = sc.skip_value() else {
             break;
         };
-        // a repeated key keeps its first value, matching the catalog's count
+        // a repeated key reads as its last value (JSON last-wins, TRACE-001),
+        // as the API and the allocation panel show it
         if let Some(index) = keys.iter().position(|k| *k == name) {
-            if matches!(out[index], Value::Missing) {
-                out[index] = match shape {
-                    b'"' => Value::String(crate::json::unescape(&bytes[vlo + 1..vhi - 1])),
-                    b't' => Value::Bool(true),
-                    b'f' => Value::Bool(false),
-                    // null, objects and arrays are all missing to the
-                    // evaluator; the checker has already rejected the last two
-                    b'n' | b'{' | b'[' => Value::Missing,
-                    // a number: integral text parses as an integer, and
-                    // anything with a fraction or an exponent as a float.
-                    // Parsing everything as i128 is what made a fractional
-                    // field silently missing (T034).
-                    _ => core::str::from_utf8(&bytes[vlo..vhi]).map_or(
-                        Value::Missing,
-                        |text| {
-                            if text.bytes().any(|c| matches!(c, b'.' | b'e' | b'E')) {
-                                text.parse::<f64>().map_or(Value::Missing, |value| {
+            out[index] = match shape {
+                b'"' => Value::String(crate::json::unescape(&bytes[vlo + 1..vhi - 1])),
+                b't' => Value::Bool(true),
+                b'f' => Value::Bool(false),
+                // null, objects and arrays are all missing to the
+                // evaluator; the checker has already rejected the last two
+                b'n' | b'{' | b'[' => Value::Missing,
+                // a number: integral text parses as an integer, and
+                // anything with a fraction or an exponent as a float.
+                // Parsing everything as i128 is what made a fractional
+                // field silently missing (T034).
+                _ => core::str::from_utf8(&bytes[vlo..vhi]).map_or(
+                    Value::Missing,
+                    |text| {
+                        if text.bytes().any(|c| matches!(c, b'.' | b'e' | b'E')) {
+                            text.parse::<f64>().map_or(Value::Missing, |value| {
+                                if value.is_finite() { Value::Float(value) } else { Value::Missing }
+                            })
+                        } else {
+                            text.parse::<i128>().map_or_else(
+                                // wider than i128: keep it as the number
+                                // it approximately is rather than dropping
+                                // the field
+                                |_| text.parse::<f64>().map_or(Value::Missing, |value| {
                                     if value.is_finite() { Value::Float(value) } else { Value::Missing }
-                                })
-                            } else {
-                                text.parse::<i128>().map_or_else(
-                                    // wider than i128: keep it as the number
-                                    // it approximately is rather than dropping
-                                    // the field
-                                    |_| text.parse::<f64>().map_or(Value::Missing, |value| {
-                                        if value.is_finite() { Value::Float(value) } else { Value::Missing }
-                                    }),
-                                    Value::Int,
-                                )
-                            }
-                        },
-                    ),
-                };
-            }
+                                }),
+                                Value::Int,
+                            )
+                        }
+                    },
+                ),
+            };
         }
         if !sc.eat(b',') {
             break;
@@ -695,9 +696,8 @@ fn field_type(ns: Ns, name: &str, expr: &Expr) -> Result<CheckedType, EvalError>
         (Ns::Alloc, "tags") => CheckedType::required(Type::Set(ValueKind::String)),
         (Ns::Alloc, "freed") => CheckedType::required(Type::Bool),
         (Ns::Malloc, "seq" | "time") => CheckedType::required(Type::Int),
-        (Ns::Malloc, "site") => CheckedType::optional(Type::String),
+        (Ns::Malloc, "site" | "stack") => CheckedType::optional(Type::String),
         (Ns::Malloc, "thread") => CheckedType::optional(Type::Int),
-        (Ns::Malloc, "stack") => CheckedType::required(Type::String),
         (Ns::Free, "seq" | "time") => CheckedType::optional(Type::Int),
         (_, "fields") => {
             return Err(EvalError::at(
@@ -1838,7 +1838,7 @@ pub(crate) fn float(value: f64, unit: Option<Unit>, time_unit: &str) -> Result<f
 pub(crate) fn custom_fragment(root: FieldRoot, s: &Store, e: u32) -> u32 {
     match root {
         FieldRoot::Alloc => s.extra_at(e),
-        FieldRoot::Death => match s.death[e as usize] {
+        FieldRoot::Death => match s.death(e) {
             NONE_U32 => NONE_U32,
             death => s.extra_at(death),
         },
@@ -1854,19 +1854,19 @@ pub(crate) fn field_value(
 ) -> Result<Value, EvalError> {
     let s = ctx.store;
     let i = e as usize;
-    let death = |value: fn(&Store, u32, usize) -> Value| match s.death[i] {
+    let death = |value: fn(&Store, u32, usize) -> Value| match s.death(e) {
         NONE_U32 => Value::Missing,
         d => value(s, d, i),
     };
     Ok(match (ns, name) {
-        (Ns::Alloc, "id") => Value::Int(s.id[i] as i128),
-        (Ns::Alloc, "address") => Value::Int(s.addr[i] as i128),
-        (Ns::Alloc, "end") => Value::Int(s.addr[i].saturating_add(s.span(e)) as i128),
+        (Ns::Alloc, "id") => Value::Int(s.id(e) as i128),
+        (Ns::Alloc, "address") => Value::Int(s.addr(e) as i128),
+        (Ns::Alloc, "end") => Value::Int(s.end(e) as i128),
         (Ns::Alloc, "span") => Value::Range(
-            Num::Int(s.addr[i] as i128),
-            Num::Int(s.addr[i].saturating_add(s.span(e)) as i128),
+            Num::Int(s.addr(e) as i128),
+            Num::Int(s.end(e) as i128),
         ),
-        (Ns::Alloc, "size") => Value::Int(s.size[i] as i128),
+        (Ns::Alloc, "size") => Value::Int(s.size(e) as i128),
         (Ns::Alloc, "usable") => match s.usable_at(e) {
             0 => Value::Missing,
             v => Value::Int(v as i128),
@@ -1878,13 +1878,13 @@ pub(crate) fn field_value(
                 .map(Value::String)
                 .collect(),
         ),
-        (Ns::Alloc, "freed") => Value::Bool(s.death[i] != NONE_U32),
+        (Ns::Alloc, "freed") => Value::Bool(s.death(e) != NONE_U32),
         (Ns::Alloc, "lifetime") => {
             death(|s, d, i| Value::Int(s.t[d as usize] as i128 - s.t[i] as i128))
         }
         (Ns::Malloc, "seq") => Value::Int(e as i128),
         (Ns::Malloc, "time") => Value::Int(s.t[i] as i128),
-        (Ns::Malloc, "site") => match s.site[i] {
+        (Ns::Malloc, "site") => match s.site(e) {
             NONE_U32 => Value::Missing,
             id => Value::String(s.sites[id as usize].clone()),
         },

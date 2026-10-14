@@ -26,8 +26,10 @@ test('the panel table declares the complete default workspace', () => {
   const panels = heapPanels();
   assert.deepEqual(
     panels.filter((p) => p.dock === 'left').map((p) => [p.id, p.open]),
-    [['events-panel', true]],
+    [['events-panel', true], ['logs-panel', true]],
   );
+  // ...but Logs opens only for a trace that has log records (LOG-007)
+  assert.deepEqual(panels.filter((p) => p.needs).map((p) => [p.id, p.needs]), [['logs-panel', 'logs']]);
   assert.deepEqual(
     panels.filter((p) => p.dock === 'right').map((p) => [p.id, p.open]),
     [

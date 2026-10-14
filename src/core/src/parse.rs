@@ -21,6 +21,10 @@ pub struct Parser {
     /// live regions keyed by (addr, event): value = end address. Used for
     /// overlap warnings and to take snapshots.
     live: BTreeMap<(u64, u32), u64>,
+    /// Multiset of the spans in `live`, so the overlap walk-back is bounded
+    /// by the widest block *currently live* — one early huge allocation,
+    /// once freed, must not make every later check scan the whole window.
+    live_spans: BTreeMap<u64, u32>,
     prev_t: u64,
     saw_t: bool,
     cur_live_bytes: u64,
@@ -32,6 +36,8 @@ pub struct Parser {
     extra_map: HashMap<String, u32>,
     /// Custom field name -> index into `store.fields`.
     field_map: HashMap<String, u32>,
+    logger_map: HashMap<String, u32>,
+    log_frag_map: HashMap<String, u32>,
     seq_warned: bool,
 }
 
@@ -69,6 +75,7 @@ impl Parser {
             carry: Vec::new(),
             id_map: HashMap::new(),
             live: BTreeMap::new(),
+            live_spans: BTreeMap::new(),
             prev_t: 0,
             saw_t: false,
             cur_live_bytes: 0,
@@ -79,6 +86,8 @@ impl Parser {
             label_map: HashMap::new(),
             extra_map: HashMap::new(),
             field_map: HashMap::new(),
+            logger_map: HashMap::new(),
+            log_frag_map: HashMap::new(),
             seq_warned: false,
         }
     }
@@ -134,12 +143,15 @@ impl Parser {
         // free load-time maps
         self.id_map = HashMap::new();
         self.live = BTreeMap::new();
+        self.live_spans = BTreeMap::new();
         self.site_map = HashMap::new();
         self.thr_map = HashMap::new();
         self.stack_map = HashMap::new();
         self.label_map = HashMap::new();
         self.extra_map = HashMap::new();
         self.field_map = HashMap::new();
+        self.logger_map = HashMap::new();
+        self.log_frag_map = HashMap::new();
     }
 
     fn line(&mut self, line: &[u8]) {
@@ -156,8 +168,16 @@ impl Parser {
             return;
         }
         let line = &line[a..b];
-        match parse_raw(line) {
-            Some(raw) => self.apply(raw),
+        // A log line is re-read by its own domain's parser: its keys mean
+        // something else there, and every other key is a custom field. A log
+        // line whose keys the heap reader cannot type (`"size":"x"`) is still
+        // a log line, so a failed heap read gets the same second look.
+        let log = match parse_raw(line) {
+            Some(raw) if raw.op != b'L' => return self.apply(raw),
+            _ => crate::logs::parse_log_line(line),
+        };
+        match log {
+            Some(log) => self.apply_log(log),
             None => {
                 // no event row is produced: attach to the previous event so
                 // "jump to warning" lands where the bad line sat in the stream
@@ -178,9 +198,17 @@ impl Parser {
         i
     }
 
-    fn intern_thr(&mut self, thr: i64) -> u16 {
+    /// Thread intern index for record `e`. The column is 16-bit with
+    /// `NONE_U16` reserved, so at most 65,535 distinct threads are kept; a
+    /// record on any thread past that reads as thread-less and is flagged
+    /// rather than aliasing another thread's index.
+    fn intern_thr(&mut self, thr: i64, e: u32) -> u16 {
         if let Some(&i) = self.thr_map.get(&thr) {
             return i;
+        }
+        if self.store.thrs.len() >= NONE_U16 as usize {
+            self.store.warn(e, W_THREADS, thr as u64);
+            return NONE_U16;
         }
         let i = self.store.thrs.len() as u16;
         self.thr_map.insert(thr, i);
@@ -276,7 +304,7 @@ impl Parser {
             };
             self.store.fields[index as usize].types |= shape;
             // a fragment repeating a key counts once; the value the evaluator
-            // will read is the first, so the duplicate is not a second member
+            // will read is the last, so the duplicate is not a second member
             if !members.contains(&index) {
                 members.push(index);
             }
@@ -287,7 +315,30 @@ impl Parser {
         members
     }
 
-    fn apply(&mut self, mut raw: Raw) {
+    /// Append one record to the event spine (DOM-001). The spine -> heap rank
+    /// is materialized the first time a non-heap record arrives — until then
+    /// every record is a heap record and the heap row is the spine index, so
+    /// a heap-only trace never builds the mapping.
+    fn push_spine(&mut self, op: u8, t: u64, thr_idx: u16, heap: bool) {
+        let s = &mut self.store;
+        let e = s.len();
+        if !heap && s.hrank.is_empty() {
+            debug_assert_eq!(s.heap.addr.len(), e as usize);
+            s.hrank = (0..=e).collect();
+            s.heap.seq = (0..e).collect();
+        }
+        s.op.push(op);
+        s.t.push(t);
+        s.thr_idx.push(thr_idx);
+        if let Some(&r) = s.hrank.last() {
+            s.hrank.push(r + heap as u32);
+            if heap {
+                s.heap.seq.push(e);
+            }
+        }
+    }
+
+    fn apply(&mut self, raw: Raw) {
         if raw.op == b'H' {
             let s = &mut self.store;
             s.has_header = true;
@@ -314,10 +365,42 @@ impl Parser {
             return;
         }
 
-        let e = self.store.len();
+        // Every record that will be dropped (TRACE-009) is decided here,
+        // before anything is stamped or interned: a dropped record must leave
+        // no trace — no clock movement, no catalogued site or field, and no
+        // warning pinned to whichever record comes next.
+        let op = match raw.op {
+            b'M' => OP_M,
+            b'F' => OP_F,
+            b'R' => OP_R,
+            b'E' => OP_E,
+            _ => {
+                // unknown record type: forward-compat, ignore
+                return;
+            }
+        };
+        // op F with the reserved null id is a no-op record
+        if op == OP_F && raw.id == Some(0) {
+            return;
+        }
+        if (op == OP_M || op == OP_R) && raw.addr.is_none() {
+            // no event row is produced: attach to the previous event
+            let seq = self.store.len().saturating_sub(1);
+            self.store.warn(seq, W_MALFORMED, raw.id.unwrap_or(0));
+            return;
+        }
 
-        // timestamp: missing inherits previous; decreasing clamps
-        let t = match raw.t {
+        let (e, t) = self.stamp(raw.t, raw.seq);
+        self.apply_heap(raw, op, e, t);
+    }
+
+    /// Timestamp and seq checks shared by every domain's records (TRACE-007):
+    /// a missing `t` inherits, a decreasing one clamps, and a `seq` that
+    /// disagrees with stream position is flagged once. Returns the spine
+    /// index the record will take and its timestamp.
+    fn stamp(&mut self, t: Option<u64>, seq: Option<i64>) -> (u32, u64) {
+        let e = self.store.len();
+        let t = match t {
             Some(t) => {
                 if self.saw_t && t < self.prev_t {
                     self.store.warn(e, W_T_DECREASE, t);
@@ -335,29 +418,75 @@ impl Parser {
         self.prev_t = t;
 
         // seq sanity (stream order is authoritative regardless)
-        if let Some(sq) = raw.seq {
+        if let Some(sq) = seq {
             if sq != e as i64 && !self.seq_warned {
                 self.store.warn(e, W_SEQ_MISMATCH, sq as u64);
                 self.seq_warned = true;
             }
         }
+        (e, t)
+    }
 
-        let op = match raw.op {
-            b'M' => OP_M,
-            b'F' => OP_F,
-            b'R' => OP_R,
-            b'E' => OP_E,
-            _ => {
-                // unknown record type: forward-compat, ignore
-                return;
+    /// One `L` record (LOG-001): a spine row and a log row, nothing else.
+    fn apply_log(&mut self, mut log: crate::logs::RawLog) {
+        use crate::logs::{truncate_msg, LevelRead, LEVEL_INFO};
+        let Some(mut msg) = log.msg.take() else {
+            // no event row is produced, as for any other dropped record
+            let seq = self.store.len().saturating_sub(1);
+            self.store.warn(seq, W_MALFORMED, 0);
+            return;
+        };
+        let (e, t) = self.stamp(log.t, log.seq);
+        let level = match log.level() {
+            LevelRead::Known(level) => level,
+            LevelRead::Absent => LEVEL_INFO,
+            LevelRead::Bad => {
+                self.store.warn(e, W_BAD_LEVEL, 0);
+                LEVEL_INFO
             }
         };
-
-        // op F with the reserved null id is a no-op record
-        if op == OP_F && raw.id == Some(0) {
-            return;
+        let full = msg.len();
+        if truncate_msg(&mut msg) {
+            self.store.warn(e, W_LONG_LOG, full as u64);
         }
+        let thr_idx = match log.thr {
+            Some(v) => self.intern_thr(v, e),
+            None => NONE_U16,
+        };
+        let logger = match log.logger.take() {
+            Some(name) => match self.logger_map.get(&name) {
+                Some(&i) => i,
+                None => {
+                    let logs = &mut self.store.logs;
+                    let i = logs.loggers.len() as u32;
+                    self.logger_map.insert(name.clone(), i);
+                    logs.loggers.push(name);
+                    logs.logger_count.push(0);
+                    i
+                }
+            },
+            None => NONE_U32,
+        };
+        let fields = if log.extra.is_empty() {
+            NONE_U32
+        } else {
+            match self.log_frag_map.get(&log.extra) {
+                Some(&i) => i,
+                None => {
+                    let logs = &mut self.store.logs;
+                    let i = logs.frags.len() as u32;
+                    self.log_frag_map.insert(log.extra.clone(), i);
+                    logs.frags.push(std::mem::take(&mut log.extra));
+                    i
+                }
+            }
+        };
+        self.push_spine(OP_L, t, thr_idx, false);
+        self.store.logs.push(e, level, logger, &msg, fields);
+        self.store.n_log += 1;
+    }
 
+    fn apply_heap(&mut self, mut raw: Raw, op: u8, e: u32, t: u64) {
         // A custom event is a label and its custom fields; `site` and `stack`
         // describe an allocation, so they are not read off one — a site nobody
         // ever allocated from would sit in the legend at count zero.
@@ -370,7 +499,7 @@ impl Parser {
             None => NONE_U32,
         };
         let thr_idx = match raw.thr {
-            Some(v) => self.intern_thr(v),
+            Some(v) => self.intern_thr(v, e),
             None => NONE_U16,
         };
         let stack = match raw.stack.filter(|_| op != OP_E) {
@@ -395,7 +524,7 @@ impl Parser {
             let kid = if op == OP_F { raw.id } else { raw.old_id };
             match kid.and_then(|k| self.id_map.get(&k).copied()) {
                 Some(ce) => {
-                    if self.store.death[ce as usize] != NONE_U32 {
+                    if self.store.death(ce) != NONE_U32 {
                         self.store.warn(e, W_DOUBLE_FREE, kid.unwrap_or(0));
                     } else {
                         target = ce;
@@ -410,16 +539,8 @@ impl Parser {
         // geometry of the new allocation for M / R
         let (mut addr, mut size, mut usable) = (0u64, 0u64, 0u64);
         if op == OP_M || op == OP_R {
-            addr = match raw.addr {
-                Some(a) => a,
-                None => {
-                    // record is dropped (no event row): attach to the previous
-                    // event, not the yet-unpushed next one
-                    self.store
-                        .warn(e.saturating_sub(1), W_MALFORMED, raw.id.unwrap_or(0));
-                    return;
-                }
-            };
+            // `apply` has already dropped a creator without an address
+            addr = raw.addr.unwrap_or(0);
             size = raw.size.unwrap_or(0);
             if size == 0 {
                 self.store.warn(e, W_BAD_SIZE, raw.id.unwrap_or(0));
@@ -435,52 +556,48 @@ impl Parser {
         let (mut o_addr, mut o_size) = (0u64, 0u64);
         if op == OP_R {
             if target != NONE_U32 {
-                o_addr = self.store.addr[target as usize];
-                o_size = self.store.size[target as usize];
+                o_addr = self.store.addr(target);
+                o_size = self.store.size(target);
             } else {
                 o_addr = raw.old_addr.unwrap_or(0);
                 o_size = raw.old_size.unwrap_or(0);
             }
         }
 
-        // ---- push the event row ----
+        // ---- push the spine row, then the heap row ----
+        self.push_spine(op, t, thr_idx, true);
         let s = &mut self.store;
-        s.op.push(op);
-        s.t.push(t);
-        s.id.push(raw.id.unwrap_or(0));
-        s.addr.push(addr);
-        s.size.push(size);
+        let h = s.heap.addr.len();
+        let hc = &mut s.heap;
+        hc.id.push(raw.id.unwrap_or(0));
+        hc.addr.push(addr);
+        hc.size.push(size);
         // lazy columns: materialize (backfilled with the default) only once a
-        // real value appears, so traces without them pay no per-event memory
-        push_lazy(&mut s.usable, e as usize, usable, 0);
-        s.thr_idx.push(thr_idx);
-        s.site.push(site);
-        push_lazy(&mut s.stack, e as usize, stack, NONE_U32);
-        push_lazy(&mut s.label, e as usize, label, NONE_U32);
-        push_lazy(&mut s.extra, e as usize, extra, NONE_U32);
-        s.target.push(target);
+        // real value appears, so traces without them pay no per-row memory
+        push_lazy(&mut hc.usable, h, usable, 0);
+        hc.site.push(site);
+        push_lazy(&mut hc.stack, h, stack, NONE_U32);
+        push_lazy(&mut hc.label, h, label, NONE_U32);
+        push_lazy(&mut hc.extra, h, extra, NONE_U32);
+        hc.target.push(target);
+        hc.death.push(NONE_U32);
+        let gp = hc.green_pre[h];
+        let rp = hc.red_pre[h];
+        hc.green_pre.push(gp + (op == OP_M || op == OP_R) as u32);
+        hc.red_pre.push(rp + (op == OP_F || op == OP_R) as u32);
         if op == OP_R && (o_addr != 0 || o_size != 0) {
             s.old_geom.insert(e, (o_addr, o_size));
         }
-        s.death.push(NONE_U32);
-        let gp = *s.green_pre.last().unwrap_or(&0);
-        let rp = *s.red_pre.last().unwrap_or(&0);
-        if s.green_pre.is_empty() {
-            s.green_pre.push(0);
-            s.red_pre.push(0);
-        }
-        s.green_pre
-            .push(gp + (op == OP_M || op == OP_R) as u32);
-        s.red_pre.push(rp + (op == OP_F || op == OP_R) as u32);
 
         // ---- liveness bookkeeping ----
         if target != NONE_U32 {
-            s.death[target as usize] = e;
-            let ta = s.addr[target as usize];
-            self.live.remove(&(ta, target));
-            self.cur_live_bytes = self
-                .cur_live_bytes
-                .saturating_sub(s.size[target as usize]);
+            let th = s.heap_rank(target) as usize;
+            s.heap.death[th] = e;
+            let ta = s.addr(target);
+            if let Some(tend) = self.live.remove(&(ta, target)) {
+                multiset_remove(&mut self.live_spans, tend - ta);
+            }
+            self.cur_live_bytes = self.cur_live_bytes.saturating_sub(s.size(target));
         }
 
         if op == OP_M || op == OP_R {
@@ -492,7 +609,7 @@ impl Parser {
             // duplicate-id check + registration
             if let Some(id) = raw.id {
                 if let Some(&prev) = self.id_map.get(&id) {
-                    if s.death[prev as usize] == NONE_U32 {
+                    if s.death(prev) == NONE_U32 {
                         s.warn(e, W_DUP_ID, id);
                     }
                 }
@@ -502,10 +619,11 @@ impl Parser {
             // overlap check against the live map. Walking left, the nearest
             // block by start address is not enough: a large earlier block can
             // cover `addr` even with other (non-overlapping) blocks between —
-            // scan the whole window a live block could span, bounded by
-            // max_span like the pick path.
+            // scan the whole window a live block could span, bounded by the
+            // widest block live right now (not the widest ever seen).
             let mut overlaps = false;
-            let floor = addr.saturating_sub(s.max_span.max(1));
+            let widest = self.live_spans.keys().next_back().copied().unwrap_or(0);
+            let floor = addr.saturating_sub(widest.max(1));
             for (&(_, _), &pend) in self.live.range((floor, 0)..=(addr, u32::MAX)).rev() {
                 if pend > addr {
                     overlaps = true;
@@ -522,13 +640,13 @@ impl Parser {
                 s.overlap_index.push((addr, e));
             }
             self.live.insert((addr, e), end);
+            *self.live_spans.entry(end - addr).or_insert(0) += 1;
 
             self.cur_live_bytes += size;
             s.peak_live_bytes = s.peak_live_bytes.max(self.cur_live_bytes);
             s.total_alloc_bytes += size;
             s.addr_min = s.addr_min.min(addr);
             s.addr_max = s.addr_max.max(end);
-            s.max_span = s.max_span.max(span);
             if site != NONE_U32 {
                 s.site_count[site as usize] += 1;
             }
@@ -545,8 +663,10 @@ impl Parser {
         }
 
         // ---- periodic snapshot ----
+        // Cadence counts heap rows, so records of other domains never make
+        // snapshots denser; the position stored is the spine count applied.
         let applied = e + 1;
-        if applied % self.snap_interval == 0 {
+        if (h as u32 + 1) % self.snap_interval == 0 {
             let mut lv: Vec<u32> = self.live.keys().map(|&(_, ev)| ev).collect();
             lv.sort_unstable();
             s.snaps.push((applied, lv));
@@ -570,18 +690,15 @@ impl Default for Store {
         Store {
             op: Vec::new(),
             t: Vec::new(),
-            id: Vec::new(),
-            addr: Vec::new(),
-            size: Vec::new(),
-            usable: Vec::new(),
             thr_idx: Vec::new(),
-            site: Vec::new(),
-            stack: Vec::new(),
-            label: Vec::new(),
-            extra: Vec::new(),
-            target: Vec::new(),
+            hrank: Vec::new(),
+            heap: HeapCols {
+                green_pre: vec![0],
+                red_pre: vec![0],
+                ..HeapCols::default()
+            },
+            logs: crate::logs::LogStore::default(),
             old_geom: std::collections::HashMap::new(),
-            death: Vec::new(),
             tag_members: Vec::new(),
             tag_any: Vec::new(),
             tag_block: Vec::new(),
@@ -591,8 +708,6 @@ impl Default for Store {
             tag_alloc_idx: Vec::new(),
             tag_free_idx: Vec::new(),
             tag_idx_dirty: false,
-            green_pre: Vec::new(),
-            red_pre: Vec::new(),
             sites: Vec::new(),
             site_count: Vec::new(),
             thrs: Vec::new(),
@@ -613,17 +728,27 @@ impl Default for Store {
             t_max: 0,
             addr_min: u64::MAX,
             addr_max: 0,
-            max_span: 0,
             peak_live_bytes: 0,
             total_alloc_bytes: 0,
             n_malloc: 0,
             n_free: 0,
             n_realloc: 0,
             n_custom: 0,
+            n_log: 0,
             warnings: Vec::new(),
             warn_counts: [0; NWARN],
             overlap_index: Vec::new(),
             snaps: Vec::new(),
+        }
+    }
+}
+
+/// Drop one occurrence of `key` from a counted multiset.
+fn multiset_remove(set: &mut BTreeMap<u64, u32>, key: u64) {
+    if let Some(c) = set.get_mut(&key) {
+        *c -= 1;
+        if *c == 0 {
+            set.remove(&key);
         }
     }
 }
@@ -640,6 +765,82 @@ fn push_lazy<T: Copy + PartialEq>(col: &mut Vec<T>, e: usize, v: T, default: T) 
     col.push(v);
 }
 
+/// A key whose meaning depends on the record's `op` ([TRACE-001]): read as
+/// its defined field only on the op that defines it, and an ordinary custom
+/// field everywhere else. Field order is free, so these are held as spans and
+/// resolved once the whole line — and therefore `op` — has been read.
+///
+/// [TRACE-001]: ../../../spec/02-trace-format.md#trace-001-general-rules
+#[derive(Clone, Copy, PartialEq)]
+enum OpKey {
+    V,
+    Unit,
+    Title,
+    RowBytes,
+    ArenaBase,
+    Meta,
+    OldId,
+    OldAddr,
+    OldSize,
+}
+
+impl OpKey {
+    fn of(key: &[u8]) -> Option<Self> {
+        Some(match key {
+            b"v" => OpKey::V,
+            b"unit" => OpKey::Unit,
+            b"title" => OpKey::Title,
+            b"row_bytes" => OpKey::RowBytes,
+            b"arena_base" => OpKey::ArenaBase,
+            b"meta" => OpKey::Meta,
+            b"old_id" => OpKey::OldId,
+            b"old_addr" => OpKey::OldAddr,
+            b"old_size" => OpKey::OldSize,
+            _ => return None,
+        })
+    }
+
+    /// Does record type `op` define this key?
+    fn defined_on(self, op: u8) -> bool {
+        match self {
+            OpKey::Title => op == b'H' || op == b'E',
+            OpKey::OldId | OpKey::OldAddr | OpKey::OldSize => op == b'R',
+            _ => op == b'H',
+        }
+    }
+
+    /// Read the value text `v` into `raw`; `None` when it has the wrong shape.
+    fn read(self, v: &[u8], raw: &mut Raw) -> Option<()> {
+        let mut sc = Scan::new(v);
+        match self {
+            OpKey::V => raw.v = Some(sc.integer()?),
+            OpKey::Unit | OpKey::Title => {
+                let (a, b) = sc.string_span()?;
+                let text = Some(unescape(&v[a..b]));
+                if self == OpKey::Unit {
+                    raw.unit = text;
+                } else {
+                    raw.title = text;
+                }
+            }
+            OpKey::RowBytes => raw.row_bytes = Some(sc.unsigned_integer()?),
+            OpKey::ArenaBase | OpKey::OldAddr => {
+                let (a, b) = sc.string_span()?;
+                let addr = parse_addr(&v[a..b]);
+                if self == OpKey::ArenaBase {
+                    raw.arena_base = addr;
+                } else {
+                    raw.old_addr = addr;
+                }
+            }
+            OpKey::Meta => raw.meta = Some(String::from_utf8_lossy(v).into_owned()),
+            OpKey::OldId => raw.old_id = Some(sc.unsigned_integer()?),
+            OpKey::OldSize => raw.old_size = Some(sc.unsigned_integer()?),
+        }
+        Some(())
+    }
+}
+
 fn parse_raw(line: &[u8]) -> Option<Raw> {
     let mut sc = Scan::new(line);
     if !sc.eat(b'{') {
@@ -651,6 +852,10 @@ fn parse_raw(line: &[u8]) -> Option<Raw> {
     if sc.peek() == b'}' {
         return None; // no op field
     }
+    // Keys that are custom fields, or may be once `op` is known, in source
+    // order: (key span, value span, op-dependent meaning).
+    type Deferred = ((usize, usize), (usize, usize), Option<OpKey>);
+    let mut rest: Vec<Deferred> = Vec::new();
     loop {
         let (ks, ke) = sc.string_span()?;
         if !sc.eat(b':') {
@@ -663,38 +868,18 @@ fn parse_raw(line: &[u8]) -> Option<Raw> {
                 raw.op = if b - a == 1 { sc.b[a] } else { 0 };
             }
             b"id" => raw.id = Some(sc.unsigned_integer()?),
-            b"old_id" => raw.old_id = Some(sc.unsigned_integer()?),
             b"addr" => {
                 let (a, b) = sc.string_span()?;
                 raw.addr = parse_addr(&sc.b[a..b]);
             }
-            b"old_addr" => {
-                let (a, b) = sc.string_span()?;
-                raw.old_addr = parse_addr(&sc.b[a..b]);
-            }
-            b"arena_base" => {
-                let (a, b) = sc.string_span()?;
-                raw.arena_base = parse_addr(&sc.b[a..b]);
-            }
             b"size" => raw.size = Some(sc.unsigned_integer()?),
-            b"old_size" => raw.old_size = Some(sc.unsigned_integer()?),
             b"usable" => raw.usable = Some(sc.unsigned_integer()?),
             b"t" => raw.t = Some(sc.unsigned_integer()?),
             b"seq" => raw.seq = Some(sc.integer()?),
             b"thr" => raw.thr = Some(sc.integer()?),
-            b"v" => raw.v = Some(sc.integer()?),
-            b"row_bytes" => raw.row_bytes = Some(sc.unsigned_integer()?),
             b"site" => {
                 let (a, b) = sc.string_span()?;
                 raw.site = Some(unescape(&sc.b[a..b]));
-            }
-            b"unit" => {
-                let (a, b) = sc.string_span()?;
-                raw.unit = Some(unescape(&sc.b[a..b]));
-            }
-            b"title" => {
-                let (a, b) = sc.string_span()?;
-                raw.title = Some(unescape(&sc.b[a..b]));
             }
             b"stack" => {
                 // array of strings, joined with newlines (outermost-last kept as-is)
@@ -727,19 +912,9 @@ fn parse_raw(line: &[u8]) -> Option<Raw> {
                     sc.skip_value()?;
                 }
             }
-            b"meta" => {
-                let (a, b) = sc.skip_value()?;
-                raw.meta = Some(String::from_utf8_lossy(&sc.b[a..b]).into_owned());
-            }
             _ => {
-                let key_str = unescape(&sc.b[ks..ke]);
-                let (a, b) = sc.skip_value()?;
-                if !raw.extra.is_empty() {
-                    raw.extra.push(',');
-                }
-                push_json_str(&mut raw.extra, &key_str);
-                raw.extra.push(':');
-                raw.extra.push_str(&String::from_utf8_lossy(&sc.b[a..b]));
+                let span = sc.skip_value()?;
+                rest.push(((ks, ke), span, OpKey::of(key)));
             }
         }
         sc.ws();
@@ -755,5 +930,126 @@ fn parse_raw(line: &[u8]) -> Option<Raw> {
     if raw.op == 0 {
         return None;
     }
+    for ((ks, ke), (a, b), key) in rest {
+        match key {
+            Some(key) if key.defined_on(raw.op) => key.read(&line[a..b], &mut raw)?,
+            _ => {
+                if !raw.extra.is_empty() {
+                    raw.extra.push(',');
+                }
+                push_json_str(&mut raw.extra, &unescape(&line[ks..ke]));
+                raw.extra.push(':');
+                raw.extra.push_str(&String::from_utf8_lossy(&line[a..b]));
+            }
+        }
+    }
     Some(raw)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn load(input: &str) -> Store {
+        let mut p = Parser::new();
+        p.chunk(input.as_bytes());
+        p.finish();
+        p.store
+    }
+
+    fn field_names(s: &Store) -> Vec<&str> {
+        s.fields.iter().map(|f| f.name.as_str()).collect()
+    }
+
+    #[test]
+    fn op_specific_keys_are_custom_fields_elsewhere() {
+        let s = load(concat!(
+            r#"{"op":"H","v":1,"title":"trace","unit":"us"}"#, "\n",
+            r#"{"op":"M","id":1,"addr":"0x10","size":4,"title":"t","meta":{"k":1},"v":"two","unit":3,"old_id":5}"#, "\n",
+            r#"{"old_id":1,"op":"R","id":2,"addr":"0x20","size":8,"old_size":4}"#, "\n",
+            r#"{"op":"F","id":2,"old_addr":7}"#, "\n",
+        ));
+        assert_eq!(s.len(), 3, "no line is malformed");
+        assert_eq!(s.warn_counts[W_MALFORMED as usize], 0);
+        assert_eq!((s.title.as_str(), s.unit.as_str()), ("trace", "us"));
+        assert_eq!(field_names(&s), ["title", "meta", "v", "unit", "old_id", "old_addr"]);
+        // the R record still reads its own `old_id`, whatever the key order
+        assert_eq!(s.target(1), 0);
+        assert_eq!(s.extra_at(1), NONE_U32);
+        assert_eq!(
+            s.extras[s.extra_at(0) as usize],
+            r#""title":"t","meta":{"k":1},"v":"two","unit":3,"old_id":5"#
+        );
+    }
+
+    #[test]
+    fn a_defined_key_with_the_wrong_shape_is_still_malformed() {
+        let s = load(concat!(
+            r#"{"op":"R","id":2,"old_id":"x","addr":"0x20","size":8}"#, "\n",
+            r#"{"op":"E","title":3}"#, "\n",
+        ));
+        assert_eq!(s.len(), 0);
+        assert_eq!(s.warn_counts[W_MALFORMED as usize], 2);
+    }
+
+    #[test]
+    fn dropped_records_leave_no_trace() {
+        let s = load(concat!(
+            r#"{"op":"X","t":900,"seq":4,"site":"x","thr":9,"k1":1}"#, "\n",
+            r#"{"op":"F","id":0,"t":900,"seq":4,"thr":8,"k2":1}"#, "\n",
+            r#"{"op":"M","id":3,"t":900,"seq":4,"site":"y","thr":7,"stack":["s"],"k3":1}"#, "\n",
+            r#"{"op":"M","id":1,"addr":"0x10","size":4,"t":100}"#, "\n",
+        ));
+        assert_eq!(s.len(), 1);
+        assert_eq!((s.t_min, s.t_max), (100, 100));
+        assert!(s.sites.is_empty() && s.thrs.is_empty() && s.stacks.is_empty());
+        assert!(s.fields.is_empty() && s.extras.is_empty());
+        // the malformed creator is the only warning; nothing is pinned on the
+        // record that follows
+        assert_eq!(s.warn_counts.iter().sum::<u32>(), 1);
+        assert_eq!(s.warn_counts[W_MALFORMED as usize], 1);
+    }
+
+    #[test]
+    fn overlap_walk_ignores_freed_wide_blocks_but_finds_live_ones() {
+        let mut t = String::from(concat!(
+            r#"{"op":"M","id":1,"addr":"0x0","size":1099511627776}"#, "\n",
+            r#"{"op":"F","id":1}"#, "\n",
+        ));
+        for i in 0..64u64 {
+            t.push_str(&format!(
+                "{{\"op\":\"M\",\"id\":{},\"addr\":\"0x{:x}\",\"size\":16}}\n",
+                i + 2,
+                0x1000 + i * 32
+            ));
+        }
+        // a live wide block, with a non-overlapping freed block between it
+        // and the nested one
+        t.push_str(concat!(
+            r#"{"op":"M","id":100,"addr":"0x100000","size":65536}"#, "\n",
+            r#"{"op":"M","id":101,"addr":"0x100000","size":16}"#, "\n",
+            r#"{"op":"F","id":101}"#, "\n",
+            r#"{"op":"M","id":102,"addr":"0x108000","size":16}"#, "\n",
+        ));
+        let s = load(&t);
+        assert_eq!(s.warn_counts[W_OVERLAP as usize], 2);
+        let flagged: Vec<u64> = s.overlap_index.iter().map(|&(a, _)| a).collect();
+        assert_eq!(flagged, [0x100000, 0x108000]);
+    }
+
+    #[test]
+    fn threads_past_the_column_capacity_are_dropped_not_aliased() {
+        let mut t = String::new();
+        for thr in 0..=NONE_U16 as u64 {
+            t.push_str(&format!("{{\"op\":\"E\",\"thr\":{thr}}}\n"));
+        }
+        t.push_str("{\"op\":\"E\",\"thr\":0}\n");
+        let s = load(&t);
+        let n = s.len() as usize;
+        assert_eq!(s.thrs.len(), NONE_U16 as usize);
+        assert_eq!(s.thr_idx[n - 3], NONE_U16 - 1);
+        assert_eq!(s.thr_idx[n - 2], NONE_U16, "the 65,536th thread is not interned");
+        assert_eq!(s.thr_idx[n - 1], 0);
+        assert_eq!(s.warn_counts[W_THREADS as usize], 1);
+    }
 }

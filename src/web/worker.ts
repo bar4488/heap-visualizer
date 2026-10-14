@@ -2,6 +2,7 @@
 // The main thread only sends input events and receives state/query results.
 
 import { fmtBytes, fmtAllocSize as fmtAllocSizeMode, clampView } from './fmt.ts';
+import { QUERY_FAILURE, queryFailureReply } from './query-failure.ts';
 import type { FromWorker, SettingKey, ToWorker } from './protocol.ts';
 
 // Shadows the global: nothing leaves this worker that the protocol does not
@@ -18,6 +19,9 @@ let wasmModule: WebAssembly.Module | null = null; // compiled module, re-instant
 const td = new TextDecoder();
 const te = new TextEncoder();
 let loading = false;
+// A streamed load that failed keeps receiving the chunks already in flight;
+// those are dropped quietly so the first error is the one the user sees.
+let loadFailed = false;
 let loadTotal = 0;
 let loadDone = 0;
 
@@ -103,6 +107,7 @@ function beginTraceLoad(total) {
   // stop the frame loop from rendering against a half-swapped engine
   S.loaded = false;
   S.playing = false;
+  loadFailed = false;
   if (wasmModule) {
     E = new WebAssembly.Instance(wasmModule, {}).exports;
     applyRowPx();
@@ -114,6 +119,7 @@ function beginTraceLoad(total) {
 }
 
 function loadTraceChunk(buffer) {
+  if (loadFailed) return;
   if (!loading) throw new Error('trace chunk arrived without a load');
   const len = buffer.byteLength;
   const ptr = E.hp_buf_ptr(len);
@@ -127,6 +133,7 @@ function loadTraceChunk(buffer) {
 }
 
 function endTraceLoad() {
+  if (loadFailed) return;
   if (!loading) throw new Error('trace ended without a load');
   loading = false;
   if (loadDone !== loadTotal) {
@@ -153,6 +160,8 @@ function finishTraceLoad() {
   // the custom field catalog is a per-trace fact, settled by the load pass
   E.hp_fields_json();
   const fields = retJson();
+  // the log domain's summary (LOG-009); null from a core without it
+  meta.logs = typeof E.hp_logs_meta_json === 'function' ? (E.hp_logs_meta_json(), retJson()) : null;
 
   S.loaded = true;
   S.n = n;
@@ -444,6 +453,12 @@ function frame(now) {
 // message handling
 // ---------------------------------------------------------------------------
 
+function failLoad(err) {
+  loading = false;
+  loadFailed = true;
+  postMessage({ type: 'error', message: String((err as Error)?.message || err) });
+}
+
 // Settables, one table entry per key: `preLoad` marks the ones that work
 // before a trace is loaded, right next to how the key applies — no separate
 // allowlist to keep in sync with the handlers. The preLoad appliers guard on
@@ -551,8 +566,20 @@ const SETTINGS: Record<SettingKey, { preLoad?: boolean; apply(m: any): void }> =
   },
 };
 
+// Every handler runs inside one catch: a query that throws still gets its
+// failure reply (see query-failure.ts), and a command that throws is logged.
 onmessage = async (ev: MessageEvent<ToWorker>) => {
-  const m = ev.data;
+  try {
+    await handleMessage(ev.data);
+  } catch (err) {
+    const message = `worker error: ${String((err as Error)?.message || err)}`;
+    const reply = queryFailureReply(ev.data, message);
+    if (reply) postMessage(reply);
+    else console.error(err);
+  }
+};
+
+async function handleMessage(m: ToWorker) {
   switch (m.type) {
     case 'init': {
       dpr = m.dpr || 1;
@@ -574,36 +601,33 @@ onmessage = async (ev: MessageEvent<ToWorker>) => {
       try {
         loadTrace(m.buffer);
       } catch (err) {
-        loading = false;
-        postMessage({ type: 'error', message: String((err as Error)?.message || err) });
+        failLoad(err);
       }
       break;
     case 'load-begin':
       try {
         beginTraceLoad(m.total);
       } catch (err) {
-        loading = false;
-        postMessage({ type: 'error', message: String((err as Error)?.message || err) });
+        failLoad(err);
       }
       break;
     case 'load-chunk':
       try {
         loadTraceChunk(m.buffer);
       } catch (err) {
-        loading = false;
-        postMessage({ type: 'error', message: String((err as Error)?.message || err) });
+        failLoad(err);
       }
       break;
     case 'load-end':
       try {
         endTraceLoad();
       } catch (err) {
-        loading = false;
-        postMessage({ type: 'error', message: String((err as Error)?.message || err) });
+        failLoad(err);
       }
       break;
     case 'load-cancel':
       loading = false;
+      loadFailed = false;
       break;
     case 'unload':
       loading = false;
@@ -629,6 +653,8 @@ onmessage = async (ev: MessageEvent<ToWorker>) => {
     }
     case 'seek': {
       if (!S.loaded) break;
+      // NAV-002: any explicit seek stops playback, like jump and step
+      stopPlay();
       let seq = m.seq;
       if (m.t !== undefined) seq = E.hp_seq_for_t(m.t);
       seq = Math.max(0, Math.min(S.n, Math.round(seq)));
@@ -715,7 +741,10 @@ onmessage = async (ev: MessageEvent<ToWorker>) => {
       S.dirty.addr = true;
       break;
     case 'addr-at': {
-      if (!S.loaded || !canvases.addr) break;
+      if (!S.loaded || !canvases.addr) {
+        postMessage(QUERY_FAILURE['addr-at'](m, ''));
+        break;
+      }
       E.hp_addr_at(canvases.addr.width, Math.round(toDevice(m.x)), toDevice(m.y), S.scroll);
       const r = new Uint32Array(E.memory.buffer, E.hp_ret(), 8);
       const addr = r[3] ? '0x' + ((BigInt(r[1]) << 32n) | BigInt(r[0])).toString(16) : null;
@@ -976,7 +1005,10 @@ onmessage = async (ev: MessageEvent<ToWorker>) => {
       break;
     }
     case 'events': {
-      if (!S.loaded) break;
+      if (!S.loaded) {
+        postMessage(QUERY_FAILURE.events(m, ''));
+        break;
+      }
       // filtered mode indexes into the engine's filtered event list; `total`
       // sizes the panel's virtual scroll either way
       let total = S.n;
@@ -991,7 +1023,10 @@ onmessage = async (ev: MessageEvent<ToWorker>) => {
     }
     // position of a seq in the filtered event list (follow / scroll-to)
     case 'ev-pos': {
-      if (!S.loaded) break;
+      if (!S.loaded) {
+        postMessage(QUERY_FAILURE['ev-pos'](m, ''));
+        break;
+      }
       postMessage({
         type: 'ev-pos', reqId: m.reqId,
         pos: E.hp_events_filtered_pos(m.seq), total: E.hp_events_filtered_count(),
@@ -1026,5 +1061,21 @@ onmessage = async (ev: MessageEvent<ToWorker>) => {
       postMessage({ type: 'tlhover-result', reqId: m.reqId, kind: m.kind, info: retJson() });
       break;
     }
+    // the log domain (LOG-009): answered even with no trace or an older core
+    // without the exports, so a coalesced caller is never left waiting
+    case 'logs-query': {
+      const ok = S.loaded && typeof E.hp_logs_query === 'function';
+      const { reqId, type: _t, ...q } = m;
+      const r = ok ? (E.hp_logs_query(writeBuf(te.encode(JSON.stringify(q)))), retJson()) : null;
+      postMessage({ type: 'logs-query-result', reqId, available: ok, total: r?.total ?? 0, from: r?.from ?? m.from, rows: r?.rows ?? [] });
+      break;
+    }
+    case 'logs-locate': {
+      const ok = S.loaded && typeof E.hp_logs_locate === 'function';
+      const { reqId, type: _t, ...q } = m;
+      const r = ok ? (E.hp_logs_locate(writeBuf(te.encode(JSON.stringify(q)))), retJson()) : null;
+      postMessage({ type: 'logs-locate-result', reqId, available: ok, row: r?.row ?? -1, total: r?.total ?? 0 });
+      break;
+    }
   }
-};
+}

@@ -18,7 +18,7 @@ pub struct View {
     birth_counts: BTreeMap<u64, u32>,
     /// Multiset of live allocations' rendered spans, so the render-time
     /// walk-back is bounded by the widest allocation *currently live* rather
-    /// than Store::max_span, a trace-wide maximum that never decreases.
+    /// than the widest allocation ever seen, a maximum that never decreases.
     span_counts: BTreeMap<u64, u32>,
 
     pub row_bytes: u64,
@@ -135,7 +135,7 @@ impl View {
     }
 
     fn occ_add(&mut self, s: &Store, e: u32, delta: i32) {
-        let a = s.addr[e as usize];
+        let a = s.addr(e);
         let span = s.span(e);
         let r0 = self.row_of(a);
         let r1 = self.row_of(a.saturating_add(span).saturating_sub(1));
@@ -167,9 +167,9 @@ impl View {
     }
 
     fn insert_alloc(&mut self, s: &Store, e: u32) {
-        if self.live.insert((s.addr[e as usize], e)) {
+        if self.live.insert((s.addr(e), e)) {
             self.live_count += 1;
-            self.live_bytes += s.size[e as usize];
+            self.live_bytes += s.size(e);
             *self.birth_counts.entry(s.t[e as usize]).or_insert(0) += 1;
             *self.span_counts.entry(s.span(e)).or_insert(0) += 1;
             self.occ_add(s, e, 1);
@@ -177,9 +177,9 @@ impl View {
     }
 
     fn remove_alloc(&mut self, s: &Store, e: u32) {
-        if self.live.remove(&(s.addr[e as usize], e)) {
+        if self.live.remove(&(s.addr(e), e)) {
             self.live_count -= 1;
-            self.live_bytes = self.live_bytes.saturating_sub(s.size[e as usize]);
+            self.live_bytes = self.live_bytes.saturating_sub(s.size(e));
             if let Some(c) = self.birth_counts.get_mut(&s.t[e as usize]) {
                 *c -= 1;
                 if *c == 0 {
@@ -203,7 +203,7 @@ impl View {
 
     /// Rendered span of the widest allocation currently live (0 when none) —
     /// the walk-back bound for per-frame live-set range scans. Unlike
-    /// `Store::max_span` it shrinks when the wide allocation is freed, so one
+    /// a trace-wide maximum it shrinks when the wide allocation is freed, so one
     /// early arena block does not tax every later frame.
     pub fn max_live_span(&self) -> u64 {
         self.span_counts.keys().next_back().copied().unwrap_or(0)
@@ -212,7 +212,7 @@ impl View {
     fn apply_fwd(&mut self, s: &Store, e: u32) {
         let op = s.op[e as usize];
         if op == OP_F || op == OP_R {
-            let tgt = s.target[e as usize];
+            let tgt = s.target(e);
             if tgt != NONE_U32 {
                 self.remove_alloc(s, tgt);
             }
@@ -228,7 +228,7 @@ impl View {
             self.remove_alloc(s, e);
         }
         if op == OP_F || op == OP_R {
-            let tgt = s.target[e as usize];
+            let tgt = s.target(e);
             if tgt != NONE_U32 {
                 self.insert_alloc(s, tgt);
             }
@@ -418,7 +418,7 @@ impl View {
             if op != OP_M && op != OP_R {
                 continue;
             }
-            let a = s.addr[e as usize];
+            let a = s.addr(e);
             let r0 = self.row_of(a);
             let r1 = self.row_of(a.saturating_add(s.span(e)).saturating_sub(1));
             if r1 - r0 > 65536 {

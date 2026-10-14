@@ -18,6 +18,25 @@ extra-field blobs each get a small table plus a per-event index column. Hex
 address strings are parsed to `u64` at load and never exist as strings again
 internally.
 
+The store is split along the domain boundary of
+[DOM-001/DOM-002](13-domains-and-logs.md#dom-001-one-event-spine):
+
+- the **event spine** holds the columns every record has — `op`, `t`, and
+  thread — one row per record of any domain, indexed by `seq`;
+- the **heap domain** (`HeapCols`) holds `id`, `addr`, `size`, `usable`,
+  site, stack, label, custom-field fragment, `target`/`death` links, the
+  timeline prefix sums, and the tag bitsets — one row per heap record (`M`,
+  `F`, `R`, and for now `E`), never one per record of another domain;
+- each further domain (logs, [LOG-003](13-domains-and-logs.md#log-003-the-log-store))
+  keeps its own store keyed by spine index.
+
+Heap rows are read **by spine index** through accessors. While every record
+is a heap record the heap row *is* the spine index and no mapping exists; the
+first non-heap record materializes a spine→heap rank (`hrank`) and a
+heap→spine column, so a heap-only trace pays nothing for the boundary. Link
+values stay spine indexes, so allocation identity (MODEL-002) is unchanged by
+the presence of other domains.
+
 ## MODEL-002: Identity — ids resolve to event indices at load
 
 The wire format names allocations by `id`; the engine does not. During the
@@ -88,6 +107,12 @@ rejecting input (goal: *faithful*). Warning codes:
 | overlap | A new allocation overlaps a live region. |
 | bad-size | Creator with missing/zero `size` (rendered as 1 byte). |
 | version | Header declared a version other than 1. |
+| bad-level | `L` record whose `level` is not a known level name; read as `info` ([LOG-001](13-domains-and-logs.md#log-001-the-log-record-l)). |
+| long-log | `L` record whose `msg` exceeded 16 KiB; truncated, record kept. Detail is the original byte length. |
+| too-many-threads | A record on a thread beyond the first 65,535 distinct `thr` values; its thread is read as absent rather than aliased to another. Detail is the `thr` value. |
+
+The agent API names these `bad_level`, `long_log` and `too_many_threads`;
+numeric codes are 9, 10 and 11, after `version` (8).
 
 Full counts per code are always kept; detailed records are capped (first
 1000) so a pathological trace cannot blow up memory. The UI shows a toolbar

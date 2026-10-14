@@ -22,6 +22,16 @@ Keep process lightweight. Spend time on the product, not repository ceremony.
 - Do not add browser automation or new dependencies unless the task requires
   them.
 
+## Tests
+
+- Add tests with the change: new behavior gets tests, and a bug fix gets a
+  regression test that fails without the fix.
+- Keep them cheap and focused: unit-level, fast, deterministic, no network.
+  Prefer testing pure logic and engine behavior over UI plumbing.
+- Don't sink a lot of time into testing. A few tests that pin the important
+  behavior beat exhaustive coverage; if something is hard to test, note the gap
+  and move on.
+
 ## Verification
 
 Run the checks relevant to the files changed. Common commands are:
