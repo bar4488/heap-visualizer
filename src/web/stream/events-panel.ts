@@ -1,6 +1,9 @@
-// Heap domain: the Events panel — a virtualized list of the trace's
-// sequential events, with click-to-jump, keyboard stepping, and drag
-// selection over a seq range.
+// The Events panel — a virtualized list of the trace's spine records, of
+// every domain (DOM-001), with click-to-jump, keyboard stepping, drag
+// selection over a seq range, and a chip per domain to leave its records out.
+// Rows are rendered in stream/stream-model.ts: what the record is first (a
+// heap record's size and site, a function's name, a log's message), then where
+// (thread, short address), with a columns menu for the optional fields.
 //
 // Virtualization detail worth keeping in mind: browsers cap element height,
 // so past EV_MAX_SPACER the spacer stops being 1:1 with the event count and
@@ -10,17 +13,19 @@
 // What it needs from main.ts arrives through initEventsPanel(deps).
 
 import { $, $$, toCss } from '../shell/dom.ts';
-import { raisePanel } from '../shell/panels.ts';
-import { refreshDrawerDividers } from '../shell/drawers.ts';
+import { layout } from '../shell/layout.ts';
+import { hoverTips } from '../shell/tooltip.ts';
+import { edgeSelection, selectedEdges } from '../intervals/selection.ts';
 import { esc, fmtNum } from '../fmt.ts';
-import { OP_LOG, levelBadge, levelIndex } from '../logs/logs-model.ts';
 import { revealLogSeq } from '../logs/logs-panel.ts';
+import {
+  domainChips, includedDomains, parseColumns, renderRow, threadNames, toggleColumn,
+  type DomainChip, type EventColumn, type ThreadNames,
+} from './stream-model.ts';
 
 let d = null;
 
 const EV_ROW = 18;            // px per row
-/** The engine's op code for a custom (`E`) event. */
-const OP_EVENT = 3;
 // Browsers cap how tall an element may be, so beyond this the spacer stops
 // being 1:1 with the event count (~700 k events at EV_ROW) and scroll
 // position is index-mapped instead. Two things degrade past that point and
@@ -33,10 +38,27 @@ const EV_MAX_SPACER = 12e6;
 // are no longer 1:1 with event indices
 export const evState = { from: 0, count: 0, reqId: 0, lastSeq: -1, total: -1, seqs: [], posReqId: 0 };
 
+// the domain toggles: one chip per domain the trace has records of, and the
+// ids of those left out. Per trace — a new trace lists everything again.
+const domainState = { chips: [] as DomainChip[], excluded: new Set<string>(), names: new Map() as ThreadNames };
+
+// which optional fields a row shows (the header's columns menu): a viewer's
+// preference, kept across traces and reloads
+const COLUMNS_KEY = 'heapviz:events-columns';
+let columns = parseColumns(readStored(COLUMNS_KEY));
+
+function readStored(key: string): string | null {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+
 const evFiltered = () => $('ev-filtered').checked;
+/** The domains the list includes, or undefined when it is the whole spine. */
+const evDomains = () => includedDomains(domainState.chips, domainState.excluded);
+// the list is indexed (not 1:1 with seq) when filtered or a domain is left out
+const evIndexed = () => evFiltered() || evDomains() !== undefined;
 
 // deps: { ui, post, fmtAllocSize, updateSelOverlay, requestSelMirror,
-//         openSelPopover }
+//         openSelPopover, selectInterval }
 export function initEventsPanel(deps) {
   d = deps;
   wireEventsPanel();
@@ -44,7 +66,7 @@ export function initEventsPanel(deps) {
 
 function evLayout() {
   const all = d.ui.meta ? d.ui.meta.n : 0;
-  const n = evFiltered() && evState.total >= 0 ? evState.total : all;
+  const n = evIndexed() && evState.total >= 0 ? evState.total : all;
   const viewH = $('events-scroll').clientHeight;
   const spacerH = Math.min(n * EV_ROW, EV_MAX_SPACER);
   const visN = Math.max(1, Math.ceil(viewH / EV_ROW) + 1);
@@ -53,7 +75,7 @@ function evLayout() {
 }
 
 export function refreshEventsPanel() {
-  if (!d.ui.loaded || $('events-panel').hidden) return;
+  if (!d.ui.loaded || !layout.isOpen('events-panel')) return;
   const L = evLayout();
   $('events-spacer').style.height = `${L.spacerH}px`;
   const sc = $('events-scroll');
@@ -63,62 +85,53 @@ export function refreshEventsPanel() {
   evState.from = from;
   evState.count = L.visN;
   evState.reqId = d.ui.reqId++;
-  d.post({ type: 'events', from, count: L.visN, reqId: evState.reqId, filtered: evFiltered() });
+  d.post({ type: 'events', from, count: L.visN, reqId: evState.reqId, filtered: evFiltered(), domains: evDomains() });
   updateEventsSelBand();
 }
 
 export function onEventsSlice(m) {
   if (m.reqId !== evState.reqId) return;
-  if (evFiltered() && m.total !== undefined && m.total !== evState.total) {
-    // filtered count (re)learned: re-lay out the virtual list once — the
+  if (evIndexed() && m.total !== undefined && m.total !== evState.total) {
+    // indexed count (re)learned: re-lay out the virtual list once — the
     // follow-up reply carries the same total, so this converges immediately
     evState.total = m.total;
     refreshEventsPanel();
   }
   evState.seqs = m.events.map((ev) => ev.seq);
-  const curSeq = d.ui.state ? d.ui.state.seq - 1 : -1;
-  $('events-rows').innerHTML = m.events.map((ev) => {
-    const cur = ev.seq === curSeq ? ' cur' : '';
-    const head = `<span class="ev-seq">${fmtNum(ev.seq)}</span>`
-      + `<span class="ev-op ${['m', 'f', 'r', 'e', 'l'][ev.op]}">${['M', 'F', 'R', 'E', 'L'][ev.op]}</span>`;
-    // a log line: its level and message, in place of geometry (LOG-006)
-    if (ev.op === OP_LOG) {
-      return `
-    <div class="ev-row ev-log lv-${levelIndex(ev.level)}${cur}" data-seq="${ev.seq}" data-log="1" title="click: seek here and show this line in Logs">
-      ${head}<span class="ev-lv">${levelBadge(ev.level)}</span><span class="ev-msg">${esc(ev.msg ?? '')}</span>
-    </div>`;
-    }
-    // a custom event has no geometry to show: its label takes the width of the
-    // address, size and site columns together (TRACE-010)
-    if (ev.op === OP_EVENT) {
-      return `
-    <div class="ev-row ev-custom${cur}" data-seq="${ev.seq}" data-custom="1" title="click: seek here and open this event">
-      ${head}<span class="ev-label">${ev.title ? esc(ev.title) : '<span class="dim">event</span>'}</span>
-    </div>`;
-    }
-    return `
-    <div class="ev-row${cur}" data-seq="${ev.seq}" title="click: seek here and select the allocation">
-      ${head}
-      <span class="ev-addr">${ev.addr}</span>
-      <span class="ev-size">${d.fmtAllocSize(ev.size)}</span>
-      <span class="ev-site">${ev.site ? esc(ev.site) : ''}</span>
-    </div>`;
-  }).join('');
+  const ctx = {
+    domains: d.ui.meta?.domains, names: domainState.names,
+    fmtAllocSize: d.fmtAllocSize, curSeq: d.ui.state ? d.ui.state.seq - 1 : -1, columns,
+    pickedSeqs: selectedEdges(d.ui.intervalSel ?? null),
+  };
+  $('events-rows').innerHTML = m.events.map((ev) => renderRow(ev, ctx)).join('');
   $$('.ev-row', $('events-rows')).forEach((row) => {
-    row.onclick = () => {
+    row.onclick = (e) => {
       const seq = +row.dataset.seq;
-      if (row.dataset.log) {
+      if (row.dataset.edge) {
+        // an interval edge: seek there, and select (and open) its interval
+        d.post({ type: 'jump', seq: seq + 1, select: true });
+        // the window opens beside the list, not over it
+        d.selectInterval?.(edgeSelection(seq, { x: row.getBoundingClientRect().right, y: e.clientY }));
+      } else if (row.dataset.log) {
         d.post({ type: 'jump', seq: seq + 1, select: true });
         revealLogSeq(seq);
       } else if (d.ui.state && seq === d.ui.state.seq - 1 && !row.dataset.custom) {
         // already the current event: flash exactly where it is on the map
         d.post({ type: 'flash-event', seq });
       } else {
-        // a custom event is nowhere on the map, so re-clicking it reopens its
-        // window instead of flashing
+        // a record of another domain is nowhere on the map, so re-clicking it
+        // seeks (and reopens a custom event's window) instead of flashing
         d.post({ type: 'jump', seq: seq + 1, select: true });
       }
     };
+  });
+}
+
+/** The interval selection changed: mark the rows of its edges (IVL-UI-005). */
+export function markIntervalSelection() {
+  const picked = selectedEdges(d.ui.intervalSel ?? null);
+  $$('.ev-row', $('events-rows')).forEach((row) => {
+    row.classList.toggle('picked', !!row.dataset.edge && picked.has(+row.dataset.seq));
   });
 }
 
@@ -147,13 +160,13 @@ export function flashRects(rects) {
 // keep the highlight (and, with follow on, the scroll position) on the
 // current event as the playhead moves
 export function updateEventsPanel() {
-  if (!d.ui.loaded || $('events-panel').hidden || !d.ui.state) return;
+  if (!d.ui.loaded || !layout.isOpen('events-panel') || !d.ui.state) return;
   const cur = d.ui.state.seq - 1;
   if (cur === evState.lastSeq) return;
   evState.lastSeq = cur;
   // filtered rows are not 1:1 with seq, so visibility is judged from the
   // loaded rows' actual seq span instead of index arithmetic
-  const visible = evFiltered()
+  const visible = evIndexed()
     ? evState.seqs.length > 0 && cur >= evState.seqs[0] && cur <= evState.seqs[evState.seqs.length - 1]
     : cur >= evState.from && cur < evState.from + evState.count - 1;
   if ($('ev-follow').checked && !visible) {
@@ -166,10 +179,10 @@ export function updateEventsPanel() {
 }
 
 function evScrollToSeq(seq) {
-  if (evFiltered()) {
-    // seq -> row index in the filtered list is an engine query
+  if (evIndexed()) {
+    // seq -> row index in an indexed list is an engine query
     evState.posReqId = d.ui.reqId++;
-    d.post({ type: 'ev-pos', seq, reqId: evState.posReqId });
+    d.post({ type: 'ev-pos', seq, reqId: evState.posReqId, filtered: evFiltered(), domains: evDomains() });
     return;
   }
   evScrollToIndex(seq);
@@ -193,8 +206,8 @@ function stepEventsSelection(delta) {
   if (!d.ui.loaded || !d.ui.state || !d.ui.state.n) return;
   const cur = d.ui.state.seq - 1;
   let target = cur + delta;
-  if (evFiltered() && evState.seqs.length) {
-    // step along the filtered rows, not raw seq
+  if (evIndexed() && evState.seqs.length) {
+    // step along the listed rows, not raw seq
     const i = evState.seqs.indexOf(cur);
     if (i >= 0) {
       const j = i + delta;
@@ -218,7 +231,7 @@ export function updateEventsSelBand() {
   const band = $('events-sel-band');
   if (!d.ui.sel) { band.hidden = true; return; }
   const seqRange = d.ui.sel.kind === 1 ? d.ui.sel : d.ui.selMirror;
-  if (!seqRange || $('events-panel').hidden) { band.hidden = true; return; }
+  if (!seqRange || !layout.isOpen('events-panel')) { band.hidden = true; return; }
   const L = evLayout();
   const sc = $('events-scroll');
   // viewport-relative y, from the currently-visible row window (evState.from)
@@ -228,8 +241,8 @@ export function updateEventsSelBand() {
   // scrollTop via its own `top` style), so re-add scrollTop to place it in
   // the scroll container's coordinate space
   let y0, y1;
-  if (evFiltered()) {
-    // filtered rows: the band covers the loaded rows whose seq is in range
+  if (evIndexed()) {
+    // indexed rows: the band covers the loaded rows whose seq is in range
     // (rows filtered out in between simply collapse)
     const seqs = evState.seqs;
     y0 = seqs.filter((s) => s < seqRange.lo).length * EV_ROW;
@@ -247,20 +260,81 @@ export function updateEventsSelBand() {
   }
 }
 
+/** A freshly loaded trace (the panel table's refill): every domain listed again. */
 export function resetEventsPanel() {
+  domainState.chips = domainChips(d.ui.meta?.domains);
+  domainState.excluded.clear();
+  domainState.names = threadNames(d.ui.meta?.domains);
+  renderDomainChips();
+  relistEvents();
+}
+
+// one chip per domain with records; a trace of one domain needs none
+function renderDomainChips() {
+  const bar = $('ev-domains');
+  const chips = domainState.chips;
+  bar.hidden = chips.length < 2;
+  bar.innerHTML = chips.map((c) => {
+    const on = !domainState.excluded.has(c.id);
+    return `<button type="button" class="ev-chip d-${esc(c.id)}${on ? ' on' : ''}" data-domain="${esc(c.id)}" aria-pressed="${on}"`
+      + ` title="${esc(`${on ? 'Hide' : 'Show'} ${c.name} records (${fmtNum(c.count)})`)}">${esc(c.name)}</button>`;
+  }).join('');
+}
+
+function relistEvents() {
   evState.lastSeq = -1;
   evState.total = -1;
   evState.seqs = [];
   $('events-scroll').scrollTop = 0;
   $('events-rows').innerHTML = '';
-  if (!$('events-panel').hidden) refreshEventsPanel();
+  if (layout.isOpen('events-panel')) refreshEventsPanel();
+}
+
+function renderColumnsMenu() {
+  $$('#ev-cols-menu input[data-col]').forEach((box) => { box.checked = !!columns[box.dataset.col]; });
+}
+
+function wireColumnsMenu() {
+  const btn = $('ev-cols-btn');
+  const menu = $('ev-cols-menu');
+  const setOpen = (open: boolean) => {
+    menu.hidden = !open;
+    btn.setAttribute('aria-expanded', String(open));
+  };
+  renderColumnsMenu();
+  btn.onclick = (e) => { e.stopPropagation(); setOpen(menu.hidden); };
+  menu.addEventListener('change', (e) => {
+    const col = e.target?.dataset?.col as EventColumn | undefined;
+    if (!col) return;
+    columns = toggleColumn(columns, col);
+    try { localStorage.setItem(COLUMNS_KEY, JSON.stringify(columns)); } catch { /* storage unavailable: this session only */ }
+    renderColumnsMenu();
+    refreshEventsPanel();
+  });
+  document.addEventListener('pointerdown', (e) => {
+    if (!menu.hidden && !(e.target as Element | null)?.closest?.('.ev-cols')) setOpen(false);
+  });
+  menu.addEventListener('keydown', (e) => { if (e.key === 'Escape') { setOpen(false); btn.focus(); } });
 }
 
 function wireEventsPanel() {
+  wireColumnsMenu();
+  // the kind chip's and the row's words, in the app's tooltip (NAV-005)
+  hoverTips($('events-scroll'), 'events');
   $('ev-filtered').onchange = () => {
-    resetEventsPanel();
+    relistEvents();
     updateEventsPanel();
   };
+  $('ev-domains').addEventListener('click', (e) => {
+    const chip = e.target?.closest?.('.ev-chip');
+    if (!chip) return;
+    const id = chip.dataset.domain;
+    if (domainState.excluded.has(id)) domainState.excluded.delete(id);
+    else domainState.excluded.add(id);
+    renderDomainChips();
+    relistEvents();
+    updateEventsPanel();
+  });
 
   {
     const scEl = $('events-scroll');
@@ -284,8 +358,8 @@ function wireEventsPanel() {
     let dragCaptured = false;
     const yToSeq = (y) => {
       const row = (y - scEl.getBoundingClientRect().top) / EV_ROW;
-      if (evFiltered()) {
-        // filtered rows carry arbitrary seqs: read the nearest loaded row
+      if (evIndexed()) {
+        // indexed rows carry arbitrary seqs: read the nearest loaded row
         const seqs = evState.seqs;
         if (!seqs.length) return 0;
         return seqs[Math.max(0, Math.min(seqs.length - 1, Math.floor(row)))];
@@ -318,17 +392,13 @@ function wireEventsPanel() {
     });
   }
 
-  $('btn-events').onclick = () => {
-    const p = $('events-panel');
-    p.hidden = !p.hidden;
-    if (!p.hidden) {
-      raisePanel(p);
-      evState.lastSeq = -1;
-      refreshEventsPanel();
-      updateEventsPanel();
-    }
-    if (p.dataset.dockSide) refreshDrawerDividers(p.dataset.dockSide);
-  };
+  // the shell shows the window (its toolbar toggle is in the panel table);
+  // the list was not kept current while closed, so it catches up on opening
+  layout.onOpen('events-panel', () => {
+    evState.lastSeq = -1;
+    refreshEventsPanel();
+    updateEventsPanel();
+  });
   $('ev-follow').onchange = () => {
     evState.lastSeq = -1;
     updateEventsPanel();

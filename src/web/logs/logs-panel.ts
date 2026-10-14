@@ -1,23 +1,23 @@
 // Log domain: the Logs panel (spec LOG-007) — the trace's log lines as a
 // terminal that follows the playhead.
 //
-// The list is virtualized the way the Events panel is (heap/events-panel.ts):
+// The list is virtualized the way the Events panel is (stream/events-panel.ts):
 // a spacer sized to the match count, capped, and one absolutely-placed block
 // holding only the lines in view, fetched from the engine per window. Unlike
-// that panel it talks through rpc.ts's coalescing `requestLatest`, under keys
+// that panel it talks through rpc.ts's coalescing `requestLatest` — the
+// generic `domain-query` / `domain-locate` with `domain: "logs"` (DOM-004) — under keys
 // no other feature uses, so a fast scroll or playback never builds a backlog.
 //
 // Two things move the list: the user's scroll, and — while following — the
 // playhead. Each `state` message asks the engine to locate the playhead's
-// line in the current matches (`logs-locate`); following then scrolls only
+// line in the current matches (a `domain-locate` on `logs`); following then scrolls only
 // when that line is out of view, so playback reads like `tail -f`. Scrolling
 // by hand turns follow off; the head's checkbox turns it back on.
 //
 // The arithmetic is in logs-model.ts and tested there; this file is the DOM.
 
 import { $ } from '../shell/dom.ts';
-import { raisePanel } from '../shell/panels.ts';
-import { refreshDrawerDividers } from '../shell/drawers.ts';
+import { layout as windows } from '../shell/layout.ts';
 import { esc } from '../fmt.ts';
 import type { LogRow, LogsMeta, QueryPayload, QueryType, ReplyTo } from '../protocol.ts';
 import {
@@ -38,6 +38,8 @@ let d: Deps = null;
 const KEY_ROWS = 'logs-panel-rows';
 const KEY_LOCATE = 'logs-panel-locate';
 const KEY_REVEAL = 'logs-panel-reveal';
+/** The log domain's registry id (DOM-004). */
+const LOGS = 'logs';
 
 const st = {
   meta: null as LogsMeta | null,
@@ -55,9 +57,8 @@ const st = {
   revealSeq: -1,
 };
 
-const panel = () => $('logs-panel');
 const scroller = () => $('logs-scroll');
-const visible = () => !panel().hidden;
+const visible = () => windows.isOpen('logs-panel');
 
 /** Whether the loaded trace has any log record — the panel's default-open rule. */
 export function logsPresent(): boolean {
@@ -85,7 +86,6 @@ export function resetLogsPanel() {
   st.query = DEFAULT_QUERY;
   $('log-level').value = '0';
   $('log-search').value = '';
-  $('btn-logs').hidden = !logsPresent();
   $('log-follow').checked = true;
   st.revealSeq = -1;
   queryChanged();
@@ -129,7 +129,7 @@ export function refreshLogsPanel() {
   const win = st.total < 0 ? { from: 0, count: L.visN } : rowWindow(L, from);
   $('logs-rows').style.top = `${sc.scrollTop}px`;
   const gen = st.gen;
-  d.requestLatest(KEY_ROWS, 'logs-query', { ...st.query, ...win }).then((m) => {
+  d.requestLatest(KEY_ROWS, 'domain-query', { domain: LOGS, query: { ...st.query, ...win } }).then(({ result: m }) => {
     if (gen !== st.gen) return;
     if (m.total !== st.total) {
       // the match count is (re)learned: lay out once more with it — the next
@@ -140,7 +140,7 @@ export function refreshLogsPanel() {
       return;
     }
     st.from = m.from;
-    st.rows = m.rows;
+    st.rows = m.rows as LogRow[];
     renderRows();
   });
 }
@@ -178,7 +178,7 @@ function relocate() {
   if (!d.ui.loaded || !visible() || !logsPresent() || !d.ui.state) return;
   const seq = playheadSeq(d.ui.state.seq);
   const gen = st.gen;
-  d.requestLatest(KEY_LOCATE, 'logs-locate', { ...st.query, seq }).then((m) => {
+  d.requestLatest(KEY_LOCATE, 'domain-locate', { domain: LOGS, query: { ...st.query, seq } }).then(({ result: m }) => {
     if (gen !== st.gen) return;
     st.playheadRow = m.row;
     if (m.total !== st.total) { st.total = m.total; updateHeading(); }
@@ -200,17 +200,13 @@ function relocate() {
  */
 export function revealLogSeq(seq: number) {
   if (!d.ui.loaded || !logsPresent()) return;
-  if (!visible()) {
-    panel().hidden = false;
-    raisePanel(panel());
-    if (panel().dataset.dockSide) refreshDrawerDividers(panel().dataset.dockSide);
-  }
+  windows.reveal('logs-panel');
   // the flash is one animation, not a state: lines re-render as the playhead
   // moves, and a class that stayed would replay it on every render
   st.revealSeq = seq;
   setTimeout(() => { if (st.revealSeq === seq) st.revealSeq = -1; }, 1400);
   const gen = st.gen;
-  d.requestLatest(KEY_REVEAL, 'logs-locate', { ...st.query, seq }).then((m) => {
+  d.requestLatest(KEY_REVEAL, 'domain-locate', { domain: LOGS, query: { ...st.query, seq } }).then(({ result: m }) => {
     if (gen !== st.gen || m.row < 0) return;
     st.total = m.total;
     updateHeading();
@@ -277,17 +273,13 @@ function wire() {
   };
   $('log-follow').onchange = () => { if (following()) relocate(); };
 
-  $('btn-logs').onclick = () => {
-    const p = panel();
-    p.hidden = !p.hidden;
-    if (!p.hidden) {
-      raisePanel(p);
-      st.locatedSeq = NaN;
-      updateHeading();
-      refreshLogsPanel();
-      updateLogsPanel();
-    }
-    if (p.dataset.dockSide) refreshDrawerDividers(p.dataset.dockSide);
-  };
+  // the shell shows the window (its toolbar toggle is in the panel table);
+  // the terminal was not kept current while closed, so it catches up on opening
+  windows.onOpen('logs-panel', () => {
+    st.locatedSeq = NaN;
+    updateHeading();
+    refreshLogsPanel();
+    updateLogsPanel();
+  });
 }
 

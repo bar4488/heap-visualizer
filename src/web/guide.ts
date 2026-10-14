@@ -29,30 +29,45 @@ import type { El } from './shell/dom.ts';
 import { esc } from './fmt.ts';
 import { heapPanels } from './heap/panels.ts';
 
-// Panel id -> the toolbar button that opens it, read from the panel table
-// rather than from a second list of ids here (spec SHELL-003). This is the one
-// thing the guide needs to know about panels: how to point at one that is
-// closed, by clicking the real toggle instead of un-hiding the element behind
-// its back.
+// Panel id -> the control that opens it (its View-menu item, or a top-bar
+// button), read from the panel table rather than from a second list of ids
+// here (spec SHELL-003). This is the one thing the guide needs to know about
+// panels: how to point at one that is closed, by clicking the real toggle
+// instead of un-hiding the element behind its back.
 const PANEL_TOGGLE = new Map(heapPanels().map((p) => [p.id, p.toggle]));
 
-// Section files, in reading order. Each is fetched from dist/guide/.
-const SECTIONS = [
-  { file: 'getting-started.md', title: 'Try the demo' },
-  { file: 'the-map.md', title: 'Adjust the map' },
-  { file: 'time.md', title: 'Move through the trace' },
-  { file: 'selecting.md', title: 'Inspect an allocation' },
-  { file: 'filters.md', title: 'Find allocations' },
-  { file: 'tags-and-marks.md', title: 'Save a finding' },
-  { file: 'your-trace.md', title: 'Open a local trace' },
-  { file: 'opencode.md', title: 'Connect an AI assistant' },
-  { file: 'troubleshooting.md', title: 'Fix a connection' },
-  { file: 'the-format.md', title: 'Produce a trace' },
-];
+// The guides the surface hosts, each a peer with its own tab, its own scrolling
+// pane, and its own section files (fetched from dist/guide/) in reading order.
+// "Tasks" is the how-to; "heapviz & AI agents" explains the local companion and
+// lives in its own directory so it is never one of the Tasks sections.
+export type GuideId = 'tasks' | 'agents';
+export const GUIDES: Record<GuideId, { title: string; pane: string; sections: { file: string; title: string }[] }> = {
+  tasks: {
+    title: 'Tasks',
+    pane: 'guide-body',
+    sections: [
+      { file: 'getting-started.md', title: 'Try the demo' },
+      { file: 'the-map.md', title: 'Adjust the map' },
+      { file: 'time.md', title: 'Move through the trace' },
+      { file: 'selecting.md', title: 'Inspect an allocation' },
+      { file: 'filters.md', title: 'Find allocations' },
+      { file: 'tags-and-marks.md', title: 'Save a finding' },
+      { file: 'your-trace.md', title: 'Open a local trace' },
+      { file: 'troubleshooting.md', title: 'Fix a connection' },
+      { file: 'the-format.md', title: 'Produce a trace' },
+    ],
+  },
+  agents: {
+    title: 'heapviz & AI agents',
+    pane: 'guide-agents',
+    sections: [{ file: 'agents/heapviz-and-agents.md', title: 'heapviz & AI agents' }],
+  },
+};
 
 const HIGHLIGHT_MS = 2200;
 
-let loaded = false;
+const loading: Partial<Record<GuideId, Promise<void>>> = {};
+let current: GuideId = 'tasks';
 let highlightTimer = 0;
 
 /**
@@ -155,9 +170,22 @@ function highlight(id: string) {
   // behind the toggle's back. Anything still hidden (a toolbar button that
   // needs a loaded trace) is reported, not forced.
   const panel = el.closest('.panel');
-  const toggle = panel && panel.hidden && PANEL_TOGGLE.get(panel.id);
+  // (open but out of sight — a tab behind another, a collapsed edge — counts
+  // as closed here: the toggle brings such a window to the front)
+  const unseen = panel && (panel.hidden || panel.checkVisibility?.() === false);
+  const toggle = unseen && PANEL_TOGGLE.get(panel.id);
   if (toggle) $(toggle).click();
   if (el.hidden) { note(`guide: "${id}" is not available yet`); return; }
+
+  // An item of a closed menu (File → Open demo) cannot be seen: ring the menu
+  // that holds it instead, which is where the reader will find it.
+  const menu = el.closest('[role=menu]');
+  const ring = menu?.hidden ? $(menu.id.replace(/-list$/, '')) || el : el;
+  if (ring !== el) {
+    ring.classList.add('g-target');
+    highlightTimer = window.setTimeout(() => ring.classList.remove('g-target'), HIGHLIGHT_MS);
+    return;
+  }
 
   el.classList.add('g-target');
   // `scrollIntoView` scrolls every scrollable ancestor, and a docked panel's
@@ -200,7 +228,7 @@ function act(spec: string) {
   // An app handler may focus a control it just revealed, and focusing scrolls
   // ancestors. Nothing an action does is allowed to move the reader's place in
   // the prose, so the guide's own scroll is pinned across the whole call.
-  const body = $('guide-body');
+  const body = $(GUIDES[current].pane);
   const keep = body.scrollTop;
   try {
     run(spec);
@@ -239,46 +267,92 @@ function run(spec: string) {
   highlight(id);
 }
 
-async function load() {
-  // Set before the first await: opening and closing quickly must not start a
-  // second round of fetches. A section that fails renders its own failure, so
-  // there is nothing to retry by re-entering here.
-  loaded = true;
-  const body = $('guide-body');
+async function load(id: GuideId) {
+  // Called once per guide (showGuide keeps the promise): opening and closing
+  // quickly must not start a second round of fetches. A section that fails
+  // renders its own failure, so there is nothing to retry by re-entering here.
+  const guide = GUIDES[id];
   const parts: string[] = [];
-  for (const section of SECTIONS) {
+  for (const section of guide.sections) {
     try {
       const resp = await fetch(`guide/${section.file}`, { cache: 'no-cache' });
       if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
-      parts.push(`<section class="g-section">${render(await resp.text())}</section>`);
+      parts.push(`<section class="g-section" id="${sectionId(section.file)}">${render(await resp.text())}</section>`);
     } catch (e) {
       parts.push(`<section class="g-section"><p class="g-fail">${
         esc(section.title)} failed to load: ${esc((e as Error).message)}</p></section>`);
     }
   }
-  body.innerHTML = parts.join('\n');
+  $(guide.pane).innerHTML = parts.join('\n');
 }
 
-export function toggleGuide(open = $('guide').hidden) {
-  $('guide').hidden = !open;
-  $('btn-guide').classList.toggle('active', open);
-  if (open && !loaded) void load();
+/** Help → Guide's check mark: the surface is open on Tasks. */
+export const guideOpen = () => !$('guide').hidden && current === 'tasks';
+
+/**
+ * Open the guide surface on one guide, switching tabs if it is open on the
+ * other. Each guide keeps its own pane, so its scroll position survives a
+ * switch.
+ */
+export function showGuide(id: GuideId): Promise<void> {
+  current = id;
+  $('guide').hidden = false;
+  for (const gid of Object.keys(GUIDES) as GuideId[]) {
+    $(GUIDES[gid].pane).hidden = gid !== id;
+    const tab = $(`guide-tab-${gid}`);
+    tab.classList.toggle('active', gid === id);
+    tab.setAttribute('aria-selected', String(gid === id));
+  }
+  loading[id] ||= load(id);
+  return loading[id];
+}
+
+/** Help → Guide: open on Tasks, or close when already showing Tasks. */
+export function toggleGuide(open = !guideOpen()) {
+  if (open) void showGuide('tasks');
+  else $('guide').hidden = true;
+}
+
+/** A section's element id: `guide-` plus its file name without directory or `.md`. */
+export const sectionId = (file: string) => `guide-${file.replace(/^.*\//, '').replace(/\.md$/, '')}`;
+
+/**
+ * Scroll a guide's pane to one of its sections, switching to that guide first
+ * if needed, moving nothing else: the reader's place in the app stays put (see
+ * `scrollParent`).
+ */
+function scrollToSection(id: string) {
+  const owner = (Object.keys(GUIDES) as GuideId[])
+    .find((g) => GUIDES[g].sections.some((s) => sectionId(s.file) === id));
+  if (!owner) return;
+  void showGuide(owner).then(() => {
+    const section = document.getElementById(id);
+    if (!section) return;
+    const body = $(GUIDES[owner].pane);
+    body.scrollTop += section.getBoundingClientRect().top - body.getBoundingClientRect().top;
+  });
 }
 
 export function initGuide() {
-  $('btn-guide').onclick = () => toggleGuide();
   // A scenario link navigates to `?trace=…&guide=1`, so the reader lands back
   // in the guide with that trace loading. The parameter is the whole of the
   // guide's persistence: nothing is stored anywhere.
   if (new URLSearchParams(location.search).get('guide')) toggleGuide(true);
   $('guide-close').onclick = () => toggleGuide(false);
-  $('guide-body').addEventListener('click', (ev: any) => {
+  for (const id of Object.keys(GUIDES) as GuideId[]) $(`guide-tab-${id}`).onclick = () => { void showGuide(id); };
+  for (const guide of Object.values(GUIDES)) $(guide.pane).addEventListener('click', (ev: any) => {
     const btn = ev.target.closest('.g-act');
     if (btn) act(btn.dataset.act);
+    // A link to another section (`[Fix a connection](#guide-troubleshooting)`),
+    // in this guide or the other, scrolls the guide only; the URL fragment belongs to the connection
+    // launch (local-server.ts) and is left alone.
+    const link = ev.target.closest('a[href^="#guide-"]');
+    if (link) { ev.preventDefault(); scrollToSection(link.getAttribute('href').slice(1)); }
   });
 
-  // Width drag, the one piece of drawer behavior worth having here. Panels get
-  // this from shell/drawers.ts, which this surface deliberately does not use.
+  // Width drag, the one piece of dock behavior worth having here. Panels get
+  // this from the dock (shell/layout.ts), which this surface deliberately does
+  // not use.
   const grip = $('guide-resize');
   grip.addEventListener('pointerdown', (ev: PointerEvent) => {
     grip.setPointerCapture(ev.pointerId);

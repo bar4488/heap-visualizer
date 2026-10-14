@@ -2,8 +2,10 @@
 // The main thread only sends input events and receives state/query results.
 
 import { fmtBytes, fmtAllocSize as fmtAllocSizeMode, clampView } from './fmt.ts';
+import { paintPlayhead } from './timeline-interaction.ts';
 import { QUERY_FAILURE, queryFailureReply } from './query-failure.ts';
-import type { FromWorker, SettingKey, ToWorker } from './protocol.ts';
+import type { DomainDescriptor, EventRow, FromWorker, SettingKey, ToWorker } from './protocol.ts';
+import { maskPlan, maskRank, maskSeqAt, rowDomain } from './stream/stream-model.ts';
 
 // Shadows the global: nothing leaves this worker that the protocol does not
 // describe, and the main thread's switch is written against the same union.
@@ -56,6 +58,9 @@ const S = {
   lastTick: 0,
   dirty: { addr: true, tlt: true, tls: true },
   lastState: '',
+  // the loaded trace's domain descriptors (DOM-004), or null from a core
+  // without them; the Events list's domain toggles are planned against them
+  domains: null as DomainDescriptor[] | null,
   // filled in as rendering happens rather than at startup: the last laid-out
   // virtual height, and the move link of the last applied event
   lastVirtualH: 0,
@@ -91,6 +96,54 @@ function writeBuf(bytes) {
   const ptr = E.hp_buf_ptr(bytes.length);
   new Uint8Array(E.memory.buffer, ptr, bytes.length).set(bytes);
   return bytes.length;
+}
+/** Whether a trace is loaded and this core has export `name` (feature detection). */
+function has(name: string): boolean {
+  return S.loaded && !!E && typeof E[name] === 'function';
+}
+/** Call a JSON-in-the-buffer export (ARCH-006) and parse its answer. */
+function callJson(name: string, input: unknown) {
+  E[name](writeBuf(te.encode(JSON.stringify(input))));
+  return retJson();
+}
+
+// ---------------------------------------------------------------------------
+// the Events list with domains left out (stream/stream-model.ts has the math)
+// ---------------------------------------------------------------------------
+
+/** Records of `domain` at or before `seq`, from its locate. */
+function domainRank(domain: string, seq: number): number {
+  const r = callJson('hp_domain_locate', { domain, seq });
+  return Math.max(0, (r?.row ?? -1) + 1);
+}
+
+/** One page of the list holding only `plan`'s domains, from position `from`. */
+function maskedEvents(plan, included: string[], from: number, count: number): EventRow[] {
+  const keep = new Set(included);
+  const rows: EventRow[] = [];
+  let seq = maskSeqAt(plan, from, S.n, domainRank);
+  let scanned = 0;
+  while (rows.length < count && seq < S.n) {
+    // walk the spine a chunk at a time; a long run of left-out records is
+    // jumped over by searching instead of read through
+    if (scanned >= 1024) {
+      seq = maskSeqAt(plan, from + rows.length, S.n, domainRank);
+      scanned = 0;
+      if (seq >= S.n) break;
+    }
+    const chunk = Math.min(256, S.n - seq);
+    E.hp_events_json(seq, chunk);
+    const evs: EventRow[] = retJson();
+    for (const ev of evs) {
+      if (ev && keep.has(rowDomain(ev))) {
+        rows.push(ev);
+        if (rows.length >= count) break;
+      }
+    }
+    seq += chunk;
+    scanned += chunk;
+  }
+  return rows;
 }
 
 // ---------------------------------------------------------------------------
@@ -162,6 +215,12 @@ function finishTraceLoad() {
   const fields = retJson();
   // the log domain's summary (LOG-009); null from a core without it
   meta.logs = typeof E.hp_logs_meta_json === 'function' ? (E.hp_logs_meta_json(), retJson()) : null;
+  // every domain's descriptor (DOM-004); null from a core without them
+  meta.domains = typeof E.hp_domains_json === 'function' ? (E.hp_domains_json(), retJson()) : null;
+  S.domains = meta.domains;
+  // the interval domain's descriptor (spec/14), or null: the default layout
+  // decides its panels at load, before any `domains` reply
+  meta.intervals = meta.domains?.find((d) => d.id === 'intervals') ?? null;
 
   S.loaded = true;
   S.n = n;
@@ -340,18 +399,7 @@ function renderTl(kind) {
   // playhead
   const val = kind === 0 ? E.hp_cur_t() : E.hp_cur();
   const x = ((val - view.lo) / (view.hi - view.lo)) * w;
-  if (x >= -2 && x <= w + 2) {
-    ctx.fillStyle = 'rgba(230,237,243,0.08)';
-    ctx.fillRect(0, 0, Math.max(0, x), h);
-    ctx.fillStyle = '#e6edf3';
-    ctx.fillRect(Math.round(x) - Math.round(dpr / 2), 0, Math.max(1, Math.round(1.5 * dpr)), h);
-    // grab triangle
-    ctx.beginPath();
-    ctx.moveTo(x - 4 * dpr, 0);
-    ctx.lineTo(x + 4 * dpr, 0);
-    ctx.lineTo(x, 5 * dpr);
-    ctx.fill();
-  }
+  if (x >= -2 && x <= w + 2) paintPlayhead(ctx, x, 0, h, dpr);
 }
 
 function postState() {
@@ -1012,6 +1060,16 @@ async function handleMessage(m: ToWorker) {
       // filtered mode indexes into the engine's filtered event list; `total`
       // sizes the panel's virtual scroll either way
       let total = S.n;
+      const plan = has('hp_domain_locate') ? maskPlan(S.domains, m.domains) : null;
+      if (plan && m.filtered && !m.domains.includes('heap')) {
+        // the filtered list holds heap records only (DOM-003)
+        postMessage({ type: 'events', reqId: m.reqId, from: m.from, events: [], total: 0 });
+        break;
+      }
+      if (plan && !m.filtered) {
+        postMessage({ type: 'events', reqId: m.reqId, from: m.from, events: maskedEvents(plan, m.domains, m.from, m.count), total: plan.total });
+        break;
+      }
       if (m.filtered) {
         total = E.hp_events_filtered_count();
         E.hp_events_filtered_json(m.from, m.count);
@@ -1025,6 +1083,16 @@ async function handleMessage(m: ToWorker) {
     case 'ev-pos': {
       if (!S.loaded) {
         postMessage(QUERY_FAILURE['ev-pos'](m, ''));
+        break;
+      }
+      const plan = has('hp_domain_locate') ? maskPlan(S.domains, m.domains) : null;
+      if (plan && m.filtered && !m.domains.includes('heap')) {
+        postMessage({ type: 'ev-pos', reqId: m.reqId, pos: 0, total: 0 });
+        break;
+      }
+      if (plan && !m.filtered) {
+        // the position of the first listed record at or after seq
+        postMessage({ type: 'ev-pos', reqId: m.reqId, pos: maskRank(plan, m.seq - 1, domainRank), total: plan.total });
         break;
       }
       postMessage({
@@ -1061,20 +1129,52 @@ async function handleMessage(m: ToWorker) {
       postMessage({ type: 'tlhover-result', reqId: m.reqId, kind: m.kind, info: retJson() });
       break;
     }
-    // the log domain (LOG-009): answered even with no trace or an older core
-    // without the exports, so a coalesced caller is never left waiting
-    case 'logs-query': {
-      const ok = S.loaded && typeof E.hp_logs_query === 'function';
-      const { reqId, type: _t, ...q } = m;
-      const r = ok ? (E.hp_logs_query(writeBuf(te.encode(JSON.stringify(q)))), retJson()) : null;
-      postMessage({ type: 'logs-query-result', reqId, available: ok, total: r?.total ?? 0, from: r?.from ?? m.from, rows: r?.rows ?? [] });
+    // The generic domain surface (DOM-004) and the interval domain
+    // (spec/14). Each is answered even with no trace loaded or with a core
+    // that lacks the export — its failure reply (`available: false`) — so a
+    // coalesced caller is never left waiting.
+    case 'domains': {
+      if (!has('hp_domains_json') || !has('hp_lanes_json')) { postMessage(QUERY_FAILURE.domains(m, '')); break; }
+      E.hp_domains_json();
+      const domains = retJson();
+      E.hp_lanes_json();
+      postMessage({ type: 'domains-result', reqId: m.reqId, available: true, domains, lanes: retJson() });
       break;
     }
-    case 'logs-locate': {
-      const ok = S.loaded && typeof E.hp_logs_locate === 'function';
-      const { reqId, type: _t, ...q } = m;
-      const r = ok ? (E.hp_logs_locate(writeBuf(te.encode(JSON.stringify(q)))), retJson()) : null;
-      postMessage({ type: 'logs-locate-result', reqId, available: ok, row: r?.row ?? -1, total: r?.total ?? 0 });
+    case 'domain-query': {
+      if (!has('hp_domain_query')) { postMessage(QUERY_FAILURE['domain-query'](m, '')); break; }
+      const result = callJson('hp_domain_query', { ...m.query, domain: m.domain });
+      postMessage({ type: 'domain-query-result', reqId: m.reqId, available: true, result });
+      break;
+    }
+    case 'domain-locate': {
+      if (!has('hp_domain_locate')) { postMessage(QUERY_FAILURE['domain-locate'](m, '')); break; }
+      const result = callJson('hp_domain_locate', { ...m.query, domain: m.domain });
+      postMessage({ type: 'domain-locate-result', reqId: m.reqId, available: true, result });
+      break;
+    }
+    case 'domain-state': {
+      if (!has('hp_domain_state')) { postMessage(QUERY_FAILURE['domain-state'](m, '')); break; }
+      const result = callJson('hp_domain_state', { domain: m.domain, seq: m.seq });
+      postMessage({ type: 'domain-state-result', reqId: m.reqId, available: true, result });
+      break;
+    }
+    case 'record': {
+      if (!has('hp_record_json')) { postMessage(QUERY_FAILURE.record(m, '')); break; }
+      E.hp_record_json(Math.max(0, Math.floor(m.seq)) >>> 0);
+      postMessage({ type: 'record-result', reqId: m.reqId, available: true, result: retJson() });
+      break;
+    }
+    case 'tracks': {
+      if (!has('hp_tracks_json')) { postMessage(QUERY_FAILURE.tracks(m, '')); break; }
+      E.hp_tracks_json();
+      postMessage({ type: 'tracks-result', reqId: m.reqId, available: true, result: retJson() });
+      break;
+    }
+    case 'interval-window': {
+      if (!has('hp_interval_window')) { postMessage(QUERY_FAILURE['interval-window'](m, '')); break; }
+      const result = callJson('hp_interval_window', m.query);
+      postMessage({ type: 'interval-window-result', reqId: m.reqId, available: true, result });
       break;
     }
   }

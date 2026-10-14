@@ -5,22 +5,35 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import { installDom, El } from './dom-stub.ts';
+import { createFakeDockview } from './fake-dockview.ts';
 
 const doc = installDom();
 
 const {
   initSession, buildSession, applySession, resetSessionSnapshot, HEAP_SESSION_VERSION,
 } = await import('../session.ts');
-const {
-  drawersState, dockPanel, dockPanelAt, refreshDrawerDividers, setDrawerCollapsed,
-} = await import('../shell/drawers.ts');
 const { heapPanels } = await import('../heap/panels.ts');
+const { layout } = await import('../shell/layout.ts');
+const { LIVE, PINNED, pinAllocation, pinnedTitle, unpinAllocation } = await import('../heap/alloc-windows.ts');
 
 // the panel list comes from the domain's table, not a copy of it
 const PANELS = heapPanels();
-const PANEL_IDS = PANELS.map((p) => p.id);
+// (titled the way main.ts titles one: the allocation's name, else `#<id>`)
+function pinnedEl(key, data) {
+  const el = new El('div');
+  el.classList.add('panel', 'pinned-detail');
+  const head = new El('div');
+  head.classList.add('panel-head');
+  const title = new El('span');
+  title.classList.add('ph-t');
+  title.textContent = pinnedTitle({ e: +key, id: data?.id ?? key }, data?.name);
+  head.appendChild(title);
+  el.appendChild(head);
+  return el;
+}
 
 // --- fixture ---------------------------------------------------------------
 
@@ -54,18 +67,22 @@ function buildFixture() {
     fp.appendChild(r);
   }
 
-  // panels as windows, with a couple carrying explicit float geometry
-  for (const id of PANEL_IDS) {
-    const p = doc.getElementById(id);
-    p.classList.add('panel');
+  // the views and windows, declared to the shell the way main.ts does, in a
+  // dock (a stand-in engine), with Play floating at an explicit spot
+  for (const p of PANELS) {
+    if (!p.multi && p.dock !== 'center') doc.getElementById(p.id).classList.add('panel');
+    layout.register(p.id, {
+      title: p.title,
+      singleton: !p.multi,
+      persist: p.persist !== false,
+      closable: p.closable !== false,
+      defaultLocation: { dock: p.dock, open: p.open },
+      build: p.multi ? pinnedEl : () => doc.getElementById(p.id),
+    });
   }
-  Object.assign(doc.getElementById('play-panel').style,
-    { left: '12px', top: '34px', right: 'auto', bottom: 'auto' });
-  doc.getElementById('warnings-panel').hidden = true;
-
-  // drawers
-  doc.getElementById('drawer-left').classList.add('drawer');
-  doc.getElementById('drawer-right').classList.add('drawer');
+  layout.init(new El('main'), { createDockview: createFakeDockview });
+  layout.resetLayout();
+  layout.open('play-panel', '', { at: { left: 12, top: 34 } });
 }
 
 function makeDeps(ui, posted) {
@@ -106,7 +123,6 @@ function makeUI() {
     filterApplied: 'alloc.size >= 1KiB and alloc.size <= 1MiB',
     filterMode: 2,
     marksDirty: false,
-    drawers: drawersState,
   };
 }
 
@@ -138,16 +154,14 @@ test('buildSession captures every field the format promises', () => {
   assert.equal(h.filter.languageVersion, 4);
   assert.equal(h.filter.source, 'alloc.size >= 1KiB and alloc.size <= 1MiB');
   assert.equal(h.filter.mode, 2);
-  assert.deepEqual(Object.keys(s.windows).sort(), [...PANEL_IDS].sort());
-  assert.equal(s.windows['warnings-panel'].hidden, true);
-  assert.deepEqual(s.windows['play-panel'],
-    { hidden: false, left: '12px', top: '34px', right: 'auto', bottom: 'auto' });
+  // the shell's section is the dock's own serialization, opaque here
+  assert.equal(s.shell.version, 3);
+  assert.ok(s.shell.dock);
 });
 
-test('the top level is shell state only — no heap concept escapes the heap key', () => {
+test('the top level is an envelope — no heap concept escapes the heap key', () => {
   const s = buildSession();
-  assert.deepEqual(Object.keys(s).sort(),
-    ['drawers', 'heap', 'heapVisualizerSession', 'windows']);
+  assert.deepEqual(Object.keys(s).sort(), ['heap', 'heapVisualizerSession', 'shell']);
 });
 
 // scrambles everything the session owns, so a field applySession forgets to
@@ -170,9 +184,9 @@ function scramble() {
   ui.filterApplied = '';
   ui.filterMode = 1;
   ui.state = { seq: 0, n: 100000 };
-  Object.assign(doc.getElementById('play-panel').style,
-    { left: '999px', top: '999px', right: '', bottom: '' });
-  doc.getElementById('warnings-panel').hidden = false;
+  layout.resetLayout();
+  layout.open('warnings-panel', '', { dock: 'left' });
+  layout.close('filter-panel');
 }
 
 test('buildSession -> applySession -> buildSession is a fixed point', () => {
@@ -191,7 +205,7 @@ test('buildSession -> applySession -> buildSession is a fixed point', () => {
 // top level, no `heap` key, no version
 function flatten(s) {
   const { version, ...heap } = s.heap;
-  return { heapVisualizerSession: 1, ...heap, windows: s.windows, drawers: s.drawers };
+  return { heapVisualizerSession: 1, ...heap, shell: s.shell };
 }
 
 test('a session written in the old flat shape restores identically', () => {
@@ -214,7 +228,7 @@ test('a heap section at an unknown version is skipped, and the shell layout stil
 
   const after = buildSession();
   // shell state came back...
-  assert.deepEqual(after.windows, before.windows);
+  assert.deepEqual(after.shell, before.shell);
   // ...and nothing from the unreadable heap section was applied
   assert.deepEqual(after.heap, scrambled.heap);
 });
@@ -249,69 +263,125 @@ test('applySession ignores a filter written in an older language version', () =>
   assert.equal(ui.filterApplied, '');
 });
 
-test('applySession restores drawer docking and widths', () => {
-  const s = buildSession();
-  s.drawers = {
-    left: ['filter-panel'], right: ['events-panel'],
-    widthLeft: 420, widthRight: 260,
-    collapsedLeft: true, collapsedRight: false,
-  };
-  applySession(s);
-
-  assert.equal(doc.getElementById('drawer-left').style.width, '420px');
-  assert.equal(doc.getElementById('drawer-right').style.width, '260px');
-  assert.deepEqual(drawersState.left, ['filter-panel']);
-  assert.deepEqual(drawersState.right, ['events-panel']);
-  assert.equal(doc.getElementById('filter-panel').dataset.dockSide, 'left');
-  assert.equal(doc.getElementById('events-panel').dataset.dockSide, 'right');
-  assert.equal(drawersState.collapsedLeft, true);
-  assert.equal(drawersState.collapsedRight, false);
-  assert.equal(doc.getElementById('drawer-left').classList.contains('collapsed'), true);
-
-  // and the docking survives a build/apply cycle
-  const again = buildSession();
-  assert.deepEqual(again.drawers.left, ['filter-panel']);
-  assert.deepEqual(again.drawers.right, ['events-panel']);
-  assert.equal(again.drawers.widthLeft, 420);
-  assert.equal(again.drawers.collapsedLeft, true);
-});
-
-test('a saved drawer layout wholly overrides panels docked by default', () => {
-  for (const p of PANELS.filter((p) => p.dock)) {
-    dockPanel(doc.getElementById(p.id), p.dock);
+// A session written before the dock (shell version 1): the shell's
+// `windows` and `drawers` at the top level, pinned windows' slots in the
+// drawer order and their geometry in the heap section.
+function v1Session() {
+  const windows = {};
+  for (const p of PANELS) {
+    if (p.persist === false || p.multi || p.dock === 'center') continue;
+    windows[p.id] = { hidden: false, left: '', top: '', right: '', bottom: '' };
   }
-  assert.equal(doc.getElementById('layout-panel').dataset.dockSide, 'right');
-
-  const s = buildSession();
-  s.drawers = {
-    left: ['events-panel'], right: [],
-    widthLeft: 300, widthRight: 300,
-    collapsedLeft: false, collapsedRight: false,
+  windows['warnings-panel'] = { hidden: true, left: '', top: '', right: '', bottom: '' };
+  windows['play-panel'] = { hidden: false, left: '40px', top: '50px', right: 'auto', bottom: 'auto' };
+  return {
+    heapVisualizerSession: 1,
+    windows,
+    drawers: {
+      left: ['filter-panel', 'pinned-detail:42'], right: ['events-panel'],
+      widthLeft: 420, widthRight: 260,
+      collapsedLeft: true, collapsedRight: false,
+      sizes: { 'filter-panel': 2 },
+    },
+    heap: {
+      version: HEAP_SESSION_VERSION,
+      rowBytes: '0x2000',
+      playhead: 12,
+      pinned: [
+        { e: 42, dockSide: 'left', left: '', top: '' },
+        { e: 7, dockSide: null, left: '300px', top: '200px', right: 'auto', bottom: 'auto' },
+      ],
+    },
   };
-  applySession(s);
+}
 
-  assert.equal(doc.getElementById('layout-panel').dataset.dockSide, undefined);
-  assert.equal(doc.getElementById('appearance-panel').dataset.dockSide, undefined);
-  assert.equal(doc.getElementById('filter-panel').dataset.dockSide, undefined);
-  assert.equal(doc.getElementById('analysis-panel').dataset.dockSide, undefined);
-  assert.deepEqual(drawersState.left, ['events-panel']);
-  assert.deepEqual(drawersState.right, []);
+test('a v1 session (drawers, floating windows, pinned) reads into a dock layout and writes back as v3', async () => {
+  const restoreUi = { ...makeUI(), meta: {} };
+  initSession({
+    ...makeDeps(restoreUi, []),
+    requestAllocInfo: async (e) => ({ e }),
+    createPinnedWindow: (info, place) => layout.open('pinned-detail', String(info.e), { data: info, ...place }),
+  });
+  applySession(v1Session());
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  // drawers became edge groups, in order, with their width and collapse
+  assert.deepEqual(layout.location('filter-panel'), { dock: 'left', open: true });
+  assert.deepEqual(layout.location('events-panel'), { dock: 'right', open: true });
+  assert.deepEqual(layout.location('pinned-detail', '42'), { dock: 'left', open: true });
+  const shell = buildSession().shell;
+  const left = shell.dock.grid.root.data[0];
+  assert.deepEqual(left.data.views, ['filter-panel', 'pinned-detail:42']);
+  assert.deepEqual(shell.edges.left, { collapsed: true, size: 420, groups: { [left.data.id]: 420 } });
+  // windows the old drawers did not dock float, closed ones stay closed
+  assert.deepEqual(layout.location('layout-panel'), { dock: null, open: true });
+  assert.equal(layout.isOpen('warnings-panel'), false);
+  assert.deepEqual(shell.dock.floatingGroups.find((g) => g.data.views.includes('play-panel')).position.left, 40);
+  assert.deepEqual(layout.location('pinned-detail', '7'), { dock: null, open: true });
+  // the views the old session never placed take their default
+  assert.deepEqual(layout.location('addr-scroll'), { dock: 'center', open: true });
+  // and it is written back in the current shape
+  assert.equal(shell.version, 3);
+  assert.deepEqual(buildSession().heap.pinned, [{ e: 42 }, { e: 7 }]);
+
+  // which round-trips
+  const v2 = buildSession();
+  layout.resetLayout();
+  layout.closeAll('pinned-detail');
+  applySession(JSON.parse(JSON.stringify(v2)));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(buildSession().shell, v2.shell);
+
+  layout.closeAll('pinned-detail');
+  initSession(makeDeps(ui, posted));
 });
 
-test('session docking preserves a collapsed drawer, while a user drop expands it', () => {
-  const win = new El('div');
-  win.classList.add('panel');
-  doc.body.appendChild(win);
+// A session written with the engine's own edge groups (shell version 2: one
+// group per side, outside the grid), as the app saved it — the edges come
+// back as columns and rows of the one grid, collapse and sizes kept.
+test('a v2 session (edge groups) reads into the one grid and writes back as v3', async () => {
+  const shell = JSON.parse(readFileSync(new URL('./fixtures/shell-v2.json', import.meta.url), 'utf8'));
+  assert.equal(shell.version, 2);
+  layout.resetLayout();
+  applySession({ heapVisualizerSession: 1, heap: { version: HEAP_SESSION_VERSION, pinned: [] }, shell });
+  assert.deepEqual(layout.location('events-panel'), { dock: 'left', open: true });
+  for (const id of ['layout-panel', 'appearance-panel', 'filter-panel', 'analysis-panel']) {
+    assert.deepEqual(layout.location(id), { dock: 'right', open: true }, id);
+  }
+  assert.deepEqual(layout.location('addr-scroll'), { dock: 'center', open: true });
+  assert.deepEqual(layout.location('strip-t'), { dock: 'center', open: true });
+  // the right edge was collapsed: its windows are open but out of sight
+  assert.equal(layout.isShown('layout-panel'), false);
+  assert.equal(layout.isShown('events-panel'), true);
+  const out = buildSession().shell;
+  assert.equal(out.version, 3);
+  assert.equal(out.dock.edgeGroups, undefined);
+  assert.equal(out.edges.right.collapsed, true);
+  assert.equal(out.edges.right.size, 300);
+  assert.equal(out.edges.left.collapsed, false);
+  // panels this build has no window for (another domain's) are not restored
+  assert.equal(out.dock.panels['intervals-state'], undefined);
+  // and the v3 it was written as round-trips
+  layout.resetLayout();
+  applySession(JSON.parse(JSON.stringify(buildSessionWith(out))));
+  assert.deepEqual(buildSession().shell, out);
+});
 
-  setDrawerCollapsed('left', true);
-  dockPanelAt(win, 'left', null, false);
-  assert.equal(drawersState.collapsedLeft, true);
+function buildSessionWith(shell) {
+  return { ...buildSession(), shell };
+}
 
-  dockPanelAt(win, 'left', null);
-  assert.equal(drawersState.collapsedLeft, false);
-
-  win.remove();
-  refreshDrawerDividers('left');
+test('a v1 drawer layout wholly overrides panels docked by default', () => {
+  const s = v1Session();
+  s.drawers = { left: ['events-panel'], right: [], widthLeft: 300, widthRight: 300, collapsedLeft: false, collapsedRight: false } as any;
+  s.heap.pinned = [];
+  layout.resetLayout();
+  assert.deepEqual(layout.location('layout-panel'), { dock: 'right', open: true });
+  applySession(s);
+  for (const id of ['layout-panel', 'appearance-panel', 'filter-panel', 'analysis-panel']) {
+    assert.deepEqual(layout.location(id), { dock: null, open: true }, id);
+  }
+  assert.deepEqual(layout.location('events-panel'), { dock: 'left', open: true });
 });
 
 test('applySession seeks to the saved playhead', () => {
@@ -360,5 +430,86 @@ test('a pinned-window restore stops when a new trace loads mid-restore', async (
   await drain();
   assert.deepEqual(created, [3]);
 
+  initSession(makeDeps(ui, posted));
+});
+
+// --- allocation windows (SHELL-005) ----------------------------------------
+
+const groupOf = (type, key = '') => layout.placeOf(type, key);
+const sameGroup = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+test('pinning replaces the live window in place; pinning B keeps A pinned', () => {
+  layout.resetLayout();
+  layout.open(LIVE); // the live window shows A, floating
+  const liveSpot = groupOf(LIVE);
+  pinAllocation(layout, { e: 11, id: 1 });
+  // one window, not two: A's pinned window took the live window's place
+  assert.ok(layout.isOpen(PINNED, '11'), 'A is pinned');
+  assert.equal(layout.isOpen(LIVE), false, 'the live window was replaced');
+  assert.ok(sameGroup(groupOf(PINNED, '11'), liveSpot));
+
+  layout.open(LIVE); // B is selected: a fresh live window, not a tab on A's
+  assert.ok(!sameGroup(groupOf(LIVE), groupOf(PINNED, '11')));
+  pinAllocation(layout, { e: 22, id: 2 });
+
+  assert.ok(layout.isOpen(PINNED, '11'), 'A is still pinned');
+  assert.ok(layout.isOpen(PINNED, '22'), 'B is pinned');
+  assert.equal(layout.isOpen(LIVE), false);
+  assert.deepEqual(layout.instancesOf(PINNED).map((i) => i.key), ['11', '22']);
+
+  // pinning one that is pinned already opens nothing new
+  const el = layout.element(PINNED, '11');
+  assert.equal(pinAllocation(layout, { e: 11, id: 1 }), el);
+  assert.equal(layout.instancesOf(PINNED).length, 2);
+
+  // unpinning A closes it alone; the live window (closed) opens where A stood
+  const placeA = groupOf(PINNED, '11');
+  const shown = [];
+  unpinAllocation(layout, { e: 11, id: 1 }, (place) => shown.push(place));
+  assert.deepEqual(shown, [placeA]);
+  assert.equal(layout.isOpen(PINNED, '11'), false);
+  assert.ok(layout.isOpen(PINNED, '22'));
+  layout.closeAll(PINNED);
+  layout.close(LIVE);
+});
+
+test('a pinned tab reads the allocation\'s name, else #id', () => {
+  assert.equal(pinnedTitle({ e: 5, id: 1843 }), '#1843');
+  assert.equal(pinnedTitle({ e: 5, id: 1843 }, 'json_root'), 'json_root');
+});
+
+test('pinned windows sharing a floating window come back in it, titled, after a reload', async () => {
+  layout.resetLayout();
+  layout.open(LIVE);
+  layout.open(PINNED, '11', { data: { id: 1, name: 'json_root' }, beside: { type: LIVE } });
+  layout.open(PINNED, '22', { data: { id: 2 }, beside: { type: LIVE } });
+  const saved = JSON.parse(JSON.stringify(buildSession()));
+  assert.deepEqual(saved.heap.pinned, [{ e: 11 }, { e: 22 }]);
+  assert.equal(saved.shell.dock.panels['pinned-detail:11'].title, 'json_root');
+  assert.equal(saved.shell.dock.panels['pinned-detail:22'].title, '#2');
+
+  // a reload: nothing open, then the session
+  layout.closeAll(PINNED);
+  layout.close(LIVE);
+  layout.resetLayout();
+  const infos = { 11: { e: 11, id: 1, name: 'json_root' }, 22: { e: 22, id: 2 } };
+  initSession({
+    ...makeDeps({ ...makeUI(), meta: {} }, []),
+    requestAllocInfo: async (e) => infos[e],
+    createPinnedWindow: (info, place) => layout.open(PINNED, String(info.e), { data: info, ...place }),
+  });
+  applySession(saved);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.ok(layout.isOpen(PINNED, '11') && layout.isOpen(PINNED, '22'));
+  assert.equal(layout.isOpen(LIVE), false, 'the live window is not restored');
+  const a = groupOf(PINNED, '11');
+  assert.ok('float' in a, 'floating');
+  assert.ok(sameGroup(a, groupOf(PINNED, '22')), 'in one floating window, as tabs');
+  const panels = buildSession().shell.dock.panels;
+  assert.equal(panels['pinned-detail:11'].title, 'json_root');
+  assert.equal(panels['pinned-detail:22'].title, '#2');
+
+  layout.closeAll(PINNED);
   initSession(makeDeps(ui, posted));
 });

@@ -12,7 +12,7 @@
 // still live there.
 
 import { $, $$, setHtml, delegate } from '../shell/dom.ts';
-import { showPanel } from '../shell/panels.ts';
+import { layout } from '../shell/layout.ts';
 import { esc, fmtNum } from '../fmt.ts';
 import { request } from '../rpc.ts';
 import { buildSession, applySession } from '../session.ts';
@@ -316,7 +316,7 @@ export function gotoAddr(addrHex) {
 export function addAddrMark(addrHex) {
   commit({ type: 'putAddressMark', id: persistentId('address'), name: `addr ${d.ui.addrMarks.length + 1}`, addr: addrHex });
   $('st-info').textContent = `marked ${addrHex} — rename it in the Marks panel`;
-  showPanel('analysis-panel');
+  layout.reveal('analysis-panel');
   markDirty();
 }
 
@@ -359,7 +359,7 @@ export function addBookmark() {
   const b = { name: `mark ${d.ui.bookmarks.length + 1}`, seq: d.ui.state.seq, t: d.ui.state.t };
   commit({ type: 'putBookmark', id: persistentId('bookmark'), ...b });
   $('st-info').textContent = `bookmarked seq ${fmtNum(b.seq)} · ${d.fmtTime(b.t)} — rename it in the Marks panel`;
-  showPanel('analysis-panel');
+  layout.reveal('analysis-panel');
   markDirty();
 }
 
@@ -514,7 +514,7 @@ export function applyMarks(obj, quiet?) {
   // legacy rowBytes/collapseMin/colorMode/playhead fields above
   applySession(obj.session);
   if (!quiet) {
-    showPanel('analysis-panel');
+    layout.reveal('analysis-panel');
     $('st-info').textContent =
       `marks loaded: ${d.ui.tags.length} tags, ${d.ui.names.size} names, ${d.ui.bookmarks.length} time marks, ${d.ui.addrMarks.length} addr marks`;
   }
@@ -601,8 +601,6 @@ function wireAnalysisPanel() {
   });
 
   $('btn-mark').onclick = addBookmark;
-  $('an-save').onclick = saveMarks;
-  $('an-load').onclick = () => $('analysis-file').click();
   $('analysis-file').onchange = async (ev) => {
     const f = ev.target.files[0];
     if (f) {

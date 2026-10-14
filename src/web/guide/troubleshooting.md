@@ -13,4 +13,4 @@ heapviz doctor
 - For **update required**, run `heapviz update` and reconnect.
 - If an assistant cannot see the skill, rerun its `heapviz setup` command.
 
-[Setup](#do:btn-setup) always shows this site's current commands.
+[File → Setup…](#do:btn-setup) always shows this site's current commands.

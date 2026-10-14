@@ -27,9 +27,18 @@ Design decisions that matter:
   are interleaved by default — startup, phases, requests, warnings at heap
   high-water marks — from their own random stream, so the heap records are
   identical with or without them; `--no-logs` omits them.
+- **Intervals** are on by default and make the trace v2
+  ([TRACE-011](02-trace-format.md#trace-011-version-2-and-process-identity))
+  with a header `pid`, `T` thread names, nested `B`/`X` calls per thread,
+  request spans that may end on another thread, and `C` context switches on
+  up to four CPUs that never run one thread twice
+  ([spec/14](14-intervals.md)). They come from their own random stream too,
+  so the heap records are the same with or without them; `--no-intervals`
+  omits them and writes a v1 trace (`--intervals` is still accepted).
 
 Knobs: `--seed --ops --threads --mean-gap --burst-prob --leak-rate
---realloc-rate --arena-base --row-bytes --unit --fields --no-logs --out`.
+--realloc-rate --arena-base --row-bytes --unit --fields --no-logs
+--no-intervals --out`.
 
 `--fields` attaches caller-defined custom fields
 ([TRACE-001](02-trace-format.md#trace-001-general-rules)) to records, so the
@@ -141,9 +150,13 @@ and aimed at what a refactor breaks silently:
   threads run on the same input, so the main thread's optimistic local zoom
   agreeing with the worker's authoritative clamp rests on it;
 - `normAddr` (`heap/addr.js`), and the panel table (`heap/panels.js`);
+- the shell's panel API (`shell/layout.ts`), against a stand-in dock engine:
+  open/close/hook state, toggles, focus and Escape, multi-instance windows and
+  their saved slot, the default layout, and the read path for pre-dock
+  sessions;
 - the **session round-trip** — `buildSession → applySession → buildSession`
-  must be a fixed point, plus drawer docking, address-range validation and
-  playhead restore;
+  must be a fixed point, plus the pre-dock (v1) session read, address-range
+  validation and playhead restore;
 - the **`.heapa` round-trip** — `buildMarks → applyMarks → buildMarks`, plus
   the validation `applyMarks` does on a file off disk (tag color fallback,
   address-mark and per-allocation-color rejection, trace-count mismatch).
@@ -170,9 +183,31 @@ wrong-method and unknown-route errors), per-route request-body limits,
 advertised limits matching enforced ones, and the private-network preflight
 response.
 
-Rendering, pointer interaction and the real worker round trip are still
-verified by hand — against `dist/`, after a build — and there is no fixed
-script.
+`npm run test:browser` runs the **browser smoke suite** (`tests/browser/`,
+Playwright, `playwright.config.ts`): the wiring no unit test reaches — the dock
+engine, canvases drawn by the worker and its wasm, menus, pointer drags — along
+a few short flows against the built `dist/`, served by `serve.py`. It needs
+`./build.sh` first and says so when the build is missing; it uses the system
+Chromium (`HEAPVIZ_CHROMIUM` overrides). The flows:
+
+- the demo loads: the address map and both strips paint, the Heap, Logs and
+  Intervals domain chips are present, and no page or console error is raised
+  (every flow fails on one);
+- pinning replaces the live Allocation window with `#<id>`; pinning a second
+  leaves the first untouched;
+- unpinning closes only that window and shows the allocation in the live one;
+- two pinned tabs combine into one floating window, and Move to new window
+  takes one out again;
+- a tab dropped on the lower half of the left edge splits it top/bottom;
+- a reload restores the pinned windows, their grouping and the split edge;
+- View → Logs toggles the Logs panel, and the palette's Reset layout restores it;
+- a `call ▸` row in Events opens the Interval window and marks Tracks/Stacks;
+- the Logs panel marks the playhead's line after a jump and during play.
+
+It stays small and fast (under a minute) and outside the unit loop: neither
+`node --test` nor `tsconfig.test.json` loads it. A change to UI wiring gets a
+flow here or extends one; everything else stays a unit test. Visual judgment
+— does it look right — is still a person's.
 `window.__heap_visualizer` exposes UI state for console poking.
 
 ## TOOL-004: Agent-analysis benchmark corpus

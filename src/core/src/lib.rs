@@ -9,6 +9,7 @@ mod filter_plan;
 mod log_tests;
 pub mod agent;
 pub mod analysis;
+pub mod domain;
 pub mod json;
 pub mod logs;
 pub mod parse;
@@ -110,9 +111,10 @@ struct App {
     /// copy so `named()` can resolve.
     names: Vec<(u32, String)>,
     analysis: analysis::Document,
-    /// The last log query and its matches, so paging and locate (which the
-    /// Logs panel calls as the playhead moves) do not rescan message bytes.
-    log_cache: Option<(logs::LogQuery, logs::Matches)>,
+    /// The last point-domain query and its matches, so paging and locate
+    /// (which the Logs panel calls as the playhead moves) do not rescan
+    /// message bytes.
+    query_cache: domain::QueryCache,
 }
 
 impl App {
@@ -132,7 +134,7 @@ impl App {
             tag_labels: Vec::new(),
             names: Vec::new(),
             analysis: analysis::Document::default(),
-            log_cache: None,
+            query_cache: domain::QueryCache::default(),
         }
     }
 }
@@ -229,13 +231,22 @@ impl Engine {
         agent::timeline(&self.app, source, domain, from, to, bins)
     }
 
+    /// API-008 with landmarks as asked and log records counted in
+    /// `omitted.logs` rather than returned.
     pub fn agent_stream_context(&self, source: &str, center: u32, before: u32, after: u32, landmarks: bool) -> Result<serde_json::Value, agent::Error> {
-        agent::stream_context(&self.app, source, center, before, after, landmarks)
+        let options = agent::ContextOptions { landmarks, logs: false };
+        agent::stream_context(&self.app, source, center, before, after, options.into())
+    }
+
+    /// API-008 with every option: landmarks and log records each included
+    /// or not.
+    pub fn agent_stream_context_with(&self, source: &str, center: u32, before: u32, after: u32, options: impl Into<agent::ContextInclude>) -> Result<serde_json::Value, agent::Error> {
+        agent::stream_context(&self.app, source, center, before, after, options.into())
     }
 
     /// `hp_logs_meta_json`'s document.
     pub fn logs_meta_json(&mut self) -> String {
-        logs::meta_json(&mut self.app.out, &self.app.store.logs);
+        logs::meta_json(&mut self.app.out, &self.app.store.dom.logs);
         self.app.out.clone()
     }
 
@@ -249,6 +260,73 @@ impl Engine {
     pub fn logs_locate_json(&mut self, request: &str) -> String {
         write_logs_locate(&mut self.app, request.as_bytes());
         self.app.out.clone()
+    }
+
+    /// `hp_domains_json`'s document: every domain's descriptor.
+    pub fn domains_json(&mut self) -> String {
+        write_domains_json(&mut self.app);
+        self.app.out.clone()
+    }
+
+    /// `hp_domain_query`'s document for a JSON request `{domain, …}`.
+    pub fn domain_query_json(&mut self, request: &str) -> String {
+        write_domain_query(&mut self.app, request.as_bytes());
+        self.app.out.clone()
+    }
+
+    /// `hp_domain_state`'s document for a JSON request `{domain, seq}`.
+    pub fn domain_state_json(&mut self, request: &str) -> String {
+        write_domain_state(&mut self.app, request.as_bytes());
+        self.app.out.clone()
+    }
+
+    /// `hp_domain_locate`'s document for a JSON request `{domain, seq, …}`.
+    pub fn domain_locate_json(&mut self, request: &str) -> String {
+        write_domain_locate(&mut self.app, request.as_bytes());
+        self.app.out.clone()
+    }
+
+    /// `hp_record_json`'s document: spine record `seq`'s generic summary.
+    pub fn record_json(&mut self, seq: u32) -> String {
+        write_record_json(&mut self.app, seq);
+        self.app.out.clone()
+    }
+
+    /// `hp_interval_window`'s document for a JSON request (IVL-008).
+    pub fn interval_window_json(&mut self, request: &str) -> String {
+        write_interval_window(&mut self.app, request.as_bytes());
+        self.app.out.clone()
+    }
+
+    /// The interval window as data (IVL-008): the drawn intervals with
+    /// their lanes, the culled count, and whether the cap was hit.
+    pub fn interval_window(&self, request: &serde_json::Value) -> Result<domain::interval::Window, String> {
+        let req = domain::interval::WindowRequest::parse(&self.app.store, request)?;
+        Ok(domain::interval_window::window(&self.app.store, &req))
+    }
+
+    /// `hp_tracks_json`'s document: `{threads, cpus}` (IVL-008).
+    pub fn tracks_json(&mut self) -> String {
+        write_tracks_json(&mut self.app);
+        self.app.out.clone()
+    }
+
+    /// `hp_lanes_json`'s document: the timeline lanes, bottom first.
+    pub fn lanes_json(&mut self) -> String {
+        write_lanes_json(&mut self.app);
+        self.app.out.clone()
+    }
+
+    /// A domain's state as of `seq` records applied, for a domain that has
+    /// one (the mark in force); `None` otherwise or for an unknown domain.
+    pub fn domain_state(&self, domain: &str, seq: u32) -> Option<serde_json::Value> {
+        domain::get(&self.app.store, domain::by_name(domain)?)?.state_at(seq)
+    }
+
+    /// One bounded page of any domain's records — the core of a generic
+    /// `GET /api/v1/domains/{d}/records`, without `traceId`.
+    pub fn agent_domain_records(&self, domain: &str, params: &domain::RecordParams) -> Result<serde_json::Value, agent::Error> {
+        agent::domain_records(&self.app, domain, params)
     }
 
     /// One bounded page of `GET /api/v1/logs` (LOG-008), without `traceId`,
@@ -382,7 +460,7 @@ fn parse_begin(a: &mut App) {
     a.tag_labels.clear();
     a.names.clear();
     a.analysis = analysis::Document::default();
-    a.log_cache = None;
+    a.query_cache = domain::QueryCache::default();
 }
 
 #[no_mangle]
@@ -405,7 +483,7 @@ fn parse_end(a: &mut App) -> u32 {
         a.view.reset(&a.store);
         a.ev_filtered = Vec::new();
         a.ev_dirty = true;
-        a.log_cache = None;
+        a.query_cache = domain::QueryCache::default();
     }
     a.store.len()
 }
@@ -555,6 +633,8 @@ fn write_warnings_json(a: &mut App) {
         }
         o.push_str(&format!("{{\"seq\":{},\"code\":{},\"kind\":", w.seq, w.code));
         push_json_str(o, store::warn_code_name(w.code));
+        o.push_str(",\"domain\":");
+        push_json_str(o, store::warn_domain(w.code));
         o.push_str(",\"msg\":");
         push_json_str(o, warn_name(w.code));
         o.push_str(&format!(",\"detail\":{},\"detailExact\":\"{}\"}}", w.detail as f64, w.detail));
@@ -681,9 +761,9 @@ pub extern "C" fn hp_center_x_for_event(e: u32) -> f64 {
     let ei = e as usize;
     let creator = match s.op[ei] {
         OP_F => s.target(e),
-        // a custom event has no address to pan to
-        OP_E | OP_L => return a.cfg.x_pan,
-        _ => e,
+        OP_M | OP_R => e,
+        // any other record has no address to pan to
+        _ => return a.cfg.x_pan,
     };
     if creator == NONE_U32 {
         return a.cfg.x_pan;
@@ -844,7 +924,7 @@ pub extern "C" fn hp_filter_apply(len: u32) {
             return;
         }
     };
-    let mut bits = vec![0u64; (a.store.len() as usize).div_ceil(64)];
+    let mut bits = vec![0u64; a.store.row_words()];
     let matches = filter_plan::scan(&plan, &ctx, &mut bits);
     let creators = plan.creator_count();
     let mode = a.cfg.filter.mode;
@@ -985,13 +1065,10 @@ fn tag_filter_matches(a: &mut App, tag: u32) -> u32 {
     let Some(bits) = a.cfg.filter.matches.as_ref() else {
         return 0;
     };
-    let to_tag: Vec<u32> = (0..a.store.len())
-        .filter(|&e| {
-            matches!(a.store.op[e as usize], OP_M | OP_R)
-                && bits
-                    .get(e as usize / 64)
-                    .is_some_and(|word| word & (1 << (e % 64)) != 0)
-        })
+    let to_tag: Vec<u32> = a
+        .store
+        .row_bits_events(bits)
+        .filter(|&e| matches!(a.store.op[e as usize], OP_M | OP_R))
         .collect();
     let tag = tag.min(255) as u8;
     for &e in &to_tag {
@@ -1018,7 +1095,7 @@ fn tag_seq_range(a: &mut App, lo: u32, hi: u32, tag: u32, by_free: u32) -> u32 {
         let s = &a.store;
         let f = &a.cfg.filter;
         let filtered = f.mode != render::FILTER_OFF;
-        (lo..hi.min(s.len()))
+        s.heap_events(lo, hi)
             .filter_map(|e| {
                 let op = s.op[e as usize];
                 if by_free != 0 {
@@ -1132,9 +1209,17 @@ pub extern "C" fn hp_tags_clear() {
 pub extern "C" fn hp_retag(from: u32, to: u32) -> u32 {
     let a = unsafe { &mut *app() };
     let (from, to) = (from.min(255) as u8, to.min(255) as u8);
-    let events: Vec<u32> = (0..a.store.len())
-        .filter(|&e| a.store.has_tag(e, from))
-        .collect();
+    let s = &a.store;
+    // a tag's members are its bitset over heap rows; tag 0 (untagged) has no
+    // bitset, so it alone walks the heap rows
+    let events: Vec<u32> = match (from, s.tag_members.get(from as usize)) {
+        (0, _) => (0..s.heap_len() as usize)
+            .map(|h| s.heap_seq(h))
+            .filter(|&e| s.has_tag(e, 0))
+            .collect(),
+        (_, Some(bits)) => s.row_bits_events(bits).collect(),
+        (_, None) => Vec::new(),
+    };
     for &e in &events {
         a.store.remove_tag(e, from);
         if to != 0 {
@@ -1154,11 +1239,10 @@ pub extern "C" fn hp_tags_dump_json() {
 }
 
 fn tags_dump_json(s: &Store, o: &mut String) {
+    // each tag's bitset over heap rows, read back as ascending spine indexes
     let mut lists: Vec<Vec<u32>> = vec![Vec::new(); 256];
-    for e in 0..s.len() {
-        for t in s.tag_ids(e) {
-            lists[t as usize].push(e);
-        }
+    for (t, bits) in s.tag_members.iter().enumerate().skip(1) {
+        lists[t] = s.row_bits_events(bits).collect();
     }
     o.clear();
     o.push('{');
@@ -1433,23 +1517,31 @@ fn push_event_json(o: &mut String, s: &Store, e: u32) {
             "{{\"seq\":{},\"op\":{},\"t\":{},\"e\":null,\"title\":",
             e, OP_E, s.t[ei] as f64
         ));
-        if s.label_at(e) != NONE_U32 {
-            push_json_str(o, &s.ev_labels[s.label_at(e) as usize]);
-        } else {
-            o.push_str("null");
+        match domain::marks::title(s, e) {
+            Some(title) => push_json_str(o, title),
+            None => o.push_str("null"),
         }
         o.push_str(",\"thr\":");
-        if s.thr_idx[ei] != NONE_U16 {
-            o.push_str(&format!("{}", s.thrs[s.thr_idx[ei] as usize]));
-        } else {
-            o.push_str("null");
-        }
-        if s.extra_at(e) != NONE_U32 {
-            o.push_str(",\"extra\":{");
-            o.push_str(&s.extras[s.extra_at(e) as usize]);
-            o.push('}');
+        domain::push_thr(o, s, e);
+        if let Some(fields) = domain::marks::fields(s, e) {
+            o.push_str(",\"extra\":");
+            domain::push_fields(o, Some(fields));
         }
         o.push('}');
+        return;
+    }
+    // Any other domain's record touches no allocation either: without a
+    // bespoke row it is listed by its generic summary, with `op` and a null
+    // `e` added — never by reading heap columns it does not have.
+    if !s.is_heap(e) {
+        let mut one = String::new();
+        if let Some((row, d)) = domain::get(s, s.domain_of(e)).and_then(|d| Some((d.row_of(e)?, d))) {
+            d.record_json(row, &mut one);
+        }
+        match one.strip_prefix('{') {
+            Some(rest) => o.push_str(&format!("{{\"op\":{},\"e\":null,{rest}", s.op[ei])),
+            None => o.push_str("null"),
+        }
         return;
     }
     // an F row carries no geometry of its own: report the allocation it kills
@@ -1500,11 +1592,7 @@ fn write_allocation_json(o: &mut String, s: &Store, e: u32) -> bool {
         o.push_str("null");
     }
     o.push_str(",\"thread\":");
-    if s.thr_idx[i] != NONE_U16 {
-        o.push_str(&s.thrs[s.thr_idx[i] as usize].to_string());
-    } else {
-        o.push_str("null");
-    }
+    domain::push_thr(o, s, e);
     let death = s.death(e);
     o.push_str(",\"death\":");
     if death != NONE_U32 {
@@ -1550,17 +1638,14 @@ fn query_json(a: &App, source: &str, from: u32, count: u32) -> String {
             Ok(plan) => plan,
             Err(error) => return query_diagnostic(&error.message, error.span.start, error.span.end),
         };
-        let mut found = vec![0_u64; (a.store.len() as usize).div_ceil(64)];
+        let mut found = vec![0_u64; a.store.row_words()];
         filter_plan::scan(&plan, &context, &mut found);
         bits = Some(found);
     }
-    let matches: Vec<u32> = (0..a.store.len())
-        .filter(|&e| matches!(a.store.op[e as usize], OP_M | OP_R))
-        .filter(|&e| {
-            bits.as_ref().is_none_or(|found| {
-                found[e as usize / 64] & (1_u64 << (e % 64)) != 0
-            })
-        })
+    // the scan is already intersected with the creators
+    let matches: Vec<u32> = a
+        .store
+        .row_bits_events(bits.as_deref().unwrap_or(&a.store.dom.heap.creators))
         .collect();
     let lo = (from as usize).min(matches.len());
     let hi = lo.saturating_add(count as usize).min(matches.len());
@@ -1641,21 +1726,34 @@ fn ensure_ev_filtered(a: &mut App) {
     a.ev_dirty = false;
     let s = &a.store;
     let f = &a.cfg.filter;
+    // Membership is decided in heap rows: a log record has no allocation to
+    // pass a filter (the filter language is over allocations, DOM-003), so
+    // the walk never visits another domain's records, and the record kind is
+    // read off the heap prefix sums rather than the spine's op column.
+    let (green, red) = (&s.dom.heap.green_pre, &s.dom.heap.red_pre);
+    let pass = |h: usize| {
+        f.mode == render::FILTER_OFF
+            || f.matches.as_ref().is_none_or(|bits| {
+                bits.get(h / 64).is_some_and(|w| w & (1 << (h % 64)) != 0)
+            })
+    };
     let mut list = Vec::new();
-    for e in 0..s.len() {
-        // a custom event or a log record has no allocation to pass a filter,
-        // so it drops out of the filtered list exactly as an F of an unknown
-        // id does (the filter language is over allocations, DOM-003)
-        if matches!(s.op[e as usize], OP_E | OP_L) {
-            continue;
-        }
-        let creator = if s.op[e as usize] == OP_F {
-            s.target(e)
+    for h in 0..s.heap_len() as usize {
+        // a creator (M/R) passes as itself and an F as the allocation it
+        // frees; a custom event (neither mark) has no allocation and drops
+        // out exactly as an F of an unknown id does
+        let creator = if green[h + 1] != green[h] {
+            Some(h)
+        } else if red[h + 1] != red[h] {
+            match s.dom.heap.target[h] {
+                NONE_U32 => None,
+                t => Some(s.heap_rank(t) as usize),
+            }
         } else {
-            e
+            None
         };
-        if creator != NONE_U32 && f.pass(s, creator) {
-            list.push(e);
+        if creator.is_some_and(pass) {
+            list.push(s.heap_seq(h));
         }
     }
     a.ev_filtered = list;
@@ -1718,80 +1816,192 @@ pub extern "C" fn hp_events_filtered_pos(seq: u32) -> u32 {
 // logs (LOG-009)
 // ---------------------------------------------------------------------------
 
-/// A browser log request: `{minLevel, text, seqLo?, seqHi?, from, count}`
-/// for a query, `{minLevel, text, seq}` for locate. `minLevel` is 0–5 or a
-/// level name; numbers are read leniently since they come from JavaScript.
-#[derive(serde::Deserialize, Default)]
-#[serde(rename_all = "camelCase", default)]
-struct LogsRequest {
-    min_level: serde_json::Value,
-    text: Option<String>,
-    seq_lo: Option<f64>,
-    seq_hi: Option<f64>,
-    from: Option<f64>,
-    count: Option<f64>,
-    seq: Option<f64>,
-}
-
-fn clamp_u32(v: f64) -> u32 {
-    if v.is_nan() {
-        0
-    } else {
-        v.clamp(0.0, u32::MAX as f64) as u32
-    }
-}
-
-impl LogsRequest {
-    fn query(&self) -> logs::LogQuery {
-        logs::LogQuery {
-            min_level: logs::level_operand(&self.min_level).unwrap_or(0),
-            text: self.text.clone().unwrap_or_default(),
-            seq_lo: self.seq_lo.map(clamp_u32),
-            seq_hi: self.seq_hi.map(clamp_u32),
+/// Run `f` on domain `id` with the engine's query cache, after reading the
+/// JSON request `input`. `None` when the input is not a request object.
+fn with_domain_request(
+    a: &mut App,
+    input: &[u8],
+    id: Option<domain::DomainId>,
+    check_params: bool,
+    f: impl FnOnce(&dyn domain::Domain, &domain::Request, &mut domain::QueryCache, &mut String),
+) -> Result<(), String> {
+    let raw: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(input).map_err(|_| "invalid request")?;
+    let req: domain::Request = serde_json::from_value(serde_json::Value::Object(raw.clone())).map_err(|_| "invalid request")?;
+    let id = match id {
+        Some(id) => id,
+        None => req
+            .domain
+            .as_deref()
+            .and_then(domain::by_name)
+            .ok_or("unknown domain")?,
+    };
+    let d = domain::get(&a.store, id).ok_or("unknown domain")?;
+    if check_params {
+        let known = d.query_params();
+        let shared = ["domain", "from", "count", "seq"];
+        if let Some(k) = raw.keys().find(|k| !shared.contains(&k.as_str()) && !known.contains(&k.as_str())) {
+            return Err(format!("unknown parameter {k}"));
         }
     }
-}
-
-/// Make `a.log_cache` hold the matches of `q`, scanning only when the query
-/// changed since the last call.
-fn ensure_log_matches(a: &mut App, q: logs::LogQuery) {
-    if !matches!(&a.log_cache, Some((k, _)) if *k == q) {
-        let m = logs::Matches::new(&a.store.logs, &q);
-        a.log_cache = Some((q, m));
-    }
+    let mut out = std::mem::take(&mut a.out);
+    f(d.as_ref(), &req, &mut a.query_cache, &mut out);
+    a.out = out;
+    Ok(())
 }
 
 fn write_logs_query(a: &mut App, input: &[u8]) {
-    let Ok(req) = serde_json::from_slice::<LogsRequest>(input) else {
+    if with_domain_request(a, input, Some(domain::LOGS), true, |d, req, cache, out| d.query_json(req, cache, out)).is_err() {
         a.out = "{\"total\":0,\"from\":0,\"rows\":[],\"error\":\"invalid log query\"}".into();
-        return;
-    };
-    let from = clamp_u32(req.from.unwrap_or(0.0));
-    let count = clamp_u32(req.count.unwrap_or(logs::PAGE_MAX as f64));
-    ensure_log_matches(a, req.query());
-    let mut out = std::mem::take(&mut a.out);
-    let m = &a.log_cache.as_ref().unwrap().1;
-    logs::query_json(&mut out, &a.store, m, from, count);
-    a.out = out;
+    }
 }
 
 fn write_logs_locate(a: &mut App, input: &[u8]) {
-    let Ok(req) = serde_json::from_slice::<LogsRequest>(input) else {
+    if with_domain_request(a, input, Some(domain::LOGS), true, |d, req, cache, out| d.locate_json(req, cache, out)).is_err() {
         a.out = "{\"row\":-1,\"total\":0,\"error\":\"invalid log query\"}".into();
-        return;
-    };
-    let seq = clamp_u32(req.seq.unwrap_or(0.0));
-    ensure_log_matches(a, req.query());
-    let m = &a.log_cache.as_ref().unwrap().1;
-    let logs = &a.store.logs;
-    a.out = format!("{{\"row\":{},\"total\":{}}}", m.locate(logs, seq), m.total(logs));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// domains (DOM-003): the generic surface every domain answers through
+// ---------------------------------------------------------------------------
+
+fn write_domains_json(a: &mut App) {
+    let all: Vec<serde_json::Value> = domain::all(&a.store).map(|d| d.descriptor()).collect();
+    a.out = serde_json::Value::Array(all).to_string();
+}
+
+fn write_domain_query(a: &mut App, input: &[u8]) {
+    if let Err(error) = with_domain_request(a, input, None, true, |d, req, cache, out| d.query_json(req, cache, out)) {
+        a.out = serde_json::json!({ "total": 0, "from": 0, "rows": [], "error": error }).to_string();
+    }
+}
+
+fn write_domain_locate(a: &mut App, input: &[u8]) {
+    if let Err(error) = with_domain_request(a, input, None, true, |d, req, cache, out| d.locate_json(req, cache, out)) {
+        a.out = serde_json::json!({ "row": -1, "total": 0, "error": error }).to_string();
+    }
+}
+
+fn write_domain_state(a: &mut App, input: &[u8]) {
+    let state = with_domain_request(a, input, None, false, |d, req, _, out| {
+        *out = d.state_at(req.seq()).map_or_else(|| "null".to_string(), |v| v.to_string());
+    });
+    if let Err(error) = state {
+        a.out = serde_json::json!({ "error": error }).to_string();
+    }
+}
+
+fn write_record_json(a: &mut App, seq: u32) {
+    let s = &a.store;
+    a.out.clear();
+    let found = domain::get(s, s.domain_of(seq)).and_then(|d| Some((d.row_of(seq)?, d)));
+    match found {
+        Some((row, d)) => d.record_json(row, &mut a.out),
+        None => a.out.push_str("null"),
+    }
+}
+
+fn write_interval_window(a: &mut App, input: &[u8]) {
+    match serde_json::from_slice::<serde_json::Value>(input) {
+        Ok(request) => domain::interval::view(&a.store).window_json(&request, &mut a.out),
+        Err(_) => a.out = r#"{"rows":[],"culled":0,"truncated":false,"error":"invalid request"}"#.into(),
+    }
+}
+
+fn write_tracks_json(a: &mut App) {
+    a.out = domain::interval::view(&a.store).tracks_value().to_string();
+}
+
+fn write_lanes_json(a: &mut App) {
+    let lanes: Vec<serde_json::Value> = domain::all(&a.store)
+        .flat_map(|d| domain::lanes_value(d.name(), d.lanes()).as_array().cloned().unwrap_or_default())
+        .collect();
+    a.out = serde_json::Value::Array(lanes).to_string();
+}
+
+/// Every domain's descriptor: `[{id, name, kinds, shape, count, lanes,
+/// fields, query, limits}]`.
+#[no_mangle]
+pub extern "C" fn hp_domains_json() {
+    let a = unsafe { &mut *app() };
+    write_domains_json(a);
+    ret_str(&a.out);
+}
+
+/// One page of a domain's query: the input buffer holds `{domain, …query,
+/// from, count}`; the result is `{total, from, rows}` in the domain's keys.
+#[no_mangle]
+pub extern "C" fn hp_domain_query(len: u32) {
+    let a = unsafe { &mut *app() };
+    let input = a.buf[..len as usize].to_vec();
+    write_domain_query(a, &input);
+    ret_str(&a.out);
+}
+
+/// The interval window (IVL-008): the input buffer holds `{track: {thr,
+/// pid?} | {cpu}, axis: "seq"|"t", lo, hi, width, category?}`; the result is
+/// `{rows:[{ivl, name, category, lane, depth, start, end, open, thr, …}],
+/// culled, truncated}`, or the same with `error`.
+#[no_mangle]
+pub extern "C" fn hp_interval_window(len: u32) {
+    let a = unsafe { &mut *app() };
+    let input = a.buf[..len as usize].to_vec();
+    write_interval_window(a, &input);
+    ret_str(&a.out);
+}
+
+/// The interval tracks: `{threads:[{thr, pid?, name, calls, spans}],
+/// cpus:[{cpu, slices}]}`.
+#[no_mangle]
+pub extern "C" fn hp_tracks_json() {
+    let a = unsafe { &mut *app() };
+    write_tracks_json(a);
+    ret_str(&a.out);
+}
+
+/// `{domain, seq}` → the domain's state with `seq` records applied (the
+/// interval domain's call stacks, open spans and CPUs; the mark in force),
+/// or `null` for a domain without one.
+#[no_mangle]
+pub extern "C" fn hp_domain_state(len: u32) {
+    let a = unsafe { &mut *app() };
+    let input = a.buf[..len as usize].to_vec();
+    write_domain_state(a, &input);
+    ret_str(&a.out);
+}
+
+/// `{row, total}` for `{domain, …query, seq}`: the last match at or before
+/// `seq`.
+#[no_mangle]
+pub extern "C" fn hp_domain_locate(len: u32) {
+    let a = unsafe { &mut *app() };
+    let input = a.buf[..len as usize].to_vec();
+    write_domain_locate(a, &input);
+    ret_str(&a.out);
+}
+
+/// The generic summary of spine record `seq`, whatever its domain, or
+/// `null`.
+#[no_mangle]
+pub extern "C" fn hp_record_json(seq: u32) {
+    let a = unsafe { &mut *app() };
+    write_record_json(a, seq);
+    ret_str(&a.out);
+}
+
+/// The timeline lanes the loaded trace draws, bottom first.
+#[no_mangle]
+pub extern "C" fn hp_lanes_json() {
+    let a = unsafe { &mut *app() };
+    write_lanes_json(a);
+    ret_str(&a.out);
 }
 
 /// `{count, byLevel:[n0..n5], loggers:[{name,count}]}`.
 #[no_mangle]
 pub extern "C" fn hp_logs_meta_json() {
     let a = unsafe { &mut *app() };
-    logs::meta_json(&mut a.out, &a.store.logs);
+    logs::meta_json(&mut a.out, &a.store.dom.logs);
     ret_str(&a.out);
 }
 
@@ -1887,16 +2097,19 @@ mod tests {
         let full = base.with_fields(&fields);
         let plan =
             filter_plan::lower(&expr, &full).unwrap_or_else(|e| panic!("{source}: {}", e.message));
-        let mut bits = vec![0u64; (a.store.len() as usize).div_ceil(64).max(1)];
+        let mut bits = vec![0u64; a.store.row_words().max(1)];
         let matched = filter_plan::scan(&plan, &full, &mut bits);
 
+        // the oracle walks the spine and evaluates by spine index; the plan's
+        // bits are heap rows, so this is also the boundary conversion's test
         let mut oracle = vec![0u64; bits.len()];
         let mut counted = 0;
         for e in 0..a.store.len() {
             if matches!(a.store.op[e as usize], OP_M | OP_R)
                 && filter_eval::evaluate(&expr, &full, e).unwrap()
             {
-                oracle[e as usize / 64] |= 1 << (e % 64);
+                let h = a.store.heap_row(e).unwrap();
+                oracle[h / 64] |= 1 << (h % 64);
                 counted += 1;
             }
         }
@@ -1908,9 +2121,7 @@ mod tests {
     /// The creator events a source matches, through the plan.
     fn matching(a: &App, labels: &[String], source: &str) -> Vec<u32> {
         let bits = match_bits(a, labels, source);
-        (0..a.store.len())
-            .filter(|&e| bits[e as usize / 64] >> (e % 64) & 1 == 1)
-            .collect()
+        a.store.row_bits_events(&bits).collect()
     }
 
     fn tags(store: &Store) -> Vec<Vec<u8>> {
@@ -2020,7 +2231,7 @@ mod tests {
             assert_eq!((s.n_malloc, s.n_free, s.n_realloc), (2, 2, 1));
             assert_eq!(s.warn_counts.iter().sum::<u32>(), 0);
             // labels intern; an E without a title has none
-            assert_eq!(s.ev_labels, vec!["phase: warm up", "phase: steady"]);
+            assert_eq!(s.dom.marks.labels, vec!["phase: warm up", "phase: steady"]);
             assert_eq!(s.label_at(0), 0);
             assert_eq!(s.label_at(1), NONE_U32);
             assert_eq!(s.label_at(7), NONE_U32);
@@ -2086,7 +2297,7 @@ mod tests {
         let mut a = load(SAMPLE_WITH_EVENTS);
         a.cfg.filter.mode = render::FILTER_DIM;
         // every bit set, the custom events' included
-        a.cfg.filter.matches = Some(vec![u64::MAX; (a.store.len() as usize).div_ceil(64)]);
+        a.cfg.filter.matches = Some(vec![u64::MAX; a.store.row_words()]);
         a.ev_dirty = true;
         ensure_ev_filtered(&mut a);
         assert!(
@@ -3345,7 +3556,7 @@ not json at all
             let fields = filter_eval::FieldValues::resolve(&expr, &a.store);
             let full = base.with_fields(&fields);
             let plan = filter_plan::lower(&expr, &full).unwrap();
-            let mut bits = vec![0u64; (a.store.len() as usize).div_ceil(64).max(1)];
+            let mut bits = vec![0u64; a.store.row_words().max(1)];
 
             // everything that allocates — parsing, checking, resolving custom
             // fields, lowering, the output buffer — has happened by now
@@ -3494,6 +3705,49 @@ not json at all
             let hits = matching(&a, &labels, source).len();
             nonempty += usize::from(hits > 0);
             proper += usize::from(hits > 0 && hits < creators);
+        }
+
+        // The same corpus over the same heap records with a log line before
+        // every one: the plan runs in heap rows while `seq`, `time`, thread,
+        // death links and the oracle are spine-indexed, so every boundary
+        // conversion is exercised. Tags and the name follow the heap rows.
+        let mut mixed_src = String::new();
+        for (i, line) in src.lines().enumerate() {
+            if line.contains("\"op\":\"H\"") || line.trim().is_empty() || line.starts_with('#') {
+                mixed_src.push_str(line);
+            } else {
+                mixed_src.push_str(&format!(
+                    "{{\"op\":\"L\",\"thr\":{},\"msg\":\"before {i}\",\"size\":9}}\n{line}",
+                    i % 3
+                ));
+            }
+            mixed_src.push('\n');
+        }
+        let mut m = load(&mixed_src);
+        assert_eq!(m.store.heap_len(), a.store.heap_len());
+        assert!(m.store.n_log > 0 && !m.store.hrank.is_empty());
+        for h in 0..a.store.heap_len() as usize {
+            let (e, me) = (a.store.heap_seq(h), m.store.heap_seq(h));
+            for tag in a.store.tag_ids(e).collect::<Vec<_>>() {
+                m.store.add_tag(me, tag);
+            }
+        }
+        let named_row = a.store.heap_row(named).unwrap();
+        m.names = vec![(m.store.heap_seq(named_row), "anchor".to_string())];
+        let ids = |app: &App, events: Vec<u32>| -> Vec<u64> {
+            events.into_iter().map(|e| app.store.id(e)).collect()
+        };
+        for source in corpus {
+            let mixed = matching(&m, &labels, source);
+            // positions differ between the traces, so only expressions that
+            // do not read one are expected to select the same allocations
+            if !source.contains(".seq") && !source.contains(".time") && !source.contains("lifetime") {
+                assert_eq!(
+                    ids(&m, mixed),
+                    ids(&a, matching(&a, &labels, source)),
+                    "`{source}` selects different allocations once logs are present"
+                );
+            }
         }
         // a corpus where everything matched nothing would pass the equivalence
         // assertion while testing nothing

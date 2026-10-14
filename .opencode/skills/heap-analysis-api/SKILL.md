@@ -127,7 +127,8 @@ must not exceed 200.
   "center":500,
   "before":10,
   "after":10,
-  "includeLandmarks":true
+  "includeLandmarks":true,
+  "includeLogs":false
 }
 ```
 
@@ -135,7 +136,9 @@ The raw before/after window may span at most 100 events.
 Custom records appear as `operation:"event"` with their producer-supplied
 `title`; allocation/free/realloc records expose creator identity and operation
 semantics. Custom-record fields beyond the title are not returned by this
-endpoint.
+endpoint. Log records in the window are left out unless `includeLogs` is true
+(then they appear as `operation:"log"` with `level`, `logger`, `msg`,
+`fields`); when left out, `omitted.logs` counts them.
 
 ## Logs
 
@@ -148,6 +151,16 @@ parameter is optional: `minLevel` is `trace`…`fatal` (records at or above it),
 `next` for the next page. Logs are evidence about what the program was doing
 at a sequence, not proof that it caused a heap event — correlate by sequence
 range, e.g. errors near a growth window found with the timeline.
+
+## Other evidence domains
+
+`GET /api/v1/domains` lists every evidence domain (`heap`, `marks`, `logs`)
+with its record count, kinds, field catalog, and `query.params` — the
+domain's own record parameters. `GET
+/api/v1/domains/{domain}/records?seqLo=&seqHi=&from=&count=&…` pages any
+domain's records the same way as `/logs` (for `marks`, `text` matches the
+title). `/logs` is this page for `logs`. An unknown domain is
+`404 unknown_domain`; a parameter the domain does not accept is `400`.
 
 ## Warnings
 

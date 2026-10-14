@@ -236,27 +236,33 @@ impl View {
     }
 
     /// Seek the playhead to `target` events applied.
+    ///
+    /// Replay walks heap rows, not the spine: only heap records change the
+    /// live set (DOM-002), so the records of other domains between `cur` and
+    /// `target` are skipped by two rank lookups rather than visited, and both
+    /// candidate costs are counted in heap rows.
     pub fn seek(&mut self, s: &Store, target: u32) {
         let target = target.min(s.len());
         if target == self.cur {
             return;
         }
+        let (h_cur, h_target) = (s.heap_rank(self.cur), s.heap_rank(target));
         // candidate: rebuild from the best snapshot at or before target
         let snap = best_snap(s, target);
         let snap_pos = snap.map(|i| s.snaps[i].0).unwrap_or(0);
-        let snap_cost =
-            (target - snap_pos) as u64 + self.live_count as u64 / 4 + snap_pos.min(1) as u64;
-        let incr_cost = (target as i64 - self.cur as i64).unsigned_abs();
+        let snap_cost = (h_target - s.heap_rank(snap_pos)) as u64
+            + self.live_count as u64 / 4
+            + snap_pos.min(1) as u64;
+        let incr_cost = (h_target as i64 - h_cur as i64).unsigned_abs();
 
         if incr_cost <= snap_cost {
-            while self.cur < target {
-                self.apply_fwd(s, self.cur);
-                self.cur += 1;
+            for h in h_cur as usize..h_target as usize {
+                self.apply_fwd(s, s.heap_seq(h));
             }
-            while self.cur > target {
-                self.cur -= 1;
-                self.apply_bwd(s, self.cur);
+            for h in (h_target as usize..h_cur as usize).rev() {
+                self.apply_bwd(s, s.heap_seq(h));
             }
+            self.cur = target;
         } else {
             self.live.clear();
             self.birth_counts.clear();
@@ -265,18 +271,14 @@ impl View {
             self.live_count = 0;
             self.live_bytes = 0;
             if let Some(i) = snap {
-                let (pos, lv) = (&s.snaps[i].0, s.snaps[i].1.clone());
-                self.cur = *pos;
-                for e in lv {
+                for &e in &s.snaps[i].1 {
                     self.insert_alloc(s, e);
                 }
-            } else {
-                self.cur = 0;
             }
-            while self.cur < target {
-                self.apply_fwd(s, self.cur);
-                self.cur += 1;
+            for h in s.heap_rank(snap_pos) as usize..h_target as usize {
+                self.apply_fwd(s, s.heap_seq(h));
             }
+            self.cur = target;
         }
         // show_all's layout comes from all_rows (playhead-independent by
         // construction) plus pins — a seek cannot change it, so don't pay a
@@ -413,11 +415,7 @@ impl View {
     /// the current row_bytes (same span/cap rules as live occupancy).
     fn build_all_rows(&mut self, s: &Store) {
         let mut set: std::collections::HashSet<u64> = std::collections::HashSet::new();
-        for e in 0..s.len() {
-            let op = s.op[e as usize];
-            if op != OP_M && op != OP_R {
-                continue;
-            }
+        for e in s.row_bits_events(&s.dom.heap.creators) {
             let a = s.addr(e);
             let r0 = self.row_of(a);
             let r1 = self.row_of(a.saturating_add(s.span(e)).saturating_sub(1));

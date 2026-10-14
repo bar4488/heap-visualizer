@@ -348,10 +348,11 @@ must be marked as coming from the freeing record, and its predicate must read
 and a row must never offer a predicate that does not match the value shown
 beside it.
 
-**Pinning** (📌) freezes the current
-panel as an independent window and lets the next selection open fresh; any
-number of allocations can be pinned side by side for comparison
-([09-ui-shell](09-ui-shell.md)).
+**Pinning** (📌) keeps the shown allocation in a window of its own, titled
+by the allocation's name or `#<id>`, while the live panel goes on following
+the selection; any number of allocations can be pinned side by side for
+comparison, and unpinning one shows it in the live panel again
+([SHELL-005](09-ui-shell.md#shell-005-the-allocation-window-lifecycle)).
 
 ## ANL-007: Persistence — `.heapa` files and autosave
 
@@ -369,7 +370,7 @@ Two deliberately different persistence channels:
   Anchoring by event index is what makes the file portable — it is only
   meaningful against the same trace.
 - **Session** — working state, not a deliverable: layout settings, filter,
-  crop, view zooms, window/drawer positions, pinned allocation windows (by
+  crop, view zooms, the dock layout of views and windows, pinned allocation windows (by
   creator event), playhead. Autosaved to `localStorage` keyed by trace file
   name and restored silently on load; no UI.
 
@@ -387,11 +388,14 @@ snapshot, making it a complete "everything as I left it" restore point.
 ## ANL-008: The session blob's shape
 
 The session blob must separate the two kinds of state it carries. Its top
-level is a single JSON object marked `heapVisualizerSession: 1` holding only
-workspace state — panel window geometry and drawer layout — and everything
-whose meaning comes from a heap trace must sit under a `heap` key carrying its
-own `version`. Reading a blob whose `heap` version is not one this build knows
-must restore the workspace state and leave heap state at its defaults, rather
-than apply the section partially. A blob written in the pre-namespace shape,
-with the heap fields at the top level and no `heap` key, must still restore
-in full.
+level is a single JSON object marked `heapVisualizerSession: 1`: workspace
+state — the dock layout of views and windows — sits under a `shell` key
+carrying its own `version`, and everything whose meaning comes from a heap
+trace must sit under a `heap` key carrying its own `version`. Reading a blob
+whose `heap` version is not one this build knows must restore the workspace
+state and leave heap state at its defaults, rather than apply the section
+partially. A blob written in the pre-namespace shape, with the heap fields at
+the top level and no `heap` key, must still restore in full, and so must one
+written before the dock, with the shell's `windows` and `drawers` at the top
+level instead of a `shell` section
+([SHELL-004](09-ui-shell.md#shell-004-docking)).

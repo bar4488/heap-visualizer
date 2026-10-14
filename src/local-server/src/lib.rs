@@ -18,7 +18,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use heap_visualizer_core::agent;
+use heap_visualizer_core::{agent, domain};
 use tokio::sync::watch;
 use tokio_util::io::ReaderStream;
 use url::Url;
@@ -350,6 +350,8 @@ struct StreamContextRequest {
     after: u32,
     #[serde(default = "default_true")]
     include_landmarks: bool,
+    #[serde(default)]
+    include_logs: bool,
 }
 
 #[derive(Deserialize)]
@@ -449,6 +451,11 @@ pub fn router(state: ServerState) -> Router {
         )
         .route("/api/v1/overview", get(overview).options(preflight))
         .route("/api/v1/logs", get(logs).options(preflight))
+        .route("/api/v1/domains", get(domains).options(preflight))
+        .route(
+            "/api/v1/domains/{domain}/records",
+            get(domain_records).options(preflight),
+        )
         .route(
             "/api/v1/allocations/query",
             post(agent_query).options(preflight),
@@ -578,6 +585,8 @@ async fn session(State(state): State<ServerState>, headers: HeaderMap) -> Respon
                 "endpoints": {
                     "overview": "/api/v1/overview",
                     "logs": "/api/v1/logs",
+                    "domains": "/api/v1/domains",
+                    "domainRecords": "/api/v1/domains/{domain}/records",
                     "allocation": "/api/v1/allocations/{creator}",
                     "allocationQuery": "/api/v1/allocations/query",
                     "allocationSummary": "/api/v1/allocations/summarize",
@@ -617,6 +626,8 @@ fn limits() -> serde_json::Value {
         "defaultLogPage": agent::LOGS_COUNT_DEFAULT,
         "maximumLogPage": agent::LOGS_COUNT_MAX,
         "maximumLogTextBytes": agent::LOGS_TEXT_MAX,
+        "defaultRecordPage": domain::RECORDS_COUNT_DEFAULT,
+        "maximumRecordPage": domain::RECORDS_COUNT_MAX,
         "maximumFilterBytes": MAX_FILTER_BYTES,
         "maximumRequestIdBytes": MAX_REQUEST_ID_BYTES,
         "maximumRequestBytes": MAX_REQUEST_BYTES,
@@ -752,16 +763,68 @@ async fn overview(State(state): State<ServerState>, headers: HeaderMap, uri: Uri
     bounded_json(&value, origin)
 }
 
-/// `GET /api/v1/logs` (LOG-008): one bounded page of log records. The
-/// transport rejects unknown, repeated, or unparseable keys; the core
-/// validates the values. Log reads do not depend on the analysis, so the
-/// envelope carries `traceId` only.
-async fn logs(State(state): State<ServerState>, headers: HeaderMap, uri: Uri) -> Response {
+/// `GET /api/v1/domains` (DOM-004): every evidence domain's descriptor, as
+/// the core's registry reports it.
+async fn domains(State(state): State<ServerState>, headers: HeaderMap) -> Response {
     let origin = match authorize(&headers, &state) {
         Ok(origin) => origin,
         Err(error) => return error.response(),
     };
-    let params = match logs_query(uri.query(), origin.clone()) {
+    let encoded = state
+        .engine
+        .lock()
+        .expect("engine lock poisoned")
+        .domains_json();
+    let domains: serde_json::Value =
+        serde_json::from_str(&encoded).expect("the core produces valid domain JSON");
+    bounded_json(
+        &serde_json::json!({ "traceId": state.trace.id.as_ref(), "domains": domains }),
+        origin,
+    )
+}
+
+/// `GET /api/v1/domains/{domain}/records` (LOG-008, DOM-004): one bounded
+/// page of a domain's records.
+async fn domain_records(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    AxumPath(name): AxumPath<String>,
+    uri: Uri,
+) -> Response {
+    records(&state, &headers, &name, uri.query(), true)
+}
+
+/// `GET /api/v1/logs` (LOG-008): the log domain's records page, without the
+/// generic page's `domain` key.
+async fn logs(State(state): State<ServerState>, headers: HeaderMap, uri: Uri) -> Response {
+    records(&state, &headers, "logs", uri.query(), false)
+}
+
+/// One records page. The transport parses the shared paging keys strictly
+/// (repeated keys and non-numbers are rejected) and passes every other key
+/// to the core, which owns the domain's parameters (D011). Record reads do
+/// not depend on the analysis, so the envelope carries `traceId` only.
+fn records(
+    state: &ServerState,
+    headers: &HeaderMap,
+    name: &str,
+    query: Option<&str>,
+    with_domain: bool,
+) -> Response {
+    let origin = match authorize(headers, state) {
+        Ok(origin) => origin,
+        Err(error) => return error.response(),
+    };
+    if domain::by_name(name).is_none() {
+        return RequestError {
+            status: StatusCode::NOT_FOUND,
+            error: format!("unknown domain {name}").into(),
+            code: "unknown_domain",
+            origin,
+        }
+        .response();
+    }
+    let params = match records_query(query, origin.clone()) {
         Ok(params) => params,
         Err(error) => return error.response(),
     };
@@ -769,24 +832,27 @@ async fn logs(State(state): State<ServerState>, headers: HeaderMap, uri: Uri) ->
         .engine
         .lock()
         .expect("engine lock poisoned")
-        .agent_logs(&params);
+        .agent_domain_records(name, &params);
     let mut value = match result {
         Ok(value) => value,
         Err(error) => {
             return request_error(StatusCode::BAD_REQUEST, error.message, origin).response()
         }
     };
-    value
+    let object = value
         .as_object_mut()
-        .expect("agent core response is an object")
-        .insert("traceId".into(), state.trace.id.to_string().into());
+        .expect("agent core response is an object");
+    if !with_domain {
+        object.remove("domain");
+    }
+    object.insert("traceId".into(), state.trace.id.to_string().into());
     bounded_json(&value, origin)
 }
 
-fn logs_query(
+fn records_query(
     query: Option<&str>,
     origin: Option<HeaderValue>,
-) -> Result<agent::LogsParams, RequestError> {
+) -> Result<domain::RecordParams, RequestError> {
     let invalid = || {
         request_error(
             StatusCode::BAD_REQUEST,
@@ -794,20 +860,22 @@ fn logs_query(
             origin.clone(),
         )
     };
-    let mut params = agent::LogsParams::default();
+    let mut params = domain::RecordParams::default();
     let mut seen = Vec::new();
     for (key, value) in url::form_urlencoded::parse(query.unwrap_or_default().as_bytes()) {
         if seen.contains(&key) {
             return Err(invalid());
         }
         match key.as_ref() {
-            "minLevel" => params.min_level = Some(value.into_owned()),
-            "text" => params.text = Some(value.into_owned()),
             "seqLo" => params.seq_lo = Some(value.parse().map_err(|_| invalid())?),
             "seqHi" => params.seq_hi = Some(value.parse().map_err(|_| invalid())?),
             "from" => params.from = value.parse().map_err(|_| invalid())?,
             "count" => params.count = Some(value.parse().map_err(|_| invalid())?),
-            _ => return Err(invalid()),
+            _ => {
+                params
+                    .params
+                    .insert(key.clone().into_owned(), value.into_owned());
+            }
         }
         seen.push(key);
     }
@@ -1087,12 +1155,16 @@ async fn stream_context(
         Ok(source) => source,
         Err(error) => return error.response(),
     };
-    let mut value = match engine.agent_stream_context(
+    let options = agent::ContextOptions {
+        landmarks: request.include_landmarks,
+        logs: request.include_logs,
+    };
+    let mut value = match engine.agent_stream_context_with(
         &source,
         request.center,
         request.before,
         request.after,
-        request.include_landmarks,
+        options,
     ) {
         Ok(value) => value,
         Err(error) => return filter_error(error, origin),
@@ -2323,6 +2395,127 @@ mod tests {
         assert_eq!(capabilities["limits"]["defaultLogPage"], agent::LOGS_COUNT_DEFAULT);
         assert_eq!(capabilities["limits"]["maximumLogPage"], agent::LOGS_COUNT_MAX);
         assert_eq!(capabilities["limits"]["maximumLogTextBytes"], agent::LOGS_TEXT_MAX);
+    }
+
+    /// A heap, a mark, and two log records.
+    const MIXED_TRACE: &str = concat!(
+        "{\"op\":\"H\",\"v\":1}\n",
+        "{\"op\":\"M\",\"t\":1,\"id\":1,\"addr\":\"0x1000\",\"size\":8}\n",
+        "{\"op\":\"L\",\"t\":2,\"level\":\"warn\",\"logger\":\"net\",\"msg\":\"slow\"}\n",
+        "{\"op\":\"E\",\"t\":3,\"title\":\"phase: sweep\"}\n",
+        "{\"op\":\"L\",\"t\":4,\"level\":\"info\",\"msg\":\"done\"}\n",
+    );
+
+    #[tokio::test]
+    async fn domains_are_discoverable_and_their_records_paged() {
+        let (app, id) = app_with(MIXED_TRACE);
+
+        let (status, body) = get_json(&app, "/api/v1/domains").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["traceId"], id);
+        let names: Vec<_> = body["domains"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["id"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names, ["heap", "marks", "logs", "intervals"]);
+
+        let (status, ivl) = get_json(&app, "/api/v1/domains/intervals/records").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(ivl["domain"], "intervals");
+
+        let (status, logs) =
+            get_json(&app, "/api/v1/domains/logs/records?minLevel=warn&count=5").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(logs["traceId"], id);
+        assert_eq!(logs["domain"], "logs");
+        assert_eq!(logs["total"], 1);
+        assert_eq!(logs["items"][0]["msg"], "slow");
+
+        // `/logs` is the same page without the generic `domain` key
+        let (_, mut generic) = get_json(&app, "/api/v1/domains/logs/records?text=o&count=1").await;
+        let (_, alias) = get_json(&app, "/api/v1/logs?text=o&count=1").await;
+        generic.as_object_mut().unwrap().remove("domain");
+        assert_eq!(generic, alias);
+
+        let (status, marks) = get_json(&app, "/api/v1/domains/marks/records?text=sweep").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(marks["domain"], "marks");
+        assert_eq!(marks["total"], 1);
+        assert_eq!(marks["items"][0]["seq"], 2);
+
+        let (status, body) = get_json(&app, "/api/v1/domains/gpu/records").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "unknown_domain");
+
+        for bad in [
+            "/api/v1/domains/marks/records?minLevel=warn",
+            "/api/v1/domains/logs/records?colour=red",
+            "/api/v1/domains/logs/records?count=201",
+            "/api/v1/domains/logs/records?seqLo=x",
+            "/api/v1/domains/logs/records?text=a&text=b",
+        ] {
+            let (status, body) = get_json(&app, bad).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+            assert_eq!(body["error"]["code"], "invalid_request", "{bad}");
+        }
+
+        let (_, session) = get_json(&app, "/api/v1/session").await;
+        let capabilities = &session["capabilities"];
+        assert_eq!(capabilities["endpoints"]["domains"], "/api/v1/domains");
+        assert_eq!(
+            capabilities["endpoints"]["domainRecords"],
+            "/api/v1/domains/{domain}/records"
+        );
+        assert_eq!(capabilities["limits"]["defaultRecordPage"], domain::RECORDS_COUNT_DEFAULT);
+        assert_eq!(capabilities["limits"]["maximumRecordPage"], domain::RECORDS_COUNT_MAX);
+    }
+
+    #[tokio::test]
+    async fn stream_context_includes_logs_only_on_request() {
+        let (app, id) = app_with(MIXED_TRACE);
+        let context = |include: Option<bool>| {
+            let mut payload =
+                serde_json::json!({ "traceId": id, "center": 0, "before": 0, "after": 4 });
+            if let Some(include) = include {
+                payload["includeLogs"] = include.into();
+            }
+            let app = app.clone();
+            async move {
+                let response = app
+                    .oneshot(json_post("/api/v1/stream/context", payload.to_string()))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                let body = response.into_body().collect().await.unwrap().to_bytes();
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+            }
+        };
+        let operations = |body: &serde_json::Value| -> Vec<String> {
+            body["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| e["operation"].as_str().unwrap().to_string())
+                .collect()
+        };
+
+        let default = context(None).await;
+        assert!(!operations(&default).contains(&"log".to_string()));
+        assert_eq!(default["omitted"]["logs"], 2);
+
+        let with_logs = context(Some(true)).await;
+        let logs: Vec<_> = with_logs["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["operation"] == "log")
+            .collect();
+        assert_eq!(logs.len(), 2);
+        assert_eq!(logs[0]["level"], "warn");
+        assert_eq!(logs[0]["msg"], "slow");
+        assert!(with_logs.get("omitted").is_none());
     }
 
     #[tokio::test]

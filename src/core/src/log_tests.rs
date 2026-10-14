@@ -116,16 +116,35 @@ fn live(a: &App) -> Vec<(u64, u64, u64)> {
     v
 }
 
+/// `rank[p]`: records other than logs in spine `[0, p)` — the position in
+/// the log-free trace that matches position `p` of the mixed one. (Marks
+/// are their own domain, so heap rank no longer is that position.)
+fn non_log_rank(s: &Store) -> Vec<u32> {
+    let mut rank = vec![0];
+    for &op in &s.op {
+        rank.push(rank.last().unwrap() + (op != OP_L) as u32);
+    }
+    rank
+}
+
+/// Spine index of the `k`th record that is not a log.
+fn non_log_seqs(s: &Store) -> Vec<u32> {
+    (0..s.len()).filter(|&e| s.op[e as usize] != OP_L).collect()
+}
+
 // ------------------------------------------------------------- DOM-002
 
 #[test]
 fn heap_only_trace_builds_no_mapping() {
     let (heap, _) = gen(7, 500, 0);
+    // landmarks are the marks domain's records: a trace with none is the
+    // heap-only one
+    let heap: String = heap.lines().filter(|l| !l.contains("\"op\":\"E\"")).map(|l| format!("{l}\n")).collect();
     let a = load_app(&heap);
     assert!(a.store.hrank.is_empty());
-    assert!(a.store.heap.seq.is_empty());
+    assert!(a.store.dom.heap.seq.is_empty());
     assert_eq!(a.store.heap_len(), a.store.len());
-    assert!(a.store.logs.is_empty());
+    assert!(a.store.dom.logs.is_empty());
 }
 
 #[test]
@@ -134,13 +153,14 @@ fn log_records_get_no_heap_rows_and_heap_records_no_log_rows() {
     let (h, m) = (load_app(&heap), load_app(&mixed));
     let s = &m.store;
     assert!(s.n_log > 0);
-    assert_eq!(s.heap_len(), h.store.len(), "one heap row per heap record");
-    assert_eq!(s.logs.len(), s.n_log);
-    assert_eq!(s.len(), s.heap_len() + s.logs.len());
-    for col in [s.heap.id.len(), s.heap.size.len(), s.heap.site.len(), s.heap.target.len(), s.heap.death.len()] {
+    assert_eq!(s.heap_len(), h.store.heap_len(), "one heap row per heap record");
+    assert_eq!(s.dom.logs.len(), s.n_log);
+    assert_eq!(s.dom.marks.len(), s.n_custom);
+    assert_eq!(s.len(), s.heap_len() + s.dom.marks.len() + s.dom.logs.len());
+    for col in [s.dom.heap.id.len(), s.dom.heap.size.len(), s.dom.heap.site.len(), s.dom.heap.target.len(), s.dom.heap.death.len()] {
         assert_eq!(col, s.heap_len() as usize);
     }
-    assert_eq!(s.heap.green_pre.len(), s.heap_len() as usize + 1);
+    assert_eq!(s.dom.heap.green_pre.len(), s.heap_len() as usize + 1);
     // the mapping round-trips
     for e in 0..s.len() {
         match s.heap_row(e) {
@@ -148,7 +168,7 @@ fn log_records_get_no_heap_rows_and_heap_records_no_log_rows() {
                 assert!(s.is_heap(e));
                 assert_eq!(s.heap_seq(h), e);
             }
-            None => assert_eq!(s.op[e as usize], OP_L),
+            None => assert!(matches!(s.op[e as usize], OP_L | OP_E)),
         }
     }
     // L records are not custom events and not allocations
@@ -169,23 +189,24 @@ fn live_set_is_identical_with_and_without_log_records() {
         assert_eq!(m.store.peak_live_bytes, h.store.peak_live_bytes);
         assert_eq!(m.store.total_alloc_bytes, h.store.total_alloc_bytes);
         let len = m.store.len();
+        let rank = non_log_rank(&m.store);
         for p in 0..=len {
             m.view.seek(&m.store, p);
-            let applied = m.store.heap_rank(p);
+            let applied = rank[p as usize];
             h.view.seek(&h.store, applied);
             assert_eq!(m.view.live_bytes, h.view.live_bytes, "seed {seed} at {p}");
             assert_eq!(live(&m), live(&h), "seed {seed} at {p}");
         }
         for p in (0..=len).rev().step_by(7) {
             m.view.seek(&m.store, p);
-            h.view.seek(&h.store, m.store.heap_rank(p));
+            h.view.seek(&h.store, rank[p as usize]);
             assert_eq!(live(&m), live(&h), "seed {seed} back at {p}");
         }
         let mut r = Rng(seed * 31 + 1);
         for _ in 0..200 {
             let p = r.below(len as u64 + 1) as u32;
             m.view.seek(&m.store, p);
-            h.view.seek(&h.store, m.store.heap_rank(p));
+            h.view.seek(&h.store, rank[p as usize]);
             assert_eq!(live(&m), live(&h), "seed {seed} jump to {p}");
         }
     }
@@ -237,6 +258,44 @@ fn filters_tags_and_timelines_agree_with_and_without_logs() {
     assert_eq!(sh.red_before(sh.len()), sm.red_before(sm.len()));
 }
 
+/// The agent timeline walks only the heap records inside its spine range, so
+/// the range's two ends are converted to heap rows: a seq range covering the
+/// same heap records must count the same activity in both traces, and so
+/// must the time range spanning them.
+#[test]
+fn agent_timeline_ranges_convert_at_the_heap_boundary() {
+    let (heap, mixed) = gen(23, 3000, 60);
+    let (h, m) = (engine(&heap), engine(&mixed));
+    let sm = &m.app.store;
+    let src = "alloc.size >= 32";
+    let counts = |v: &Value| -> Vec<Value> {
+        v["bins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| serde_json::json!([b["allocations"], b["frees"], b["reallocations"], b["customEvents"], b["allocatedBytes"], b["freedBytes"]]))
+            .collect()
+    };
+    let base = non_log_seqs(sm);
+    for (a, b) in [(0usize, 3000usize), (0, 1), (17, 18), (500, 2400), (2999, 3000)] {
+        // spine range [first non-log record a, last non-log record b - 1]
+        let lo = base[a];
+        let hi = base[b - 1] + 1;
+        let th = h.agent_timeline(src, "seq", a as u64, b as u64, 1).unwrap();
+        let tm = m.agent_timeline(src, "seq", u64::from(lo), u64::from(hi), 1).unwrap();
+        assert_eq!(counts(&th), counts(&tm), "seq [{a}, {b})");
+        // by time: every record with t in [t0, t1), which is the spine range
+        // the two binary searches find — equal timestamps included
+        let (t0, t1) = (sm.t[lo as usize], sm.t[hi as usize - 1] + 1);
+        let by_time = m.agent_timeline(src, "time", t0, t1, 1).unwrap();
+        let spine: Vec<u32> = (0..sm.len()).filter(|&e| (t0..t1).contains(&sm.t[e as usize])).collect();
+        let (slo, shi) = (spine[0], spine[spine.len() - 1] + 1);
+        assert_eq!(shi - slo, spine.len() as u32, "t is monotonic");
+        let by_seq = m.agent_timeline(src, "seq", u64::from(slo), u64::from(shi), 1).unwrap();
+        assert_eq!(counts(&by_time), counts(&by_seq), "time [{t0}, {t1})");
+    }
+}
+
 // ------------------------------------------------------------- LOG-001
 
 #[test]
@@ -278,8 +337,8 @@ fn log_records_parse_with_defaults_warnings_and_fields() {
     assert_eq!(s.warn_counts[W_SEQ_MISMATCH as usize], 0);
     // the M keeps "msg" as its own custom field
     assert_eq!(s.extras[s.extra_at(0) as usize], r#""msg":"heap custom field""#);
-    let logs = &s.logs;
-    assert_eq!(logs.level, vec![3, 2, 2, 2, 4, 2]);
+    let logs = &s.dom.logs;
+    assert_eq!(logs.cat, vec![3, 2, 2, 2, 4, 2]);
     assert_eq!(logs.seq, vec![1, 2, 3, 4, 5, 6]);
     assert_eq!(logs.msg(0), "retrying \"x\"");
     assert_eq!(logs.logger_name(0), Some("net.http"));
@@ -295,6 +354,14 @@ fn log_records_parse_with_defaults_warnings_and_fields() {
     assert_eq!(long_warn.detail as usize, long.len());
     // log keys never enter the heap's custom-field catalog
     assert!(s.fields.iter().all(|f| f.name == "msg"));
+    // ... they enter the log domain's own catalog, with types and counts
+    let catalog: Vec<(&str, u8, u32)> = logs.catalog.iter().map(|f| (f.name.as_str(), f.types, f.events)).collect();
+    assert_eq!(
+        catalog,
+        [("attempt", FIELD_INT, 1), ("site", FIELD_STRING, 1), ("size", FIELD_STRING, 1), ("id", FIELD_STRING, 1)]
+    );
+    let d = crate::domain::get(s, crate::domain::LOGS).unwrap().descriptor();
+    assert_eq!(d["fields"][0], serde_json::json!({"name":"attempt","type":"int","optional":false,"events":1}));
     // a decreasing t on a log is clamped like any record's
     let b = load_app("{\"op\":\"M\",\"t\":10,\"id\":1,\"addr\":\"0x10\",\"size\":1}\n{\"op\":\"L\",\"t\":3,\"msg\":\"m\"}\n");
     assert_eq!(b.store.t, vec![10, 10]);
@@ -320,12 +387,12 @@ fn log_only_trace_loads_seeks_and_renders() {
 // ------------------------------------------------------------- LOG-003/004
 
 fn brute(s: &Store, q: &LogQuery) -> Vec<u32> {
-    let logs = &s.logs;
+    let logs = &s.dom.logs;
     let needle = q.text.to_ascii_lowercase();
     (0..logs.len())
         .filter(|&r| {
             let seq = logs.seq[r as usize];
-            logs.level[r as usize] >= q.min_level
+            logs.cat[r as usize] >= q.min_cat
                 && q.seq_lo.is_none_or(|lo| seq >= lo)
                 && q.seq_hi.is_none_or(|hi| seq <= hi)
                 && (needle.is_empty()
@@ -347,22 +414,22 @@ fn queries_match_a_brute_force_oracle() {
         let lo = (r.below(3) == 0).then(|| r.below(len as u64) as u32);
         let hi = (r.below(3) == 0).then(|| r.below(len as u64) as u32);
         let q = LogQuery {
-            min_level: r.below(NLEVEL as u64) as u8,
+            min_cat: r.below(NLEVEL as u64) as u8,
             text: texts[r.below(texts.len() as u64) as usize].to_string(),
             seq_lo: lo,
             seq_hi: hi,
         };
         let want = brute(s, &q);
-        let m = Matches::new(&s.logs, &q);
-        assert_eq!(m.total(&s.logs) as usize, want.len(), "query {i}: {q:?}");
+        let m = Matches::new(&s.dom.logs, &q);
+        assert_eq!(m.total(&s.dom.logs) as usize, want.len(), "query {i}: {q:?}");
         for (k, &row) in want.iter().enumerate() {
-            assert_eq!(m.row(&s.logs, k as u32), row, "query {i} match {k}");
+            assert_eq!(m.row(&s.dom.logs, k as u32), row, "query {i} match {k}");
         }
         // locate at a few seqs
         for _ in 0..5 {
             let seq = r.below(len as u64 + 2) as u32;
-            let expect = want.iter().filter(|&&row| s.logs.seq[row as usize] <= seq).count() as i64 - 1;
-            assert_eq!(m.locate(&s.logs, seq), expect, "query {i} locate {seq}");
+            let expect = want.iter().filter(|&&row| s.dom.logs.seq[row as usize] <= seq).count() as i64 - 1;
+            assert_eq!(m.locate(&s.dom.logs, seq), expect, "query {i} locate {seq}");
         }
     }
 }
@@ -401,7 +468,7 @@ fn query_json_pages_and_reports_totals() {
         from += rows.len() as u64;
     }
     assert!(seen.windows(2).all(|w| w[0] < w[1]));
-    let q = LogQuery { min_level: 3, text: "REQ".into(), seq_lo: Some(10), seq_hi: None };
+    let q = LogQuery { min_cat: 3, text: "REQ".into(), seq_lo: Some(10), seq_hi: None };
     assert_eq!(seen.len(), brute(&e.app.store, &q).len());
     // from past the end clamps; garbage input answers with an error object
     let past: Value = serde_json::from_str(&e.logs_query_json(r#"{"minLevel":5,"text":"","from":999999,"count":5}"#)).unwrap();
@@ -415,12 +482,12 @@ fn query_json_pages_and_reports_totals() {
 fn text_scan_allocates_nothing_per_row() {
     let (_, mixed) = gen(31, 20_000, 50);
     let a = load_app(&mixed);
-    assert!(a.store.logs.len() > 10_000);
-    let q = LogQuery { min_level: 0, text: "no such text anywhere".into(), seq_lo: None, seq_hi: None };
+    assert!(a.store.dom.logs.len() > 10_000);
+    let q = LogQuery { min_cat: 0, text: "no such text anywhere".into(), seq_lo: None, seq_hi: None };
     let before = crate::counting_alloc::count();
-    let m = Matches::new(&a.store.logs, &q);
+    let m = Matches::new(&a.store.dom.logs, &q);
     let after = crate::counting_alloc::count();
-    assert_eq!(m.total(&a.store.logs), 0);
+    assert_eq!(m.total(&a.store.dom.logs), 0);
     assert!(after - before <= 3, "{} allocations for one scan", after - before);
 }
 
@@ -470,15 +537,15 @@ fn lane_bins_from_prefix_sums() {
         let y = r.below(s.len() as u64 + 1) as u32;
         let (lo, hi) = (x.min(y), x.max(y));
         let mut want = [0u32; NLEVEL];
-        for row in 0..s.logs.len() as usize {
-            let seq = s.logs.seq[row];
+        for row in 0..s.dom.logs.len() as usize {
+            let seq = s.dom.logs.seq[row];
             if seq >= lo && seq < hi {
-                want[s.logs.level[row] as usize] += 1;
+                want[s.dom.logs.cat[row] as usize] += 1;
             }
         }
-        assert_eq!(s.logs.counts(lo, hi), want, "[{lo}, {hi})");
+        assert_eq!(s.dom.logs.counts(lo, hi), want, "[{lo}, {hi})");
         let max = (0..NLEVEL).rev().find(|&l| want[l] > 0).map(|l| l as u8);
-        assert_eq!(s.logs.max_level(lo, hi), max, "[{lo}, {hi})");
+        assert_eq!(s.dom.logs.max_level(lo, hi), max, "[{lo}, {hi})");
     }
 }
 
@@ -511,6 +578,40 @@ fn lane_is_drawn_and_hover_reports_log_counts() {
     let b = load_app("{\"op\":\"M\",\"t\":1,\"id\":1,\"addr\":\"0x10\",\"size\":1}\n");
     let hover: Value = serde_json::from_str(&crate::timeline::hover(&b.store, 1, 1, 0, 0.0, 1.0)).unwrap();
     assert!(hover.get("logs").is_none());
+}
+
+/// The lane is registry-driven now; its pixels must still be exactly
+/// LOG-005's: rows `log_lane_rows(h)`, each column the most severe level's
+/// color, at every strip size. Marks draw no lane and add no hover key.
+#[test]
+fn registry_lanes_keep_the_log_lane_pixels() {
+    let (_, mixed) = gen(41, 3000, 40);
+    let mixed = mixed + "{\"op\":\"E\",\"title\":\"end\"}\n";
+    let mut a = load_app(&mixed);
+    let n = a.store.len() as f64;
+    for (w, h) in [(300u32, 40u32), (1200, 60), (77, 100), (5, 6)] {
+        let mut px = Vec::new();
+        crate::timeline::render(&mut a.store, &a.cfg, 1, w, h, 0.0, n, &mut px);
+        let bins = crate::timeline::bin(&a.store, 1, w, 0.0, n);
+        let (y0, y1) = crate::timeline::log_lane_rows(h);
+        assert_eq!(y1 - y0, ((h / 20) as i64).clamp(2, 4));
+        for x in 0..w as usize {
+            if let Some(level) = a.store.dom.logs.max_level(bins.from[x], bins.from[x + 1]) {
+                for y in y0..y1 {
+                    let p = ((y as u32 * w + x as u32) * 4) as usize;
+                    assert_eq!(px[p..p + 3], crate::timeline::LOG_COLORS[level as usize], "{w}x{h} at ({x}, {y})");
+                }
+            }
+        }
+    }
+    let hover: Value = serde_json::from_str(&crate::timeline::hover(&a.store, 1, 10, 9, 0.0, n)).unwrap();
+    assert!(hover.get("logs").is_some() && hover.get("marks").is_none());
+    let mut e = engine(&mixed);
+    let lanes: Value = serde_json::from_str(&e.lanes_json()).unwrap();
+    assert_eq!(lanes.as_array().unwrap().len(), 1);
+    assert_eq!(lanes[0]["id"], "logs.level");
+    assert_eq!(lanes[0]["colors"][4], "#f85149");
+    assert_eq!(engine("{\"op\":\"M\",\"t\":1,\"id\":1,\"addr\":\"0x10\",\"size\":1}\n").lanes_json(), "[]");
 }
 
 // ------------------------------------------------------------- LOG-006

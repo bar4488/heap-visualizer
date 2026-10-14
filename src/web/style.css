@@ -26,31 +26,134 @@ html, body {
 
 body { display: flex; flex-direction: column; }
 
-/* ---------- toolbar ---------- */
+/* ---------- top bar (SHELL-001) ---------- */
 
+/* Three columns: menus and the title, playback, status. The sides share what
+   the center leaves, so the transport sits in the middle; nothing wraps — the
+   title gives way first. */
 #toolbar {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 10px;
+  gap: 8px;
+  height: 36px;
+  padding: 0 8px;
   background: var(--bg2);
   border-bottom: 1px solid var(--border);
-  flex-wrap: wrap;
   user-select: none;
+  white-space: nowrap;
 }
+.tb-side { flex: 1 1 0; min-width: 0; display: flex; align-items: center; gap: 6px; }
+.tb-right { justify-content: flex-end; }
+.tb-center { flex: none; display: flex; align-items: center; gap: 3px; }
+.tb-center .tb-icon { padding: 2px 7px; min-width: 28px; }
+.tb-center .tb-speed { font-family: ui-monospace, monospace; font-size: 11px; color: var(--fg-dim); }
+#jump-input { width: 150px; }
 
 .brand {
+  flex: none;
   font-weight: 700;
   letter-spacing: 0.5px;
   color: var(--green);
-  margin-right: 4px;
+  margin-right: 2px;
   font-family: ui-monospace, monospace;
 }
 
-.title { color: var(--fg-dim); font-family: ui-monospace, monospace; font-size: 12px;
-  max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.title { min-width: 0; color: var(--fg-dim); font-family: ui-monospace, monospace; font-size: 12px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.title:not(:empty) { border-left: 1px solid var(--border); padding-left: 8px; }
 
-.sep { width: 1px; height: 20px; background: var(--border); margin: 0 4px; }
+.sep { flex: none; width: 1px; height: 20px; background: var(--border); margin: 0 4px; }
+
+/* status pills on the right */
+#toolbar .pill { flex: none; border-radius: 11px; padding: 1px 9px; font-size: 11px; }
+#conn-status { display: inline-flex; align-items: center; gap: 6px; color: var(--fg-dim); background: none; }
+#conn-status .dot { width: 7px; height: 7px; border-radius: 50%; border: 1px solid var(--fg-dim); }
+#conn-status[data-state="connected"] { color: var(--green); }
+#conn-status[data-state="connected"] .dot { background: var(--green); border-color: var(--green); }
+#conn-status[data-state="connecting"] .dot { background: var(--accent); border-color: var(--accent); }
+#conn-status[data-state="auth-failed"],
+#conn-status[data-state="permission-denied"],
+#conn-status[data-state="upgrade-required"],
+#conn-status[data-state="unreachable"] { color: var(--red); border-color: #f8514955; }
+#conn-status[data-state="auth-failed"] .dot,
+#conn-status[data-state="permission-denied"] .dot,
+#conn-status[data-state="upgrade-required"] .dot,
+#conn-status[data-state="unreachable"] .dot { background: var(--red); border-color: var(--red); }
+
+/* ---------- menus (SHELL-011) ---------- */
+
+#menubar { flex: none; display: flex; align-items: center; }
+.menu-trigger {
+  background: none; border-color: transparent; padding: 3px 8px; color: var(--fg);
+}
+.menu-trigger:hover:not(:disabled), .menu-trigger.open { background: var(--bg3); border-color: var(--border); }
+.menu-popup {
+  position: fixed; z-index: 120;
+  display: flex; flex-direction: column;
+  min-width: 220px; padding: 4px;
+  background: #161b22fa;
+  border: 1px solid var(--border); border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.6);
+  outline: none;
+}
+.menu-group { display: flex; flex-direction: column; }
+.menu-heading {
+  padding: 5px 8px 2px 28px; font-size: 10px; letter-spacing: 0.6px;
+  text-transform: uppercase; color: var(--fg-dim);
+}
+.menu-sep { height: 1px; margin: 4px 2px; background: var(--border); }
+.menu-item, .pal-item {
+  display: flex; align-items: center; gap: 0;
+  text-align: left; background: none; border-color: transparent; border-radius: 4px;
+  padding: 4px 8px; color: var(--fg);
+}
+.menu-item:focus { outline: none; }
+.menu-item:hover:not(:disabled), .menu-item:focus-visible, .menu-item:focus:not(:disabled) {
+  background: rgba(88,166,255,0.16); border-color: transparent;
+}
+.mi-check { flex: none; width: 20px; color: var(--green); }
+[aria-checked=true] > .mi-check::before { content: '✓'; }
+.mi-label { flex: 1; }
+.mi-key { flex: none; margin-left: 24px; color: var(--fg-dim); font-size: 11px; font-family: ui-monospace, monospace; }
+/* a filter is applied: the Filter entry says so */
+.menu-item.active .mi-label::after { content: ' ●'; color: var(--green); font-size: 9px; vertical-align: middle; }
+
+/* ---------- command palette (⌘/Ctrl+K) and the shortcut list ---------- */
+
+#palette, #shortcuts {
+  position: fixed; inset: 0; z-index: 115;
+  display: flex; align-items: flex-start; justify-content: center;
+  padding-top: 12vh;
+  background: rgba(13,17,23,0.6);
+}
+#palette-box, #shortcuts-box {
+  width: 560px; max-width: 92vw; max-height: 60vh;
+  display: flex; flex-direction: column;
+  background: #161b22f8;
+  border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.7);
+  overflow: hidden;
+}
+#palette-input {
+  padding: 12px 14px; font: 14px system-ui, sans-serif;
+  background: var(--bg3); color: var(--fg);
+  border: none; border-bottom: 1px solid var(--border); border-radius: 0; outline: none;
+}
+#palette-list { overflow-y: auto; padding: 4px; }
+.pal-item { cursor: pointer; font-size: 13px; }
+.pal-item[aria-selected=true] { background: rgba(88,166,255,0.16); }
+.pal-label b { color: var(--accent); font-weight: 600; }
+.pal-where { margin-left: 12px; color: var(--fg-dim); font-size: 11px; }
+.pal-label { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; }
+.pal-where { flex: 1; }
+.pal-empty { padding: 10px 14px; color: var(--fg-dim); }
+.sc-head { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--border); font-weight: 600; }
+#shortcuts-list { overflow-y: auto; padding: 8px 14px; }
+.sc-row { display: flex; gap: 12px; padding: 3px 0; align-items: baseline; }
+.sc-row kbd {
+  flex: none; min-width: 90px; font: 11px ui-monospace, monospace; color: var(--fg);
+}
+.sc-row span { color: var(--fg-dim); }
 
 button, select, input {
   background: var(--bg3);
@@ -130,94 +233,127 @@ input { font-family: ui-monospace, monospace; }
 #legend .swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
 #legend .ramp { width: 90px; height: 10px; border-radius: 2px; display: inline-block; }
 
-/* ---------- views ---------- */
+/* ---------- the dock (shell/layout.ts, Dockview — D014) ---------- */
 
 #workspace { flex: 1; display: flex; flex-direction: row; min-height: 0; min-width: 0; }
-#views { flex: 1; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+/* The dock is one stacking context, so nothing inside it — Dockview floats
+   its groups at z 999 — can rise above the app's overlays (tooltip 50,
+   selection popover 60, menu 70, progress/drop 100, search 110, welcome 140). */
+#dock { flex: 1; min-width: 0; min-height: 0; position: relative; isolation: isolate; z-index: 0; }
 
-/* ---------- dockable drawers ---------- */
+/* Dockview's tokens, mapped onto the app's. Selectors carry the id so they win
+   over the theme class wherever Dockview puts it. */
+#dock.dockview-theme-dark, #dock .dockview-theme-dark {
+  --dv-group-view-background-color: var(--bg);
+  --dv-tabs-and-actions-container-background-color: var(--bg2);
+  --dv-activegroup-visiblepanel-tab-background-color: var(--bg);
+  --dv-activegroup-hiddenpanel-tab-background-color: var(--bg2);
+  --dv-inactivegroup-visiblepanel-tab-background-color: var(--bg);
+  --dv-inactivegroup-hiddenpanel-tab-background-color: var(--bg2);
+  --dv-activegroup-visiblepanel-tab-color: var(--fg);
+  --dv-activegroup-hiddenpanel-tab-color: var(--fg-dim);
+  --dv-inactivegroup-visiblepanel-tab-color: var(--fg-dim);
+  --dv-inactivegroup-hiddenpanel-tab-color: var(--fg-dim);
+  --dv-tab-divider-color: var(--border);
+  --dv-separator-border: var(--border);
+  --dv-paneview-header-border-color: var(--border);
+  --dv-sash-color: var(--border);
+  --dv-active-sash-color: var(--accent);
+  --dv-drag-over-background-color: rgba(88,166,255,0.18);
+  --dv-drag-over-border-color: var(--accent);
+  --dv-edge-dock-indicator-color: var(--accent);
+  --dv-paneview-active-outline-color: var(--accent);
+  --dv-icon-hover-background-color: var(--bg3);
+  --dv-tabs-container-scrollbar-color: var(--border);
+  --dv-scrollbar-background-color: var(--border);
+  --dv-tabs-and-actions-container-height: 26px;
+  --dv-tabs-and-actions-container-font-size: 12px;
+  --dv-floating-border: 1px solid var(--border);
+  --dv-floating-box-shadow: 0 10px 30px rgba(0,0,0,0.6);
+  --dv-context-menu-background-color: var(--bg2);
+  --dv-context-menu-color: var(--fg);
+  color: var(--fg);
+}
+#dock .dv-default-tab { font-weight: 600; }
+#dock .dv-tab:focus-visible, #dock .dock-action:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
 
-.drawer {
-  flex: 0 0 auto;
-  width: 300px;
-  display: flex; flex-direction: column;
+/* A floating window. It moves by the empty part of its tab strip (the shell
+   sets the engine's drag handle to the strip), so that reads as a handle. Its
+   edges resize it: the engine's handles are 4px, straddling the frame, and
+   sit at a z-index taken from a custom property its own stylesheet defines
+   in terms of itself, which makes it invalid — so the window's content
+   painted over them and caught the pointer. Wider, and above the content. */
+#dock .dv-resize-container .dv-void-container { cursor: move; }
+#dock .dv-resize-container.dv-resize-container-dragging .dv-void-container { cursor: grabbing; }
+#dock .dv-resize-container > [class^='dv-resize-handle-'] { z-index: 5; }
+#dock .dv-resize-container > .dv-resize-handle-top,
+#dock .dv-resize-container > .dv-resize-handle-bottom { height: 8px; }
+#dock .dv-resize-container > .dv-resize-handle-top { top: -4px; }
+#dock .dv-resize-container > .dv-resize-handle-bottom { bottom: -4px; }
+#dock .dv-resize-container > .dv-resize-handle-left,
+#dock .dv-resize-container > .dv-resize-handle-right { width: 8px; }
+#dock .dv-resize-container > .dv-resize-handle-left { left: -4px; }
+#dock .dv-resize-container > .dv-resize-handle-right { right: -4px; }
+#dock .dv-resize-container > .dv-resize-handle-topleft,
+#dock .dv-resize-container > .dv-resize-handle-topright,
+#dock .dv-resize-container > .dv-resize-handle-bottomleft,
+#dock .dv-resize-container > .dv-resize-handle-bottomright { width: 12px; height: 12px; z-index: 6; }
+#dock .dv-resize-container > .dv-resize-handle-topleft { top: -5px; left: -5px; }
+#dock .dv-resize-container > .dv-resize-handle-topright { top: -5px; right: -5px; }
+#dock .dv-resize-container > .dv-resize-handle-bottomleft { bottom: -5px; left: -5px; }
+#dock .dv-resize-container > .dv-resize-handle-bottomright { bottom: -5px; right: -5px; }
+
+/* the buttons at the end of a tab strip: collapse an edge, maximize a group */
+.dock-actions { display: flex; align-items: center; height: 100%; padding: 0 4px; }
+.dock-action {
+  padding: 0 6px; line-height: 18px; font-size: 13px;
+  background: none; border-color: transparent; color: var(--fg-dim);
+}
+.dock-action:hover { color: var(--fg); border-color: var(--border); }
+
+/* A window's own actions, in its tab (a pin): small icon buttons between the
+   title and the close button. Pressed (a pinned window) they show orange, and
+   so does the tab's top edge — the pinned window's one tell. */
+.dock-tab-actions { display: inline-flex; align-items: center; gap: 2px; margin-left: 4px; }
+.dock-tab-actions:empty { display: none; }
+#dock .tab-action {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; padding: 0;
+  background: none; border: 1px solid transparent; border-radius: 3px;
+  color: var(--fg-dim); opacity: 0.75; cursor: pointer;
+}
+#dock .tab-action:hover { opacity: 1; color: var(--fg); border-color: var(--border); }
+#dock .tab-action:focus-visible { outline: 1px solid var(--accent); outline-offset: 0; opacity: 1; }
+#dock .tab-action[aria-pressed='true'] { opacity: 1; color: #d29922; background: rgba(210, 137, 34, 0.18); }
+#dock .dv-tab:has(.tab-action[aria-pressed='true']) { box-shadow: inset 0 2px 0 #d29922; }
+/* the side edges' tabs run down the strip: their actions turn with them */
+#dock .dv-groupview-header-vertical .dock-tab-actions { margin: 4px 0 0; }
+
+/* a panel's content: the adopted element fills it */
+.dock-adopt { width: 100%; height: 100%; overflow: hidden; display: flex; flex-direction: column; }
+.dock-adopt > * { flex: 1 1 auto; min-height: 0; }
+
+/* A window inside the dock gives up its floating chrome: the tab is its title
+   and close button and its drag handle. Its head stays only as a row of the
+   window's own controls (follow, pin, …), and goes when it has none. */
+.dock-adopt > .panel {
+  position: static; z-index: auto;
+  width: auto; height: auto; max-height: none;
+  border: none; border-radius: 0; box-shadow: none;
   background: var(--bg2);
-  overflow: hidden;
-  position: relative;
 }
-#drawer-left { border-right: 1px solid var(--border); }
-#drawer-right { border-left: 1px solid var(--border); }
-.drawer-bar {
-  flex: 0 0 28px;
-  display: flex;
-  align-items: center;
-  padding: 2px 4px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg3);
+.dock-adopt > .panel .panel-head {
+  cursor: default; padding: 3px 8px; font-weight: 400; justify-content: flex-end;
 }
-#drawer-left .drawer-bar { justify-content: flex-end; }
-#drawer-right .drawer-bar { justify-content: flex-start; }
-.drawer-collapse {
-  width: 22px; height: 22px; padding: 0;
-  font-size: 16px; line-height: 20px;
-}
-.drawer.collapsed { width: 30px !important; }
-.drawer.collapsed .panel,
-.drawer.collapsed .drawer-vresize,
-.drawer.collapsed .drawer-resize { display: none !important; }
-.drawer.collapsed .drawer-bar {
-  flex: 1 1 auto;
-  padding: 2px 3px;
-  align-items: flex-start;
-  justify-content: center;
-}
-/* width-resize handle on the drawer's inner edge (against #views) */
-.drawer-resize {
-  position: absolute; top: 0; bottom: 0; width: 6px;
-  cursor: col-resize; z-index: 5;
-}
-#drawer-left .drawer-resize { right: -3px; }
-#drawer-right .drawer-resize { left: -3px; }
-/* a docked panel gives up floating chrome and becomes a stacked flex item;
-   multiple panels in one drawer split the height evenly by default and can
-   be resized against their neighbor via .drawer-vresize */
-.panel.docked {
-  position: static !important;
-  z-index: auto !important;
-  width: auto !important; max-height: none;
-  flex: 1 1 0; min-height: 60px;
-  border: none; border-radius: 0;
-  box-shadow: none;
-  border-bottom: 1px solid var(--border);
-}
-.drawer-vresize {
-  flex: 0 0 6px;
-  cursor: row-resize;
-  background: var(--border);
-}
-.drawer.drop-target { outline: 2px dashed var(--accent); outline-offset: -2px; }
-#dnd-indicator {
-  position: fixed; height: 2px; background: var(--accent);
-  z-index: 200; pointer-events: none;
-  box-shadow: 0 0 4px var(--accent);
-}
-/* the "in your hand" state while dragging a window (docked or floating) —
-   applied after undocking, so it's always the plain floating .panel look
-   plus this on top; makes it unmistakable that it's detached and moving */
-.panel.dragging {
-  z-index: 300 !important;
-  opacity: 0.88;
-  cursor: grabbing;
-  box-shadow: 0 20px 50px rgba(0,0,0,0.75);
-  transition: none;
-}
-.panel.dragging .panel-head { cursor: grabbing; }
+.dock-adopt > .panel .panel-head > .ph-t,
+.dock-adopt > .panel .panel-close { display: none; }
+.dock-adopt > .panel .panel-head:not(:has(.head-actions > :not(.panel-close, [hidden]), .log-count)) { display: none; }
+.dock-adopt > .panel .panel-body { flex: 1 1 auto; min-height: 0; }
 
-
+/* the views */
 .tl-strip {
   position: relative;
-  height: 64px;
-  border-bottom: 1px solid var(--border);
+  height: 100%;
   cursor: crosshair;
 }
 .tl-strip canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
@@ -276,6 +412,7 @@ input { font-family: ui-monospace, monospace; }
 #addr-scroll {
   position: relative;
   flex: 1;
+  height: 100%;
   overflow-y: auto;
   overflow-x: hidden;
   min-height: 0;
@@ -337,19 +474,10 @@ input { font-family: ui-monospace, monospace; }
 /* ---------- panels ---------- */
 
 .panel {
-  position: fixed; z-index: 40;
-  top: 52px; right: 10px;
-  width: 320px;
-  max-height: 70vh;
   display: flex; flex-direction: column;
-  background: #161b22f8;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  box-shadow: 0 10px 30px rgba(0,0,0,0.6);
+  background: var(--bg2);
 }
-#detail-panel { right: auto; left: 10px; top: auto; bottom: 34px; width: 360px; }
 #detail-panel .head-actions { display: flex; gap: 6px; align-items: center; }
-.pinned-detail { width: 360px; }
 .pinned-detail .head-actions { display: flex; gap: 6px; align-items: center; }
 
 /* pin toggle: quiet by default, orange tint while pinned */
@@ -377,6 +505,11 @@ button.d-pin.pinned {
   touch-action: none;
 }
 .panel-close { padding: 0 7px; }
+/* a window takes focus when opened from the toolbar (so Escape closes it);
+   only keyboard focus draws a ring */
+.panel:focus { outline: none; }
+.panel:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+
 .panel-body { overflow-y: auto; padding: 8px 10px; font-size: 12px; }
 
 .filter-row { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
@@ -614,11 +747,6 @@ input[type="color"] {
 .allnone a:hover { text-decoration: underline; }
 
 /* events panel: virtualized sequential event list */
-#events-panel { width: 480px; }
-/* a fixed height only makes sense while floating; docked, it should flex to
-   fill whatever room the drawer gives it (like every other docked panel) —
-   otherwise it fights the drawer's own flex sizing and gets clipped */
-#events-panel:not(.docked) { height: 52vh; }
 #events-panel .head-actions { display: flex; gap: 10px; align-items: center; }
 #events-panel .head-actions label { font-weight: 400; }
 #events-scroll { position: relative; overflow-y: auto; flex: 1; min-height: 0; }
@@ -642,30 +770,37 @@ input[type="color"] {
 }
 .ev-row:hover { background: var(--bg3); }
 .ev-row.cur { background: #1f3d2b; box-shadow: inset 2px 0 0 var(--green); }
-.ev-row .ev-seq {
-  color: var(--fg-dim); width: 58px; flex: none; text-align: left;
-  font-variant-numeric: tabular-nums;
-}
-.ev-row .ev-op { width: 14px; flex: none; font-weight: 700; }
-.ev-row .ev-op.m { color: var(--green); }
-.ev-row .ev-op.f { color: var(--red); }
-.ev-row .ev-op.r { color: #d29922; }
-.ev-row .ev-addr { color: var(--accent); }
 .ev-row .ev-size { color: var(--fg); }
 .ev-row .ev-site { color: var(--fg-dim); overflow: hidden; text-overflow: ellipsis; }
 /* a custom event: a landmark in the stream, not an allocation operation */
-.ev-row .ev-op.e { color: #bc8cff; }
 .ev-row .ev-label {
   color: #d2a8ff; overflow: hidden; text-overflow: ellipsis; font-style: italic;
 }
 .ev-row.ev-custom { background: rgba(188, 140, 255, 0.07); }
 .ev-row.ev-custom:hover { background: rgba(188, 140, 255, 0.16); }
 
+/* any other domain's record: its generic summary (DOM-004) */
+.ev-row .ev-src { flex: none; color: var(--fg-dim); font-size: 10.5px; }
+.ev-row.ev-generic .ev-label { color: var(--fg); font-style: normal; }
+.ev-row.ev-generic { background: rgba(86, 211, 100, 0.04); }
+/* the domain toggles: one chip per domain the trace has records of */
+.ev-domains { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 10px; border-bottom: 1px solid var(--border, #30363d); }
+.ev-chip {
+  font: 11px ui-monospace, monospace; padding: 1px 8px; border-radius: 10px; cursor: pointer;
+  border: 1px solid var(--border, #30363d); background: transparent; color: var(--fg-dim);
+  text-decoration: line-through;
+}
+.ev-chip.on { color: var(--fg); background: var(--bg3); text-decoration: none; }
+
 #warnings-list { font-family: ui-monospace, monospace; font-size: 11.5px; }
 #warnings-list .warn-row { padding: 3px 4px; border-radius: 4px; cursor: pointer; display: flex; gap: 8px; }
 #warnings-list .warn-row:hover { background: var(--bg3); }
 #warnings-list .warn-seq { color: var(--accent); flex: none; }
+#warnings-list .warn-kind { color: var(--fg-dim); flex: none; }
 #warnings-list .warn-msg { color: #d29922; }
+#warnings-list .warn-domain { margin: 8px 0 2px; color: var(--fg); font-weight: 700; }
+#warnings-list .warn-domain:first-child { margin-top: 0; }
+#warnings-list .warn-domain .dim { font-weight: 400; }
 
 .detail-body { font-family: ui-monospace, monospace; font-size: 11.5px; white-space: pre-wrap; }
 .detail-body .row { display: flex; gap: 8px; }
@@ -780,48 +915,47 @@ input[type="color"] {
   font-weight: 600;
   user-select: none;
 }
-#guide-title { font-size: 12px; }
 #guide-close {
   background: none; border: none; color: var(--fg-dim);
   font-size: 14px; padding: 0 6px; line-height: 1;
 }
 #guide-close:hover { color: var(--fg); }
 
-#guide-body {
+.guide-pane {
   flex: 1; min-height: 0;
   overflow-y: auto;
   padding: 8px 14px 40px;
   font-size: 12.5px; line-height: 1.5;
 }
-#guide-body .g-section + .g-section {
+.guide-pane .g-section + .g-section {
   margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border);
 }
-#guide-body h2 {
+.guide-pane h2 {
   font-size: 11px; font-weight: 600;
   letter-spacing: 0.6px; text-transform: uppercase;
   color: var(--accent);
   margin: 4px 0 7px;
 }
-#guide-body h3 { font-size: 12.5px; font-weight: 600; margin: 14px 0 5px; }
-#guide-body p { margin: 0 0 8px; color: var(--fg); }
-#guide-body ul { margin: 0 0 9px; padding-left: 17px; }
-#guide-body li { margin-bottom: 3px; }
-#guide-body hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
-#guide-body code {
+.guide-pane h3 { font-size: 12.5px; font-weight: 600; margin: 14px 0 5px; }
+.guide-pane p { margin: 0 0 8px; color: var(--fg); }
+.guide-pane ul { margin: 0 0 9px; padding-left: 17px; }
+.guide-pane li { margin-bottom: 3px; }
+.guide-pane hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
+.guide-pane code {
   font-family: ui-monospace, monospace; font-size: 11.5px;
   background: var(--bg3); border: 1px solid var(--border); border-radius: 3px;
   padding: 0 3px;
 }
-#guide-body pre {
+.guide-pane pre {
   background: var(--bg); border: 1px solid var(--border); border-radius: 5px;
   padding: 7px 9px; overflow-x: auto; margin: 0 0 9px;
 }
-#guide-body pre code { background: none; border: none; padding: 0; }
-#guide-body a { color: var(--accent); }
-#guide-body strong { color: var(--fg); font-weight: 600; }
+.guide-pane pre code { background: none; border: none; padding: 0; }
+.guide-pane a { color: var(--accent); }
+.guide-pane strong { color: var(--fg); font-weight: 600; }
 
 /* an action link: inline in the prose, and visibly a thing that does something */
-#guide-body .g-act {
+.guide-pane .g-act {
   font: inherit; font-size: 11.5px;
   font-family: ui-monospace, monospace;
   background: rgba(88,166,255,0.1);
@@ -831,8 +965,8 @@ input[type="color"] {
   padding: 0 5px;
   cursor: pointer;
 }
-#guide-body .g-act:hover { background: rgba(88,166,255,0.2); border-color: var(--accent); }
-#guide-body .g-fail { color: var(--red); font-family: ui-monospace, monospace; }
+.guide-pane .g-act:hover { background: rgba(88,166,255,0.2); border-color: var(--accent); }
+.guide-pane .g-fail { color: var(--red); font-family: ui-monospace, monospace; }
 
 #guide-resize {
   position: absolute; top: 0; bottom: 0; right: -3px; width: 7px;
@@ -862,8 +996,6 @@ input[type="color"] {
   --term-logger: #79c0ff;
   --term-cur: #1d2a3a;
 }
-#logs-panel { width: 520px; }
-#logs-panel:not(.docked) { height: 40vh; }
 #logs-panel .head-actions { display: flex; gap: 10px; align-items: center; }
 #logs-panel .head-actions label { font-weight: 400; }
 #logs-panel .log-count {
@@ -875,7 +1007,6 @@ input[type="color"] {
 #logs-scroll {
   position: relative; overflow: auto; flex: 1; min-height: 0;
   background: var(--term-bg); color: var(--term-fg);
-  border-radius: 0 0 8px 8px;
 }
 #logs-scroll:focus { outline: none; }
 #logs-spacer { width: 1px; }
@@ -910,7 +1041,6 @@ input[type="color"] {
 @keyframes log-reveal { from { background: rgba(88,166,255,0.35); } to { background: transparent; } }
 
 /* a log record in the Events list: level and message instead of geometry */
-.ev-row .ev-op.l { color: var(--term-logger); }
 .ev-row .ev-lv { flex: none; font-weight: 700; color: var(--fg-dim); white-space: pre; }
 .ev-row .ev-msg { overflow: hidden; text-overflow: ellipsis; color: var(--fg); }
 .ev-row.ev-log { background: rgba(121, 192, 255, 0.05); }
@@ -920,3 +1050,100 @@ input[type="color"] {
 .ev-row.ev-log.lv-4 .ev-lv, .ev-row.ev-log.lv-4 .ev-msg,
 .ev-row.ev-log.lv-5 .ev-lv, .ev-row.ev-log.lv-5 .ev-msg { color: var(--red); }
 .ev-row.ev-log.lv-5 .ev-msg { font-weight: 700; }
+
+/* ---------- guides: tabs, the pill's popover, the welcome line ----------
+   The guide surface hosts two peer guides (SHELL-009); the connection pill
+   offers Connect… or the heapviz & AI agents guide while disconnected. */
+
+#guide-tabs { display: flex; align-self: stretch; gap: 2px; margin-left: -6px; }
+#guide-bar .grow { flex: 1; }
+#guide-tabs button {
+  background: none; border: none; border-bottom: 2px solid transparent; border-radius: 0;
+  padding: 0 8px; color: var(--fg-dim); font-size: 12px; font-weight: 600;
+}
+#guide-tabs button:hover { color: var(--fg); }
+#guide-tabs button.active { color: var(--fg); border-bottom-color: var(--accent); }
+
+#conn-pop {
+  position: fixed; z-index: 75;
+  display: flex; flex-direction: column; min-width: 170px; padding: 4px;
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+}
+#conn-pop[hidden] { display: none; }
+#conn-pop button { text-align: left; background: none; border: none; padding: 5px 10px; border-radius: 4px; }
+#conn-pop button:hover, #conn-pop button:focus-visible { background: rgba(88,166,255,0.16); outline: none; }
+
+#welcome-card .welcome-agents { margin: 4px 0 0; color: var(--fg-dim); }
+#welcome-card .welcome-agents a { color: var(--accent); font-weight: 600; }
+
+/* --- Events list: kind labels and domain accents (NAV-005) ----------------
+   A row's record type reads as a word (alloc, free, call ▸, switch, a log
+   level), in a fixed-width chip tinted by its domain; a thin bar on the left
+   repeats the domain's color, as its chip at the top of the panel does. */
+.ev-row, .ev-chip { --dom: var(--fg-dim); }
+.ev-row[data-domain="heap"], .ev-chip.d-heap { --dom: #3fb950; }
+.ev-row[data-domain="marks"], .ev-chip.d-marks { --dom: #bc8cff; }
+.ev-row[data-domain="logs"], .ev-chip.d-logs { --dom: #79c0ff; }
+.ev-row[data-domain="intervals"], .ev-chip.d-intervals { --dom: #f0883e; }
+.ev-row { box-shadow: inset 2px 0 0 color-mix(in srgb, var(--dom) 70%, transparent); }
+.ev-row.cur { box-shadow: inset 3px 0 0 var(--dom); }
+.ev-row .ev-kind {
+  flex: none; width: 8ch; box-sizing: content-box; padding: 0 4px;
+  height: 14px; line-height: 14px; border-radius: 3px; overflow: hidden;
+  font-size: 10.5px; font-weight: 600; white-space: pre; text-overflow: clip;
+  color: var(--dom); background: color-mix(in srgb, var(--dom) 13%, transparent);
+}
+/* the selected interval's edges (IVL-UI-005) */
+.ev-row.picked { outline: 1px solid color-mix(in srgb, var(--accent) 75%, transparent); outline-offset: -1px; }
+.ev-row.picked:not(.cur) { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.ev-row.picked .ev-main { color: var(--fg); }
+.ev-row[data-domain="heap"] .ev-kind.k-malloc { color: var(--green); }
+.ev-row[data-domain="heap"] .ev-kind.k-free { color: var(--red); }
+.ev-row[data-domain="heap"] .ev-kind.k-realloc { color: #d29922; }
+.ev-row[data-domain="intervals"] .ev-kind.k-begin { color: #56d364; }
+.ev-row[data-domain="intervals"] .ev-kind.k-end { color: #f0883e; }
+.ev-row[data-domain="intervals"] .ev-kind.k-switch { color: #a5d6ff; }
+.ev-chip::before {
+  content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+  margin-right: 5px; vertical-align: 1px; background: var(--dom); opacity: 0.4;
+}
+.ev-chip.on::before { opacity: 1; }
+.ev-row.ev-log.lv-0 .ev-kind, .ev-row.ev-log.lv-1 .ev-kind { color: var(--fg-dim); }
+
+/* A row: kind, then what the record is (primary), then where (secondary:
+   thread, short address), then the seq. The secondary text gives up its
+   width long before the primary does (NAV-005). */
+.ev-row .ev-main {
+  flex: 0 1 auto; min-width: 5ch; overflow: hidden; text-overflow: ellipsis;
+  /* a pixel of slack: text exactly as wide as its box can still ellipsize */
+  padding-right: 1px; margin-right: -1px;
+}
+/* each secondary field shows whole or not at all: one that does not fit
+   wraps onto a second line the row clips (the zero-width space first lets
+   even the first field wrap away rather than be cut in half) */
+.ev-row .ev-sub {
+  flex: 1 1 0; min-width: 0; max-width: max-content; height: 18px; overflow: hidden;
+  white-space: normal; color: var(--fg-dim); font-size: 10.5px; opacity: 0.85;
+}
+.ev-row .ev-sub::before { content: "\200b"; }
+.ev-row .ev-thr, .ev-row .ev-addr { display: inline-block; white-space: nowrap; }
+.ev-row .ev-addr { color: color-mix(in srgb, var(--accent) 65%, var(--fg-dim)); }
+.ev-row .ev-seq {
+  flex: none; margin-left: auto; padding-left: 4px;
+  color: var(--fg-dim); font-size: 10px; opacity: 0.7; font-variant-numeric: tabular-nums;
+}
+/* the header's columns menu: which optional fields a row shows */
+#events-panel .ev-cols { position: relative; }
+#ev-cols-btn {
+  background: none; border: 1px solid var(--border, #30363d); border-radius: 4px;
+  color: var(--fg-dim); font-size: 11px; padding: 0 6px; line-height: 16px;
+}
+#ev-cols-btn:hover, #ev-cols-btn[aria-expanded="true"] { color: var(--fg); background: var(--bg3); }
+.ev-cols-menu {
+  position: absolute; right: 0; top: calc(100% + 4px); z-index: 30;
+  display: flex; flex-direction: column; gap: 2px; padding: 4px 8px; min-width: 96px;
+  background: var(--bg2); border: 1px solid var(--border, #30363d); border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.5); white-space: nowrap;
+}
+.ev-cols-menu[hidden] { display: none; }

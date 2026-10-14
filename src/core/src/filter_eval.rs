@@ -4,7 +4,7 @@ use heap_visualizer_filter_dsl::{
 
 use crate::json::push_json_str;
 use crate::store::{
-    Store, FIELD_BOOL, FIELD_FLOAT, FIELD_INT, FIELD_OTHER, FIELD_SCALARS, FIELD_STRING, NONE_U16,
+    Store, FIELD_BOOL, FIELD_FLOAT, FIELD_INT, FIELD_OTHER, FIELD_SCALARS, FIELD_STRING,
     NONE_U32, OP_M, OP_R,
 };
 
@@ -57,7 +57,7 @@ impl<'a> Ctx<'a> {
         let mut found = None;
         let mut count = 0;
         let s = self.store;
-        for (row, &candidate) in s.heap.id.iter().enumerate() {
+        for (row, &candidate) in s.dom.heap.id.iter().enumerate() {
             let event = s.heap_seq(row);
             if candidate == id && matches!(s.op[event as usize], OP_M | OP_R) {
                 count += 1;
@@ -1522,9 +1522,9 @@ fn observed_items(subject: &Expr, ctx: &Ctx, in_set: bool) -> Vec<CompletionItem
             .iter()
             .map(|value| string_item(value, "observed site", in_set))
             .collect(),
-        "thread" => ctx
-            .store
-            .thrs
+        "thread" => (0..ctx.store.thrs.len())
+            .filter_map(|i| ctx.store.track_thr(i as u16))
+            .collect::<std::collections::BTreeSet<i64>>()
             .iter()
             .map(|value| {
                 let label = value.to_string();
@@ -1888,10 +1888,7 @@ pub(crate) fn field_value(
             NONE_U32 => Value::Missing,
             id => Value::String(s.sites[id as usize].clone()),
         },
-        (Ns::Malloc, "thread") => match s.thr_idx[i] {
-            NONE_U16 => Value::Missing,
-            id => Value::Int(s.thrs[id as usize] as i128),
-        },
+        (Ns::Malloc, "thread") => s.track_thr(s.thr_idx[i]).map_or(Value::Missing, |t| Value::Int(t as i128)),
         (Ns::Malloc, "stack") => match s.stack_at(e) {
             NONE_U32 => Value::Missing,
             id => Value::String(s.stacks[id as usize].clone()),

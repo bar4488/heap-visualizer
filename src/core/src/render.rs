@@ -68,21 +68,17 @@ const GHOST_MARK: u8 = 0x80;
 #[derive(Default)]
 pub struct Filter {
     pub mode: u8,
-    /// Match bits for the applied E010 expression, indexed by creator event.
-    /// `None` means the expression is empty/off.
+    /// Match bits for the applied E010 expression, indexed by heap row (read
+    /// by spine index through `Store::row_bit`). `None` means the expression
+    /// is empty/off.
     pub matches: Option<Vec<u64>>,
 }
 
 impl Filter {
-    fn bit(words: &[u64], i: u32) -> bool {
-        let w = (i / 64) as usize;
-        w < words.len() && words[w] >> (i % 64) & 1 == 1
-    }
-
     /// Does creator `e` pass? Everything does while the filter is off or no
     /// expression is applied.
-    pub fn pass(&self, _s: &Store, e: u32) -> bool {
-        self.mode == FILTER_OFF || self.matches.as_ref().is_none_or(|bits| Self::bit(bits, e))
+    pub fn pass(&self, s: &Store, e: u32) -> bool {
+        self.mode == FILTER_OFF || self.matches.as_ref().is_none_or(|bits| s.row_bit(bits, e))
     }
 }
 
@@ -987,8 +983,8 @@ pub fn alloc_info(
         out.push_str("null");
     }
     out.push_str(",\"thr\":");
-    if s.thr_idx[ei] != NONE_U16 {
-        out.push_str(&format!("{}", s.thrs[s.thr_idx[ei] as usize]));
+    if let Some(thr) = s.track_thr(s.thr_idx[ei]) {
+        out.push_str(&thr.to_string());
     } else {
         out.push_str("null");
     }
@@ -1105,9 +1101,9 @@ pub fn event_rects(s: &Store, v: &mut View, cfg: &Cfg, w: u32, e: u32, scroll: f
     let ei = e as usize;
     let creator = match s.op[ei] {
         OP_F => s.target(e),
-        // a custom event marks no region of the map
-        OP_E | OP_L => return "[]".to_string(),
-        _ => e,
+        OP_M | OP_R => e,
+        // a record of another kind or domain marks no region of the map
+        _ => return "[]".to_string(),
     };
     if creator == NONE_U32 {
         return "[]".to_string();
@@ -1131,8 +1127,8 @@ pub fn move_link(s: &Store, v: &mut View, cfg: &Cfg, w: u32, scroll: f64) -> Str
     v.ensure_rows();
     let mut out = String::from("{");
     out.push_str(&format!("\"op\":{},\"seq\":{}", op, e));
-    if op == OP_E || op == OP_L {
-        // nothing moved, nothing was freed: a landmark draws no link
+    if !matches!(op, OP_M | OP_F | OP_R) {
+        // nothing moved, nothing was freed: a landmark or log draws no link
         out.push_str(",\"old\":[],\"new\":[]}");
         return out;
     }
@@ -1192,9 +1188,9 @@ pub fn scroll_for_event(s: &Store, v: &mut View, cfg: &Cfg, h: u32, e: u32) -> f
                 return -1.0;
             }
         }
-        // a custom event sits at no address: leave the viewport where it is
-        OP_E | OP_L => return -1.0,
-        _ => e,
+        OP_M | OP_R => e,
+        // any other record sits at no address: leave the viewport where it is
+        _ => return -1.0,
     };
     let a = s.addr(creator);
     let r = (a.saturating_sub(v.base)) / v.row_bytes;

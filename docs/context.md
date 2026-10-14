@@ -6,9 +6,10 @@ belongs in [spec/](../spec/README.md); this file is operational.
 ## Build
 
 ```sh
-npm install         # typescript + @types/node, dev-only, once
+npm install         # typescript, @types/node, @playwright/test (dev; no browser
+                    # download), dockview-core (vendored), once
 ./build.sh          # everything into dist/: the wasm, the compiled web layer,
-                    # and a generated demo trace
+                    # the vendored dock engine, and a generated demo trace
 ./build.sh web      # skip the cargo build; recompile only the web layer
 ```
 
@@ -18,6 +19,14 @@ layer is TypeScript; `tsc` emits browser ES modules with source maps, and
 refuses to emit at all if anything fails to type-check.
 
 Needs the wasm target: `rustup target add wasm32-unknown-unknown`.
+
+**The dock engine is vendored, not bundled.** `dockview-core` is pinned to an
+exact version in `package.json` ([D014](decisions/D014-dockview-for-windowing.md)).
+`build.sh` copies its one self-contained ES module to
+`dist/vendor/dockview-core.esm.min.mjs`, which the import map in `index.html`
+maps the bare specifier onto, and writes `dist/vendor/dockview.css` — lifted
+out of the package's UMD build, because the ESM build ships no stylesheet. An
+upgrade is a deliberate version bump plus a look at the result in a browser.
 
 **`./build.sh` emits two wasm modules.** `heap_visualizer_core.wasm` is the
 engine, loaded by the worker. `filter_lexer.wasm` is `src/filter-dsl/` on its
@@ -179,6 +188,30 @@ cargo test --manifest-path src/local-server/Cargo.toml # the local data-server t
 
 Each command prints its own test count; do not maintain duplicate counts here.
 
+### Browser smoke suite
+
+```sh
+./build.sh                  # the suite serves dist/ as built; it builds nothing
+npm run test:browser        # type-checks tests/browser, then runs Playwright
+HEAPVIZ_CHROMIUM=/path/to/chrome npm run test:browser   # another browser binary
+npx playwright test -g pin  # one flow; --headed / --debug to watch it
+```
+
+A few short flows through the real page (`tests/browser/*.spec.ts`, shared
+steps in `helpers.ts`): the demo loads and paints, allocation windows pin,
+unpin, combine and split apart, an edge splits, a reload restores the layout,
+the menus and palette, an interval click, the Logs playhead. It is separate
+from the unit loop: `node --test` and `tsconfig.test.json` never see it
+(`tsconfig.browser.json` checks it).
+
+`playwright.config.ts` starts `./serve.py 8699` (or reuses a server already on
+that port, outside CI) and fails at once, naming `./build.sh`, when
+`dist/demo.heapl` or the wasm is missing. It uses the system Chromium,
+`/usr/bin/chromium`, unless `HEAPVIZ_CHROMIUM` names another; with neither,
+it falls back to Playwright's own (`npx playwright install chromium`).
+`npm install` downloads no browser. A failing flow leaves a screenshot and a
+trace under `test-results/` (`npx playwright show-trace <zip>`).
+
 **Invoke the compiler as `node_modules/.bin/tsc`, not `npx tsc`.** `typescript`
 is a devDependency, so with `node_modules/` absent npx fetches an unrelated
 package from the registry whose entire content is a message saying it is not
@@ -193,8 +226,10 @@ strips the types itself, which is why sources import each other as `./x.ts` and
 sources in `src/web/`, not against `dist/`. Type-checking is the one thing that
 needs `npm install`.
 `src/web/test/dom-stub.ts` is a stand-in for the DOM surface the web layer
-actually touches — that is what makes the persisted round-trips testable
-without a browser.
+actually touches, and `src/web/test/fake-dockview.ts` for the slice of the dock
+engine the shell drives — that is what makes the persisted round-trips and the
+panel API testable without a browser (the shell receives the engine from
+`main.ts` rather than importing it, so no test loads `dockview-core`).
 
 The web suite covers, among others: `fmt.ts` in full (`clampView` included —
 it is the one function both threads run on the same input), `normAddr`, the
@@ -207,9 +242,10 @@ What it does not cover yet: see [Verify a web change](#verify-a-web-change).
 
 ## Verify a web change
 
-Rendering, pointer interaction, and the real worker round trip are not yet
-covered by any suite. Run the available checks and say precisely what they
-did and did not establish.
+Rendering, pointer interaction, the real dock engine (dragging tabs, edge
+groups, floating), and the real worker round trip are covered only by the
+browser smoke suite, and only along its few flows. Run the available checks
+and say precisely what they did and did not establish.
 
 ```sh
 cargo test --manifest-path src/core/Cargo.toml
@@ -217,7 +253,7 @@ cargo test --manifest-path src/filter-dsl/Cargo.toml
 node --test 'src/web/**/*.test.ts'
 node_modules/.bin/tsc -p tsconfig.test.json
 ./build.sh web
-./serve.py &     # then: curl -s -o /dev/null -w '%{http_code}\n' localhost:8630/main.js
+npm run test:browser
 ```
 
 For a change meant to preserve behavior — a translation, a rename, a config
@@ -243,7 +279,7 @@ in the final result rather than blocking otherwise verified work.
 | `src/core/` | Rust engine: parse, columnar store, state, render, timeline. Also an `rlib`, so tests run natively. |
 | `src/filter-dsl/` | Dependency-free Rust crate for allocation-filter source spans, syntax trees, and parsing. |
 | `src/web/protocol.ts` | The main-thread ↔ worker message contract. Types only; both sides import it. |
-| `src/web/shell/` | Domain-independent: panel windows, drawers, tooltip, DOM helpers. Names no heap concept. |
+| `src/web/shell/` | Domain-independent: the panel API over the dock (`layout.ts`, the only code that talks to Dockview), its engine-free layout plans, tooltip, DOM helpers. Names no heap concept. |
 | `src/web/heap/` | Heap-specific: analysis data, the panel table, events panel, address helpers. |
 | `src/web/session.ts` | The boundary: serializes shell state *and* heap state into one per-trace blob. |
 | `src/web/main.ts` | Trace/worker/toolbar wiring plus the three coordinated views. Owns `UIState`, the shared state every other module takes as `deps.ui`. |
@@ -251,6 +287,7 @@ in the final result rather than blocking otherwise verified work.
 | `dist/` | The served tree. Generated; not in git. |
 | `src/server/` | The feature-request service: `store.py` (the JSONL), `app.py` (static tree + API), `admin.html` (the review panel). Stdlib only, and it never sees trace data. |
 | `gen.py` | Synthetic `.heapl` trace generator. |
+| `tests/browser/` | The browser smoke suite (Playwright), run against `dist/` by `npm run test:browser`. |
 
 **No module imports `UI`.** Modules receive what they need via `init*(deps)`.
 That is what keeps the coupling written down and the persisted shapes testable.

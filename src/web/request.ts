@@ -18,11 +18,11 @@
 //     analysis, nothing about the loaded file. The body is `{text, contact}`.
 //
 // It is not in heap/panels.ts: there is nothing heap-shaped about it and
-// nothing to restore per trace, for the same reason the Event window is not
-// (SHELL-003).
+// nothing to restore per trace. It is declared to the shell here instead, as
+// a window that is not persisted (SHELL-003).
 
 import { $ } from './shell/dom.ts';
-import { raisePanel } from './shell/panels.ts';
+import { layout } from './shell/layout.ts';
 
 const ENDPOINT = '/api/requests';
 
@@ -83,12 +83,16 @@ export function initRequest() {
     status.classList.toggle('bad', !ok);
   };
 
-  $('btn-request').onclick = () => {
-    panel.hidden = !panel.hidden;
-    if (panel.hidden) return;
-    raisePanel(panel);
-    text.focus();
-  };
+  // A window like any other, declared here because it is not heap-shaped:
+  // the Help menu toggles it, and nothing about it persists.
+  layout.register('request-panel', {
+    title: 'Request a feature',
+    toggle: null, // Help → Request a feature… (main.ts's action registry)
+    persist: false,
+    defaultLocation: { dock: null, open: false },
+    build: () => panel,
+    onOpen: () => text.focus(),
+  });
 
   button.onclick = async () => {
     const body = text.value.trim();

@@ -17,9 +17,10 @@
 //! that stack substring predicates would have to be slower does not survive
 //! lowering.
 //!
-//! **The output and the tag indexes are both blocked by 64.** The match bitset
-//! is words of 64 events, and [D009]'s `tag_members` is a bitset per tag over
-//! the same blocks. `tags contains "x"` is therefore not a per-event test at
+//! **The output and the tag indexes are both blocked by 64.** The scan runs
+//! over **heap rows**, not the event spine ([DOM-002]): the match bitset is
+//! words of 64 heap rows, and [D009]'s `tag_members` is a bitset per tag over
+//! the same blocks, whatever other domains share the spine. `tags contains "x"` is therefore not a per-event test at
 //! all: it is one 64-bit load. The executor works a block at a time and
 //! carries an `active` mask down the tree, so `&&` narrows what the next
 //! clause looks at and an expensive clause only ever touches events a cheaper
@@ -27,6 +28,13 @@
 //!
 //! [D008]: ../../../docs/decisions/D008-the-filter-evaluator-is-a-lowered-plan.md
 //! [D009]: ../../../docs/decisions/D009-tag-membership-has-one-owner-and-derived-indexes.md
+//! [DOM-002]: ../../../spec/13-domains-and-logs.md#dom-002-domains-own-their-payloads
+//!
+//! Every per-row reader below takes a heap row `h`. Heap columns are indexed
+//! by it directly; the spine columns (`t`, thread) and the spine-valued
+//! results (`seq`, links) go through `Store::heap_seq` — the one boundary.
+//! The result bitset is over heap rows too; `Store::row_bit` and
+//! `Store::row_bits_events` read it back in spine indexes.
 
 use heap_visualizer_filter_dsl::{BinaryOp, Expr, ExprKind, UnaryOp};
 
@@ -34,7 +42,7 @@ use crate::filter_eval::{
     cmp_num, custom_fragment, field_value, float, number_literal, ordered, reference_event,
     resolve_path, Ctx, EvalError, FieldRoot, FieldValues, Leaf, Ns, Num, Path, Value,
 };
-use crate::store::{Store, NONE_U16, NONE_U32, OP_M, OP_R};
+use crate::store::{Store, NONE_U16, NONE_U32};
 
 // ------------------------------------------------------------------ columns
 
@@ -57,29 +65,31 @@ enum NumCol {
 }
 
 impl NumCol {
+    /// The value for heap row `h`.
     #[inline]
-    fn get(self, s: &Store, e: u32) -> Option<i128> {
-        let i = e as usize;
+    fn get(self, s: &Store, h: u32) -> Option<i128> {
+        let r = h as usize;
+        let hc = &s.dom.heap;
         Some(match self {
-            NumCol::Id => s.id(e) as i128,
-            NumCol::Addr => s.addr(e) as i128,
-            NumCol::End => s.end(e) as i128,
-            NumCol::Size => s.size(e) as i128,
-            NumCol::Seq => e as i128,
-            NumCol::Time => s.t[i] as i128,
-            NumCol::Usable => match s.usable_at(e) {
+            NumCol::Id => hc.id[r] as i128,
+            NumCol::Addr => hc.addr[r] as i128,
+            NumCol::End => hc.addr[r].saturating_add(hc.size[r]) as i128,
+            NumCol::Size => hc.size[r] as i128,
+            NumCol::Seq => s.heap_seq(r) as i128,
+            NumCol::Time => s.t[s.heap_seq(r) as usize] as i128,
+            NumCol::Usable => match usable_row(s, r) {
                 0 => return None,
                 v => v as i128,
             },
-            NumCol::Lifetime => match s.death(e) {
+            NumCol::Lifetime => match hc.death[r] {
                 NONE_U32 => return None,
-                d => s.t[d as usize] as i128 - s.t[i] as i128,
+                d => s.t[d as usize] as i128 - s.t[s.heap_seq(r) as usize] as i128,
             },
-            NumCol::DeathSeq => match s.death(e) {
+            NumCol::DeathSeq => match hc.death[r] {
                 NONE_U32 => return None,
                 d => d as i128,
             },
-            NumCol::DeathTime => match s.death(e) {
+            NumCol::DeathTime => match hc.death[r] {
                 NONE_U32 => return None,
                 d => s.t[d as usize] as i128,
             },
@@ -101,40 +111,42 @@ impl NumCol {
     }
 }
 
-/// A column that is one `u64` per event, with no sentinel and no arithmetic.
+/// A column that is one `u64` per heap row, with no sentinel and no
+/// arithmetic.
 #[derive(Clone, Copy, Debug)]
 enum U64Col {
     Id,
     Addr,
     Size,
     Time,
-    /// The event index itself, so there is no column to read.
+    /// The record's spine index, so there is no column to read.
     Seq,
 }
 
 impl U64Col {
-    /// The column as a slice indexed by spine index. Heap columns are one
-    /// only while heap rows are spine indexes (a heap-only trace); otherwise
-    /// the scan reads them per event through the store's accessors.
+    /// The column as a slice indexed by heap row. The heap columns always
+    /// are one; `t` is a spine column, so it is one only while heap rows are
+    /// spine indexes (no other domain in the trace) and is gathered through
+    /// `heap_seq` otherwise.
     fn slice(self, s: &Store) -> Option<&[u64]> {
-        let unmapped = s.hrank.is_empty();
         Some(match self {
-            U64Col::Id if unmapped => &s.heap.id,
-            U64Col::Addr if unmapped => &s.heap.addr,
-            U64Col::Size if unmapped => &s.heap.size,
-            U64Col::Time => &s.t,
+            U64Col::Id => &s.dom.heap.id,
+            U64Col::Addr => &s.dom.heap.addr,
+            U64Col::Size => &s.dom.heap.size,
+            U64Col::Time if s.dom.heap.seq.is_empty() => &s.t,
             _ => return None,
         })
     }
 
     #[inline]
-    fn at(self, s: &Store, e: u32) -> u64 {
+    fn at(self, s: &Store, h: u32) -> u64 {
+        let r = h as usize;
         match self {
-            U64Col::Id => s.id(e),
-            U64Col::Addr => s.addr(e),
-            U64Col::Size => s.size(e),
-            U64Col::Time => s.t[e as usize],
-            U64Col::Seq => u64::from(e),
+            U64Col::Id => s.dom.heap.id[r],
+            U64Col::Addr => s.dom.heap.addr[r],
+            U64Col::Size => s.dom.heap.size[r],
+            U64Col::Time => s.t[s.heap_seq(r) as usize],
+            U64Col::Seq => u64::from(s.heap_seq(r)),
         }
     }
 }
@@ -168,22 +180,20 @@ impl DictCol {
     fn value(self, id: usize, s: &Store, fv: &FieldValues) -> Value {
         match self {
             DictCol::Site => Value::String(s.sites[id].clone()),
-            DictCol::Thread => Value::Int(s.thrs[id] as i128),
+            // a process track's placeholder `thr` is no thread
+            DictCol::Thread => s.track_thr(id as u16).map_or(Value::Missing, |t| Value::Int(t as i128)),
             DictCol::Stack => Value::String(s.stacks[id].clone()),
             DictCol::Field { key, .. } => fv.at(key, id as u32),
         }
     }
 
-    /// The value for one event, without cloning — the fallback paths that
+    /// The value for heap row `h`, without cloning — the fallback paths that
     /// survive to the scan use this.
     #[inline]
-    fn num_at(self, s: &Store, fv: &FieldValues, e: u32) -> Option<Num> {
+    fn num_at(self, s: &Store, fv: &FieldValues, h: u32) -> Option<Num> {
         match self {
-            DictCol::Thread => match s.thr_idx[e as usize] {
-                NONE_U16 => None,
-                t => Some(Num::Int(s.thrs[t as usize] as i128)),
-            },
-            DictCol::Field { key, .. } => match fv.at_ref(key, custom_fragment_of(self, s, e)) {
+            DictCol::Thread => s.track_thr(s.thr_idx[s.heap_seq(h as usize) as usize]).map(|t| Num::Int(t as i128)),
+            DictCol::Field { key, .. } => match fv.at_ref(key, custom_fragment_of(self, s, h)) {
                 Some(Value::Int(v)) => Some(Num::Int(*v)),
                 Some(Value::Float(v)) => Some(Num::Float(*v)),
                 _ => None,
@@ -193,17 +203,17 @@ impl DictCol {
     }
 
     #[inline]
-    fn str_at<'a>(self, s: &'a Store, fv: &'a FieldValues, e: u32) -> Option<&'a str> {
+    fn str_at<'a>(self, s: &'a Store, fv: &'a FieldValues, h: u32) -> Option<&'a str> {
         match self {
-            DictCol::Site => match s.site(e) {
+            DictCol::Site => match s.dom.heap.site[h as usize] {
                 NONE_U32 => None,
                 id => Some(&s.sites[id as usize]),
             },
-            DictCol::Stack => match s.stack_at(e) {
+            DictCol::Stack => match stack_row(s, h as usize) {
                 NONE_U32 => None,
                 id => Some(&s.stacks[id as usize]),
             },
-            DictCol::Field { key, .. } => match fv.at_ref(key, custom_fragment_of(self, s, e)) {
+            DictCol::Field { key, .. } => match fv.at_ref(key, custom_fragment_of(self, s, h)) {
                 Some(Value::String(v)) => Some(v),
                 _ => None,
             },
@@ -213,11 +223,40 @@ impl DictCol {
 }
 
 #[inline]
-fn custom_fragment_of(col: DictCol, s: &Store, e: u32) -> u32 {
+fn custom_fragment_of(col: DictCol, s: &Store, h: u32) -> u32 {
     match col {
-        DictCol::Field { root, .. } => custom_fragment(root, s, e),
+        DictCol::Field { root, .. } => fragment_row(root, s, h as usize),
         _ => NONE_U32,
     }
+}
+
+/// `custom_fragment` for heap row `h`: the creator's own fragment is a heap
+/// column, the death record's is read through the (spine) death link.
+#[inline]
+fn fragment_row(root: FieldRoot, s: &Store, h: usize) -> u32 {
+    match root {
+        FieldRoot::Alloc => extra_row(s, h),
+        FieldRoot::Death => match s.dom.heap.death[h] {
+            NONE_U32 => NONE_U32,
+            death => custom_fragment(FieldRoot::Alloc, s, death),
+        },
+    }
+}
+
+// Lazy heap columns read by row: empty means no record carried the value.
+#[inline]
+fn extra_row(s: &Store, h: usize) -> u32 {
+    s.dom.heap.extra.get(h).copied().unwrap_or(NONE_U32)
+}
+
+#[inline]
+fn stack_row(s: &Store, h: usize) -> u32 {
+    s.dom.heap.stack.get(h).copied().unwrap_or(NONE_U32)
+}
+
+#[inline]
+fn usable_row(s: &Store, h: usize) -> u64 {
+    s.dom.heap.usable.get(h).copied().unwrap_or(0)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -255,13 +294,14 @@ enum Scalar {
 }
 
 impl Scalar {
+    /// The value for heap row `e`.
     #[inline]
     fn get(&self, s: &Store, fv: &FieldValues, e: u32) -> Option<Num> {
         match self {
             Scalar::Const(v) => Some(*v),
             Scalar::Col(col) => col.get(s, e).map(Num::Int),
             Scalar::Dict(col) => col.num_at(s, fv, e),
-            Scalar::TagLen => Some(Num::Int(s.tag_ids(e).count() as i128)),
+            Scalar::TagLen => Some(Num::Int(s.row_tag_ids(e as usize).count() as i128)),
             Scalar::Add(pair) => arith(&pair.0, &pair.1, s, fv, e, false),
             Scalar::Sub(pair) => arith(&pair.0, &pair.1, s, fv, e, true),
             Scalar::Abs(inner) => match inner.get(s, fv, e)? {
@@ -374,11 +414,10 @@ impl Pred {
     }
 }
 
-/// A compiled filter: the predicate, plus the creator mask it is intersected
-/// with so that a non-allocation event can never match.
+/// A compiled filter. The scan intersects it with the store's creator mask
+/// (`HeapCols::creators`) so that a non-allocation record can never match.
 pub struct Plan {
     root: Pred,
-    creators: Vec<u64>,
     creator_count: u32,
 }
 
@@ -395,19 +434,9 @@ impl Plan {
 /// bug rather than bad input, but reported rather than panicked on.
 pub fn lower(expr: &Expr, ctx: &Ctx) -> Result<Plan, EvalError> {
     let root = pred(expr, ctx)?;
-    let s = ctx.store;
-    let mut creators = vec![0u64; (s.len() as usize).div_ceil(64).max(1)];
-    let mut creator_count = 0;
-    for e in 0..s.len() {
-        if matches!(s.op[e as usize], OP_M | OP_R) {
-            creators[e as usize / 64] |= 1 << (e % 64);
-            creator_count += 1;
-        }
-    }
     Ok(Plan {
         root,
-        creators,
-        creator_count,
+        creator_count: ctx.store.creator_count(),
     })
 }
 
@@ -1212,14 +1241,14 @@ fn get_bit(bits: &[u64], i: u32) -> bool {
 
 // ----------------------------------------------------------------- execution
 
-/// Run the plan over the whole trace, writing one match bit per event.
-/// Returns the number of matches.
+/// Run the plan over every heap row, writing one match bit per heap row into
+/// `out` (`Store::row_words` long). Returns the number of matches.
 pub fn scan(plan: &Plan, ctx: &Ctx, out: &mut [u64]) -> u32 {
     let s = ctx.store;
     let fv = ctx.fields;
     let mut matches = 0;
     for (block, slot) in out.iter_mut().enumerate() {
-        let active = plan.creators.get(block).copied().unwrap_or(0);
+        let active = s.dom.heap.creators.get(block).copied().unwrap_or(0);
         if active == 0 {
             *slot = 0;
             continue;
@@ -1231,8 +1260,8 @@ pub fn scan(plan: &Plan, ctx: &Ctx, out: &mut [u64]) -> u32 {
     matches
 }
 
-/// Answer one predicate for one 64-event block. `active` is the set of events
-/// still worth asking about; a leaf never looks outside it.
+/// Answer one predicate for one block of 64 heap rows. `active` is the set of
+/// rows still worth asking about; a leaf never looks outside it.
 fn word_of(p: &Pred, s: &Store, fv: &FieldValues, block: usize, active: u64) -> u64 {
     match p {
         Pred::Const(true) => active,
@@ -1259,16 +1288,7 @@ fn word_of(p: &Pred, s: &Store, fv: &FieldValues, block: usize, active: u64) -> 
             found
         }
         Pred::Not(inner) => active & !word_of(inner, s, fv, block, active),
-        // Tag bitsets are blocked by heap row; a block of spine indexes is one
-        // of them only while the two coincide.
-        Pred::TagWord(tag) if !s.hrank.is_empty() => {
-            each(active, block, |e| s.has_tag(e, *tag))
-        }
-        Pred::TagAny if !s.hrank.is_empty() => each(active, block, |e| s.has_tags(e)),
-        Pred::TagsEq(want) if !s.hrank.is_empty() => each(active, block, |e| {
-            want.iter().all(|&tag| s.has_tag(e, tag))
-                && s.tag_ids(e).all(|tag| want.contains(&tag))
-        }),
+        // tag bitsets are blocked by heap row, exactly like the scan
         Pred::TagWord(tag) => active & tag_word(s, *tag, block),
         Pred::TagAny => active & s.tag_any.get(block).copied().unwrap_or(0),
         Pred::TagsEq(want) => {
@@ -1317,21 +1337,15 @@ fn word_of(p: &Pred, s: &Store, fv: &FieldValues, block: usize, active: u64) -> 
         // every optional column is a sentinel test, so it never needs the
         // general numeric read
         Pred::Present { col, want } => match col {
-            NumCol::DeathSeq | NumCol::DeathTime | NumCol::Lifetime if s.hrank.is_empty() => {
-                let death = &s.heap.death;
-                each(active, block, |e| {
-                    (death[e as usize] != NONE_U32) == *want
+            NumCol::DeathSeq | NumCol::DeathTime | NumCol::Lifetime => {
+                let death = &s.dom.heap.death;
+                each(active, block, |h| {
+                    (death[h as usize] != NONE_U32) == *want
                 })
             }
-            NumCol::DeathSeq | NumCol::DeathTime | NumCol::Lifetime => {
-                each(active, block, |e| (s.death(e) != NONE_U32) == *want)
-            }
-            NumCol::Usable if !s.heap.usable.is_empty() && s.hrank.is_empty() => {
-                let usable = &s.heap.usable;
-                each(active, block, |e| (usable[e as usize] != 0) == *want)
-            }
-            NumCol::Usable if !s.heap.usable.is_empty() => {
-                each(active, block, |e| (s.usable_at(e) != 0) == *want)
+            NumCol::Usable if !s.dom.heap.usable.is_empty() => {
+                let usable = &s.dom.heap.usable;
+                each(active, block, |h| (usable[h as usize] != 0) == *want)
             }
             NumCol::Usable => each(active, block, |_| !*want),
             _ => each(active, block, |e| col.get(s, e).is_some() == *want),
@@ -1366,40 +1380,42 @@ fn dict_word(
     active: u64,
     hit: impl Fn(u32) -> bool,
 ) -> u64 {
-    // Heap dictionary columns are slices over spine indexes only while the
-    // heap row is the spine index; a trace with other domains reads them
-    // per event through the accessors instead.
-    let unmapped = s.hrank.is_empty();
+    // Heap dictionary columns are slices over heap rows. The thread column
+    // is a spine column: a slice too while the heap row is the spine index,
+    // gathered through `heap_seq` once other domains share the spine.
+    let thread = |t: u16| match t {
+        NONE_U16 => hit(NONE_U32),
+        t => hit(u32::from(t)),
+    };
     match col {
-        DictCol::Site if unmapped => {
-            let ids = &s.heap.site;
-            each(active, block, |e| hit(ids[e as usize]))
+        DictCol::Site => {
+            let ids = &s.dom.heap.site;
+            each(active, block, |h| hit(ids[h as usize]))
         }
-        DictCol::Site => each(active, block, |e| hit(s.site(e))),
-        DictCol::Thread => {
+        DictCol::Thread if s.dom.heap.seq.is_empty() => {
             let ids = &s.thr_idx;
-            each(active, block, |e| match ids[e as usize] {
-                NONE_U16 => hit(NONE_U32),
-                t => hit(u32::from(t)),
-            })
+            each(active, block, |h| thread(ids[h as usize]))
         }
-        DictCol::Stack if !s.heap.stack.is_empty() && unmapped => {
-            let ids = &s.heap.stack;
-            each(active, block, |e| hit(ids[e as usize]))
+        DictCol::Thread => {
+            let (ids, seq) = (&s.thr_idx, &s.dom.heap.seq);
+            each(active, block, |h| thread(ids[seq[h as usize] as usize]))
         }
-        DictCol::Stack if !s.heap.stack.is_empty() => {
-            each(active, block, |e| hit(s.stack_at(e)))
+        DictCol::Stack if !s.dom.heap.stack.is_empty() => {
+            let ids = &s.dom.heap.stack;
+            each(active, block, |h| hit(ids[h as usize]))
         }
-        // a lazy column the trace never materialized: every event is missing
+        // a lazy column the trace never materialized: every row is missing
         DictCol::Stack => each(active, block, |_| hit(NONE_U32)),
         DictCol::Field {
             root: FieldRoot::Alloc,
             ..
-        } if !s.heap.extra.is_empty() && unmapped => {
-            let ids = &s.heap.extra;
-            each(active, block, |e| hit(ids[e as usize]))
+        } if !s.dom.heap.extra.is_empty() => {
+            let ids = &s.dom.heap.extra;
+            each(active, block, |h| hit(ids[h as usize]))
         }
-        DictCol::Field { root, .. } => each(active, block, |e| hit(custom_fragment(root, s, e))),
+        DictCol::Field { root, .. } => {
+            each(active, block, |h| hit(fragment_row(root, s, h as usize)))
+        }
     }
 }
 
@@ -1434,10 +1450,11 @@ fn u64_word(col: U64Col, op: BinaryOp, rhs: u64, s: &Store, block: usize, active
             };
         }
     }
-    each(active, block, |e| {
-        let v = match col.slice(s) {
-            Some(column) => column[e as usize],
-            None => col.at(s, e),
+    let column = col.slice(s);
+    each(active, block, |h| {
+        let v = match column {
+            Some(column) => column[h as usize],
+            None => col.at(s, h),
         };
         match op {
             BinaryOp::Equal => v == rhs,
@@ -1450,7 +1467,7 @@ fn u64_word(col: U64Col, op: BinaryOp, rhs: u64, s: &Store, block: usize, active
     })
 }
 
-/// Test the events in `active` and collect the answers into a word.
+/// Test the heap rows in `active` and collect the answers into a word.
 ///
 /// A full block runs as a straight loop over all 64 — no bit scanning, and it
 /// vectorizes — while a narrowed one walks only the bits still set, which is
