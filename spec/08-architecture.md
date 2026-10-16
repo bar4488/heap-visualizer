@@ -95,9 +95,12 @@ answers.
 
 | | |
 |---|---|
-| `src/web/shell/` | `dom.ts` (`$`, `$$`, `setHtml`, `delegate`, device↔CSS px), `panels.ts` (draggable windows, z-stack), `drawers.ts` (dockable left/right drawers), `tooltip.ts`. **No domain identifiers.** |
-| `src/web/heap/` | `analysis.ts` (tags, names, colors, marks, `.heapa`), `panels.ts` (the panel table), `events-panel.ts`, `addr.ts` |
-| `src/web/session.ts` | The boundary: serializes shell state (window/drawer geometry) *and* heap state (view, crop, filters, playhead) into the one per-trace session blob |
+| `src/web/shell/` | `dom.ts` (`$`, `$$`, `setHtml`, `delegate`, device↔CSS px), `layout.ts` (the panel API domain code uses: register, open/close/toggle/reveal, hooks, reset, the layout half of the session — [SHELL-003](09-ui-shell.md#shell-003-panels-are-declared-as-data); the only module that talks to the dock engine, Dockview — [D014](../docs/decisions/D014-dockview-for-windowing.md)), `layout-plan.ts` (the default layout and the pre-dock session read path, as engine-free data), `tooltip.ts`. **No domain identifiers.** |
+| `src/web/heap/` | `analysis.ts` (tags, names, colors, marks, `.heapa`), `panels.ts` (the heap's panel table: the views and the windows), `addr.ts` |
+| `src/web/panels.ts` | The panel table's assembly: the heap's table plus each domain module's panels, declared through its registration hook (`PanelContext`) |
+| `src/web/stream/` | The Events list over every domain's records: `events-panel.ts` (DOM), `stream-model.ts` (rows, domain toggles, the position ↔ seq map) |
+| `src/web/logs/`, `src/web/intervals/` | A domain's own panels: the Logs terminal; the interval panels (`registerIntervalPanels`) |
+| `src/web/session.ts` | The boundary: puts the shell's layout serialization (the dock layout, from `shell/layout.ts`) *and* heap state (view, crop, filters, playhead) into the one per-trace session blob |
 | `src/web/main.ts` | Trace/worker/toolbar wiring and the three coordinated views. Owns `UIState`, the shared main-thread state every other module receives as `deps.ui` |
 | `src/web/fmt.ts`, `src/web/rpc.ts` | Shared with the worker; the request/response layer |
 | `src/web/protocol.ts` | The message protocol, types only. Both sides import it, so a message one side does not know about is a build error |
@@ -105,8 +108,10 @@ answers.
 Two rules keep the seam from eroding. **No module imports the shared `UI`
 object** — each receives what it needs through an `init*(deps)` call, so the
 coupling is written down instead of ambient, and there is no circular-import
-initialization hazard. **`panels.js` never imports `drawers.js`**: the drag
-path that can end in a dock receives the dock API as an argument.
+initialization hazard. **Only `shell/layout.ts` touches the dock engine**, and
+only `main.ts` imports it (`dockview-core`, mapped by the page's import map onto
+the copy `build.sh` vendors) to hand it to the shell; the panel API's tests run
+the shell against a stand-in engine.
 
 The destination this serves is a domain-independent shell hosting several
 analysis domains, heap being the first; see
@@ -151,7 +156,10 @@ a freshly generated capability in its URL fragment, and the UI must retain it
 only for that tab. The capability must be required as a bearer value by every
 data request. CORS may admit a syntactically valid browser origin so any
 compatible deployment can connect; possession of the capability, not the web
-origin, is the authority.
+origin, is the authority. Every response to a request with a valid loopback
+Host and Origin carries that CORS treatment, including authentication,
+body-limit, wrong-method, and unknown-route errors, so the browser can read why
+a request failed. Errors use `{error:{code,message}}`.
 
 Connected mode must not move rendering onto the server. The browser worker,
 WASM engine and OffscreenCanvas remain the complete rendering path; no frame,
@@ -224,8 +232,12 @@ references, cap tags at 255, and atomically remove all membership when deleting
 a tag.
 
 `GET /api/v1/analysis` must return the active `traceId` and canonical document.
+It is the complete synchronization snapshot and so is exempt from the agent
+response limit ([API-001](12-agent-api.md#api-001-progressive-bounded-evidence)).
 `POST /api/v1/analysis/changes` must accept that trace identity, an expected
-revision, and one core change; stale identities or revisions conflict. A
+revision, and one core change; stale identities or revisions conflict. Its
+request body may be large enough for a complete tag-member list (32 MiB);
+every other route keeps the 32 KiB request limit. A
 successful response contains only the canonical committed change and new
 revision. The server must persist the resulting document under its data
 directory, keyed by trace digest, with an atomic durable replacement before it

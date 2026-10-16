@@ -4,7 +4,7 @@ use heap_visualizer_filter_dsl::{
 
 use crate::json::push_json_str;
 use crate::store::{
-    Store, FIELD_BOOL, FIELD_FLOAT, FIELD_INT, FIELD_OTHER, FIELD_SCALARS, FIELD_STRING, NONE_U16,
+    Store, FIELD_BOOL, FIELD_FLOAT, FIELD_INT, FIELD_OTHER, FIELD_SCALARS, FIELD_STRING,
     NONE_U32, OP_M, OP_R,
 };
 
@@ -56,10 +56,12 @@ impl<'a> Ctx<'a> {
     fn allocation(&self, id: u64) -> Result<u32, usize> {
         let mut found = None;
         let mut count = 0;
-        for (event, (&candidate, &op)) in self.store.id.iter().zip(&self.store.op).enumerate() {
-            if candidate == id && matches!(op, OP_M | OP_R) {
+        let s = self.store;
+        for (row, &candidate) in s.dom.heap.id.iter().enumerate() {
+            let event = s.heap_seq(row);
+            if candidate == id && matches!(s.op[event as usize], OP_M | OP_R) {
                 count += 1;
-                found.get_or_insert(event as u32);
+                found.get_or_insert(event);
             }
         }
         match (count, found) {
@@ -322,14 +324,20 @@ fn ns_fields(ns: Ns) -> &'static [(&'static str, &'static str, Type)] {
             ("usable", "bytes, optional", Type::Int),
         ],
         Ns::Malloc => &[
+            ("calls", "call names open on its thread", Type::Names),
             ("seq", "integer", Type::Int),
             ("site", "string, optional", Type::String),
-            ("stack", "string", Type::String),
+            ("span_ids", "span ids current on its thread", Type::Names),
+            ("spans", "span names current on its thread", Type::Names),
+            ("stack", "string, optional", Type::String),
             ("thread", "integer, optional", Type::Int),
             ("time", "time", Type::Int),
         ],
         Ns::Free => &[
+            ("calls", "call names open when freed, optional", Type::Names),
             ("seq", "integer, optional", Type::Int),
+            ("span_ids", "span ids current when freed, optional", Type::Names),
+            ("spans", "span names current when freed, optional", Type::Names),
             ("time", "time, optional", Type::Int),
         ],
     }
@@ -348,6 +356,7 @@ pub fn schema(store: &Store, from: usize, count: usize) -> serde_json::Value {
             Type::Set(ValueKind::Int) => "integer-set",
             Type::Set(ValueKind::Float) => "float-set",
             Type::Allocation => "allocation",
+            Type::Names => "string-collection",
         }
     }
     fn fields(ns: Ns) -> Vec<serde_json::Value> {
@@ -447,42 +456,41 @@ fn resolve_fragment(fragment: &str, keys: &[String]) -> Vec<Value> {
         let Some((vlo, vhi)) = sc.skip_value() else {
             break;
         };
-        // a repeated key keeps its first value, matching the catalog's count
+        // a repeated key reads as its last value (JSON last-wins, TRACE-001),
+        // as the API and the allocation panel show it
         if let Some(index) = keys.iter().position(|k| *k == name) {
-            if matches!(out[index], Value::Missing) {
-                out[index] = match shape {
-                    b'"' => Value::String(crate::json::unescape(&bytes[vlo + 1..vhi - 1])),
-                    b't' => Value::Bool(true),
-                    b'f' => Value::Bool(false),
-                    // null, objects and arrays are all missing to the
-                    // evaluator; the checker has already rejected the last two
-                    b'n' | b'{' | b'[' => Value::Missing,
-                    // a number: integral text parses as an integer, and
-                    // anything with a fraction or an exponent as a float.
-                    // Parsing everything as i128 is what made a fractional
-                    // field silently missing (T034).
-                    _ => core::str::from_utf8(&bytes[vlo..vhi]).map_or(
-                        Value::Missing,
-                        |text| {
-                            if text.bytes().any(|c| matches!(c, b'.' | b'e' | b'E')) {
-                                text.parse::<f64>().map_or(Value::Missing, |value| {
+            out[index] = match shape {
+                b'"' => Value::String(crate::json::unescape(&bytes[vlo + 1..vhi - 1])),
+                b't' => Value::Bool(true),
+                b'f' => Value::Bool(false),
+                // null, objects and arrays are all missing to the
+                // evaluator; the checker has already rejected the last two
+                b'n' | b'{' | b'[' => Value::Missing,
+                // a number: integral text parses as an integer, and
+                // anything with a fraction or an exponent as a float.
+                // Parsing everything as i128 is what made a fractional
+                // field silently missing (T034).
+                _ => core::str::from_utf8(&bytes[vlo..vhi]).map_or(
+                    Value::Missing,
+                    |text| {
+                        if text.bytes().any(|c| matches!(c, b'.' | b'e' | b'E')) {
+                            text.parse::<f64>().map_or(Value::Missing, |value| {
+                                if value.is_finite() { Value::Float(value) } else { Value::Missing }
+                            })
+                        } else {
+                            text.parse::<i128>().map_or_else(
+                                // wider than i128: keep it as the number
+                                // it approximately is rather than dropping
+                                // the field
+                                |_| text.parse::<f64>().map_or(Value::Missing, |value| {
                                     if value.is_finite() { Value::Float(value) } else { Value::Missing }
-                                })
-                            } else {
-                                text.parse::<i128>().map_or_else(
-                                    // wider than i128: keep it as the number
-                                    // it approximately is rather than dropping
-                                    // the field
-                                    |_| text.parse::<f64>().map_or(Value::Missing, |value| {
-                                        if value.is_finite() { Value::Float(value) } else { Value::Missing }
-                                    }),
-                                    Value::Int,
-                                )
-                            }
-                        },
-                    ),
-                };
-            }
+                                }),
+                                Value::Int,
+                            )
+                        }
+                    },
+                ),
+            };
         }
         if !sc.eat(b',') {
             break;
@@ -502,6 +510,12 @@ enum Type {
     /// One allocation, reached through `named("x")`. Not a value: it has no
     /// equality or ordering, and only a field read gets anything out of it.
     Allocation,
+    /// The names of the intervals around a record — `malloc.calls`,
+    /// `free.spans` (ANL-013). A collection whose only operation is
+    /// membership of a string constant, `"parse" in malloc.calls`: the plan
+    /// answers that by marking interval chains once, which equality or
+    /// `len()` could not reuse.
+    Names,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -659,7 +673,8 @@ const fn matches_exactly(want: Type, have: Type) -> bool {
         (Type::Bool, Type::Bool)
         | (Type::String, Type::String)
         | (Type::Range, Type::Range)
-        | (Type::Allocation, Type::Allocation) => true,
+        | (Type::Allocation, Type::Allocation)
+        | (Type::Names, Type::Names) => true,
         (Type::Set(a), Type::Set(b)) => a as u8 == b as u8,
         _ => false,
     }
@@ -695,10 +710,14 @@ fn field_type(ns: Ns, name: &str, expr: &Expr) -> Result<CheckedType, EvalError>
         (Ns::Alloc, "tags") => CheckedType::required(Type::Set(ValueKind::String)),
         (Ns::Alloc, "freed") => CheckedType::required(Type::Bool),
         (Ns::Malloc, "seq" | "time") => CheckedType::required(Type::Int),
-        (Ns::Malloc, "site") => CheckedType::optional(Type::String),
+        (Ns::Malloc, "site" | "stack") => CheckedType::optional(Type::String),
         (Ns::Malloc, "thread") => CheckedType::optional(Type::Int),
-        (Ns::Malloc, "stack") => CheckedType::required(Type::String),
         (Ns::Free, "seq" | "time") => CheckedType::optional(Type::Int),
+        // the interval context (ANL-013): empty without intervals, so never
+        // missing on the record that always exists, and missing on the one
+        // that may not
+        (Ns::Malloc, "calls" | "spans" | "span_ids") => CheckedType::required(Type::Names),
+        (Ns::Free, "calls" | "spans" | "span_ids") => CheckedType::optional(Type::Names),
         (_, "fields") => {
             return Err(EvalError::at(
                 expr,
@@ -739,7 +758,7 @@ fn moved_field(name: &str) -> Option<Ns> {
         "id" | "address" | "end" | "span" | "size" | "usable" | "lifetime" | "tags" | "freed" => {
             Ns::Alloc
         }
-        "site" | "thread" | "stack" => Ns::Malloc,
+        "site" | "thread" | "stack" | "calls" | "spans" | "span_ids" => Ns::Malloc,
         _ => return None,
     })
 }
@@ -1046,7 +1065,11 @@ fn check_type(expr: &Expr, ctx: &Ctx) -> Result<CheckedType, EvalError> {
                 let [argument] = arguments.as_slice() else {
                     return Err(EvalError::at(expr, "len takes one set"));
                 };
-                return if check_type(argument, ctx)?.member_kind().is_some() {
+                let argument_ty = check_type(argument, ctx)?;
+                if argument_ty.ty == Type::Names {
+                    return Err(names_only(argument));
+                }
+                return if argument_ty.member_kind().is_some() {
                     Ok(CheckedType::required(Type::Int))
                 } else {
                     Err(EvalError::at(expr, "len takes a set, as `len(alloc.tags)`"))
@@ -1145,6 +1168,11 @@ fn check_type(expr: &Expr, ctx: &Ctx) -> Result<CheckedType, EvalError> {
                         Err(EvalError::at(expr, "boolean operators require bool"))
                     }
                 }
+                BinaryOp::Equal | BinaryOp::NotEqual
+                    if left_ty.ty == Type::Names || right_ty.ty == Type::Names =>
+                {
+                    Err(names_only(if left_ty.ty == Type::Names { left } else { right }))
+                }
                 BinaryOp::Equal | BinaryOp::NotEqual => {
                     let same_sets = left_ty.member_kind().is_some()
                         && left_ty.member_kind() == right_ty.member_kind();
@@ -1195,6 +1223,21 @@ fn check_type(expr: &Expr, ctx: &Ctx) -> Result<CheckedType, EvalError> {
                 BinaryOp::In => {
                     // one operator for every membership: a set, a substring of
                     // a string or a stack, and a half-open range
+                    if right_ty.ty == Type::Names {
+                        // decided by marking interval chains while lowering,
+                        // so the name must be known before the scan
+                        return if matches!(left.kind, ExprKind::String(_)) {
+                            required(Type::Bool)
+                        } else {
+                            let path = source_hint(right);
+                            Err(EvalError::at(
+                                left,
+                                format!(
+                                    "the left of `in {path}` must be a string constant, as `\"parse\" in {path}`"
+                                ),
+                            ))
+                        };
+                    }
                     let compatible = match right_ty.ty {
                         Type::Range => left_ty.numeric(),
                         Type::Set(kind) => left_ty
@@ -1216,6 +1259,15 @@ fn check_type(expr: &Expr, ctx: &Ctx) -> Result<CheckedType, EvalError> {
             }
         }
     }
+}
+
+/// The diagnostic for anything but membership on an interval-context field.
+fn names_only(expr: &Expr) -> EvalError {
+    let path = source_hint(expr);
+    EvalError::at(
+        expr,
+        format!("`{path}` supports only membership, as `\"parse\" in {path}`"),
+    )
 }
 
 pub fn check(expr: &Expr, ctx: &Ctx) -> Result<(), EvalError> {
@@ -1444,6 +1496,8 @@ fn operator_items(ty: CheckedType, leading_space: bool) -> Vec<CompletionItem> {
         // a reference is not a value: the only thing to do with it is read a
         // field, and that is a member completion rather than an operator
         Type::Allocation => Vec::new(),
+        // membership reads `"x" in malloc.calls`, so nothing follows the field
+        Type::Names => Vec::new(),
     };
     if ty.optional {
         labels.push(("is", Some("None test")));
@@ -1512,19 +1566,37 @@ fn observed_items(subject: &Expr, ctx: &Ctx, in_set: bool) -> Vec<CompletionItem
     };
     let name = match path.leaf {
         Leaf::Custom { key, .. } => return observed_field_values(key, ctx, in_set),
+        Leaf::Builtin { ns: Ns::Free, name } if matches!(name, "calls" | "spans" | "span_ids") => name,
         Leaf::Builtin { ns: Ns::Malloc | Ns::Alloc, name } => name,
         Leaf::Builtin { .. } => return Vec::new(),
     };
+    let st = &ctx.store.dom.intervals;
+    let names = |cat: u8, detail: &'static str| -> Vec<CompletionItem> {
+        st.edges
+            .labels
+            .iter()
+            .zip(&st.name_cats)
+            .filter(|(_, cats)| **cats & (1 << cat) != 0)
+            .map(|(value, _)| string_item(value, detail, in_set))
+            .collect()
+    };
     match name {
+        "calls" => names(crate::domain::interval::CAT_CALL, "observed call"),
+        "spans" => names(crate::domain::interval::CAT_SPAN, "observed span"),
+        "span_ids" => st
+            .span_ids
+            .iter()
+            .map(|value| string_item(value, "observed span id", in_set))
+            .collect(),
         "site" => ctx
             .store
             .sites
             .iter()
             .map(|value| string_item(value, "observed site", in_set))
             .collect(),
-        "thread" => ctx
-            .store
-            .thrs
+        "thread" => (0..ctx.store.thrs.len())
+            .filter_map(|i| ctx.store.track_thr(i as u16))
+            .collect::<std::collections::BTreeSet<i64>>()
             .iter()
             .map(|value| {
                 let label = value.to_string();
@@ -1577,7 +1649,16 @@ fn operand_items(left: &Expr, kind: OperandKind, ctx: &Ctx) -> Vec<CompletionIte
                     ));
                     items.extend(expression_items(Some(Type::Int), ctx));
                 }
-                Some(Type::String) => items.extend(expression_items(Some(Type::String), ctx)),
+                Some(Type::String) => {
+                    items.extend(expression_items(Some(Type::String), ctx));
+                    // `"parse" in malloc.calls`: every namespace with an
+                    // interval-context field, once
+                    for extra in expression_items(Some(Type::Names), ctx) {
+                        if !items.iter().any(|have| have.label == extra.label) {
+                            items.push(extra);
+                        }
+                    }
+                }
                 _ => {}
             }
             items
@@ -1693,6 +1774,8 @@ pub fn push_completions_json(out: &mut String, source: &str, cursor: usize, ctx:
                 Vec::new()
             }
         }
+        // `"|" in malloc.calls`: the values the collection was seen holding
+        CompletionSite::Element { collection } => observed_items(collection, ctx, true),
         CompletionSite::SetDelimiter => vec![
             item(",", ", ", "operator", Some("another set member"), 0),
             item("}", "}", "operator", Some("close set"), 0),
@@ -1838,7 +1921,7 @@ pub(crate) fn float(value: f64, unit: Option<Unit>, time_unit: &str) -> Result<f
 pub(crate) fn custom_fragment(root: FieldRoot, s: &Store, e: u32) -> u32 {
     match root {
         FieldRoot::Alloc => s.extra_at(e),
-        FieldRoot::Death => match s.death[e as usize] {
+        FieldRoot::Death => match s.death(e) {
             NONE_U32 => NONE_U32,
             death => s.extra_at(death),
         },
@@ -1854,19 +1937,19 @@ pub(crate) fn field_value(
 ) -> Result<Value, EvalError> {
     let s = ctx.store;
     let i = e as usize;
-    let death = |value: fn(&Store, u32, usize) -> Value| match s.death[i] {
+    let death = |value: fn(&Store, u32, usize) -> Value| match s.death(e) {
         NONE_U32 => Value::Missing,
         d => value(s, d, i),
     };
     Ok(match (ns, name) {
-        (Ns::Alloc, "id") => Value::Int(s.id[i] as i128),
-        (Ns::Alloc, "address") => Value::Int(s.addr[i] as i128),
-        (Ns::Alloc, "end") => Value::Int(s.addr[i].saturating_add(s.span(e)) as i128),
+        (Ns::Alloc, "id") => Value::Int(s.id(e) as i128),
+        (Ns::Alloc, "address") => Value::Int(s.addr(e) as i128),
+        (Ns::Alloc, "end") => Value::Int(s.end(e) as i128),
         (Ns::Alloc, "span") => Value::Range(
-            Num::Int(s.addr[i] as i128),
-            Num::Int(s.addr[i].saturating_add(s.span(e)) as i128),
+            Num::Int(s.addr(e) as i128),
+            Num::Int(s.end(e) as i128),
         ),
-        (Ns::Alloc, "size") => Value::Int(s.size[i] as i128),
+        (Ns::Alloc, "size") => Value::Int(s.size(e) as i128),
         (Ns::Alloc, "usable") => match s.usable_at(e) {
             0 => Value::Missing,
             v => Value::Int(v as i128),
@@ -1878,28 +1961,63 @@ pub(crate) fn field_value(
                 .map(Value::String)
                 .collect(),
         ),
-        (Ns::Alloc, "freed") => Value::Bool(s.death[i] != NONE_U32),
+        (Ns::Alloc, "freed") => Value::Bool(s.death(e) != NONE_U32),
         (Ns::Alloc, "lifetime") => {
             death(|s, d, i| Value::Int(s.t[d as usize] as i128 - s.t[i] as i128))
         }
         (Ns::Malloc, "seq") => Value::Int(e as i128),
         (Ns::Malloc, "time") => Value::Int(s.t[i] as i128),
-        (Ns::Malloc, "site") => match s.site[i] {
+        (Ns::Malloc, "site") => match s.site(e) {
             NONE_U32 => Value::Missing,
             id => Value::String(s.sites[id as usize].clone()),
         },
-        (Ns::Malloc, "thread") => match s.thr_idx[i] {
-            NONE_U16 => Value::Missing,
-            id => Value::Int(s.thrs[id as usize] as i128),
-        },
+        (Ns::Malloc, "thread") => s.track_thr(s.thr_idx[i]).map_or(Value::Missing, |t| Value::Int(t as i128)),
         (Ns::Malloc, "stack") => match s.stack_at(e) {
             NONE_U32 => Value::Missing,
             id => Value::String(s.stacks[id as usize].clone()),
+        },
+        (Ns::Malloc, "calls" | "spans" | "span_ids") => context_names(s, e, name),
+        (Ns::Free, "calls" | "spans" | "span_ids") => match s.death(e) {
+            NONE_U32 => Value::Missing,
+            d => context_names(s, d, name),
         },
         (Ns::Free, "seq") => death(|_, d, _| Value::Int(d as i128)),
         (Ns::Free, "time") => death(|s, d, _| Value::Int(s.t[d as usize] as i128)),
         _ => return Err(EvalError::at(expr, format!("`{}` has no field `{name}`", ns.label()))),
     })
+}
+
+/// The interval context of spine record `e` (ANL-013), by the spec's
+/// definition rather than the load-time columns, so the test oracle checks
+/// those columns: the call stack open on the record's thread
+/// (`IntervalStore::stack_at`), or the thread's current span — the
+/// latest-begun span begun on that thread and open there — with its
+/// ancestors by `parent`. Empty without intervals.
+pub(crate) fn context_names(s: &Store, e: u32, field: &str) -> Value {
+    let st = &s.dom.intervals;
+    let track = s.thr_idx[e as usize];
+    let chain: Vec<u32> = if field == "calls" {
+        st.stack_at(track, e)
+    } else {
+        let current = st
+            .track_spans
+            .get(&track)
+            .and_then(|list| list.iter().rev().find(|&&i| st.open_at(i, e)).copied());
+        core::iter::successors(current, |&i| {
+            Some(st.parent[i as usize]).filter(|&p| p != NONE_U32)
+        })
+        .collect()
+    };
+    let mut names: Vec<Value> = Vec::new();
+    for i in chain {
+        let name = if field == "span_ids" { st.span_id(i) } else { st.name_of(i) };
+        if let Some(name) = name {
+            if !names.iter().any(|v| matches!(v, Value::String(n) if n == name)) {
+                names.push(Value::String(name.to_string()));
+            }
+        }
+    }
+    Value::Set(names)
 }
 
 /// Widen for arithmetic only, where a float result is already inexact.

@@ -102,6 +102,7 @@ const ui = {
 seedDom();
 
 const noop = () => {};
+let namesSent = 0;
 initSession({
   ui,
   post: (m) => posted.push(m),
@@ -129,7 +130,7 @@ analysis.initAnalysis({
   fmtTime: (t) => `${t} ns`,
   buildLegend: noop,
   buildFilterPanel: noop,
-  sendNames: noop,
+  sendNames: () => { namesSent++; },
   rowBytesValue: () => 0x1000,
   setRowBytesInput: noop,
   sendCollapseMin: noop,
@@ -358,4 +359,56 @@ test('applyMarks clears the dirty flag', () => {
   ui.marksDirty = true;
   analysis.applyMarks({ heapVisualizerAnalysis: 1 }, true);
   assert.equal(ui.marksDirty, false);
+});
+
+test('applyMarks validates imported names and the names list escapes them', () => {
+  analysis.applyMarks({
+    heapVisualizerAnalysis: 1,
+    names: [
+      { e: 4, name: '<b>x</b>', id: '<img src=x onerror=alert(1)>', addr: '<script>alert(1)</script>' },
+      { e: 5, name: 'ok', id: 7, addr: '0X7FAB' },
+      { e: -1, name: 'negative creator' },
+      { e: '6', name: 'string creator' },
+      { e: 8, name: { toString: () => 'object' } },
+      { e: 9, name: '   ' },
+      null,
+    ],
+  }, true);
+  assert.deepEqual([...ui.names.entries()], [
+    [4, { name: '<b>x</b>', id: 4, addr: '' }],
+    [5, { name: 'ok', id: 7, addr: '0x7fab' }],
+  ]);
+  const html = doc.getElementById('an-names').innerHTML;
+  assert.doesNotMatch(html, /<img|<script|<b>/);
+  assert.match(html, /&lt;b&gt;x&lt;\/b&gt;/);
+  assert.match(html, /id 7 · 0x7fab/);
+
+  // escaping holds even for a value that slipped past validation
+  ui.names = new Map([[4, { name: 'n', id: '<i>' as any, addr: '"><svg onload=alert(1)>' }]]);
+  analysis.buildNamesSection();
+  const raw = doc.getElementById('an-names').innerHTML;
+  assert.doesNotMatch(raw, /<i>|<svg/);
+  assert.match(raw, /id &lt;i&gt; · &quot;&gt;&lt;svg/);
+});
+
+test('a canonical projection pushes names to the worker only when one changed', async () => {
+  analysisDocument = {
+    version: 1, revision: 0, allocations: { 3: { name: 'first' } },
+    tags: {}, bookmarks: {}, addressMarks: {}, savedFilters: {},
+  };
+  await analysis.loadCanonicalAnalysis();
+  namesSent = 0;
+  // a rename reaches the labels and any applied named() filter
+  analysisDocument = { ...analysisDocument, allocations: { 3: { name: 'renamed' } } };
+  await analysis.loadCanonicalAnalysis();
+  assert.equal(namesSent, 1);
+  assert.equal(ui.names.get(3).name, 'renamed');
+  // an unrelated change (a bookmark) leaves the names alone
+  analysisDocument = { ...analysisDocument, bookmarks: { b: { name: 'b', seq: 1, t: 1 } } };
+  await analysis.loadCanonicalAnalysis();
+  assert.equal(namesSent, 1);
+  // removing the last name is a change too
+  analysisDocument = { ...analysisDocument, allocations: {} };
+  await analysis.loadCanonicalAnalysis();
+  assert.equal(namesSent, 2);
 });

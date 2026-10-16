@@ -2,7 +2,10 @@
 // The main thread only sends input events and receives state/query results.
 
 import { fmtBytes, fmtAllocSize as fmtAllocSizeMode, clampView } from './fmt.ts';
-import type { FromWorker, SettingKey, ToWorker } from './protocol.ts';
+import { paintPlayhead } from './timeline-interaction.ts';
+import { QUERY_FAILURE, queryFailureReply } from './query-failure.ts';
+import type { DomainDescriptor, EventRow, FromWorker, SettingKey, ToWorker } from './protocol.ts';
+import { FILTERED_HEAP, maskPlan, maskRank, maskSeqAt, rowDomain } from './stream/stream-model.ts';
 
 // Shadows the global: nothing leaves this worker that the protocol does not
 // describe, and the main thread's switch is written against the same union.
@@ -18,6 +21,9 @@ let wasmModule: WebAssembly.Module | null = null; // compiled module, re-instant
 const td = new TextDecoder();
 const te = new TextEncoder();
 let loading = false;
+// A streamed load that failed keeps receiving the chunks already in flight;
+// those are dropped quietly so the first error is the one the user sees.
+let loadFailed = false;
 let loadTotal = 0;
 let loadDone = 0;
 
@@ -52,6 +58,9 @@ const S = {
   lastTick: 0,
   dirty: { addr: true, tlt: true, tls: true },
   lastState: '',
+  // the loaded trace's domain descriptors (DOM-004), or null from a core
+  // without them; the Events list's domain toggles are planned against them
+  domains: null as DomainDescriptor[] | null,
   // filled in as rendering happens rather than at startup: the last laid-out
   // virtual height, and the move link of the last applied event
   lastVirtualH: 0,
@@ -88,6 +97,85 @@ function writeBuf(bytes) {
   new Uint8Array(E.memory.buffer, ptr, bytes.length).set(bytes);
   return bytes.length;
 }
+/** Whether a trace is loaded and this core has export `name` (feature detection). */
+function has(name: string): boolean {
+  return S.loaded && !!E && typeof E[name] === 'function';
+}
+/** Call a JSON-in-the-buffer export (ARCH-006) and parse its answer. */
+function callJson(name: string, input: unknown) {
+  E[name](writeBuf(te.encode(JSON.stringify(input))));
+  return retJson();
+}
+
+// ---------------------------------------------------------------------------
+// the Events list with domains left out (stream/stream-model.ts has the math)
+// ---------------------------------------------------------------------------
+
+/**
+ * Records of `domain` at or before `seq`, from its locate — or, for
+ * `FILTERED_HEAP`, the heap rows the applied filter keeps.
+ */
+function domainRank(domain: string, seq: number): number {
+  if (domain === FILTERED_HEAP) return E.hp_events_filtered_heap_rank(seq + 1);
+  const r = callJson('hp_domain_locate', { domain, seq });
+  return Math.max(0, (r?.row ?? -1) + 1);
+}
+
+/**
+ * The Events list's plan (stream-model.ts). The filtered toggle narrows the
+ * heap rows only (NAV-005), so it takes part only when the applied filter
+ * actually drops a heap row. A list of nothing but the filtered heap rows is
+ * the engine's own filtered list, which answers it directly (`filteredList`).
+ */
+function eventsPlan(m) {
+  let filteredHeap: number | undefined;
+  if (m.filtered && has('hp_events_filtered_heap_rank')) {
+    const kept = E.hp_events_filtered_heap_rank(S.n);
+    const heap = (S.domains || []).find((d) => d.id === 'heap')?.count ?? kept;
+    if (kept !== heap) filteredHeap = kept;
+  }
+  const plan = has('hp_domain_locate') ? maskPlan(S.domains, m.domains, filteredHeap) : null;
+  const heapOnly = !!plan && !plan.residual && plan.add.length === 1 && plan.add[0] === FILTERED_HEAP;
+  // no plan (two residual domains): the engine's heap-only filtered list
+  const fallback = !plan && filteredHeap !== undefined;
+  return { plan: heapOnly ? null : plan, filteredList: heapOnly || fallback };
+}
+
+/** One page of the list holding only `plan`'s records, from position `from`. */
+function maskedEvents(plan, included: string[] | undefined, from: number, count: number): EventRow[] {
+  const keep = included ? new Set(included) : null;
+  const heapFiltered = plan.add.includes(FILTERED_HEAP);
+  const kept = (ev: EventRow) => {
+    const domain = rowDomain(ev);
+    if (keep && !keep.has(domain)) return false;
+    if (!heapFiltered || domain !== 'heap') return true;
+    return E.hp_events_filtered_heap_rank(ev.seq + 1) > E.hp_events_filtered_heap_rank(ev.seq);
+  };
+  const rows: EventRow[] = [];
+  let seq = maskSeqAt(plan, from, S.n, domainRank);
+  let scanned = 0;
+  while (rows.length < count && seq < S.n) {
+    // walk the spine a chunk at a time; a long run of left-out records is
+    // jumped over by searching instead of read through
+    if (scanned >= 1024) {
+      seq = maskSeqAt(plan, from + rows.length, S.n, domainRank);
+      scanned = 0;
+      if (seq >= S.n) break;
+    }
+    const chunk = Math.min(256, S.n - seq);
+    E.hp_events_json(seq, chunk);
+    const evs: EventRow[] = retJson();
+    for (const ev of evs) {
+      if (ev && kept(ev)) {
+        rows.push(ev);
+        if (rows.length >= count) break;
+      }
+    }
+    seq += chunk;
+    scanned += chunk;
+  }
+  return rows;
+}
 
 // ---------------------------------------------------------------------------
 // loading
@@ -103,6 +191,7 @@ function beginTraceLoad(total) {
   // stop the frame loop from rendering against a half-swapped engine
   S.loaded = false;
   S.playing = false;
+  loadFailed = false;
   if (wasmModule) {
     E = new WebAssembly.Instance(wasmModule, {}).exports;
     applyRowPx();
@@ -114,6 +203,7 @@ function beginTraceLoad(total) {
 }
 
 function loadTraceChunk(buffer) {
+  if (loadFailed) return;
   if (!loading) throw new Error('trace chunk arrived without a load');
   const len = buffer.byteLength;
   const ptr = E.hp_buf_ptr(len);
@@ -127,6 +217,7 @@ function loadTraceChunk(buffer) {
 }
 
 function endTraceLoad() {
+  if (loadFailed) return;
   if (!loading) throw new Error('trace ended without a load');
   loading = false;
   if (loadDone !== loadTotal) {
@@ -153,6 +244,14 @@ function finishTraceLoad() {
   // the custom field catalog is a per-trace fact, settled by the load pass
   E.hp_fields_json();
   const fields = retJson();
+  // the log domain's summary (LOG-009); null from a core without it
+  meta.logs = typeof E.hp_logs_meta_json === 'function' ? (E.hp_logs_meta_json(), retJson()) : null;
+  // every domain's descriptor (DOM-004); null from a core without them
+  meta.domains = typeof E.hp_domains_json === 'function' ? (E.hp_domains_json(), retJson()) : null;
+  S.domains = meta.domains;
+  // the interval domain's descriptor (spec/14), or null: the default layout
+  // decides its panels at load, before any `domains` reply
+  meta.intervals = meta.domains?.find((d) => d.id === 'intervals') ?? null;
 
   S.loaded = true;
   S.n = n;
@@ -331,18 +430,7 @@ function renderTl(kind) {
   // playhead
   const val = kind === 0 ? E.hp_cur_t() : E.hp_cur();
   const x = ((val - view.lo) / (view.hi - view.lo)) * w;
-  if (x >= -2 && x <= w + 2) {
-    ctx.fillStyle = 'rgba(230,237,243,0.08)';
-    ctx.fillRect(0, 0, Math.max(0, x), h);
-    ctx.fillStyle = '#e6edf3';
-    ctx.fillRect(Math.round(x) - Math.round(dpr / 2), 0, Math.max(1, Math.round(1.5 * dpr)), h);
-    // grab triangle
-    ctx.beginPath();
-    ctx.moveTo(x - 4 * dpr, 0);
-    ctx.lineTo(x + 4 * dpr, 0);
-    ctx.lineTo(x, 5 * dpr);
-    ctx.fill();
-  }
+  if (x >= -2 && x <= w + 2) paintPlayhead(ctx, x, 0, h, dpr);
 }
 
 function postState() {
@@ -443,6 +531,12 @@ function frame(now) {
 // ---------------------------------------------------------------------------
 // message handling
 // ---------------------------------------------------------------------------
+
+function failLoad(err) {
+  loading = false;
+  loadFailed = true;
+  postMessage({ type: 'error', message: String((err as Error)?.message || err) });
+}
 
 // Settables, one table entry per key: `preLoad` marks the ones that work
 // before a trace is loaded, right next to how the key applies — no separate
@@ -551,8 +645,20 @@ const SETTINGS: Record<SettingKey, { preLoad?: boolean; apply(m: any): void }> =
   },
 };
 
+// Every handler runs inside one catch: a query that throws still gets its
+// failure reply (see query-failure.ts), and a command that throws is logged.
 onmessage = async (ev: MessageEvent<ToWorker>) => {
-  const m = ev.data;
+  try {
+    await handleMessage(ev.data);
+  } catch (err) {
+    const message = `worker error: ${String((err as Error)?.message || err)}`;
+    const reply = queryFailureReply(ev.data, message);
+    if (reply) postMessage(reply);
+    else console.error(err);
+  }
+};
+
+async function handleMessage(m: ToWorker) {
   switch (m.type) {
     case 'init': {
       dpr = m.dpr || 1;
@@ -574,36 +680,33 @@ onmessage = async (ev: MessageEvent<ToWorker>) => {
       try {
         loadTrace(m.buffer);
       } catch (err) {
-        loading = false;
-        postMessage({ type: 'error', message: String((err as Error)?.message || err) });
+        failLoad(err);
       }
       break;
     case 'load-begin':
       try {
         beginTraceLoad(m.total);
       } catch (err) {
-        loading = false;
-        postMessage({ type: 'error', message: String((err as Error)?.message || err) });
+        failLoad(err);
       }
       break;
     case 'load-chunk':
       try {
         loadTraceChunk(m.buffer);
       } catch (err) {
-        loading = false;
-        postMessage({ type: 'error', message: String((err as Error)?.message || err) });
+        failLoad(err);
       }
       break;
     case 'load-end':
       try {
         endTraceLoad();
       } catch (err) {
-        loading = false;
-        postMessage({ type: 'error', message: String((err as Error)?.message || err) });
+        failLoad(err);
       }
       break;
     case 'load-cancel':
       loading = false;
+      loadFailed = false;
       break;
     case 'unload':
       loading = false;
@@ -629,6 +732,8 @@ onmessage = async (ev: MessageEvent<ToWorker>) => {
     }
     case 'seek': {
       if (!S.loaded) break;
+      // NAV-002: any explicit seek stops playback, like jump and step
+      stopPlay();
       let seq = m.seq;
       if (m.t !== undefined) seq = E.hp_seq_for_t(m.t);
       seq = Math.max(0, Math.min(S.n, Math.round(seq)));
@@ -715,7 +820,10 @@ onmessage = async (ev: MessageEvent<ToWorker>) => {
       S.dirty.addr = true;
       break;
     case 'addr-at': {
-      if (!S.loaded || !canvases.addr) break;
+      if (!S.loaded || !canvases.addr) {
+        postMessage(QUERY_FAILURE['addr-at'](m, ''));
+        break;
+      }
       E.hp_addr_at(canvases.addr.width, Math.round(toDevice(m.x)), toDevice(m.y), S.scroll);
       const r = new Uint32Array(E.memory.buffer, E.hp_ret(), 8);
       const addr = r[3] ? '0x' + ((BigInt(r[1]) << 32n) | BigInt(r[0])).toString(16) : null;
@@ -976,11 +1084,19 @@ onmessage = async (ev: MessageEvent<ToWorker>) => {
       break;
     }
     case 'events': {
-      if (!S.loaded) break;
-      // filtered mode indexes into the engine's filtered event list; `total`
-      // sizes the panel's virtual scroll either way
+      if (!S.loaded) {
+        postMessage(QUERY_FAILURE.events(m, ''));
+        break;
+      }
+      // an indexed list (domains left out, or heap rows filtered) maps
+      // positions through its plan; `total` sizes the panel's virtual scroll
       let total = S.n;
-      if (m.filtered) {
+      const { plan, filteredList } = eventsPlan(m);
+      if (plan) {
+        postMessage({ type: 'events', reqId: m.reqId, from: m.from, events: maskedEvents(plan, m.domains, m.from, m.count), total: plan.total });
+        break;
+      }
+      if (filteredList) {
         total = E.hp_events_filtered_count();
         E.hp_events_filtered_json(m.from, m.count);
       } else {
@@ -991,7 +1107,21 @@ onmessage = async (ev: MessageEvent<ToWorker>) => {
     }
     // position of a seq in the filtered event list (follow / scroll-to)
     case 'ev-pos': {
-      if (!S.loaded) break;
+      if (!S.loaded) {
+        postMessage(QUERY_FAILURE['ev-pos'](m, ''));
+        break;
+      }
+      const { plan, filteredList } = eventsPlan(m);
+      if (plan) {
+        // the position of the first listed record at or after seq
+        postMessage({ type: 'ev-pos', reqId: m.reqId, pos: maskRank(plan, m.seq - 1, domainRank), total: plan.total });
+        break;
+      }
+      if (!filteredList) {
+        // the whole spine: nothing is left out and the filter drops nothing
+        postMessage({ type: 'ev-pos', reqId: m.reqId, pos: Math.min(m.seq, S.n), total: S.n });
+        break;
+      }
       postMessage({
         type: 'ev-pos', reqId: m.reqId,
         pos: E.hp_events_filtered_pos(m.seq), total: E.hp_events_filtered_count(),
@@ -1026,5 +1156,53 @@ onmessage = async (ev: MessageEvent<ToWorker>) => {
       postMessage({ type: 'tlhover-result', reqId: m.reqId, kind: m.kind, info: retJson() });
       break;
     }
+    // The generic domain surface (DOM-004) and the interval domain
+    // (spec/14). Each is answered even with no trace loaded or with a core
+    // that lacks the export — its failure reply (`available: false`) — so a
+    // coalesced caller is never left waiting.
+    case 'domains': {
+      if (!has('hp_domains_json') || !has('hp_lanes_json')) { postMessage(QUERY_FAILURE.domains(m, '')); break; }
+      E.hp_domains_json();
+      const domains = retJson();
+      E.hp_lanes_json();
+      postMessage({ type: 'domains-result', reqId: m.reqId, available: true, domains, lanes: retJson() });
+      break;
+    }
+    case 'domain-query': {
+      if (!has('hp_domain_query')) { postMessage(QUERY_FAILURE['domain-query'](m, '')); break; }
+      const result = callJson('hp_domain_query', { ...m.query, domain: m.domain });
+      postMessage({ type: 'domain-query-result', reqId: m.reqId, available: true, result });
+      break;
+    }
+    case 'domain-locate': {
+      if (!has('hp_domain_locate')) { postMessage(QUERY_FAILURE['domain-locate'](m, '')); break; }
+      const result = callJson('hp_domain_locate', { ...m.query, domain: m.domain });
+      postMessage({ type: 'domain-locate-result', reqId: m.reqId, available: true, result });
+      break;
+    }
+    case 'domain-state': {
+      if (!has('hp_domain_state')) { postMessage(QUERY_FAILURE['domain-state'](m, '')); break; }
+      const result = callJson('hp_domain_state', { domain: m.domain, seq: m.seq });
+      postMessage({ type: 'domain-state-result', reqId: m.reqId, available: true, result });
+      break;
+    }
+    case 'record': {
+      if (!has('hp_record_json')) { postMessage(QUERY_FAILURE.record(m, '')); break; }
+      E.hp_record_json(Math.max(0, Math.floor(m.seq)) >>> 0);
+      postMessage({ type: 'record-result', reqId: m.reqId, available: true, result: retJson() });
+      break;
+    }
+    case 'tracks': {
+      if (!has('hp_tracks_json')) { postMessage(QUERY_FAILURE.tracks(m, '')); break; }
+      E.hp_tracks_json();
+      postMessage({ type: 'tracks-result', reqId: m.reqId, available: true, result: retJson() });
+      break;
+    }
+    case 'interval-window': {
+      if (!has('hp_interval_window')) { postMessage(QUERY_FAILURE['interval-window'](m, '')); break; }
+      const result = callJson('hp_interval_window', m.query);
+      postMessage({ type: 'interval-window-result', reqId: m.reqId, available: true, result });
+      break;
+    }
   }
-};
+}

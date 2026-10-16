@@ -10,6 +10,26 @@ const BASELINE: [u8; 3] = [0x30, 0x36, 0x3d];
 const GREEN_DIM: [u8; 3] = [0x1c, 0x4a, 0x28];
 const RED_DIM: [u8; 3] = [0x58, 0x2b, 0x28];
 
+pub use crate::logs::LOG_COLORS;
+
+/// Height of the tag lanes along each strip edge.
+fn tag_lane_px(h: u32) -> i64 {
+    ((h / 14) as i64).clamp(2, 5)
+}
+
+/// Bottom edge of the domain lanes: directly above the bottom tag lane's
+/// space, which stays reserved whether or not anything is tagged so the
+/// lanes do not jump when tagging starts.
+fn lanes_bottom(h: u32) -> i64 {
+    h as i64 - tag_lane_px(h)
+}
+
+/// Pixel rows `[y0, y1)` of the log lane — the first (bottom) domain lane.
+pub fn log_lane_rows(h: u32) -> (i64, i64) {
+    let y1 = lanes_bottom(h);
+    (y1 - (crate::logs::LOG_LANE.height)(h), y1)
+}
+
 /// Event-index boundary for pixel column edge `c` of `w`, view [lo, hi).
 fn boundary(s: &Store, kind: u32, w: u32, c: u32, lo: f64, hi: f64) -> u32 {
     let n = s.len();
@@ -42,8 +62,8 @@ pub fn bin(s: &Store, kind: u32, w: u32, lo: f64, hi: f64) -> Bins {
     let mut r = vec![0u32; w as usize];
     for c in 0..w as usize {
         let (a, b) = (from[c] as usize, from[c + 1] as usize);
-        g[c] = s.green_pre[b] - s.green_pre[a];
-        r[c] = s.red_pre[b] - s.red_pre[a];
+        g[c] = s.green_before(b as u32) - s.green_before(a as u32);
+        r[c] = s.red_before(b as u32) - s.red_before(a as u32);
     }
     Bins { g, r, from }
 }
@@ -110,6 +130,27 @@ pub fn render(
         put(x, mid, BASELINE);
     }
 
+    // --- domain lanes (DOM-003): each domain's lanes, from its descriptor,
+    // stacked upward from just above the bottom tag lane in registry order
+    // (today: the log lane, LOG-005). A cell is two binary searches over the
+    // domain's prefix sums; a domain with no records draws no lane.
+    {
+        let mut y1 = lanes_bottom(h);
+        for d in crate::domain::all(s) {
+            for (i, lane) in d.lanes().iter().enumerate() {
+                let y0 = y1 - (lane.height)(h);
+                for x in 0..w as usize {
+                    if let Some(c) = d.lane_cell(i, bins.from[x], bins.from[x + 1]) {
+                        for y in y0..y1 {
+                            put(x as i64, y, c);
+                        }
+                    }
+                }
+                y1 = y0;
+            }
+        }
+    }
+
     // --- tag lanes: creations on top, frees on the bottom ---
     // Untagged traces (the common case) skip this entirely. With tags, each
     // column is a binary search over the sorted tagged-event indexes instead
@@ -120,7 +161,7 @@ pub fn render(
     }
     s.ensure_tag_index();
     let (alloc_idx, free_idx) = (&s.tag_alloc_idx, &s.tag_free_idx);
-    let lane = ((h / 14) as i64).clamp(2, 5);
+    let lane = tag_lane_px(h);
     for x in 0..w as usize {
         let (a, b) = (bins.from[x], bins.from[x + 1]);
         // first tagged event in [a, b) of each kind, as before
@@ -133,7 +174,7 @@ pub fn render(
         let free_c = free_idx
             .get(i)
             .filter(|&&e| e < b)
-            .map(|&e| cfg.tag_color(s.first_tag(s.target[e as usize])));
+            .map(|&e| cfg.tag_color(s.first_tag(s.target(e))));
         if let Some(c) = alloc_c {
             for y in 0..lane {
                 put(x as i64, y, c);
@@ -165,12 +206,19 @@ pub fn hover(s: &Store, kind: u32, w: u32, x: u32, lo: f64, hi: f64) -> String {
     }
     let a = boundary(s, kind, w, x, lo, hi);
     let b = boundary(s, kind, w, x + 1, lo, hi);
-    let g = s.green_pre[b as usize] - s.green_pre[a as usize];
-    let r = s.red_pre[b as usize] - s.red_pre[a as usize];
+    let g = s.green_before(b) - s.green_before(a);
+    let r = s.red_before(b) - s.red_before(a);
     let v0 = lo + (hi - lo) * x as f64 / w as f64;
     let v1 = lo + (hi - lo) * (x + 1) as f64 / w as f64;
-    format!(
-        "{{\"g\":{},\"r\":{},\"from\":{},\"to\":{},\"seqFrom\":{},\"seqTo\":{}}}",
+    let mut out = format!(
+        "{{\"g\":{},\"r\":{},\"from\":{},\"to\":{},\"seqFrom\":{},\"seqTo\":{}",
         g, r, v0, v1, a, b
-    )
+    );
+    // each lane-drawing domain's counts for the column (for logs, LOG-005's
+    // `logs:{count, byLevel}`), only when the trace has its records
+    for d in crate::domain::all(s) {
+        d.lane_hover(a, b, &mut out);
+    }
+    out.push('}');
+    out
 }

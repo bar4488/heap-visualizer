@@ -266,26 +266,18 @@ fn utf8_len(b: u8) -> usize {
     }
 }
 
-/// Parse a `"0x..."` hex address (raw span from string_span) into u64.
-/// Accepts upper/lowercase and a missing 0x prefix; also plain decimal.
+/// Parse an address string (raw span from string_span) into u64, per
+/// TRACE-001: a `0x`/`0X` prefix means hex; otherwise all decimal digits
+/// means decimal, and digits mixed with `a-f`/`A-F` means hex. A decimal
+/// value past `u64::MAX`, or more than 16 hex digits, is not an address.
 pub fn parse_addr(raw: &[u8]) -> Option<u64> {
     let s = if raw.len() > 2 && raw[0] == b'0' && (raw[1] | 0x20) == b'x' {
         &raw[2..]
+    } else if !raw.is_empty() && raw.iter().all(u8::is_ascii_digit) {
+        return raw.iter().try_fold(0u64, |v, &c| {
+            v.checked_mul(10)?.checked_add((c - b'0') as u64)
+        });
     } else {
-        // decimal string addresses are tolerated
-        let mut v: u64 = 0;
-        let mut all_dec = !raw.is_empty();
-        for &c in raw {
-            if c.is_ascii_digit() {
-                v = v.wrapping_mul(10).wrapping_add((c - b'0') as u64);
-            } else {
-                all_dec = false;
-                break;
-            }
-        }
-        if all_dec {
-            return Some(v);
-        }
         raw
     };
     if s.is_empty() || s.len() > 16 {
@@ -321,4 +313,22 @@ pub fn push_json_str(out: &mut String, s: &str) {
         }
     }
     out.push('"');
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_addr;
+
+    #[test]
+    fn address_strings_follow_one_rule() {
+        assert_eq!(parse_addr(b"0x10002000"), Some(0x1000_2000));
+        assert_eq!(parse_addr(b"0X1F"), Some(0x1f));
+        assert_eq!(parse_addr(b"10002000"), Some(10_002_000), "all digits is decimal");
+        assert_eq!(parse_addr(b"1000a000"), Some(0x1000_a000), "a hex digit makes it hex");
+        assert_eq!(parse_addr(b"18446744073709551615"), Some(u64::MAX));
+        assert_eq!(parse_addr(b"18446744073709551616"), None, "decimal past u64 does not wrap");
+        assert_eq!(parse_addr(b"0x"), None);
+        assert_eq!(parse_addr(b""), None);
+        assert_eq!(parse_addr(b"0xg"), None);
+    }
 }

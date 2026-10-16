@@ -18,7 +18,7 @@ pub struct View {
     birth_counts: BTreeMap<u64, u32>,
     /// Multiset of live allocations' rendered spans, so the render-time
     /// walk-back is bounded by the widest allocation *currently live* rather
-    /// than Store::max_span, a trace-wide maximum that never decreases.
+    /// than the widest allocation ever seen, a maximum that never decreases.
     span_counts: BTreeMap<u64, u32>,
 
     pub row_bytes: u64,
@@ -135,7 +135,7 @@ impl View {
     }
 
     fn occ_add(&mut self, s: &Store, e: u32, delta: i32) {
-        let a = s.addr[e as usize];
+        let a = s.addr(e);
         let span = s.span(e);
         let r0 = self.row_of(a);
         let r1 = self.row_of(a.saturating_add(span).saturating_sub(1));
@@ -167,9 +167,9 @@ impl View {
     }
 
     fn insert_alloc(&mut self, s: &Store, e: u32) {
-        if self.live.insert((s.addr[e as usize], e)) {
+        if self.live.insert((s.addr(e), e)) {
             self.live_count += 1;
-            self.live_bytes += s.size[e as usize];
+            self.live_bytes += s.size(e);
             *self.birth_counts.entry(s.t[e as usize]).or_insert(0) += 1;
             *self.span_counts.entry(s.span(e)).or_insert(0) += 1;
             self.occ_add(s, e, 1);
@@ -177,9 +177,9 @@ impl View {
     }
 
     fn remove_alloc(&mut self, s: &Store, e: u32) {
-        if self.live.remove(&(s.addr[e as usize], e)) {
+        if self.live.remove(&(s.addr(e), e)) {
             self.live_count -= 1;
-            self.live_bytes = self.live_bytes.saturating_sub(s.size[e as usize]);
+            self.live_bytes = self.live_bytes.saturating_sub(s.size(e));
             if let Some(c) = self.birth_counts.get_mut(&s.t[e as usize]) {
                 *c -= 1;
                 if *c == 0 {
@@ -203,7 +203,7 @@ impl View {
 
     /// Rendered span of the widest allocation currently live (0 when none) —
     /// the walk-back bound for per-frame live-set range scans. Unlike
-    /// `Store::max_span` it shrinks when the wide allocation is freed, so one
+    /// a trace-wide maximum it shrinks when the wide allocation is freed, so one
     /// early arena block does not tax every later frame.
     pub fn max_live_span(&self) -> u64 {
         self.span_counts.keys().next_back().copied().unwrap_or(0)
@@ -212,7 +212,7 @@ impl View {
     fn apply_fwd(&mut self, s: &Store, e: u32) {
         let op = s.op[e as usize];
         if op == OP_F || op == OP_R {
-            let tgt = s.target[e as usize];
+            let tgt = s.target(e);
             if tgt != NONE_U32 {
                 self.remove_alloc(s, tgt);
             }
@@ -228,7 +228,7 @@ impl View {
             self.remove_alloc(s, e);
         }
         if op == OP_F || op == OP_R {
-            let tgt = s.target[e as usize];
+            let tgt = s.target(e);
             if tgt != NONE_U32 {
                 self.insert_alloc(s, tgt);
             }
@@ -236,27 +236,33 @@ impl View {
     }
 
     /// Seek the playhead to `target` events applied.
+    ///
+    /// Replay walks heap rows, not the spine: only heap records change the
+    /// live set (DOM-002), so the records of other domains between `cur` and
+    /// `target` are skipped by two rank lookups rather than visited, and both
+    /// candidate costs are counted in heap rows.
     pub fn seek(&mut self, s: &Store, target: u32) {
         let target = target.min(s.len());
         if target == self.cur {
             return;
         }
+        let (h_cur, h_target) = (s.heap_rank(self.cur), s.heap_rank(target));
         // candidate: rebuild from the best snapshot at or before target
         let snap = best_snap(s, target);
         let snap_pos = snap.map(|i| s.snaps[i].0).unwrap_or(0);
-        let snap_cost =
-            (target - snap_pos) as u64 + self.live_count as u64 / 4 + snap_pos.min(1) as u64;
-        let incr_cost = (target as i64 - self.cur as i64).unsigned_abs();
+        let snap_cost = (h_target - s.heap_rank(snap_pos)) as u64
+            + self.live_count as u64 / 4
+            + snap_pos.min(1) as u64;
+        let incr_cost = (h_target as i64 - h_cur as i64).unsigned_abs();
 
         if incr_cost <= snap_cost {
-            while self.cur < target {
-                self.apply_fwd(s, self.cur);
-                self.cur += 1;
+            for h in h_cur as usize..h_target as usize {
+                self.apply_fwd(s, s.heap_seq(h));
             }
-            while self.cur > target {
-                self.cur -= 1;
-                self.apply_bwd(s, self.cur);
+            for h in (h_target as usize..h_cur as usize).rev() {
+                self.apply_bwd(s, s.heap_seq(h));
             }
+            self.cur = target;
         } else {
             self.live.clear();
             self.birth_counts.clear();
@@ -265,18 +271,14 @@ impl View {
             self.live_count = 0;
             self.live_bytes = 0;
             if let Some(i) = snap {
-                let (pos, lv) = (&s.snaps[i].0, s.snaps[i].1.clone());
-                self.cur = *pos;
-                for e in lv {
+                for &e in &s.snaps[i].1 {
                     self.insert_alloc(s, e);
                 }
-            } else {
-                self.cur = 0;
             }
-            while self.cur < target {
-                self.apply_fwd(s, self.cur);
-                self.cur += 1;
+            for h in s.heap_rank(snap_pos) as usize..h_target as usize {
+                self.apply_fwd(s, s.heap_seq(h));
             }
+            self.cur = target;
         }
         // show_all's layout comes from all_rows (playhead-independent by
         // construction) plus pins — a seek cannot change it, so don't pay a
@@ -413,12 +415,8 @@ impl View {
     /// the current row_bytes (same span/cap rules as live occupancy).
     fn build_all_rows(&mut self, s: &Store) {
         let mut set: std::collections::HashSet<u64> = std::collections::HashSet::new();
-        for e in 0..s.len() {
-            let op = s.op[e as usize];
-            if op != OP_M && op != OP_R {
-                continue;
-            }
-            let a = s.addr[e as usize];
+        for e in s.row_bits_events(&s.dom.heap.creators) {
+            let a = s.addr(e);
             let r0 = self.row_of(a);
             let r1 = self.row_of(a.saturating_add(s.span(e)).saturating_sub(1));
             if r1 - r0 > 65536 {

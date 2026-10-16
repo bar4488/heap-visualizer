@@ -52,7 +52,9 @@ function serial<T>(operation: () => Promise<T>): Promise<T> {
 }
 
 async function readWorkerAnalysis(): Promise<AnalysisDocument> {
-  return (await request('analysis-get')).document as AnalysisDocument;
+  const document = (await request('analysis-get')).document as AnalysisDocument | null;
+  if (!document) throw new Error('analysis is unavailable in the browser core');
+  return document;
 }
 
 function serverInit(config: LocalServerConfig, method = 'GET', body?: unknown): RequestInit & { targetAddressSpace: 'loopback' } {

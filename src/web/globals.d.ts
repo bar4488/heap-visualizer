@@ -11,6 +11,8 @@ interface Element {
   _lastHtml?: string;
   /** The allocation a pinned detail window is showing (src/web/main.ts). */
   _allocInfo?: any;
+  /** A pinned detail window's pin, which the shell shows in its tab (src/web/main.ts). */
+  _pin?: HTMLButtonElement;
 }
 
 /** A Worker that only accepts protocol messages — see src/web/protocol.ts. */

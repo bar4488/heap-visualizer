@@ -6,73 +6,77 @@
 <!-- Self-hosters raise this only when their deployed web client requires a newer companion. -->
 <meta name="heapviz-minimum-version" content="0.2.0">
 <title>heap-visualizer — heap allocation visualizer</title>
+<!-- No bundler: the dock engine's bare specifier maps onto the copy build.sh
+     vendors from the pinned npm package (D014). -->
+<script type="importmap">
+{ "imports": { "dockview-core": "./vendor/dockview-core.esm.min.mjs" } }
+</script>
+<link rel="stylesheet" href="vendor/dockview.css">
 <link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="intervals/intervals.css">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect x='1' y='6' width='5' height='4' fill='%233fb950'/><rect x='7' y='6' width='3' height='4' fill='%23f85149'/><rect x='11' y='6' width='4' height='4' fill='%233fb950'/></svg>">
 </head>
 <body>
+<!-- One slim bar (spec SHELL-001): the menus on the left, playback in the
+     middle, status on the right. The File / View / Help menus and the command
+     palette are built from the action registry (shell/actions.ts) at startup;
+     nothing here lists a panel. -->
 <header id="toolbar">
-  <div class="brand">heap-visualizer</div>
-  <button id="btn-open" title="Open a trace directly in this browser">Open…</button>
+  <div class="tb-side tb-left">
+    <div class="brand">heap-visualizer</div>
+    <div id="menubar" aria-label="Main menu"></div>
+    <span id="trace-title" class="title"></span>
+  </div>
+  <div class="tb-center" role="group" aria-label="Playback">
+    <button id="btn-step-back" class="tb-icon" title="Step back one event (←, shift = ×100)" aria-label="Step back">⏮&#xFE0E;</button>
+    <button id="btn-play" class="tb-icon" title="Play / pause (space)" aria-label="Play" disabled>▶</button>
+    <button id="btn-step-fwd" class="tb-icon" title="Step forward one event (→, shift = ×100)" aria-label="Step forward">⏭&#xFE0E;</button>
+    <button id="btn-playcfg" class="tb-speed" title="Playback settings: advance by time or by events, and speed">15s</button>
+    <button id="btn-lock" class="tb-icon" title="Lock the viewport: stepping keeps the address view where it is instead of auto-scrolling (L)" aria-label="Lock the viewport" aria-pressed="false">🔓</button>
+    <span class="sep"></span>
+    <input id="jump-input" placeholder="seq · t:1e6 · 0x…" size="14" aria-label="Jump to"
+      title="Jump to an event index, a time (t: prefix), or an address (0x…) — press g for the search overlay">
+    <button id="btn-jump">Go</button>
+  </div>
+  <div class="tb-side tb-right">
+    <button id="hz-reset" class="pill" hidden title="Horizontal zoom on the address line (ctrl/alt+wheel to zoom around the cursor, shift+wheel or horizontal scroll to pan) — click to reset">×1</button>
+    <button id="crop-indicator" class="pill" hidden title="Crop is active — click to remove it">✂ <span id="crop-range"></span> ×</button>
+    <button id="btn-warnings" class="pill" hidden>⚠ <span id="warn-count"></span></button>
+    <button id="conn-status" class="pill" data-state="standalone" title="Connect this tab to the heapviz local companion"><span class="dot"></span><span id="conn-label">Local: off</span></button>
+  </div>
   <input type="file" id="file-input" accept=".heapl,.jsonl,.json,.txt" hidden>
-  <button id="btn-demo" title="Load the bundled demo trace">Demo</button>
-  <button id="btn-guide" title="Guide: what the views show and how to drive them">Guide</button>
-  <button id="btn-connect" title="Paste a connection from the heapviz local companion">Connect…</button>
-  <button id="btn-setup" title="Install or troubleshoot the local companion">Setup</button>
-  <button id="btn-request" title="Ask for a feature">Request…</button>
-  <span id="trace-title" class="title"></span>
-
-  <span class="sep"></span>
-
-  <button id="btn-playcfg" title="Playback controls: step, play/pause (space), mode, speed">Play</button>
-  <button id="btn-lock" title="Lock the viewport: stepping keeps the address view where it is instead of auto-scrolling (L)">🔓</button>
-
-  <span class="sep"></span>
-
-  <button id="hz-reset" hidden title="Horizontal zoom on the address line (ctrl/alt+wheel to zoom around the cursor, shift+wheel or horizontal scroll to pan) — click to reset">×1</button>
-  <button id="btn-layout" title="How the address map is arranged: row bytes, collapsing, row zoom, overlaps">Layout</button>
-  <button id="btn-appearance" title="How the address map is drawn: colors, labels, size format">Appearance</button>
-  <button id="btn-filter">Filter</button>
-  <button id="btn-events" hidden title="Sequenced list of all events">Events</button>
-  <button id="btn-analysis" hidden>Marks</button>
-  <button id="crop-indicator" hidden title="Crop is active — click to remove it">✂ <span id="crop-range"></span> ×</button>
-
-  <span class="sep"></span>
-
-  <button id="an-save" hidden title="Download tags, names, colors, and marks (bookmarks/addr marks) as a .heapa.json file">Save…</button>
-  <button id="an-load" hidden title="Load a saved marks file">Load…</button>
   <input type="file" id="analysis-file" accept=".json,.heapa" hidden>
-
-  <span class="sep"></span>
-
-  <input id="jump-input" placeholder="seq · t:1e6 · 0x…" size="12"
-    title="Jump to an event index, a time (t: prefix), or an address (0x…) — press g for the search overlay">
-  <button id="btn-jump">Go</button>
-  <button id="btn-warnings" hidden>⚠ <span id="warn-count"></span></button>
 </header>
 
 <div id="legend" hidden></div>
 
 <div id="workspace">
-<!-- The guide is not a panel and not a dockable drawer (spec SHELL-009): it is
-     its own surface at the left edge of the workspace, outside #drawer-left. -->
+<!-- The guide is not a panel and does not dock (spec SHELL-009): it is its own
+     surface at the left edge of the workspace, outside the dock. -->
 <aside id="guide" hidden>
   <div id="guide-bar">
-    <span id="guide-title">Tasks</span>
+    <div id="guide-tabs" role="tablist" aria-label="Guides">
+      <button id="guide-tab-tasks" role="tab" class="active" aria-selected="true" aria-controls="guide-body">Tasks</button>
+      <button id="guide-tab-agents" role="tab" aria-selected="false" aria-controls="guide-agents">heapviz &amp; AI agents</button>
+    </div>
     <span class="grow"></span>
     <button id="guide-close" title="Close the guide">×</button>
   </div>
-  <div id="guide-body"></div>
+  <div id="guide-body" class="guide-pane" role="tabpanel"></div>
+  <div id="guide-agents" class="guide-pane" role="tabpanel" hidden></div>
   <div id="guide-resize" title="Drag to resize the guide"></div>
 </aside>
-<div id="drawer-left" class="drawer" hidden></div>
-<main id="views">
+<!-- The dock (shell/layout.ts, Dockview): the views and every window live in
+     it as panels. The views start here and are adopted into it at startup. -->
+<main id="dock"></main>
+<div id="views" hidden>
   <section class="tl-strip" id="strip-t">
     <span class="tl-tag" title="x = wall-clock time; bursts bunch up">time</span>
     <canvas id="tlt"></canvas>
     <div class="tl-hoverline" hidden></div>
     <div class="tl-select" hidden></div>
     <div class="tl-select-echo" hidden title="the events selection, converted to time"></div>
-    <div class="tl-crop" hidden title="crop is active — click the ✂ pill in the toolbar to remove it"></div>
+    <div class="tl-crop" hidden title="crop is active — click the ✂ pill in the top bar to remove it"></div>
     <div class="tl-marks"></div>
   </section>
   <section class="tl-strip" id="strip-s">
@@ -81,7 +85,7 @@
     <div class="tl-hoverline" hidden></div>
     <div class="tl-select" hidden></div>
     <div class="tl-select-echo" hidden title="the time selection, converted to events"></div>
-    <div class="tl-crop" hidden title="crop is active — click the ✂ pill in the toolbar to remove it"></div>
+    <div class="tl-crop" hidden title="crop is active — click the ✂ pill in the top bar to remove it"></div>
     <div class="tl-marks"></div>
   </section>
 
@@ -94,8 +98,7 @@
     <div id="addr-spacer"></div>
     <div id="empty-hint">no live allocations at this point</div>
   </section>
-</main>
-<div id="drawer-right" class="drawer" hidden></div>
+</div>
 </div>
 
 <footer id="status">
@@ -109,6 +112,12 @@
 
 <div id="tooltip" hidden></div>
 
+<!-- The connection pill's choice while disconnected (main.ts). -->
+<div id="conn-pop" role="menu" aria-label="Local companion" hidden>
+  <button id="conn-pop-connect" role="menuitem">Connect…</button>
+  <button id="conn-pop-what" role="menuitem">What's heapviz?</button>
+</div>
+
 <div id="welcome" hidden>
   <div id="welcome-card">
     <button id="welcome-close" class="welcome-close" title="Close">×</button>
@@ -120,11 +129,12 @@
         <button id="welcome-demo" class="welcome-primary">Try the interactive demo</button>
         <button id="welcome-setup">Open a trace from my computer</button>
       </div>
+      <p class="welcome-agents">Work with AI agents → <a href="#" id="welcome-agents">heapviz &amp; AI agents</a></p>
     </div>
     <div id="welcome-install" hidden>
       <h1>Set up the local companion</h1>
       <p id="setup-alert" hidden></p>
-      <p>Install <code>heapviz</code>, then use one command to load a trace and open this website already connected.</p>
+      <p>Install <code>heapviz</code>, then use one command to load a trace and open this website already connected. <a href="#" id="setup-what">What is heapviz?</a></p>
       <div class="setup-tabs">
         <button id="setup-linux">Linux</button>
         <button id="setup-windows">Windows</button>
@@ -162,13 +172,8 @@
 </div>
 
 <div id="play-panel" class="panel" hidden>
-  <div class="panel-head"><span class="ph-t"></span> <button class="panel-close" data-close="play-panel">×</button></div>
+  <div class="panel-head"><span class="ph-t"></span> <button class="panel-close">×</button></div>
   <div class="panel-body">
-    <div class="filter-row">
-      <button id="btn-step-back" title="Step back one event (←, shift = ×100)">⏮</button>
-      <button id="btn-play" title="Play / pause (space)" disabled>▶</button>
-      <button id="btn-step-fwd" title="Step forward one event (→, shift = ×100)">⏭</button>
-    </div>
     <div class="filter-row"><label>advance <select id="play-mode" title="Playback advances by wall-clock time or by event index">
       <option value="t">by time</option>
       <option value="seq">by events</option>
@@ -178,7 +183,7 @@
 </div>
 
 <div id="layout-panel" class="panel" hidden>
-  <div class="panel-head"><span class="ph-t"></span> <button class="panel-close" data-close="layout-panel">×</button></div>
+  <div class="panel-head"><span class="ph-t"></span> <button class="panel-close">×</button></div>
   <div class="panel-body">
     <div class="filter-row"><label>row bytes <input id="row-bytes" size="7" placeholder="0x1000"
       title="Bytes per address-line row (e.g. 4k or 0x1000; defaults to 0x1000)"></label></div>
@@ -204,7 +209,7 @@
 </div>
 
 <div id="appearance-panel" class="panel" hidden>
-  <div class="panel-head"><span class="ph-t"></span> <button class="panel-close" data-close="appearance-panel">×</button></div>
+  <div class="panel-head"><span class="ph-t"></span> <button class="panel-close">×</button></div>
   <div class="panel-body">
     <div class="filter-row"><label>color <select id="color-mode">
       <option value="0">live</option>
@@ -227,7 +232,7 @@
 </div>
 
 <div id="filter-panel" class="panel" hidden>
-  <div class="panel-head"><span class="ph-t"></span> <button class="panel-close" data-close="filter-panel">×</button></div>
+  <div class="panel-head"><span class="ph-t"></span> <button class="panel-close">×</button></div>
   <div class="panel-body filter-editor">
     <div class="filter-row">
       <label><input type="radio" name="fmode" value="1" checked> dim others</label>
@@ -274,7 +279,7 @@
   <div class="panel-head"><span class="ph-t"></span>
     <span class="head-actions">
       <button id="btn-mark" hidden title="Bookmark the current playhead position (m)">＋ mark</button>
-      <button class="panel-close" data-close="analysis-panel">×</button>
+      <button class="panel-close">×</button>
     </span>
   </div>
   <div class="panel-body">
@@ -294,15 +299,16 @@
 </div>
 
 <div id="warnings-panel" class="panel" hidden>
-  <div class="panel-head"><span class="ph-t"></span> <button class="panel-close" data-close="warnings-panel">×</button></div>
+  <div class="panel-head"><span class="ph-t"></span> <button class="panel-close">×</button></div>
   <div class="panel-body" id="warnings-list"></div>
 </div>
 
 <div id="detail-panel" class="panel" hidden>
   <div class="panel-head"><span class="ph-t">Allocation</span>
     <span class="head-actions">
-      <button id="d-pin" class="d-pin" title="Pin: keep this window as-is; new selections open in a fresh Allocation panel">📌</button>
-      <button class="panel-close" data-close="detail-panel">×</button>
+      <button id="d-pin" class="d-pin tab-action" type="button" aria-pressed="false" aria-label="Pin this allocation window"
+        title="Pin: keep this allocation in a tab of its own; this window goes on following the selection"><svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path fill="currentColor" d="M10.2 1.2l4.6 4.6-.9.9-.8-.3-2.7 2.7.4 3.1-1.3 1.3-2.8-2.8-3.6 3.6-1.3.3.3-1.3 3.6-3.6-2.8-2.8 1.3-1.3 3.1.4 2.7-2.7-.3-.8z"/></svg></button>
+      <button class="panel-close">×</button>
     </span>
   </div>
   <div class="panel-body detail-body" id="detail-body"></div>
@@ -311,7 +317,7 @@
 <div id="event-panel" class="panel" hidden>
   <div class="panel-head"><span class="ph-t">Event</span>
     <span class="head-actions">
-      <button class="panel-close" data-close="event-panel">×</button>
+      <button class="panel-close">×</button>
     </span>
   </div>
   <div class="panel-body detail-body" id="event-body"></div>
@@ -335,9 +341,18 @@
     <span class="head-actions">
       <label title="Only list events whose allocation passes the current Filter (an F follows the allocation it frees)"><input type="checkbox" id="ev-filtered"> filtered</label>
       <label title="Keep the current event in view while stepping / playing"><input type="checkbox" id="ev-follow" checked> follow</label>
-      <button class="panel-close" data-close="events-panel">×</button>
+      <span class="ev-cols">
+        <button type="button" id="ev-cols-btn" aria-haspopup="true" aria-expanded="false" title="Columns: choose what each row shows besides the record">cols ▾</button>
+        <span id="ev-cols-menu" class="ev-cols-menu" role="menu" hidden>
+          <label title="The record's thread"><input type="checkbox" data-col="thread"> thread</label>
+          <label title="A heap record's address, last six hex digits"><input type="checkbox" data-col="addr"> address</label>
+          <label title="The record's position in the trace"><input type="checkbox" data-col="seq"> seq</label>
+        </span>
+      </span>
+      <button class="panel-close">×</button>
     </span>
   </div>
+  <div id="ev-domains" class="ev-domains" hidden title="Domains listed: click one to leave its records out"></div>
   <div id="events-scroll" tabindex="0">
     <div id="events-spacer"></div>
     <div id="events-sel-band" hidden title="the current time/events selection"></div>
@@ -345,11 +360,38 @@
   </div>
 </div>
 
+<!-- The log domain's terminal (spec LOG-007); src/web/logs/logs-panel.ts. -->
+<div id="logs-panel" class="panel" hidden>
+  <div class="panel-head"><span class="ph-t"></span> <span id="log-count" class="log-count"></span>
+    <span class="head-actions">
+      <label title="Keep the playhead's line in view while stepping / playing, like tail -f. Scrolling by hand turns this off."><input type="checkbox" id="log-follow" checked> follow</label>
+      <button class="panel-close">×</button>
+    </span>
+  </div>
+  <div class="log-bar">
+    <select id="log-level" title="Minimum level: show this level and everything more severe">
+      <option value="0">trace+</option>
+      <option value="1">debug+</option>
+      <option value="2">info+</option>
+      <option value="3">warn+</option>
+      <option value="4">error+</option>
+      <option value="5">fatal</option>
+    </select>
+    <input id="log-search" type="search" placeholder="search message / logger" autocomplete="off" spellcheck="false"
+      title="Case-insensitive substring of the message or the logger name">
+  </div>
+  <div id="logs-scroll" tabindex="0">
+    <div id="logs-spacer"></div>
+    <div id="logs-rows"></div>
+    <div id="logs-empty" hidden></div>
+  </div>
+</div>
+
 <!-- Not in the panel table (heap/panels.ts): it is not heap-shaped and there is
-     nothing per-trace to restore. It is still a .panel, so it drags and docks
-     like the rest, and its title is written here rather than by the table. -->
+     nothing per-trace to restore. request.ts declares it to the shell itself,
+     so it drags, docks, toggles and closes like the rest. -->
 <div id="request-panel" class="panel" hidden>
-  <div class="panel-head"><span class="ph-t">Request a feature</span> <button class="panel-close" data-close="request-panel">×</button></div>
+  <div class="panel-head"><span class="ph-t">Request a feature</span> <button class="panel-close">×</button></div>
   <div class="panel-body">
     <div class="request-hint">What would make this more useful? Only what you type here is sent.</div>
     <textarea id="request-text" rows="6" placeholder="e.g. let me open two traces side by side"
@@ -361,6 +403,23 @@
       <button id="request-send" type="button" title="Send the request (ctrl/⌘ enter)">Send</button>
     </div>
     <div id="request-status" class="filter-status" role="status"></div>
+  </div>
+</div>
+
+<!-- The command palette (⌘/Ctrl+K): every action in the registry, fuzzy
+     filtered (shell/menus.ts). -->
+<div id="palette" hidden>
+  <div id="palette-box" role="dialog" aria-label="Command palette">
+    <input id="palette-input" placeholder="Type a command…" autocomplete="off" spellcheck="false"
+      role="combobox" aria-expanded="true" aria-controls="palette-list" aria-autocomplete="list">
+    <div id="palette-list" role="listbox" aria-label="Commands"></div>
+  </div>
+</div>
+
+<div id="shortcuts" hidden>
+  <div id="shortcuts-box" role="dialog" aria-label="Keyboard shortcuts">
+    <div class="sc-head"><span>Keyboard shortcuts</span><button id="shortcuts-close" aria-label="Close">×</button></div>
+    <div id="shortcuts-list"></div>
   </div>
 </div>
 

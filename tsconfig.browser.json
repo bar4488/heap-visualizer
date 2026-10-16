@@ -1,0 +1,18 @@
+{
+  // Check config for the browser smoke suite (tests/browser, run by
+  // `npm run test:browser`). Kept apart from tsconfig.test.json so the fast
+  // unit loop never type-checks or loads Playwright.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["node"],
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "skipLibCheck": true
+  },
+  "include": ["playwright.config.ts", "tests/browser/**/*"]
+}

@@ -23,9 +23,22 @@ Design decisions that matter:
   live allocation and grow/shrink it; a configurable fraction of allocations
   leak. Remaining live allocations at the end are the intended "leaked at
   exit" picture.
+- **Log records** (`L`, [LOG-001](13-domains-and-logs.md#log-001-the-log-record-l))
+  are interleaved by default — startup, phases, requests, warnings at heap
+  high-water marks — from their own random stream, so the heap records are
+  identical with or without them; `--no-logs` omits them.
+- **Intervals** are on by default and make the trace v2
+  ([TRACE-011](02-trace-format.md#trace-011-version-2-and-process-identity))
+  with a header `pid`, `T` thread names, nested `B`/`X` calls per thread,
+  request spans that may end on another thread, and `C` context switches on
+  up to four CPUs that never run one thread twice
+  ([spec/14](14-intervals.md)). They come from their own random stream too,
+  so the heap records are the same with or without them; `--no-intervals`
+  omits them and writes a v1 trace (`--intervals` is still accepted).
 
 Knobs: `--seed --ops --threads --mean-gap --burst-prob --leak-rate
---realloc-rate --arena-base --row-bytes --unit --fields --out`.
+--realloc-rate --arena-base --row-bytes --unit --fields --no-logs
+--no-intervals --out`.
 
 `--fields` attaches caller-defined custom fields
 ([TRACE-001](02-trace-format.md#trace-001-general-rules)) to records, so the
@@ -45,7 +58,11 @@ counts, leaks, peak live, address span) prints to stderr.
   web layer, `index.html`/`style.css`, and a generated demo trace. It also builds
   the separate native local-data-server binary; that binary does not enter or
   serve `dist/`.
-  `./build.sh web` skips the cargo build.
+  `./build.sh web` skips the cargo build. Build products are located through
+  `cargo metadata`, so `CARGO_TARGET_DIR` is respected. The demo trace is
+  regenerated when missing or older than `gen.py`, and is written to a
+  temporary name and renamed, so an interrupted generation never leaves a
+  truncated demo behind.
 - **Hand-written files live under `src/`, generated files under `dist/`, and
   nothing crosses.** `dist/` is not in version control; a clean checkout is not
   servable until `build.sh` has run.
@@ -81,8 +98,11 @@ cache, or open a hosted deployment. `heapviz setup opencode` and `heapviz setup
 claude` install the same bundled API skill into those assistants' user skill
 directories without requiring a repository checkout. `heapviz doctor` checks
 the local setup, and `heapviz update` installs a checksum-verified release from
-the release-channel manifest. Ctrl+C stops the companion promptly, cancelling
-held read requests rather than waiting for their long-poll deadlines.
+the release-channel manifest. Ctrl+C, and on Unix also SIGTERM and SIGHUP,
+stops the companion promptly, cancelling held read requests rather than waiting
+for their long-poll deadlines, and removes its temporary trace snapshot. The
+connection string is printed as soon as the server listens; the optional
+update check runs beside the server and never delays it.
 
 The release-channel format is independent of every hosted deployment and names
 only the latest companion version and checksum-bound, same-origin platform
@@ -130,9 +150,13 @@ and aimed at what a refactor breaks silently:
   threads run on the same input, so the main thread's optimistic local zoom
   agreeing with the worker's authoritative clamp rests on it;
 - `normAddr` (`heap/addr.js`), and the panel table (`heap/panels.js`);
+- the shell's panel API (`shell/layout.ts`), against a stand-in dock engine:
+  open/close/hook state, toggles, focus and Escape, multi-instance windows and
+  their saved slot, the default layout, and the read path for pre-dock
+  sessions;
 - the **session round-trip** — `buildSession → applySession → buildSession`
-  must be a fixed point, plus drawer docking, address-range validation and
-  playhead restore;
+  must be a fixed point, plus the pre-dock (v1) session read, address-range
+  validation and playhead restore;
 - the **`.heapa` round-trip** — `buildMarks → applyMarks → buildMarks`, plus
   the validation `applyMarks` does on a file off disk (tag color fallback,
   address-mark and per-allocation-color rejection, trace-count mismatch).
@@ -154,12 +178,36 @@ the status codes and the token check are the feature. It needs no `dist/`.
 
 `cargo test --manifest-path src/local-server/Cargo.toml` runs the local
 data-server suite. Its transport tests exercise the real router: loopback Host
-validation, bearer capability, origin-reflecting CORS, and the private-network
-preflight response.
+validation, bearer capability, origin-reflecting CORS (including on body-limit,
+wrong-method and unknown-route errors), per-route request-body limits,
+advertised limits matching enforced ones, and the private-network preflight
+response.
 
-Rendering, pointer interaction and the real worker round trip are still
-verified by hand — against `dist/`, after a build — and there is no fixed
-script.
+`npm run test:browser` runs the **browser smoke suite** (`tests/browser/`,
+Playwright, `playwright.config.ts`): the wiring no unit test reaches — the dock
+engine, canvases drawn by the worker and its wasm, menus, pointer drags — along
+a few short flows against the built `dist/`, served by `serve.py`. It needs
+`./build.sh` first and says so when the build is missing; it uses the system
+Chromium (`HEAPVIZ_CHROMIUM` overrides). The flows:
+
+- the demo loads: the address map and both strips paint, the Heap, Logs and
+  Intervals domain chips are present, and no page or console error is raised
+  (every flow fails on one);
+- pinning replaces the live Allocation window with `#<id>`; pinning a second
+  leaves the first untouched;
+- unpinning closes only that window and shows the allocation in the live one;
+- two pinned tabs combine into one floating window, and Move to new window
+  takes one out again;
+- a tab dropped on the lower half of the left edge splits it top/bottom;
+- a reload restores the pinned windows, their grouping and the split edge;
+- View → Logs toggles the Logs panel, and the palette's Reset layout restores it;
+- a `call ▸` row in Events opens the Interval window and marks Tracks/Stacks;
+- the Logs panel marks the playhead's line after a jump and during play.
+
+It stays small and fast (under a minute) and outside the unit loop: neither
+`node --test` nor `tsconfig.test.json` loads it. A change to UI wiring gets a
+flow here or extends one; everything else stays a unit test. Visual judgment
+— does it look right — is still a person's.
 `window.__heap_visualizer` exposes UI state for console poking.
 
 ## TOOL-004: Agent-analysis benchmark corpus

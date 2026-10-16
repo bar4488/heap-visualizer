@@ -30,8 +30,13 @@ strings; creator event indices and sequence bounds are JSON integers.
 4. Query compact allocation matches.
 5. Fetch allocation detail for representative or boundary creators.
 6. Request focused stream context only when neighboring events matter.
+7. If the overview reports `logs.records > 0`, read the program's own logs
+   around interesting sequence ranges (see Logs).
 
 Prefer bounded semantic endpoints over paging the entire allocation set.
+`capabilities.limits` in the session response lists every page, body, and
+response limit. A response over 256 KiB is refused with
+`413 response_too_large`; repeat with a smaller page, limit, or range.
 
 ## Filters
 
@@ -50,7 +55,14 @@ fields include `alloc.size`, `alloc.freed`, `alloc.lifetime`, `alloc.tags`,
 `malloc.seq`, `malloc.time`, `malloc.site`, `malloc.thread`, `free.seq`, and
 `free.time`. Producer-defined fields use `malloc.fields.<name>`; deallocation
 fields use `free.fields.<name>`. Use `and`, `or`, `not`, comparisons, `in`, set
-literals, and `is None`/`is not None`. A filter input is always an object:
+literals, and `is None`/`is not None`.
+
+In a trace with intervals, `malloc.calls` is the call stack open on the
+allocating thread, `malloc.spans`/`malloc.span_ids` the thread's current span
+and its ancestors, and `free.calls`/`free.spans`/`free.span_ids` the same at
+the free (missing when never freed). Their only operation is membership of a
+string constant: `"parse_body" in malloc.calls`. Without intervals they are
+empty, so `in` is false. A filter input is always an object:
 
 ```json
 {"source":"malloc.site == \"example_site\" and not alloc.freed"}
@@ -122,7 +134,8 @@ must not exceed 200.
   "center":500,
   "before":10,
   "after":10,
-  "includeLandmarks":true
+  "includeLandmarks":true,
+  "includeLogs":false
 }
 ```
 
@@ -130,7 +143,31 @@ The raw before/after window may span at most 100 events.
 Custom records appear as `operation:"event"` with their producer-supplied
 `title`; allocation/free/realloc records expose creator identity and operation
 semantics. Custom-record fields beyond the title are not returned by this
-endpoint.
+endpoint. Log records in the window are left out unless `includeLogs` is true
+(then they appear as `operation:"log"` with `level`, `logger`, `msg`,
+`fields`); when left out, `omitted.logs` counts them.
+
+## Logs
+
+`GET /api/v1/logs?minLevel=warn&text=timeout&seqLo=0&seqHi=5000&from=0&count=50`
+pages the trace's structured log records (`L`) in sequence order. Every
+parameter is optional: `minLevel` is `trace`…`fatal` (records at or above it),
+`text` a case-insensitive substring of message or logger (at most 1 KiB),
+`seqLo`/`seqHi` an inclusive sequence range, `count` at most 200. Items carry
+`seq`, `t` (string), `thr`, `level`, `logger`, `msg`, and `fields`; follow
+`next` for the next page. Logs are evidence about what the program was doing
+at a sequence, not proof that it caused a heap event — correlate by sequence
+range, e.g. errors near a growth window found with the timeline.
+
+## Other evidence domains
+
+`GET /api/v1/domains` lists every evidence domain (`heap`, `marks`, `logs`)
+with its record count, kinds, field catalog, and `query.params` — the
+domain's own record parameters. `GET
+/api/v1/domains/{domain}/records?seqLo=&seqHi=&from=&count=&…` pages any
+domain's records the same way as `/logs` (for `marks`, `text` matches the
+title). `/logs` is this page for `logs`. An unknown domain is
+`404 unknown_domain`; a parameter the domain does not accept is `400`.
 
 ## Warnings
 
@@ -141,8 +178,13 @@ not infer warning positions from later allocation detail. The envelope reports
 
 ## Canonical analysis mutations
 
-First read `GET /api/v1/analysis?traceId=<url-encoded-trace-id>` and use its
-current document revision. Ordinary mutations go to
+First read `GET /api/v1/analysis/summary` and use its `analysisRevision`. It
+also lists every existing tag (`id`, `name`, `color`) and counts the other
+analysis objects; read per-allocation names, colors, and tags through allocation
+query or detail. Do not read `GET /api/v1/analysis`: it is the browser's
+complete synchronization snapshot, grows with tag membership, and is not
+size-bounded. After a successful write, use the returned `revision` for the next
+write instead of rereading. Ordinary mutations go to
 `POST /api/v1/analysis/changes`:
 
 ```json
@@ -181,5 +223,5 @@ After creating a tag, atomically tag a filter result with
 Operations are `add`, `remove`, and `replace`. The tag must already exist.
 Success returns `revision`, `matched`, `changed`, and `snapshotRequired:true`.
 Use the new revision for subsequent writes. A `409 revision_conflict` includes
-`currentRevision`; reread analysis before retrying. Reusing the same request ID
+`currentRevision`; reread `/api/v1/analysis/summary` before retrying. Reusing the same request ID
 with the same body is idempotent.

@@ -46,9 +46,11 @@ Finding everything that touches one: `rg 'MAP-003' .`
 | [06-playback-navigation](06-playback-navigation.md) | `NAV-` | Playhead, seeking, playback, stepping, jump/search, scroll anchoring | `src/web/worker.ts`, `src/web/main.ts` |
 | [07-analysis](07-analysis.md) | `ANL-` | Tags, names, marks, filter, crop, selection, `.heapa` files, persistence | `src/web/main.ts`, `src/core/src/lib.rs` |
 | [08-architecture](08-architecture.md) | `ARCH-` | The three-layer runtime: WASM core, worker, DOM; ABI and protocol | `src/core/src/lib.rs`, `src/web/worker.ts` |
-| [09-ui-shell](09-ui-shell.md) | `SHELL-` | Toolbar, floating/dockable panels, events panel, allocation windows, shortcuts | `src/web/main.ts`, `src/web/index.html` |
+| [09-ui-shell](09-ui-shell.md) | `SHELL-` | Toolbar, the dock (views and windows as panels), events panel, allocation windows, shortcuts | `src/web/main.ts`, `src/web/shell/layout.ts`, `src/web/index.html` |
 | [10-tooling](10-tooling.md) | `TOOL-` | Trace generator, build pipeline, tests | `gen.py`, `build*.sh`, `src/core` tests |
 | [11-feature-requests](11-feature-requests.md) | `REQ-` | The one server-side surface: the request form, its store, and the review panel | `src/server/app.py`, `src/web/request.ts` |
+| [13-domains-and-logs](13-domains-and-logs.md) | `DOM-`, `LOG-` | Evidence domains sharing one event spine; the log domain, its store, Logs panel, and API | `src/core/src/logs.rs`, `src/web/logs/` |
+| [14-intervals](14-intervals.md) | `IVL-` | The v2 interval domain: calls, spans, context switches, state at the playhead | `src/core/src/domain/interval.rs` |
 | [12-agent-api](12-agent-api.md) | `API-` | Progressive semantic trace inspection and canonical agent annotation over the local server | `src/core/src/agent.rs`, `src/local-server/src/lib.rs` |
 
 Reading order for newcomers: 01 → 02 → 03 → 04 → 05, then the rest as needed.

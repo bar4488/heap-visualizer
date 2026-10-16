@@ -55,13 +55,47 @@ Python's semantics are followed except where three-valued logic requires
 otherwise: an operation on a missing value is false rather than an error, per
 the missing rule below.
 
+**An expression has bounded size and depth.** Source is at most 16 KiB of
+UTF-8, at most 32 parentheses and calls deep, and calls take at most 16
+arguments. Its syntax tree is at most 128 operations deep, counting every
+operator, call, field, index and literal on the longest path from the root —
+so a run of 200 `-`, or `or` joining 200 terms, is a diagnostic rather than a
+tree the checker and evaluator recurse through. Parentheses add no depth, and
+a long list of alternatives is one `in {…}`. Every diagnostic's span covers
+whole characters.
+
 **Every field is reached through one of three objects.** `alloc` is the
 allocation — `id`, `address`, `end`, `span`, `size`, `usable`, `tags`,
 `freed`, `lifetime`. `malloc` is the record that created it — `seq`, `time`,
-`site`, `thread`, `stack`. `free` is the record that ended it — `seq`, `time`,
-both missing when it was never freed. There are no bare field names and no
-aliases; a bare name that used to be one must be a diagnostic naming its
-object.
+`site`, `thread`, `stack`, and the interval context it happened in, `calls`,
+`spans`, `span_ids` ([ANL-013](#anl-013-filtering-by-interval-context)).
+`free` is the record that ended it — `seq`, `time`, `calls`, `spans`,
+`span_ids`, all missing when it was never freed. There are no bare field
+names and no aliases; a bare name that used to be one must be a diagnostic
+naming its object.
+
+| Object | Field | Type |
+|--------|-------|------|
+| `alloc` | `id`, `address`, `end`, `size` | integer |
+| `alloc` | `usable`, `lifetime` | integer, optional |
+| `alloc` | `span` | address range |
+| `alloc` | `tags` | string set, empty when untagged ([ANL-009](#anl-009-filtering-by-tag)) |
+| `alloc` | `freed` | bool |
+| `malloc` | `seq`, `time` | integer |
+| `malloc` | `site`, `stack` | string, optional |
+| `malloc` | `thread` | integer, optional |
+| `malloc` | `calls`, `spans`, `span_ids` | string collection, empty without intervals ([ANL-013](#anl-013-filtering-by-interval-context)) |
+| `free` | `seq`, `time` | integer, optional |
+| `free` | `calls`, `spans`, `span_ids` | string collection, optional |
+| `malloc`, `free` | `fields.<key>` | per the catalog ([ANL-010](#anl-010-filtering-on-custom-trace-fields)) |
+
+`alloc.end` is the **requested** end, `address + size` — the end every
+surface displays ([ANL-006](#anl-006-the-allocation-panel-and-pinned-windows)),
+so a predicate written from a shown value matches it. `alloc.span` is
+`address..end`, half-open. The slack band a producer's `usable` adds is never
+part of either; it is reached through `alloc.usable`. `malloc.site`,
+`malloc.thread` and `malloc.stack` are optional: missing on a record that
+carries none.
 
 `named("x")` yields an allocation exposing those same three objects, so
 `named("x").alloc.address` is how one of its fields is read.
@@ -105,7 +139,7 @@ text.
 
 The focused editor offers contextual completion from the same core catalog
 that checks the expression: executable fields, type-valid operators and
-members, and observed site/thread/tag values. The attached list opens while
+members, and observed site/thread/tag values and call/span names. The attached list opens while
 typing; **Ctrl/⌘+Space** also opens it at an empty source. Up/Down selects,
 Tab inserts without applying, Enter inserts after deliberate list navigation,
 and Escape closes it. Completion never advertises a language surface the
@@ -223,7 +257,9 @@ An **integer** literal is decimal or `0x` hexadecimal. A **float** literal is
 decimal carrying a fraction or an exponent — `0.5`, `1e-3`, `2.5e6`. Both take
 the unit suffixes, which multiply the value: `1.5MiB` and `1572864` are the
 same operand. A decimal point is only ever a decimal point when a digit
-follows it, so `0..10` is a range between two integers.
+follows it, so `0..10` reads as two integers around the removed `..`, whose
+diagnostic names `range(lo, hi)`. The hexadecimal prefix is lowercase `0x`;
+`0X10` is a diagnostic saying so.
 
 Unary minus applies to numbers and binds after field access but before addition:
 `-2.5`, `-malloc.fields.drift`, and `-(alloc.size - 1)` are numbers. Negative
@@ -231,7 +267,7 @@ constants are valid set and range members. Unary plus is not part of the
 language.
 
 Integer and float operands must mix freely under ordering, equality, `in` a
-range, `in` a set, `contains`, and arithmetic. Where they mix:
+range, `in` a set, and arithmetic. Where they mix:
 
 - **Comparison must be exact.** An integer operand must not be converted to a
   double before comparing. An integer beyond 2^53 has no exact double, and
@@ -282,10 +318,66 @@ has the empty set.
 - `alloc.tags == {}` must match every untagged allocation and nothing else.
 - `alloc.tags == "a"` and `alloc.tags is None` must be diagnostics, not silently true or
   false. There is no scalar `tag` field, and no operation on `tags` may mean
-  "any one membership satisfies this" other than `contains`.
+  "any one membership satisfies this" other than `in`.
 
 The tag legend chip writes `"<name>" in alloc.tags` and the untagged chip
 writes `alloc.tags == {}` ([ANL-003](#anl-003-filter)).
+
+## ANL-013: Filtering by interval context
+
+An allocation can be filtered by what was running when it was born or freed,
+read from the interval domain ([spec/14](14-intervals.md)). The filter is
+still over allocations ([DOM-003](13-domains-and-logs.md#dom-003-what-a-domain-provides)):
+these are fields of the two records, not a second subject.
+
+| Field | Members |
+|-------|---------|
+| `malloc.calls` | the names of the call frames open on the allocating record's thread — its call stack, outermost to innermost |
+| `malloc.spans` | the name of the thread's **current span** — the most recently begun span begun on that thread and still open — and of each of its ancestors by `parent` |
+| `malloc.span_ids` | the same spans' ids |
+| `free.calls`, `free.spans`, `free.span_ids` | the same, read at the record that freed the allocation, on its thread |
+
+"Open" is IVL-005's: at a record with seq *e*, an interval is open when its
+begin precedes *e* and its end, if any, follows it. The span chain follows
+`parent` whether or not an ancestor is still open, and across threads, so
+an allocation on a worker inside a `parse` span whose parent is a `request`
+span begun elsewhere has both names; a span open on the thread but not on
+the current span's chain is not a member. A call or span without a name
+contributes no member.
+
+```python
+"parse_body" in malloc.calls
+"request" in malloc.spans and not "request" in free.spans
+"r42" in malloc.span_ids
+```
+
+- **The one operation is membership** of a string constant: `"x" in
+  malloc.calls`, under `not`, `and`, `or` like any predicate. Equality,
+  `len()`, a non-constant left operand, and `is None` on a `malloc` field
+  are diagnostics naming the membership form. There is no collection method;
+  a substring of a call name is not a member.
+- **Missing data.** In a trace without intervals (any v1 trace), or without
+  calls or spans, the `malloc` fields are **empty**, never missing, as
+  `alloc.tags` is: `"x" in malloc.calls` is false and its `not` is true. The
+  `free` fields are **missing** on an allocation never freed, so
+  `free.calls is None` is how to ask for that and `"x" in free.calls` is
+  false there; on a freed allocation they are empty when nothing was open.
+  A name the trace never carries matches nothing and is not a diagnostic.
+- **Completion and the schema.** The fields are completed under `malloc.`
+  and `free.`, and listed by `/api/v1/filter/schema` as type
+  `string-collection`. Typing the string in front of `in malloc.calls` (or
+  `spans`, `span_ids`, either object) completes observed call names, span
+  names, or span ids, bounded as site completion is.
+
+**Cost.** At load, when the trace has calls or spans, the core records per
+heap record the innermost open call and the current span on its thread (one
+merge of heap rows and intervals in seq order, amortized O(1) per row), and
+per creator the same at its death record; a trace without intervals keeps
+no column. An Apply resolves the name to its interned id once, marks in one
+pass over the intervals in begin order every interval whose parent chain
+carries it (a parent begins before its child), and tests one bit per
+allocation — O(intervals + allocations) with no per-allocation stack walk
+([D008](../docs/decisions/D008-the-filter-evaluator-is-a-lowered-plan.md)).
 
 ## ANL-004: Crop
 
@@ -329,10 +421,11 @@ must be marked as coming from the freeing record, and its predicate must read
 and a row must never offer a predicate that does not match the value shown
 beside it.
 
-**Pinning** (📌) freezes the current
-panel as an independent window and lets the next selection open fresh; any
-number of allocations can be pinned side by side for comparison
-([09-ui-shell](09-ui-shell.md)).
+**Pinning** (📌) keeps the shown allocation in a window of its own, titled
+by the allocation's name or `#<id>`, while the live panel goes on following
+the selection; any number of allocations can be pinned side by side for
+comparison, and unpinning one shows it in the live panel again
+([SHELL-005](09-ui-shell.md#shell-005-the-allocation-window-lifecycle)).
 
 ## ANL-007: Persistence — `.heapa` files and autosave
 
@@ -342,11 +435,15 @@ Two deliberately different persistence channels:
   names, colors, bookmarks, address marks, saved filters, plus trace
   fingerprint, playhead, and key view settings. Manually exported/imported as **`.heapa.json`** (a
   single JSON object marked `heapVisualizerAnalysis: 1`). Dropping one onto
-  the page restores it; a trace-size mismatch warns but applies anyway.
+  the page restores it; a trace-size mismatch warns but applies anyway. An
+  imported document is stored in the same normalized form the individual
+  edits produce (ids and names trimmed, colors and addresses canonical), so
+  an imported `" root "` is named `root`; two entries normalizing to one id
+  reject the import.
   Anchoring by event index is what makes the file portable — it is only
   meaningful against the same trace.
 - **Session** — working state, not a deliverable: layout settings, filter,
-  crop, view zooms, window/drawer positions, pinned allocation windows (by
+  crop, view zooms, the dock layout of views and windows, pinned allocation windows (by
   creator event), playhead. Autosaved to `localStorage` keyed by trace file
   name and restored silently on load; no UI.
 
@@ -364,11 +461,14 @@ snapshot, making it a complete "everything as I left it" restore point.
 ## ANL-008: The session blob's shape
 
 The session blob must separate the two kinds of state it carries. Its top
-level is a single JSON object marked `heapVisualizerSession: 1` holding only
-workspace state — panel window geometry and drawer layout — and everything
-whose meaning comes from a heap trace must sit under a `heap` key carrying its
-own `version`. Reading a blob whose `heap` version is not one this build knows
-must restore the workspace state and leave heap state at its defaults, rather
-than apply the section partially. A blob written in the pre-namespace shape,
-with the heap fields at the top level and no `heap` key, must still restore
-in full.
+level is a single JSON object marked `heapVisualizerSession: 1`: workspace
+state — the dock layout of views and windows — sits under a `shell` key
+carrying its own `version`, and everything whose meaning comes from a heap
+trace must sit under a `heap` key carrying its own `version`. Reading a blob
+whose `heap` version is not one this build knows must restore the workspace
+state and leave heap state at its defaults, rather than apply the section
+partially. A blob written in the pre-namespace shape, with the heap fields at
+the top level and no `heap` key, must still restore in full, and so must one
+written before the dock, with the shell's `windows` and `drawers` at the top
+level instead of a `shell` section
+([SHELL-004](09-ui-shell.md#shell-004-docking)).

@@ -90,3 +90,43 @@ fn multibyte_text_keeps_its_byte_spans() {
     let runs = covers(r#"malloc.site == "héllo 😀""#);
     assert!(runs.contains(&(Class::String, "\"héllo 😀\"")));
 }
+
+/// Recovery takes a bad character's width from where it starts, not from
+/// wherever the failed attempt stopped reading — which used to cut a
+/// character in half and panic.
+#[test]
+fn recovery_after_a_failed_token_keeps_whole_characters() {
+    assert_eq!(covers("0x€"), vec![(Class::Invalid, "0x€")]);
+    assert_eq!(covers("1e€"), vec![(Class::Invalid, "1e€")]);
+    assert_eq!(covers("\"\\é€"), vec![(Class::Invalid, "\"\\é€")]);
+    let runs = covers("x == 1e€ and y");
+    assert!(runs.contains(&(Class::Invalid, "1e€")), "{runs:?}");
+    assert!(runs.contains(&(Class::Field, "y")), "{runs:?}");
+}
+
+/// A failed number is invalid as a whole and the scan resumes after it, so a
+/// long digit run is read once rather than once per digit.
+#[test]
+fn recovery_is_linear_in_the_source() {
+    let digits = "9".repeat(heap_visualizer_filter_dsl::MAX_SOURCE_BYTES);
+    assert_eq!(covers(&digits), vec![(Class::Invalid, digits.as_str())]);
+
+    let runs = covers("x == 1__0 or y");
+    assert!(runs.contains(&(Class::Invalid, "1__0")), "{runs:?}");
+    assert!(runs.contains(&(Class::Field, "y")), "{runs:?}");
+
+    // a quote inside a string that already failed is not read again, and
+    // classifies exactly as reading it would have
+    assert_eq!(
+        covers("\"a\\\"b"),
+        vec![
+            (Class::Invalid, "\""),
+            (Class::Field, "a"),
+            (Class::Invalid, "\\\""),
+            (Class::Field, "b"),
+        ]
+    );
+    // every quote here is escaped, so each would otherwise rescan to the end
+    let escaped = format!("\"{}", "\\\"".repeat(5_000));
+    assert_eq!(covers(&escaped), vec![(Class::Invalid, escaped.as_str())]);
+}

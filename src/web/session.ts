@@ -1,6 +1,6 @@
-// The boundary module: it serializes shell state (window geometry, drawer
-// layout) *and* heap state (view, crop, filters, playhead) into the one
-// per-trace session blob, and reads it back.
+// The boundary module: it serializes shell state (the dock layout: views,
+// windows, edge groups, floating windows) *and* heap state (view, crop,
+// filters, playhead) into the one per-trace session blob, and reads it back.
 //
 // Everything it needs from the heap layer arrives through initSession(deps)
 // rather than by import — main.ts still owns those functions, and injecting
@@ -8,19 +8,21 @@
 // is also what makes the round-trip testable without a browser: a test
 // supplies a fake `deps` and a stub DOM.
 //
-// The blob's top level is shell-owned workspace state — panel window geometry
-// and drawer layout. Everything whose meaning comes from a heap trace lives
-// under the `heap` key, which carries its own `version` so heap state can
-// change shape without the shell's envelope moving. Blobs written in the old
-// flat shape (every field at the top level, no `heap` key) still read, and
-// there is one read path for that one old shape — not a migration framework.
+// The blob's top level is an envelope: workspace state under `shell` (the
+// shell's own serialization, with its own `version`), and everything whose
+// meaning comes from a heap trace under `heap`, which carries its own
+// `version` so heap state can change shape without the envelope moving. Two
+// old shapes still read, each through one read path rather than a migration
+// framework: the flat shape (every heap field at the top level, no `heap`
+// key), and the pre-dock shell (`windows` and `drawers` at the top level),
+// which the shell converts into a dock layout.
 
-import { $, $$, $1 } from './shell/dom.ts';
-import { applyDrawersState, dockPanelAt } from './shell/drawers.ts';
+import { $, $1 } from './shell/dom.ts';
+import { layout } from './shell/layout.ts';
 
 let d = null;
 
-// deps: { ui, post, panels, allocSizeFormat, rowBytesValue, sendCollapseMin,
+// deps: { ui, post, allocSizeFormat, rowBytesValue, sendCollapseMin,
 //         buildLegend, sendAllocSizeFormat, resetEventsPanel, sendXView,
 //         applyFilterSource, setCrop, requestAllocInfo,
 //         createPinnedWindow, buildMarks, applyMarks }
@@ -49,16 +51,13 @@ export const HEAP_SESSION_VERSION = 2;
 // there is no translator — E019 says why.
 export const FILTER_LANGUAGE_VERSION = 4;
 
+// The top level's `shell` is the shell's own serialization (shell/layout.ts)
+// — this module puts it in the envelope and hands it back, and does not read
+// inside it.
 export function buildSession() {
-  const windows = {};
-  for (const { id } of d.panels) {
-    const p = $(id);
-    windows[id] = { hidden: p.hidden, left: p.style.left, top: p.style.top, right: p.style.right, bottom: p.style.bottom };
-  }
   return {
     heapVisualizerSession: 1,
-    windows,
-    drawers: d.ui.drawers || null,
+    shell: layout.serialize(),
     heap: buildHeapSession(),
   };
 }
@@ -85,27 +84,26 @@ function buildHeapSession() {
     playhead: d.ui.state ? d.ui.state.seq : 0,
     // pinned allocation windows: re-fetched by creator event index on
     // restore (see applySession), since only the trace — not the info blob
-    // itself — is worth persisting
-    pinned: $$('.pinned-detail').map((win) => ({
-      e: +win.dataset.e,
-      dockSide: win.dataset.dockSide || null,
-      left: win.style.left, top: win.style.top, right: win.style.right, bottom: win.style.bottom,
-    })),
+    // itself — is worth persisting. Where each one sits is in the shell's
+    // saved dock, under the instance id `pinned-detail:<e>`. (Entries written
+    // before the dock also carry `dockSide` and floating `left`/`top`.)
+    pinned: layout.instancesOf('pinned-detail').map(({ key }) => ({ e: +key })),
   };
 }
 
-// The interleaving below is deliberate: heap settings, then window geometry,
-// then crop and playhead, then drawers, then pinned windows. That is the order
-// the flat shape was applied in, and docking a drawer resizes the canvas, so
-// it must keep happening after the view messages rather than before them.
+// The order below is deliberate: heap settings, then crop and playhead, then
+// the layout, then pinned windows. Rearranging the dock resizes the canvases,
+// so it must keep happening after the view messages rather than before them.
 export function applySession(obj) {
   if (!obj || obj.heapVisualizerSession !== 1) return;
   const h = readHeapSection(obj);
   if (h) applyHeapSettings(h);
-  applyWindows(obj);
   if (h) applyHeapView(h);
-  applyDrawersState(obj.drawers);
+  // a blob written before the dock has the shell's `windows` and `drawers`
+  // at the top level instead of a `shell` section
+  layout.restore(obj.shell ?? { windows: obj.windows, drawers: obj.drawers });
   if (h) restorePinnedWindows(h.pinned);
+  else layout.dropPlaceholders();
 }
 
 // the heap section, or null when there is none to trust. A blob in the old
@@ -118,17 +116,6 @@ function readHeapSection(obj) {
   if (obj.heap === undefined) return obj;
   if (!obj.heap || obj.heap.version !== HEAP_SESSION_VERSION) return null;
   return obj.heap;
-}
-
-function applyWindows(obj) {
-  if (!obj.windows) return;
-  for (const { id } of d.panels) {
-    const w = obj.windows[id];
-    const p = $(id);
-    if (!w || !p) continue;
-    p.hidden = w.hidden;
-    if (w.left) { p.style.left = w.left; p.style.top = w.top; p.style.right = w.right; p.style.bottom = w.bottom; }
-  }
 }
 
 function applyHeapSettings(obj) {
@@ -190,16 +177,33 @@ function applyHeapView(obj) {
 // re-fetches each pinned allocation's info by creator event index (the trace
 // itself, not the info blob, is what's persisted) and recreates its window,
 // docked or floating exactly as saved
+// A restore spans one worker round-trip per window, so a newer restore or a
+// newly loaded trace can arrive in between; either one ends this one rather
+// than letting it recreate windows for events of a trace no longer shown.
+let pinnedRestoreGeneration = 0;
+
+// The restored layout already holds a placeholder in each saved pinned
+// window's slot; recreating the window fills it, and whatever is left
+// unfilled at the end (an event this trace does not have) is dropped. Windows
+// pinned now that the session does not list were closed by the restore.
 async function restorePinnedWindows(pinned) {
-  if (!pinned || !pinned.length) return;
-  $$('.pinned-detail').forEach((w) => w.remove()); // avoid dupes on repeated restore
+  const generation = ++pinnedRestoreGeneration;
+  if (!pinned || !pinned.length) {
+    layout.dropPlaceholders();
+    return;
+  }
+  const meta = d.ui.meta;
   for (const pw of pinned) {
     const info = await d.requestAllocInfo(pw.e);
+    if (generation !== pinnedRestoreGeneration || d.ui.meta !== meta || !d.ui.loaded) return;
     if (!info) continue; // stale/unknown event (e.g. mismatched trace): skip
-    const win = d.createPinnedWindow(info, null);
-    win.style.left = pw.left; win.style.top = pw.top; win.style.right = pw.right; win.style.bottom = pw.bottom;
-    if (pw.dockSide) dockPanelAt(win, pw.dockSide, null, false);
+    d.createPinnedWindow(info, {
+      at: pw.left ? { left: pw.left, top: pw.top } : undefined,
+      dock: pw.dockSide === 'left' || pw.dockSide === 'right' ? pw.dockSide : undefined,
+      restoring: true,
+    });
   }
+  layout.dropPlaceholders();
 }
 
 let lastSessionJson = null;
@@ -208,6 +212,7 @@ let lastSessionJson = null;
 // saveSessionNow — the previous snapshot describes a different trace
 export function resetSessionSnapshot() {
   lastSessionJson = null;
+  pinnedRestoreGeneration++;
 }
 
 export function saveSessionNow() {
@@ -250,9 +255,18 @@ export function restoreMarksAutosave() {
     if (!raw) return false;
     const obj = JSON.parse(raw);
     if (!obj || obj.heapVisualizerAnalysis !== 1) return false;
-    d.applyMarks(obj, true);
+    // The blob's session snapshot is as old as the last marks change; the
+    // session's own key is written every two seconds and on unload. The newer
+    // one is applied (once: applyMarks applies the session it is given), or
+    // a window moved after the last rename would come back where it was.
+    let session = obj.session;
+    try {
+      const own = sessionKey() ? localStorage.getItem(sessionKey()) : null;
+      if (own) session = JSON.parse(own);
+    } catch { /* corrupt: the blob's own snapshot stands */ }
+    d.applyMarks({ ...obj, session }, true);
     // a pre-session marks blob still needs the standalone session restored
-    return !!obj.session;
+    return !!session;
   } catch { /* corrupt/unavailable: ignore, nothing to restore */ }
   return false;
 }

@@ -2,10 +2,13 @@
 """gen.py - synthetic heap-event stream generator for heap-visualizer.
 
 Emits a JSONL (.heapl) stream of malloc/free/realloc events conforming to
-spec/02-trace-format.md v1. It simulates a free-list allocator serving a workload made
-of allocation "sites" (each with a characteristic size range and lifetime) and
-sprinkles in same-timestamp bursts so the temporal and sequential timelines in
-the viewer visibly diverge.
+spec/02-trace-format.md, interleaved with structured `L` log lines
+(spec/13-domains-and-logs.md) unless --no-logs is given, and with interval
+records (calls, spans and CPU switches, spec/14-intervals.md, which make the
+trace v2) unless --no-intervals is given. It simulates a free-list allocator
+serving a workload made of allocation "sites" (each with a characteristic size
+range and lifetime) and sprinkles in same-timestamp bursts so the temporal and
+sequential timelines in the viewer visibly diverge.
 
 Deterministic: identical --seed and args produce byte-identical output.
 Only the Python standard library is used.
@@ -86,6 +89,34 @@ PHASES: list[str | None] = [
     "phase: teardown",
     None,
 ]
+
+
+# Log lines the simulated program writes (on unless --no-logs). Each phase
+# opens with an info line; the request stream is the steady background; the
+# warn/error lines are tied to heap moments a reader would want to correlate
+# with the map.
+LOG_PHASES: list[tuple[str, str]] = [
+    ("startup", "warming caches and loading assets"),
+    ("request", "serving traffic"),
+    ("render", "rendering image tiles"),
+    ("teardown", "draining connections"),
+]
+LOG_PATHS: list[str] = [
+    "/api/items", "/api/items/{id}", "/api/search", "/static/app.js",
+    "/api/tiles/{id}", "/healthz",
+]
+LOG_EVERY = 160          # operations between request log lines, on average
+LOG_PEAK_STEP = 8 << 20  # a warn each time peak live bytes crosses a multiple
+IVL_FUNCS: list[str] = [
+    "main_loop", "handle_request", "parse_body", "render_tile",
+    "flush_cache", "compress", "db_query",
+]
+IVL_ROUTES: list[str] = ["/upload", "/tiles", "/search", "/health"]
+DEMO_PID = 4242        # the process id the demo's startup log reports
+IVL_DEPTH = 8           # deepest call stack per thread (intervals on)
+IVL_OPEN_SPANS = 16     # most spans open at once (intervals on)
+
+LOG_BUDGET = 64 << 20    # past this, each new high-water mark is also an error
 
 
 def _log_uniform(rng: random.Random, lo: int, hi: int) -> int:
@@ -205,6 +236,20 @@ class Generator:
         self._cur_live_bytes = 0
         self.min_addr = args.arena_base
         self.max_addr = args.arena_base
+        # Log content draws from its own stream, so the heap records are the
+        # same with and without logs; only their seq numbers shift.
+        self.log_rng = random.Random(args.seed * 7919 + 17)
+        self.n_log = 0
+        self._log_peak_step = 0
+        self._log_req = 0
+        # Interval edges (on unless --no-intervals) draw from their own stream too.
+        self.ivl_rng = random.Random(args.seed * 104729 + 3)
+        self.ivl_stacks: dict[int, list[str]] = {}
+        self.open_spans: list[str] = []
+        self.n_span = 0
+        self.n_ivl = 0
+        self.n_cpus = max(1, min(args.threads, 4))
+        self.cpu_running: dict[int, int] = {}   # cpu -> thread it runs
 
     # -- id / time helpers --------------------------------------------------
 
@@ -442,6 +487,140 @@ class Generator:
         self.n_custom += 1
         self._emit(out, rec)
 
+    # -- log lines ------------------------------------------------------------
+
+    def _log(self, out, level: str, logger: str, msg: str, thr: int | None = None,
+             **fields) -> None:
+        """One `L` record at the current time, with optional custom fields."""
+        if thr is None:
+            thr = self.log_rng.randrange(self.args.threads)
+        rec: dict = {"t": self.t, "op": "L", "level": level, "logger": logger,
+                     "msg": msg, "thr": thr}
+        rec.update(fields)
+        self.n_log += 1
+        self._emit(out, rec)
+
+    def _log_startup(self, out) -> None:
+        a = self.args
+        self._log(out, "info", "app", "heapviz-demo 0.3.1 starting", thr=0, pid=DEMO_PID)
+        self._log(out, "debug", "app.config", "loaded config from /etc/demo/app.toml",
+                  thr=0, threads=a.threads, arena=self._hexaddr(a.arena_base))
+        self._log(out, "trace", "mem.arena", "arena reserved", thr=0,
+                  base=self._hexaddr(a.arena_base), row_bytes=a.row_bytes)
+        self._log(out, "info", "net.http", "listening on 0.0.0.0:8080", thr=0,
+                  workers=a.threads)
+
+    def _log_phase(self, out, i: int) -> None:
+        name, what = LOG_PHASES[i]
+        self._log(out, "info", "app.phase", f"phase {name}: {what}", thr=0,
+                  phase=name, live=len(self.live))
+
+    def _log_request(self, out) -> None:
+        r = self.log_rng
+        self._log_req += 1
+        path = r.choice(LOG_PATHS).replace("{id}", str(r.randint(1, 9999)))
+        method = "POST" if path == "/api/search" and r.random() < 0.5 else "GET"
+        ms = round(r.expovariate(1 / 18.0) + 0.4, 1)
+        roll = r.random()
+        thr = r.randrange(self.args.threads)  # one request, one worker thread
+        if roll < 0.012:
+            self._log(out, "warn", "net.http", f"retrying {method} {path}", thr=thr,
+                      attempt=r.randint(2, 3), backoff_ms=r.choice([50, 100, 200]))
+            self._log(out, "error", "net.http", f"{method} {path} failed: upstream timeout", thr=thr,
+                      status=504, ms=round(ms + 3000, 1), request=self._log_req)
+        elif roll < 0.04:
+            slow = round(ms + 250, 1)
+            self._log(out, "warn", "net.http", f"{method} {path} slow: {slow} ms", thr=thr,
+                      status=200, ms=slow, request=self._log_req)
+        elif roll < 0.10:
+            self._log(out, "debug", "net.http", f"{method} {path} cache hit", thr=thr,
+                      request=self._log_req)
+        else:
+            status = 404 if r.random() < 0.03 else 200
+            self._log(out, "info", "net.http", f"{method} {path} {status} in {ms} ms", thr=thr,
+                      status=status, ms=ms, request=self._log_req)
+
+    def _log_heap_moments(self, out, before_peak: int) -> None:
+        """Warn when the heap does something a reader should look at."""
+        step = self.peak_live_bytes // LOG_PEAK_STEP
+        if self.peak_live_bytes > before_peak and step > self._log_peak_step:
+            self._log_peak_step = step
+            mib = self.peak_live_bytes / (1 << 20)
+            self._log(out, "warn", "mem.monitor", f"heap high-water mark {mib:.1f} MiB",
+                      live_bytes=self._cur_live_bytes, live=len(self.live))
+            if step * LOG_PEAK_STEP >= LOG_BUDGET:
+                self._log(out, "error", "mem.monitor",
+                          f"live heap over budget ({mib:.1f} of {LOG_BUDGET >> 20} MiB)",
+                          live_bytes=self._cur_live_bytes, budget=LOG_BUDGET)
+        # the allocation just made: a very large image tile is worth a line
+        last = self.live.get(self.next_id - 1)
+        if last is not None and last.site == "image_tile" and last.size >= 60_000 \
+                and self.log_rng.random() < 0.08:
+            self._log(out, "debug", "render.tiles", f"large tile buffer {last.size} B",
+                      thr=last.thr, id=last.id, addr=self._hexaddr(last.addr))
+
+    # -- intervals (on unless --no-intervals; trace format v2) --------------
+
+    def _ivl_names(self, out) -> None:
+        """`T` records naming each thread; they take no seq."""
+        for thr in range(self.args.threads):
+            name = "main" if thr == 0 else f"worker-{thr}"
+            out.write(json.dumps({"op": "T", "thr": thr, "name": name}, separators=(",", ":")))
+            out.write("\n")
+
+    def _ivl_edge(self, out, rec: dict) -> None:
+        self.n_ivl += 1
+        self._emit(out, rec)
+
+    def _ivl_step(self, out) -> None:
+        """Maybe one interval edge: a call begin/end on a thread's stack, a
+        request span begin/end (ending on any thread), or a context switch."""
+        r = self.ivl_rng
+        thr = r.randrange(self.args.threads)
+        stack = self.ivl_stacks.setdefault(thr, [])
+        x = r.random()
+        if x < 0.35 and len(stack) < IVL_DEPTH:
+            name = r.choice(IVL_FUNCS)
+            stack.append(name)
+            self._ivl_edge(out, {"t": self.t, "op": "B", "thr": thr, "name": name})
+        elif x < 0.7 and stack:
+            self._ivl_edge(out, {"t": self.t, "op": "X", "thr": thr, "name": stack.pop()})
+        elif x < 0.78:
+            if self.open_spans and (r.random() < 0.5 or len(self.open_spans) >= IVL_OPEN_SPANS):
+                sid = self.open_spans.pop(r.randrange(len(self.open_spans)))
+                self._ivl_edge(out, {"t": self.t, "op": "X", "thr": thr, "span": sid,
+                                     "status": r.choice(["ok", "ok", "ok", "error"])})
+            else:
+                self.n_span += 1
+                sid = f"r{self.n_span}"
+                rec = {"t": self.t, "op": "B", "thr": thr, "span": sid, "name": "request",
+                       "route": r.choice(IVL_ROUTES)}
+                if self.open_spans and r.random() < 0.4:
+                    rec["parent"] = r.choice(self.open_spans)
+                self.open_spans.append(sid)
+                self._ivl_edge(out, rec)
+        elif x < 0.9:
+            # switch a CPU to a thread no other CPU is running, else idle
+            cpu = r.randrange(self.n_cpus)
+            busy = {t for c, t in self.cpu_running.items() if c != cpu}
+            ready = [t for t in range(self.args.threads) if t not in busy]
+            rec = {"t": self.t, "op": "C", "cpu": cpu}
+            if ready and r.random() < 0.85:
+                rec["thr"] = self.cpu_running[cpu] = r.choice(ready)
+            else:
+                self.cpu_running.pop(cpu, None)
+                rec["state"] = "S"
+            self._ivl_edge(out, rec)
+
+    def _ivl_close(self, out) -> None:
+        """Close every open call and span at the end of the trace."""
+        for thr, stack in sorted(self.ivl_stacks.items()):
+            while stack:
+                self._ivl_edge(out, {"t": self.t, "op": "X", "thr": thr, "name": stack.pop()})
+        for sid in self.open_spans:
+            self._ivl_edge(out, {"t": self.t, "op": "X", "thr": 0, "span": sid, "status": "ok"})
+        self.open_spans = []
+
     def _drain_due_frees(self, out) -> None:
         """Emit every scheduled free whose time has arrived."""
         while self.pending and self.pending[0][0] <= self.t:
@@ -457,15 +636,37 @@ class Generator:
 
         # one landmark per --events-every operations, plus one at the start
         every = args.events_every if args.events else 0
+        logs = args.logs
+        phase_len = max(1, args.ops // len(LOG_PHASES))
+        if logs:
+            self._log_startup(out)
+        if args.intervals:
+            self._ivl_names(out)
         for i in range(args.ops):
             self._advance_time()
             self._drain_due_frees(out)
+            if args.intervals:
+                self._ivl_step(out)
             if every and i % every == 0:
                 self._do_custom_event(out)
+            if logs and i % phase_len == 0 and i // phase_len < len(LOG_PHASES):
+                self._log_phase(out, i // phase_len)
+            before_peak = self.peak_live_bytes
             if self.rng.random() < args.realloc_rate:
                 self._do_realloc(out)
             else:
                 self._do_malloc(out)
+            if logs:
+                self._log_heap_moments(out, before_peak)
+                if self.log_rng.random() < 1.0 / LOG_EVERY:
+                    self._log_request(out)
+
+        if logs:
+            self._log(out, "info", "app", "shutting down: freeing remaining allocations",
+                      thr=0, live=len(self.live), live_bytes=self._cur_live_bytes)
+
+        if args.intervals:
+            self._ivl_close(out)
 
         # flush all remaining scheduled frees in time order
         while self.pending:
@@ -475,15 +676,24 @@ class Generator:
                 self._do_free(out, aid)
 
         self.n_leak = len(self.live)
+        if logs:
+            level = "warn" if self.n_leak else "info"
+            self._log(out, level, "mem.monitor",
+                      f"exit: {self.n_leak} allocations still live "
+                      f"({self._cur_live_bytes} bytes)",
+                      thr=0, leaked=self.n_leak, live_bytes=self._cur_live_bytes)
 
     def _emit_header(self, out) -> None:
         header = {
             "op": "H",
-            "v": FORMAT_VERSION,
+            "v": 2 if self.args.intervals else FORMAT_VERSION,
             "unit": self.args.unit,
             "arena_base": self._hexaddr(self.args.arena_base),
             "row_bytes": self.args.row_bytes,
             "title": "seed=%d ops=%d" % (self.args.seed, self.args.ops),
+            # v2: the process every record belongs to; the startup log's
+            # `pid` field names the same one
+            **({"pid": DEMO_PID} if self.args.intervals else {}),
             "meta": {
                 "generator": "gen.py",
                 "threads": self.args.threads,
@@ -502,14 +712,14 @@ class Generator:
         span = self.max_addr - self.min_addr
         return (
             "heap-visualizer gen.py summary\n"
-            "  events        : %d (M=%d F=%d R=%d E=%d)\n"
+            "  events        : %d (M=%d F=%d R=%d E=%d L=%d B/X/C=%d)\n"
             "  leaked allocs : %d (%d bytes still live at end)\n"
             "  peak live     : %d bytes (%.2f MiB)\n"
             "  address span  : %s .. %s (%d bytes, %.2f MiB)\n"
             "  final t       : %d %s\n"
             % (
                 self.seq,
-                self.n_malloc, self.n_free, self.n_realloc, self.n_custom,
+                self.n_malloc, self.n_free, self.n_realloc, self.n_custom, self.n_log, self.n_ivl,
                 self.n_leak, self._cur_live_bytes,
                 self.peak_live_bytes, self.peak_live_bytes / (1 << 20),
                 self._hexaddr(self.min_addr), self._hexaddr(self.max_addr),
@@ -565,8 +775,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "not allocations, just labels a reader can navigate by")
     p.add_argument("--events-every", type=int, default=25, dest="events_every",
                    help="operations between custom events, with --events")
+    p.add_argument("--no-logs", action="store_false", dest="logs",
+                   help="omit the structured `L` log lines (startup, phases, "
+                        "requests, and warnings tied to heap moments) that are "
+                        "otherwise interleaved with the heap records")
+    p.add_argument("--no-intervals", action="store_false", dest="intervals",
+                   help="omit the interval records and write a v1 trace; by "
+                        "default the trace is v2 with `T` thread names, nested "
+                        "`B`/`X` calls per thread, request spans that may end "
+                        "on another thread, and `C` context switches on up to "
+                        "4 CPUs (more with --threads)")
+    # the default since intervals were turned on; kept so older commands run
+    p.add_argument("--intervals", action="store_true", dest="intervals",
+                   help=argparse.SUPPRESS)
     p.add_argument("--quiet", action="store_true",
                    help="suppress the stderr summary")
+    p.set_defaults(intervals=True)
     return p.parse_args(argv)
 
 

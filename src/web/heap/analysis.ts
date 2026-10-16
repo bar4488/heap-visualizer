@@ -12,7 +12,7 @@
 // still live there.
 
 import { $, $$, setHtml, delegate } from '../shell/dom.ts';
-import { showPanel } from '../shell/panels.ts';
+import { layout } from '../shell/layout.ts';
 import { esc, fmtNum } from '../fmt.ts';
 import { request } from '../rpc.ts';
 import { buildSession, applySession } from '../session.ts';
@@ -149,6 +149,10 @@ function projectCanonicalAnalysis() {
   d.ui.addrMarks = Object.entries(canonical.addressMarks).map(([id, value]) => ({ id, ...value }));
   d.ui.savedFilters = Object.entries(canonical.savedFilters).map(([id, value]) => ({ id, ...value }));
   sendAddrMarks();
+  // The worker labels allocations from its own copy of the names, and an
+  // applied `named()` filter has to re-resolve against them: push them on
+  // every projection that changed one, local and connected alike.
+  if (!sameNames(previousNames, d.ui.names)) d.sendNames();
   syncTagDatalist();
   buildMarksPanel();
   d.buildFilterPanel();
@@ -156,11 +160,35 @@ function projectCanonicalAnalysis() {
   updateMarkers();
 }
 
+function sameNames(a: Map<number, { name: string }>, b: Map<number, { name: string }>) {
+  if (a.size !== b.size) return false;
+  for (const [e, value] of a) if (b.get(e)?.name !== value.name) return false;
+  return true;
+}
+
 // tracks whether marks changed since the last save/load/autosave — drives
 // the periodic marks autosave, not a refresh warning: marks (like
 // session/layout state) now auto-persist to localStorage, so there's nothing
 // a plain refresh can actually lose
 export function markDirty() { d.ui.marksDirty = true; }
+
+// `.heapa` names come off disk (and back out of the localStorage autosave),
+// so nothing in them is trusted: the creator must be an event index, the name
+// a string, and `id`/`addr` the shapes the engine itself renders — anything
+// else falls back to what a fresh projection would show.
+export function normalizeNames(value): Map<number, { name: string; id: number; addr: string }> {
+  const names = new Map();
+  if (!Array.isArray(value)) return names;
+  for (const entry of value) {
+    if (!entry || !Number.isSafeInteger(entry.e) || entry.e < 0) continue;
+    if (typeof entry.name !== 'string' || !entry.name.trim()) continue;
+    const id = Number.isSafeInteger(entry.id) && entry.id >= 0 ? entry.id : entry.e;
+    const addr = typeof entry.addr === 'string' && /^0x[0-9a-f]+$/i.test(entry.addr)
+      ? entry.addr.toLowerCase() : '';
+    names.set(entry.e, { name: entry.name, id, addr });
+  }
+  return names;
+}
 
 export function normalizeSavedFilters(value) {
   if (!Array.isArray(value)) return [];
@@ -257,7 +285,7 @@ export function buildNamesSection() {
   setHtml(list, entries.map(([e, v]) => `<div class="an-row">
       <input type="color" data-ncolor="${e}" value="${d.ui.allocColors.get(e) || '#3fb950'}" title="highlight color">
       <input type="text" class="grow" data-nname="${e}" value="${esc(v.name)}">
-      <span class="pos" data-ngo="${e}" title="select and jump to birth">id ${v.id} · ${v.addr}</span>
+      <span class="pos" data-ngo="${e}" title="select and jump to birth">id ${esc(String(v.id))} · ${esc(v.addr)}</span>
       <button class="x" data-ndel="${e}">×</button>
     </div>`).join(''));
 }
@@ -288,7 +316,7 @@ export function gotoAddr(addrHex) {
 export function addAddrMark(addrHex) {
   commit({ type: 'putAddressMark', id: persistentId('address'), name: `addr ${d.ui.addrMarks.length + 1}`, addr: addrHex });
   $('st-info').textContent = `marked ${addrHex} — rename it in the Marks panel`;
-  showPanel('analysis-panel');
+  layout.reveal('analysis-panel');
   markDirty();
 }
 
@@ -331,7 +359,7 @@ export function addBookmark() {
   const b = { name: `mark ${d.ui.bookmarks.length + 1}`, seq: d.ui.state.seq, t: d.ui.state.t };
   commit({ type: 'putBookmark', id: persistentId('bookmark'), ...b });
   $('st-info').textContent = `bookmarked seq ${fmtNum(b.seq)} · ${d.fmtTime(b.t)} — rename it in the Marks panel`;
-  showPanel('analysis-panel');
+  layout.reveal('analysis-panel');
   markDirty();
 }
 
@@ -440,8 +468,8 @@ export function applyMarks(obj, quiet?) {
   }
   d.post({ type: 'tags-clear' });
   d.ui.tags = (obj.tags || []).map((t, i) => ({
-    name: t.name || `tag ${i + 1}`,
-    color: /^#[0-9a-f]{6}$/i.test(t.color) ? t.color : d.CAT[i % 12],
+    name: typeof t?.name === 'string' && t.name ? t.name : `tag ${i + 1}`,
+    color: /^#[0-9a-f]{6}$/i.test(t?.color) ? t.color : d.CAT[i % 12],
   }));
   sendTagColors();
   for (const [tagStr, events] of Object.entries(obj.taggedEvents || {})) {
@@ -450,7 +478,7 @@ export function applyMarks(obj, quiet?) {
       d.post({ type: 'tag-events', tag, events });
     }
   }
-  d.ui.names = new Map((obj.names || []).map((r) => [r.e, { name: r.name, id: r.id, addr: r.addr }]));
+  d.ui.names = normalizeNames(obj.names);
   d.sendNames();
   d.ui.allocColors = new Map((obj.allocColors || []).filter(([, c]) => /^#[0-9a-f]{6}$/i.test(c)));
   for (const [e, c] of d.ui.allocColors) {
@@ -486,7 +514,7 @@ export function applyMarks(obj, quiet?) {
   // legacy rowBytes/collapseMin/colorMode/playhead fields above
   applySession(obj.session);
   if (!quiet) {
-    showPanel('analysis-panel');
+    layout.reveal('analysis-panel');
     $('st-info').textContent =
       `marks loaded: ${d.ui.tags.length} tags, ${d.ui.names.size} names, ${d.ui.bookmarks.length} time marks, ${d.ui.addrMarks.length} addr marks`;
   }
@@ -573,8 +601,6 @@ function wireAnalysisPanel() {
   });
 
   $('btn-mark').onclick = addBookmark;
-  $('an-save').onclick = saveMarks;
-  $('an-load').onclick = () => $('analysis-file').click();
   $('analysis-file').onchange = async (ev) => {
     const f = ev.target.files[0];
     if (f) {

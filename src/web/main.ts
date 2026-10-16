@@ -3,32 +3,49 @@
 
 import {
   fmtBytes, fmtHexSize, fmtAllocSize as fmtAllocSizeMode, fmtNum, parseSize,
-  esc, clampView,
+  esc,
 } from './fmt.ts';
+import {
+  SELECT_MIN_PX, axisBounds, clampAxis, selectionRange, valAt as axisValAt, wheelView,
+} from './timeline-interaction.ts';
 import {
   initRpc, request, requestLatest, cancelLatest, handleReply,
 } from './rpc.ts';
 import {
-  $, $$, $1, dpr, setHtml, toCss, toCssLen,
+  $, $$, $1, dpr, onDprChange, setHtml, toCss, toCssLen,
 } from './shell/dom.ts';
-import { raisePanel, showPanel, makePanelWindow } from './shell/panels.ts';
+import { layout } from './shell/layout.ts';
+import { actions } from './shell/actions.ts';
+import { initMenus } from './shell/menus.ts';
+import { createDockview, themeDark } from 'dockview-core';
 import { showTooltip, hideTooltip, positionTooltipNearMouse } from './shell/tooltip.ts';
 import { heapPanels } from './heap/panels.ts';
+import {
+  domainPanels, domainPresent, listeners, moduleLabel, type PanelModule, type PanelRecord, type ViewRanges,
+} from './panels.ts';
+import { registerIntervalPanels } from './intervals/index.ts';
+import { groupWarnings, warningDetail } from './warnings-model.ts';
+import { genericStatusText, kindInfo, threadNames } from './stream/stream-model.ts';
 import {
   initAnalysis, markDirty, tagIdFor, syncTagDatalist, buildMarksPanel,
   buildTagsSection, sendAddrMarks, gotoAddr, addAddrMark,
   renderAddrMarkLines, setAddrMarkYs, addBookmark, updateMarkers,
   requestAllocInfo, buildMarks, applyMarks, loadCanonicalAnalysis,
   commitCanonicalAnalysis, commitTagMembers, replaceAllocationTags, resetStandaloneAnalysis,
-  seedStandaloneAnalysis,
+  seedStandaloneAnalysis, saveMarks,
 } from './heap/analysis.ts';
 import {
   isServerAnalysis, persistentId, subscribeAnalysisServerHealth, useServerAnalysis,
 } from './analysis-port.ts';
 import {
   initEventsPanel, evState, refreshEventsPanel, onEventsSlice, flashRects,
-  updateEventsPanel, onEvPos, resetEventsPanel, updateEventsSelBand,
-} from './heap/events-panel.ts';
+  updateEventsPanel, onEvPos, resetEventsPanel, updateEventsSelBand, markIntervalSelection,
+} from './stream/events-panel.ts';
+import type { IntervalSelection } from './intervals/selection.ts';
+import {
+  initLogsPanel, logsPresent, resetLogsPanel, updateLogsPanel,
+} from './logs/logs-panel.ts';
+import { OP_LOG, logStatusText, logsHoverText } from './logs/logs-model.ts';
 import {
   initSession, restoreSession,
   restoreMarksAutosave, resetSessionSnapshot,
@@ -37,22 +54,20 @@ import {
   applyFilterCompletion, utf8Offset,
   insertAllocationReference,
 } from './filter-completion.ts';
-import { initGuide } from './guide.ts';
+import { guideOpen, initGuide, showGuide, toggleGuide } from './guide.ts';
 import { initRequest } from './request.ts';
-import { initOnboarding, setOnboardingConnectionStatus } from './onboarding.ts';
+import { initOnboarding, setOnboardingConnectionStatus, showInstall } from './onboarding.ts';
 import { loadHighlighter, paintHighlight } from './highlight.ts';
 import {
   customFieldRef, hasTopLevelPredicate, quoteFilterString, toggleFilterPredicate,
 } from './filter-actions.ts';
 import { customFieldsSection } from './heap/custom-fields.ts';
 import { eventWindowBody, eventWindowTitle } from './heap/event-window.ts';
+import { LIVE, PINNED, pinAllocation, pinnedTitle, unpinAllocation } from './heap/alloc-windows.ts';
 import {
   initLocalServerMode, setLocalServerRuntimeHealth, type LocalServerConfig,
   hostedMinimumVersion,
 } from './local-server.ts';
-import {
-  applyDrawersState, drawersState, dock, initDrawers, drawerEl, refreshDrawerDividers,
-} from './shell/drawers.ts';
 import type {
   AllocInfo, Domain, FilterCompletions, FromWorker, Range, TraceField, TraceMeta,
 } from './protocol.ts';
@@ -71,7 +86,7 @@ type Selection = { kind: Domain; lo: number; hi: number };
  *
  * The optional fields are the ones filled in after the literal below — either
  * at startup (`worker`, `seek`, `drawers`) or when a trace loads and the user
- * starts working (`fileName`, `detailInfo`, `tlLocalAt`, `detailWasPinned`).
+ * starts working (`fileName`, `detailInfo`, `tlLocalAt`).
  */
 type UIState = {
   meta: TraceMeta | null;
@@ -121,10 +136,13 @@ type UIState = {
   seek?: (seq: number) => void;
   fileName?: string;
   detailInfo?: AllocInfo | null;
+  /**
+   * The interval selection (IVL-UI-005): one call, span or run slice, shared
+   * by the Events list and the interval panels; apart from `selected`.
+   */
+  intervalSel?: IntervalSelection | null;
   /** When the user last zoomed a strip locally; see onState. */
   tlLocalAt?: number;
-  drawers?: typeof drawersState;
-  detailWasPinned?: boolean;
 };
 
 // Mirrored from src/core/src/render.rs (CAT / RAMP): the engine paints
@@ -133,13 +151,33 @@ type UIState = {
 const CAT = ['#58a6ff', '#3fb950', '#f2cc60', '#ff7b72', '#bc8cff', '#39c5cf',
   '#f778ba', '#d29922', '#7ee787', '#ffa657', '#79c0ff', '#d2a8ff'];
 const RAMP = ['#0e4429', '#006d32', '#26a641', '#39d353'];
-// index = the engine's op code; 3 is a custom (E) event, which is a landmark
-// rather than an allocation operation
-const OPS = ['malloc', 'free', 'realloc', 'event'];
+// the engine's op code of a custom (E) event, which is a landmark rather than
+// an allocation operation; records read by kind label (stream-model kindInfo)
 const OP_EVENT = 3;
 
 const worker = new Worker('worker.js', { type: 'module' }) as TypedWorker;
 initRpc(worker);
+
+// playhead and view-range subscriptions for domain modules (panels.ts)
+const stateListeners = listeners<Extract<FromWorker, { type: 'state' }>>();
+const viewListeners = listeners<ViewRanges>();
+const loadListeners = listeners<TraceMeta>();
+const intervalSelListeners = listeners<IntervalSelection | null>();
+// The interval selection: set from the Events list or an interval panel, and
+// fanned out to both (the interval module resolves an edge to its interval
+// and selects again with it).
+function selectInterval(sel: IntervalSelection | null) {
+  UI.intervalSel = sel;
+  intervalSelListeners.emit(sel);
+}
+intervalSelListeners.add(() => markIntervalSelection());
+let lastView = '';
+function emitView() {
+  const key = `${UI.tlT.lo},${UI.tlT.hi},${UI.tlS.lo},${UI.tlS.hi}`;
+  if (key === lastView) return;
+  lastView = key;
+  viewListeners.emit({ t: { ...UI.tlT }, seq: { ...UI.tlS } });
+}
 let resolveWorkerReady: () => void;
 const workerReady = new Promise<void>((resolve) => { resolveWorkerReady = resolve; });
 let renderedServerTraceId: string | null = null;
@@ -149,6 +187,9 @@ let serverLoadGeneration = 0;
 let serverTraceController: AbortController | null = null;
 let serverStreaming = false;
 let serverConfigured = false;
+// Opening a file or the demo in this tab is the standalone path; a tab driven
+// by the local companion does not offer it (the File menu greys them out).
+let standaloneFiles = true;
 
 subscribeAnalysisServerHealth((state) => {
   if (serverConfigured) setLocalServerRuntimeHealth($('st-server'), state);
@@ -184,7 +225,10 @@ const UI: UIState = {
   xview: { zoom: 1, pan: 0 },
 };
 
-void initLocalServerMode($('st-server'), $('btn-connect'), async (config, status) => {
+// The companion's Connect/Disconnect control. local-server.ts owns its label
+// and click; the File menu and the top bar's connection pill drive it.
+const connectBtn = document.createElement('button');
+void initLocalServerMode($('st-server'), connectBtn, async (config, status) => {
   setOnboardingConnectionStatus(status);
   const mine = ++serverLoadGeneration;
   serverTraceController?.abort();
@@ -199,8 +243,7 @@ void initLocalServerMode($('st-server'), $('btn-connect'), async (config, status
       pendingServerTraceId = null;
       worker.postMessage({ type: 'load-cancel' });
     }
-    $('btn-open').hidden = false;
-    $('btn-demo').hidden = false;
+    standaloneFiles = true;
     if (wasConfigured && UI.loaded) {
       try {
         await resetStandaloneAnalysis();
@@ -214,8 +257,7 @@ void initLocalServerMode($('st-server'), $('btn-connect'), async (config, status
   }
   serverConfigured = !!config;
   useServerAnalysis(config);
-  $('btn-open').hidden = true;
-  $('btn-demo').hidden = true;
+  standaloneFiles = false;
   if (!config || status.state !== 'connected') return;
   if (renderedServerTraceId === status.session.trace.id) {
     useServerAnalysis(config, status.session.trace.id);
@@ -333,6 +375,9 @@ const overlay = $('addr-overlay');
 function sendResizes() {
   const send = (which, el) => {
     const r = el.getBoundingClientRect();
+    // a view that is parked (closed) or in a tab behind another measures 0×0;
+    // keep its last raster rather than shrinking the canvas to nothing
+    if (r.width < 1 || r.height < 1) return;
     worker.postMessage({ type: 'resize', which, w: r.width * dpr, h: r.height * dpr, dpr });
   };
   // measure the addr canvas box itself (addr-view), not the scroll container:
@@ -344,6 +389,14 @@ function sendResizes() {
 }
 new ResizeObserver(sendResizes).observe($('addr-view'));
 new ResizeObserver(sendResizes).observe($('strip-t'));
+new ResizeObserver(sendResizes).observe($('strip-s'));
+// Zoom or a monitor change: re-raster at the new ratio. The worker keeps row
+// height and scroll in device px, so both are re-sent in CSS px with it.
+onDprChange(() => {
+  sendResizes();
+  worker.postMessage({ type: 'set', key: 'rowPx', value: +$('row-px').value });
+  worker.postMessage({ type: 'scroll', y: addrScroll.scrollTop });
+});
 
 // ---------------------------------------------------------------------------
 // loading
@@ -387,15 +440,17 @@ async function handleFile(f) {
   }
 }
 
-$('btn-open').onclick = () => $('file-input').click();
 $('file-input').onchange = (ev) => {
   const f = ev.target.files[0];
   if (f) handleFile(f);
   ev.target.value = '';
 };
-$('btn-demo').onclick = () => loadURL('demo.heapl');
 
+// Only a drag carrying files is a trace being dropped: a panel's tab dragged
+// around the dock is a drag too, and must not raise the overlay.
+const isFileDrag = (e) => !!e.dataTransfer && [...e.dataTransfer.types].includes('Files');
 document.addEventListener('dragover', (e) => {
+  if (!isFileDrag(e)) return;
   e.preventDefault();
   $('drop-overlay').hidden = false;
 });
@@ -406,8 +461,9 @@ document.addEventListener('dragleave', (e) => {
 });
 document.addEventListener('dragend', () => { $('drop-overlay').hidden = true; });
 document.addEventListener('drop', (e) => {
-  e.preventDefault();
   $('drop-overlay').hidden = true;
+  if (!isFileDrag(e)) return;
+  e.preventDefault();
   const f = e.dataTransfer.files[0];
   if (f) handleFile(f);
 });
@@ -431,6 +487,13 @@ worker.onmessage = (ev) => {
       $('progress-pct').textContent = `${m.pct}%`;
       break;
     case 'error':
+      if (serverStreaming) {
+        // the worker dropped this streamed load: stop the download, and let
+        // the reader loop end quietly so this first error stays the one shown
+        serverLoadGeneration++;
+        serverTraceController?.abort();
+        serverTraceController = null;
+      }
       serverStreaming = false;
       pendingServerTraceId = null;
       UI.loaded = false;
@@ -463,17 +526,24 @@ worker.onmessage = (ev) => {
     case 'stepped':
       if (m.event) {
         const e = m.event;
+        // a record of a domain without a bespoke row (DOM-004): its summary
+        if (typeof e.domain === 'string') {
+          $('st-info').textContent = genericStatusText(e, UI.meta?.domains, threadNames(UI.meta?.domains));
+          break;
+        }
+        // a log line touches no allocation either; the Logs panel follows it
+        if (e.op === OP_LOG) { $('st-info').textContent = logStatusText(e); break; }
         if (e.op === OP_EVENT) {
           // a custom event touches no allocation: the selection stays where it
           // was, and its own window opens instead of the Allocation panel
-          $('st-info').textContent = `event${e.title ? ` · ${e.title}` : ''} · seq ${fmtNum(e.seq)}`;
+          $('st-info').textContent = `${kindInfo(e, UI.meta?.domains).label}${e.title ? ` · ${e.title}` : ''} · seq ${fmtNum(e.seq)}`;
           fillEventPanel(e);
           break;
         }
         // the worker already selected the allocation this event touches
         if (e.e !== undefined && e.e !== null) UI.selected = e.e;
         $('st-info').textContent =
-          `${OPS[e.op]} id=${e.id} ${e.addr} ${fmtAllocSize(e.size)}${e.site ? ' · ' + e.site : ''}`;
+          `${kindInfo(e, UI.meta?.domains).label} id=${e.id} ${e.addr} ${fmtAllocSize(e.size)}${e.site ? ' · ' + e.site : ''}`;
         // open the allocation dialog for the malloc/free we stepped onto
         if (m.info) fillDetailPanel(m.info);
       }
@@ -567,12 +637,7 @@ function onLoaded(m) {
   clearSelection();
   syncTagDatalist();
   updateMarkers();
-  $('btn-analysis').hidden = false;
-  $('btn-analysis').classList.remove('active');
   $('btn-mark').hidden = false;
-  $('btn-events').hidden = false;
-  $('an-save').hidden = false;
-  $('an-load').hidden = false;
   $('btn-play').disabled = false;
   UI.xview = { zoom: 1, pan: 0 };
   updateHzButton();
@@ -586,17 +651,23 @@ function onLoaded(m) {
   const wc = m.meta.warnTotal;
   $('btn-warnings').hidden = wc === 0;
   $('warn-count').textContent = fmtNum(wc);
+  $('btn-warnings').title = `${fmtNum(wc)} warnings: malformed or suspicious input — click for the list`;
+  lastView = '';
 
   // every panel refills itself from the new trace, in table order — the UI
   // fields each one reads were all reset above
-  for (const { build } of PANELS) build?.();
+  for (const { refill } of PANELS) refill?.();
 
-  $('detail-panel').hidden = true;
-  $('event-panel').hidden = true;
+  layout.close('detail-panel');
+  layout.close('event-panel');
   UI.detailInfo = null;
   // pinned allocation windows reference events of the previous trace
-  $$('.pinned-detail').forEach((w) => w.remove());
-  applyDefaultPanelLayout();
+  layout.closeAll('pinned-detail');
+  // The domain declares the first-visit workspace. Reapply it for every newly
+  // loaded trace before attempting a trace-scoped restore: a layout from the
+  // previous trace must not become the accidental default for one with no
+  // save. Floating windows stay where the user left them.
+  layout.resetLayout({ keepFloating: true });
   // the marks autosave embeds its own session snapshot, so applying both
   // would run applySession twice back-to-back (double seeks, double
   // filter/layout messages, pinned windows torn down and rebuilt) — prefer
@@ -612,6 +683,8 @@ function onLoaded(m) {
       $('st-info').textContent = `analysis load failed: ${(error as Error).message}`;
     });
   }
+  // domain modules (panels.ts onLoad): the new trace is in place
+  loadListeners.emit(m.meta);
 }
 
 function onState(m) {
@@ -623,7 +696,8 @@ function onState(m) {
     UI.tlT = m.tlT;
     UI.tlS = m.tlS;
   }
-  $('btn-play').textContent = m.playing ? '⏸' : '▶';
+  $('btn-play').textContent = m.playing ? '⏸\uFE0E' : '▶\uFE0E';
+  $('btn-play').setAttribute('aria-label', m.playing ? 'Pause' : 'Play');
   $('st-pos').textContent =
     `seq ${fmtNum(m.seq)} / ${fmtNum(m.n)} · t ${fmtTime(m.t)}`;
   $('st-live').innerHTML =
@@ -642,6 +716,9 @@ function onState(m) {
   setAddrMarkYs(m.addrMarkYs || []);
   renderAddrMarkLines();
   updateEventsPanel();
+  updateLogsPanel();
+  stateListeners.emit(m);
+  emitView();
 }
 
 // ---------------------------------------------------------------------------
@@ -711,8 +788,19 @@ function buildSpeedSelect() {
     }
     sel.value = '1000';
   }
+  speedLabel();
 }
 $('play-mode').onchange = buildSpeedSelect;
+$('play-speed').addEventListener('change', speedLabel);
+
+// The top bar's Play-settings button names the current speed, so the setting
+// is visible without opening the window.
+function speedLabel() {
+  const opt = $('play-speed').selectedOptions?.[0];
+  const text = opt ? opt.textContent : '';
+  $('btn-playcfg').textContent = text.replace(/^trace in /, '').replace(' ev/s', '/s') || 'speed';
+  $('btn-playcfg').title = `Playback settings: advance ${$('play-mode').value === 't' ? 'by time' : 'by events'}, ${text}`;
+}
 
 function playRate() {
   const mode = $('play-mode').value;
@@ -737,6 +825,7 @@ function toggleLock() {
   UI.locked = !UI.locked;
   $('btn-lock').textContent = UI.locked ? '🔒' : '🔓';
   $('btn-lock').classList.toggle('active', UI.locked);
+  $('btn-lock').setAttribute('aria-pressed', String(UI.locked));
   worker.postMessage({ type: 'set', key: 'locked', value: UI.locked });
   $('st-info').textContent = UI.locked
     ? 'viewport locked — stepping will not scroll the address view'
@@ -989,18 +1078,19 @@ function sendAllocSizeFormat() {
 }
 
 function refreshAllocSizeDisplays() {
-  if (UI.detailInfo && !$('detail-panel').hidden) {
+  if (UI.detailInfo && layout.isOpen('detail-panel')) {
     buildDetailBody($('detail-body'), UI.detailInfo);
   }
-  $$('.pinned-detail').forEach((win) => {
-    if (win._allocInfo) buildDetailBody(win.querySelector('.panel-body'), win._allocInfo);
-  });
+  for (const { el } of layout.instancesOf('pinned-detail')) {
+    if (el._allocInfo) buildDetailBody(el.querySelector('.panel-body'), el._allocInfo);
+  }
   refreshEventsPanel();
 }
 
 // the worker draws in-allocation labels; it needs the user-assigned names,
 // and so does the core, which resolves `named("x")` against them
 function sendNames() {
+  retitleAllocationWindows();
   worker.postMessage({
     type: 'names',
     names: [...UI.names.entries()].map(([e, v]) => [e, v.name]),
@@ -1021,7 +1111,10 @@ async function renamedFilterRefresh() {
   if (usesNamed($('filter-source').value)) filterEdited();
   const source = UI.filterApplied;
   if (!source || !usesNamed(source)) return;
+  // a filter the user applies meanwhile wins: never act on a stale result
+  const generation = filterApplyGeneration;
   const result = await request('filter-apply', { source });
+  if (generation !== filterApplyGeneration || UI.filterApplied !== source) return;
   if (result.success) {
     filterChanged();
     return;
@@ -1029,6 +1122,7 @@ async function renamedFilterRefresh() {
   // Turn filtering off, but leave the editor alone: the source is the thing
   // the user has to fix, and clearing it would delete their work.
   await request('filter-apply', { source: '' });
+  if (generation !== filterApplyGeneration || UI.filterApplied !== source) return;
   UI.filterApplied = '';
   $('btn-filter').classList.remove('active');
   filterChanged();
@@ -1412,7 +1506,9 @@ $('filter-source').onkeydown = (e) => {
   } else if (filterCompletions && (e.key === 'Tab' || (e.key === 'Enter' && filterCompletionNavigated))) {
     e.preventDefault();
     acceptFilterCompletion();
-  } else if (e.key === 'Escape') {
+  } else if (e.key === 'Escape' && filterCompletions) {
+    // the completion list used this Escape; the next one closes the panel
+    e.preventDefault();
     hideFilterCompletions();
   }
 };
@@ -1502,14 +1598,16 @@ $$('input[name=fmode]').forEach((radio) => {
 });
 
 // ---------------------------------------------------------------------------
-// panel wiring. The windowing itself — dragging, the z-stack, docking into
-// the left/right drawers — lives in web/shell/ and knows nothing about heaps.
+// panel wiring. The windowing itself — the dock (Dockview, D014), tabs,
+// splits, edges, floating, visibility, placement and persistence —
+// lives in web/shell/ and knows nothing about heaps; this file only declares
+// panels to it (shell/layout.ts) and asks it to open and close them.
 // ---------------------------------------------------------------------------
 
 // which panels exist, and what refills each from a loaded trace. The table
-// itself is src/web/heap/panels.ts; the build functions are this file's, so they
-// are attached here where they are in scope.
-const PANELS = heapPanels({
+// itself is src/web/heap/panels.ts; the refill functions are this file's, so
+// they are attached here where they are in scope.
+const HEAP_PANELS = heapPanels({
   'play-panel': () => buildSpeedSelect(),
   // the row size comes from the trace header, with the default left visible
   // as a hint
@@ -1519,51 +1617,267 @@ const PANELS = heapPanels({
   'analysis-panel': () => buildMarksPanel(),
   'warnings-panel': () => buildWarningsPanel(),
   'events-panel': () => resetEventsPanel(),
+  'logs-panel': () => resetLogsPanel(),
 });
 
-// the shell owns the window/drawer machinery (web/shell/); this is the
-// domain side of the handoff: the panel table, and the startup wiring.
-UI.drawers = drawersState;
-$$('.panel').forEach((p) => makePanelWindow(p, dock));
-initDrawers();
+// Every panel, in table order: the heap's table, then whatever the domain
+// modules declare. Refilled per trace in this order (onLoaded).
+const PANELS: PanelRecord[] = [...HEAP_PANELS];
 
-// The domain declares the first-visit workspace. Reapply it for every newly
-// loaded trace before attempting a trace-scoped restore: a layout from the
-// previous trace must not become the accidental default for one with no save.
-function applyDefaultPanelLayout() {
-  const defaults = {
-    left: PANELS.filter((p) => p.dock === 'left').map((p) => p.id),
-    right: PANELS.filter((p) => p.dock === 'right').map((p) => p.id),
-    widthLeft: 300,
-    widthRight: 300,
-    collapsedLeft: false,
-    collapsedRight: false,
-  };
-  for (const { id, open } of PANELS) $(id).hidden = !open;
-  applyDrawersState(defaults);
+/** Whether the loaded trace has records of the domain a panel needs. */
+function needsMet(p: PanelRecord): boolean {
+  if (!p.needs) return true;
+  if (p.needs === 'logs') return logsPresent();
+  return domainPresent(UI.meta?.domains, p.needs);
 }
-applyDefaultPanelLayout();
 
-// panel titles and open/close plumbing, both from the table. The events panel
-// wires its own button (opening it also refreshes the virtualized list), which
-// is why its record carries no toggle.
-for (const { id, title, toggle } of PANELS) {
-  $(id).querySelector('.ph-t').textContent = title;
-  if (!toggle) continue;
-  $(toggle).onclick = () => {
-    const p = $(id);
-    p.hidden = !p.hidden;
-    if (!p.hidden) raisePanel(p);
-    if (p.dataset.dockSide) refreshDrawerDividers(p.dataset.dockSide);
-  };
+/**
+ * A panel's View-menu entry and palette command (spec SHELL-011): checked
+ * while it is open, and toggled like the old toolbar button — closed when on
+ * screen, brought to the front when open out of sight. `section` is the
+ * domain group; 'workspace' is the unheaded run after the groups.
+ */
+function addPanelAction(type: string, o: {
+  label: string; section: string; el?: string | null; hint?: string;
+  visible?: () => boolean; enabled?: () => boolean;
+}) {
+  const workspace = o.section === 'workspace';
+  actions.add({
+    id: `panel.${type}`,
+    label: o.label,
+    group: 'view',
+    section: o.section,
+    heading: workspace ? undefined : o.section,
+    rank: workspace ? 1 : 0,
+    el: o.el || undefined,
+    hint: o.hint,
+    run: () => layout.toggle(type, '', { focus: true }),
+    checked: () => layout.isOpen(type),
+    visible: o.visible,
+    enabled: o.enabled,
+    paletteLabel: () => `${layout.isOpen(type) && layout.isShown(type) ? 'Hide' : 'Show'} ${o.label}`,
+    keywords: 'panel window toggle',
+  });
 }
-$$('.panel-close').forEach((b) => {
-  b.onclick = () => {
-    const p = $(b.dataset.close);
-    p.hidden = true;
-    if (p.dataset.dockSide) refreshDrawerDividers(p.dataset.dockSide);
-  };
+
+// Marks and Events have nothing to show before a trace is loaded.
+const NEEDS_TRACE = new Set(['analysis-panel', 'events-panel']);
+
+function registerPanel(p: PanelRecord) {
+  // a panel with a View-menu group is toggled from that menu (and the
+  // palette); one without keeps its top-bar button, which the shell wires
+  if (p.group) {
+    addPanelAction(p.id, {
+      label: p.label || p.title, section: p.group, el: p.toggle, hint: p.hint,
+      visible: () => needsMet(p),
+      enabled: NEEDS_TRACE.has(p.id) ? () => UI.loaded : undefined,
+    });
+  }
+  layout.register(p.id, {
+    title: p.title,
+    singleton: !p.multi,
+    persist: p.persist !== false,
+    closable: p.closable !== false,
+    toggle: p.group ? null : p.toggle,
+    size: p.size,
+    floatSize: p.float,
+    autoPlace: p.autoPlace || null,
+    // read when applied: whether Logs (or any panel that needs a domain)
+    // starts open depends on the loaded trace
+    defaultLocation: () => ({ dock: p.dock, open: p.open && needsMet(p) }),
+    build: p.build ? () => p.build() : p.multi ? (_key, info) => buildPinnedWindow(info) : () => $(p.id),
+  });
+}
+
+layout.init($('dock'), { createDockview, theme: themeDark });
+for (const p of HEAP_PANELS) registerPanel(p);
+
+// Domain modules declare their own panels (the hook and the PanelContext
+// contract are in panels.ts): each is listed with the domain it needs. They
+// run after the heap's panels are registered and before the first layout, so
+// a module may also call `ctx.layout.register` itself.
+const PANEL_MODULES: PanelModule[] = [
+  { needs: 'intervals', label: 'Intervals', register: registerIntervalPanels },
+];
+domainPanels(PANEL_MODULES, {
+  layout,
+  post: (msg) => worker.postMessage(msg),
+  request,
+  requestLatest,
+  ui: UI,
+  onState: (fn) => stateListeners.add(fn),
+  onView: (fn) => viewListeners.add(fn),
+  setView: (axis, range) => UI.setView[axis === 't' ? 0 : 1]?.(range),
+  select: (axis, range, at) => {
+    if (!range) { clearSelection(); return; }
+    setSelection(axis === 't' ? 0 : 1, range.lo, range.hi);
+    if (at) openSelPopover(at.x, at.y);
+  },
+  onLoad: (fn) => loadListeners.add(fn),
+  selectInterval,
+  onIntervalSelect: (fn) => intervalSelListeners.add(fn),
+  // a panel a module registered with the shell itself gets its View entry here
+  addToggle: (mod, type, entry) => addPanelAction(type, {
+    label: entry.title, section: moduleLabel(mod), el: `btn-${type}`, hint: entry.hint,
+    visible: entry.visible || (() => domainPresent(UI.meta?.domains, mod.needs)),
+  }),
+}, HEAP_PANELS.map((p) => p.id), (p) => {
+  PANELS.push(p);
+  registerPanel(p);
 });
+layout.resetLayout({ keepFloating: true });
+
+// The top bar (spec SHELL-001, SHELL-011): every File, View and Help command
+// is one action in the registry; the menus and the command palette are both
+// rendered from it. Panel toggles were added above, from the panel table.
+{
+  const loaded = () => UI.loaded;
+  const files = () => standaloneFiles;
+  actions.add({
+    id: 'file.open', label: 'Open trace…', group: 'file', section: 'open', shortcut: 'Mod+O', el: 'btn-open',
+    hint: 'Open a trace directly in this browser', enabled: files, run: () => $('file-input').click(),
+  });
+  actions.add({
+    id: 'file.demo', label: 'Open demo', group: 'file', section: 'open', el: 'btn-demo',
+    hint: 'Load the bundled demo trace', enabled: files, run: () => loadURL('demo.heapl'),
+  });
+  actions.add({
+    id: 'file.save', label: 'Save analysis…', group: 'file', section: 'analysis', shortcut: 'Mod+S', el: 'an-save',
+    hint: 'Download tags, names, colors, and marks (bookmarks/addr marks) as a .heapa.json file',
+    enabled: loaded, run: () => void saveMarks(), keywords: 'marks tags heapa export download',
+  });
+  actions.add({
+    id: 'file.load', label: 'Load analysis…', group: 'file', section: 'analysis', el: 'an-load',
+    hint: 'Load a saved marks file', enabled: loaded, run: () => $('analysis-file').click(),
+    keywords: 'marks tags heapa import',
+  });
+  actions.add({
+    id: 'file.connect', group: 'file', section: 'connect', el: 'btn-connect',
+    label: () => (connectBtn.textContent === 'Disconnect' ? 'Disconnect from heapviz' : 'Connect to heapviz…'),
+    hint: 'Paste the Browser connection printed by the heapviz local companion',
+    run: () => connectBtn.click(), keywords: 'local companion server',
+  });
+  actions.add({
+    id: 'file.setup', label: 'Setup…', group: 'file', section: 'connect', el: 'btn-setup',
+    hint: 'Install or troubleshoot the local companion', run: showInstall, keywords: 'install heapviz companion',
+  });
+
+  actions.add({
+    id: 'view.reset', label: 'Reset layout', group: 'view', section: 'workspace', rank: 1, el: 'btn-reset-layout',
+    hint: 'Put every view, window, dock and size back to the default layout',
+    run: () => {
+      layout.resetLayout();
+      $('st-info').textContent = 'layout reset — views, windows, docks and sizes are back to the default';
+    },
+  });
+  actions.add({
+    id: 'view.palette', label: 'Command palette…', group: 'view', section: 'workspace', rank: 1,
+    shortcut: 'Mod+K', el: 'btn-palette', run: () => menus.openPalette(),
+  });
+  // palette-only: what the top bar already shows, and the jump box
+  actions.add({
+    id: 'go.seq', label: 'Go to seq, time or address…', group: 'palette', keywords: 'jump seek event index',
+    enabled: loaded, run: () => { $('jump-input').focus(); $('jump-input').select(); },
+  });
+  actions.add({
+    id: 'go.search', label: 'Search marks, names and warnings…', group: 'palette', keywords: 'find g',
+    enabled: loaded, run: () => openSearchOverlay(),
+  });
+  actions.add({
+    id: 'play.toggle', label: 'Play / pause', group: 'palette', enabled: loaded, run: togglePlay, keywords: 'playback',
+  });
+  actions.add({
+    id: 'play.lock', label: 'Lock / unlock the viewport', group: 'palette', run: toggleLock, keywords: 'scroll follow',
+  });
+  actions.add({
+    id: 'panel.play-panel', label: 'Playback settings', group: 'palette', keywords: 'speed mode play',
+    run: () => layout.toggle('play-panel', '', { focus: true }),
+  });
+  actions.add({
+    id: 'panel.warnings-panel', label: 'Warnings', group: 'palette',
+    visible: () => !!UI.meta?.warnTotal, run: () => layout.toggle('warnings-panel', '', { focus: true }),
+    paletteLabel: () => `${layout.isOpen('warnings-panel') ? 'Hide' : 'Show'} Warnings`,
+  });
+
+  actions.add({
+    id: 'help.guide', label: 'Guide', group: 'help', el: 'btn-guide',
+    hint: 'What the views show and how to drive them', checked: guideOpen, run: () => toggleGuide(),
+  });
+  actions.add({
+    id: 'help.agents', label: 'heapviz & AI agents…', group: 'help', el: 'btn-help-agents',
+    hint: 'What the heapviz companion is, how to install it, and how AI assistants use it',
+    run: () => { void showGuide('agents'); },
+    keywords: 'companion cli install local server claude opencode skill assistant',
+  });
+  actions.add({
+    id: 'help.shortcuts', label: 'Keyboard shortcuts', group: 'help', shortcut: '?', el: 'btn-shortcuts',
+    run: () => menus.openShortcuts(),
+  });
+  actions.add({
+    id: 'help.request', label: 'Request a feature…', group: 'help', el: 'btn-request',
+    hint: 'Ask for a feature', run: () => layout.toggle('request-panel', '', { focus: true }),
+  });
+}
+const menus = initMenus(actions, $('menubar'), [
+  { group: 'file', label: 'File' },
+  { group: 'view', label: 'View' },
+  { group: 'help', label: 'Help' },
+]);
+
+// The connection pill mirrors the status line's companion state (local-server.ts
+// writes it). Not connected, a click offers Connect… or the heapviz & AI agents
+// guide; connected, it asks before disconnecting.
+{
+  const pill = $('conn-status');
+  const status = $('st-server');
+  const LABEL: Record<string, string> = {
+    standalone: 'Local: off', connecting: 'Connecting…', connected: 'heapviz',
+  };
+  const sync = () => {
+    const state = status.dataset.state || 'standalone';
+    pill.dataset.state = state;
+    $('conn-label').textContent = LABEL[state] || 'Connection issue';
+    pill.title = `${status.title || status.textContent} — click to ${
+      state === 'connected' ? 'disconnect' : 'connect, or to learn what heapviz is'}`;
+  };
+  new MutationObserver(sync).observe(status, { attributes: true, childList: true, characterData: true, subtree: true });
+  sync();
+
+  const pop = $('conn-pop');
+  const items = [$('conn-pop-connect'), $('conn-pop-what')];
+  const closePop = (refocus = false) => {
+    if (pop.hidden) return;
+    pop.hidden = true;
+    pill.setAttribute('aria-expanded', 'false');
+    if (refocus) pill.focus();
+  };
+  pill.setAttribute('aria-haspopup', 'menu');
+  pill.onclick = () => {
+    if (pill.dataset.state === 'connected') {
+      if (confirm('Disconnect this tab from the heapviz local companion?')) actions.run('file.connect');
+      return;
+    }
+    if (!pop.hidden) { closePop(); return; }
+    pop.hidden = false;
+    pill.setAttribute('aria-expanded', 'true');
+    const r = pill.getBoundingClientRect();
+    pop.style.top = `${r.bottom + 4}px`;
+    pop.style.left = `${Math.max(4, Math.min(innerWidth - pop.offsetWidth - 4, r.right - pop.offsetWidth))}px`;
+    items[0].focus();
+  };
+  items[0].onclick = () => { closePop(); actions.run('file.connect'); };
+  items[1].onclick = () => { closePop(); void showGuide('agents'); };
+  pop.addEventListener('keydown', (e: KeyboardEvent) => {
+    if (e.key === 'Escape') { e.stopPropagation(); closePop(true); return; }
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    e.preventDefault();
+    const at = items.indexOf(document.activeElement as typeof items[0]);
+    items[(at + (e.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length].focus();
+  });
+  document.addEventListener('pointerdown', (e) => {
+    if (!pop.contains(e.target as Node) && !pill.contains(e.target as Node)) closePop();
+  });
+}
 
 // ---------------------------------------------------------------------------
 // warnings panel
@@ -1576,8 +1890,17 @@ function buildWarningsPanel() {
   if (total > UI.warnings.length) {
     html += `<div class="group-title">showing first ${UI.warnings.length} of ${fmtNum(total)}</div>`;
   }
-  html += UI.warnings.map((w) =>
-    `<div class="warn-row" data-seq="${w.seq}"><span class="warn-seq">#${w.seq}</span><span class="warn-msg">${esc(w.msg)}</span></div>`).join('');
+  // grouped by the domain that raised them (MODEL-005, IVL-006)
+  for (const g of groupWarnings(UI.warnings, UI.meta.warnCounts)) {
+    html += `<div class="warn-domain">${esc(g.domain)} <span class="dim">${fmtNum(g.total)}</span></div>`;
+    html += g.rows.map((w) => {
+      const detail = warningDetail(w);
+      return `<div class="warn-row" data-seq="${w.seq}" title="${esc(`${g.domain}.${w.kind ?? w.code}`)}">`
+        + `<span class="warn-seq">#${w.seq}</span>`
+        + (w.kind ? `<span class="warn-kind">${esc(w.kind)}</span>` : '')
+        + `<span class="warn-msg">${esc(w.msg)}${detail ? ` <span class="dim">(${esc(detail)})</span>` : ''}</span></div>`;
+    }).join('');
+  }
   list.innerHTML = html || '<i>none</i>';
   $$('.warn-row', list).forEach((row) => {
     row.onclick = () => worker.postMessage({ type: 'jump', seq: +row.dataset.seq + 1 });
@@ -1585,7 +1908,7 @@ function buildWarningsPanel() {
 }
 
 // ---------------------------------------------------------------------------
-// events panel (src/web/heap/events-panel.ts): the virtualized sequential list.
+// events panel (src/web/stream/events-panel.ts): the virtualized list of every domain's records.
 // ---------------------------------------------------------------------------
 
 initEventsPanel({
@@ -1595,7 +1918,10 @@ initEventsPanel({
   updateSelOverlay,
   requestSelMirror,
   openSelPopover,
+  selectInterval,
 });
+// the Logs panel (src/web/logs/logs-panel.ts): the log domain's terminal
+initLogsPanel({ ui: UI, post: (msg) => worker.postMessage(msg), requestLatest });
 
 // ---------------------------------------------------------------------------
 // analysis layer (src/web/heap/analysis.ts): tags, names, colors, time marks,
@@ -1627,7 +1953,6 @@ initAnalysis({
 initSession({
   ui: UI,
   post: (msg) => worker.postMessage(msg),
-  panels: PANELS,
   allocSizeFormat,
   rowBytesValue,
   sendCollapseMin,
@@ -1692,7 +2017,7 @@ function updateSelOverlay() {
 function requestSelMirror() {
   if (!UI.sel) { UI.selMirror = null; return; }
   const sel = UI.sel;
-  requestConvert(sel.kind, sel.lo, sel.hi, (lo, hi) => {
+  requestConvert('convert-sel', sel.kind, sel.lo, sel.hi, (lo, hi) => {
     if (UI.sel !== sel) return; // a newer selection superseded this request
     UI.selMirror = { kind: sel.kind === 0 ? 1 : 0, lo, hi };
     updateSelOverlay();
@@ -1729,19 +2054,34 @@ function updateCropIndicator() {
 }
 $('crop-indicator').onclick = clearCrop;
 
+// The crop in the time domain, converted once per crop rather than once per
+// frame: drawCropBands runs on every state message, and the conversion only
+// depends on the crop itself.
+let cropTime: { crop: Range; lo: number; hi: number } | null = null;
+let cropTimeRequested: Range | null = null;
+
 function drawCropBands() {
   const stripS = $('strip-s');
   const bandS = stripS.querySelector('.tl-crop');
-  if (!UI.crop) {
+  const stripT = $('strip-t');
+  const bandT = stripT.querySelector('.tl-crop');
+  const crop = UI.crop;
+  if (!crop) {
     bandS.hidden = true;
-    $('strip-t').querySelector('.tl-crop').hidden = true;
+    bandT.hidden = true;
     return;
   }
-  paintBand(bandS, stripS, 1, UI.crop.lo, UI.crop.hi);
-  requestConvert(1, UI.crop.lo, UI.crop.hi, (lo, hi) => {
-    if (!UI.crop) return; // cleared while the conversion was in flight
-    const stripT = $('strip-t');
-    paintBand(stripT.querySelector('.tl-crop'), stripT, 0, lo, hi);
+  paintBand(bandS, stripS, 1, crop.lo, crop.hi);
+  if (cropTime?.crop === crop) {
+    paintBand(bandT, stripT, 0, cropTime.lo, cropTime.hi);
+    return;
+  }
+  if (cropTimeRequested === crop) return;
+  cropTimeRequested = crop;
+  requestConvert('convert-crop', 1, crop.lo, crop.hi, (lo, hi) => {
+    if (UI.crop !== crop) return; // changed or cleared while in flight
+    cropTime = { crop, lo, hi };
+    paintBand(bandT, stripT, 0, lo, hi);
   });
 }
 
@@ -1771,7 +2111,7 @@ $('sel-crop').onclick = () => {
   if (sel.kind === 1) {
     setCrop(Math.round(sel.lo), Math.round(sel.hi));
   } else {
-    requestConvert(0, sel.lo, sel.hi, (lo, hi) => setCrop(Math.round(lo), Math.round(hi)));
+    requestConvert(null, 0, sel.lo, sel.hi, (lo, hi) => setCrop(Math.round(lo), Math.round(hi)));
   }
   clearSelection();
 };
@@ -1801,31 +2141,41 @@ document.addEventListener('keydown', (e) => {
 // timeline interaction
 // ---------------------------------------------------------------------------
 
+// A range selection on either axis (kind 0 = time, 1 = events), from a strip
+// or another timeline view (the Tracks panel, via PanelContext.select): the
+// band, its mirror on the other strip, and on release the popover.
+function setSelection(kind, lo, hi) {
+  UI.sel = { kind, lo, hi };
+  updateSelOverlay();
+  requestSelMirror();
+}
+
+// The gestures and their math are timeline-interaction.ts's (TL-004), shared
+// with the Tracks panel.
 function setupTimeline(stripId, canvas, kind) {
   const strip = $(stripId);
   const hoverline = strip.querySelector('.tl-hoverline');
+  const axis = kind === 0 ? 't' : 'seq';
   const view = () => (kind === 0 ? UI.tlT : UI.tlS);
   // `mirror` is internal: false when this call is itself the mirrored
   // update for the *other* strip's zoom, so it doesn't bounce back and forth
   const setView = (raw, mirror = true) => {
     if (!UI.meta) return;
-    const v = kind === 0
-      ? clampView(raw, UI.meta.tMin, Math.max(UI.meta.tMax, UI.meta.tMin + 1), 1e-9)
-      : clampView(raw, 0, Math.max(UI.meta.n, 1), 4);
+    const v = clampAxis(raw, axisBounds(axis, UI.meta));
     if (kind === 0) UI.tlT = v; else UI.tlS = v;
     UI.tlLocalAt = performance.now();
+    emitView();
     worker.postMessage({ type: 'tlview', kind, lo: v.lo, hi: v.hi });
     updateSelOverlay();
     if (mirror) {
-      requestConvert(kind, v.lo, v.hi, (lo, hi) => {
+      requestConvert(`convert-view-${kind}`, kind, v.lo, v.hi, (lo, hi) => {
         UI.setView[kind === 0 ? 1 : 0]({ lo, hi }, false);
       });
     }
   };
   const valAt = (x) => {
     const r = canvas.getBoundingClientRect();
-    const v = view();
-    return v.lo + ((x - r.left) / r.width) * (v.hi - v.lo);
+    return axisValAt(x - r.left, view(), r.width);
   };
   UI.setView[kind] = setView;
   let dragging = false;
@@ -1837,11 +2187,9 @@ function setupTimeline(stripId, canvas, kind) {
   };
 
   const updateSelection = (x) => {
-    const a = valAt(Math.min(selecting, x));
-    const b = valAt(Math.max(selecting, x));
-    UI.sel = { kind, lo: a, hi: b };
-    updateSelOverlay();
-    requestSelMirror();
+    const r = canvas.getBoundingClientRect();
+    const s = selectionRange(view(), r.width, selecting - r.left, x - r.left);
+    setSelection(kind, s.lo, s.hi);
   };
 
   strip.addEventListener('pointerdown', (e) => {
@@ -1860,7 +2208,7 @@ function setupTimeline(stripId, canvas, kind) {
   strip.addEventListener('pointerup', (e) => {
     dragging = false;
     if (selecting !== null) {
-      const moved = Math.abs(e.clientX - selecting) > 3;
+      const moved = Math.abs(e.clientX - selecting) > SELECT_MIN_PX;
       selecting = null;
       if (moved && UI.sel) openSelPopover(e.clientX, e.clientY);
       else clearSelection();
@@ -1874,28 +2222,25 @@ function setupTimeline(stripId, canvas, kind) {
     else if (dragging) seekTo(e.clientX);
     queryTlHover(kind, e.clientX - r.left);
   });
+  strip.addEventListener('pointercancel', () => {
+    dragging = false;
+    if (selecting !== null) {
+      selecting = null;
+      clearSelection();
+    }
+  });
   strip.addEventListener('pointerleave', () => {
     hoverline.hidden = true;
     hideTooltip('tl');
   });
   strip.addEventListener('dblclick', () => {
     if (!UI.meta) return;
-    setView(kind === 0
-      ? { lo: UI.meta.tMin, hi: Math.max(UI.meta.tMax, UI.meta.tMin + 1) }
-      : { lo: 0, hi: Math.max(UI.meta.n, 1) });
+    setView(axisBounds(axis, UI.meta));
   });
   strip.addEventListener('wheel', (e) => {
     e.preventDefault();
-    const v = view();
-    const span = v.hi - v.lo;
-    if (e.shiftKey) {
-      const d = span * (e.deltaY > 0 ? 0.15 : -0.15);
-      setView({ lo: v.lo + d, hi: v.hi + d });
-    } else {
-      const f = Math.exp(e.deltaY * 0.0015);
-      const c = valAt(e.clientX);
-      setView({ lo: c - (c - v.lo) * f, hi: c + (v.hi - c) * f });
-    }
+    const r = canvas.getBoundingClientRect();
+    setView(wheelView(view(), e, e.clientX - r.left, r.width));
   }, { passive: false });
 }
 
@@ -1915,7 +2260,8 @@ function onTlHoverResult(m) {
     // positioning comes from positionTooltipNearMouse (which tracks the real
     // mouse), so showTooltip takes no coordinates
     showTooltip('tl',
-      `<span class="g">▲ ${fmtNum(i.g)} alloc</span>  <span class="r">▼ ${fmtNum(i.r)} free</span>\n<span class="dim">${range} · events ${fmtNum(i.seqFrom)}–${fmtNum(i.seqTo)}</span>`);
+      `<span class="g">▲ ${fmtNum(i.g)} alloc</span>  <span class="r">▼ ${fmtNum(i.r)} free</span>\n<span class="dim">${range} · events ${fmtNum(i.seqFrom)}–${fmtNum(i.seqTo)}</span>`
+      + (i.logs?.count ? `\n<span class="dim">${esc(logsHoverText(i.logs))}</span>` : ''));
     positionTooltipNearMouse();
   }
 }
@@ -1926,9 +2272,14 @@ function onTlHoverResult(m) {
 // fast drag never queues more than one in-flight request
 // ---------------------------------------------------------------------------
 
-function requestConvert(kind, lo, hi, cb) {
+// `key` names the purpose (one coalescing slot each, so a per-frame crop
+// repaint cannot supersede a selection mirror); null is a one-shot request
+// that nothing supersedes.
+function requestConvert(key: string | null, kind, lo, hi, cb) {
   if (!UI.loaded) return;
-  requestLatest('convert', 'convert', { kind, lo, hi }).then((m) => cb(m.lo, m.hi));
+  const payload = { kind, lo, hi };
+  (key === null ? request('convert', payload) : requestLatest(key, 'convert', payload))
+    .then((m) => cb(m.lo, m.hi));
 }
 
 // ---------------------------------------------------------------------------
@@ -2040,17 +2391,22 @@ addrScroll.addEventListener('click', (e) => {
     return;
   }
   if (!UI.loaded) return;
-  requestLatest('pick', 'pick', {
+  // a plain request, not the hover key: a click must not be superseded by the
+  // next hover, nor dropped when the pointer leaves
+  const at = { x: e.clientX, y: e.clientY };
+  request('pick', {
     x: e.clientX - r.left, y: e.clientY - r.top, forClick: true,
-  }).then(onPickResult);
+  }).then((m) => onPickResult(m, at));
 });
 
-function onPickResult(m) {
+// `at`: the viewport point a click picked at, which an Allocation window
+// opening from scratch is placed beside
+function onPickResult(m, at = null) {
   const info = m.info;
   if (m.forClick) {
     UI.selected = info ? info.e : null;
     worker.postMessage({ type: 'set', key: 'selected', value: UI.selected });
-    fillDetailPanel(info);
+    fillDetailPanel(info, null, at);
   } else if (info) {
     hoverRects = info.rects || [];
     drawMoveLink(UI.state && UI.state.moveLink);
@@ -2121,7 +2477,7 @@ function buildDetailBody(root, info) {
   const dd = q('.d-death');
   if (dd) dd.onclick = () => worker.postMessage({ type: 'jump', seq: info.deathSeq + 1 });
   q('.d-reference').onclick = () => {
-    showPanel('filter-panel');
+    layout.reveal('filter-panel');
     const input = $('filter-source');
     const start = input.selectionStart ?? input.value.length;
     const end = input.selectionEnd ?? start;
@@ -2134,7 +2490,7 @@ function buildDetailBody(root, info) {
     $('st-info').textContent = `inserted reference to allocation id ${info.id}`;
   };
   q('.d-range').onclick = async () => {
-    showPanel('filter-panel');
+    layout.reveal('filter-panel');
     const applied = await applyFilterSource(
       `alloc.span.overlaps(range(${info.addr}, ${info.end}))`,
     );
@@ -2145,7 +2501,7 @@ function buildDetailBody(root, info) {
   // one gesture, like the legend chips: write the predicate and apply it
   for (const button of root.querySelectorAll('.cf-filter[data-predicate]')) {
     button.onclick = async () => {
-      showPanel('filter-panel');
+      layout.reveal('filter-panel');
       const predicate = button.dataset.predicate;
       if (await applyFilterSource(predicate)) {
         $('st-info').textContent = `filtering ${predicate}`;
@@ -2154,10 +2510,8 @@ function buildDetailBody(root, info) {
   }
   q('.d-name').onchange = () => {
     const v = q('.d-name').value.trim();
+    // (the windows' titles follow once the name lands: sendNames)
     void commitCanonicalAnalysis({ type: 'setAllocationName', creator: info.e, name: v || null });
-    // keep the enclosing window's title in sync with the name
-    const t = root.closest('.panel')?.querySelector('.ph-t');
-    if (t) t.textContent = detailTitle(info);
     markDirty();
   };
   q('.d-tag-apply').onclick = async () => {
@@ -2168,7 +2522,10 @@ function buildDetailBody(root, info) {
       $('st-info').textContent = 'cannot create these tags: the 255-tag limit would be exceeded';
       return;
     }
-    const tags = await Promise.all(names.map(tagIdFor));
+    // one at a time: each new tag's color comes from the tag count, which a
+    // parallel create would read before the previous tag landed
+    const tags = [];
+    for (const name of names) tags.push(await tagIdFor(name));
     worker.postMessage({ type: 'tag-event', e: info.e, tags });
     await replaceAllocationTags(info.e, tags);
     info.tags = tags;
@@ -2196,155 +2553,112 @@ function buildDetailBody(root, info) {
   };
 }
 
-function detailTitle(info) {
+// An allocation window's title and tooltip (SHELL-005): the live window's tab
+// reads "Allocation"; a pinned one's the allocation's name, else `#<id>`. The
+// tooltip has the rest. The shell shows `.ph-t`'s text in the tab and its
+// `title` attribute as the tab's tooltip.
+function titleAllocWindow(win, info, title) {
+  const t = win.querySelector('.ph-t');
+  if (!t) return;
   const name = UI.names.get(info.e)?.name;
-  return name ? `Allocation · ${name}` : 'Allocation';
+  const tip = [
+    `${title === 'Allocation' ? 'Allocation (follows the selection)' : 'Pinned allocation'}: ${name ? `“${name}” ` : ''}id ${info.id}`,
+    `${info.addr} – ${info.end} · ${fmtAllocSize(info.size)}`,
+    info.site ? `site ${info.site}` : '',
+    `born seq ${fmtNum(info.seq)}${info.deathSeq !== null ? ` · dies seq ${fmtNum(info.deathSeq)}` : ' · never freed'}`,
+  ].filter(Boolean).join('\n');
+  if (t.textContent !== title) t.textContent = title;
+  if (t.getAttribute('title') !== tip) t.setAttribute('title', tip);
 }
 
-function panelHasManualPosition(panel) {
-  return !!(panel.style.left || panel.style.top || panel.style.right || panel.style.bottom);
-}
-
-// When the live panel (re)opens, keep it in the usable workspace beside any
-// open drawer. After pinning, start from the default bottom-left spot and
-// cascade up-right past any pinned windows sitting there.
-function placeLivePanel(panel, reset = false) {
-  if (reset) {
-  panel.style.left = '';
-  panel.style.top = '';
-  panel.style.right = '';
-  panel.style.bottom = '';
-  }
-  const r = panel.getBoundingClientRect();
-  let x = r.left;
-  let y = r.top;
-  const gap = 10;
-  const leftDr = drawerEl('left');
-  const rightDr = drawerEl('right');
-  let minX = gap;
-  let maxX = Math.max(gap, innerWidth - r.width - gap);
-  if (!leftDr.hidden) minX = Math.max(minX, leftDr.getBoundingClientRect().right + gap);
-  if (!rightDr.hidden) maxX = Math.min(maxX, rightDr.getBoundingClientRect().left - r.width - gap);
-  if (maxX < minX) {
-    // Very narrow layouts may not have enough room between two drawers; keep
-    // the panel visible and prefer the space nearest the left drawer.
-    const visibleMax = Math.max(gap, innerWidth - r.width - gap);
-    minX = Math.min(minX, visibleMax);
-    maxX = visibleMax;
-  }
-  const clampX = (v) => Math.min(maxX, Math.max(minX, v));
-  const nx = clampX(x);
-  let moved = Math.abs(nx - x) > 0.5;
-  x = nx;
-  const pins = $$('.pinned-detail').map((w) => w.getBoundingClientRect());
-  const clash = () => pins.some((p) => Math.abs(p.left - x) < 48 && Math.abs(p.top - y) < 48);
-  while (clash() && y > 40) {
-    x = clampX(x + 28);
-    y -= 28;
-    moved = true;
-  }
-  if (moved) {
-    panel.style.left = `${x}px`;
-    panel.style.top = `${y}px`;
-    panel.style.right = 'auto';
-    panel.style.bottom = 'auto';
+// Every allocation window's title, after a rename.
+function retitleAllocationWindows() {
+  if (UI.detailInfo) titleAllocWindow($(LIVE), UI.detailInfo, 'Allocation');
+  for (const { el } of layout.instancesOf(PINNED)) {
+    if (el._allocInfo) titleAllocWindow(el, el._allocInfo, pinnedTitle(el._allocInfo, UI.names.get(el._allocInfo.e)?.name));
   }
 }
 
 // The Event window: the same chrome as the Allocation panel, for a record
-// that is not an allocation (TRACE-010). It is not pinnable and not part of
-// the panel table — like the allocation window it is opened per event, and
-// unlike it there is nothing per-allocation to restore.
+// that is not an allocation (TRACE-010). It is not pinnable and not persisted
+// — like the allocation window it is opened per event (the panel table
+// declares it as such), and unlike it there is nothing per-allocation to
+// restore.
 function fillEventPanel(event) {
   const panel = $('event-panel');
   panel.querySelector('.ph-t').textContent = eventWindowTitle(event);
   $('event-body').innerHTML = eventWindowBody(event, fmtTime);
-  const wasHidden = panel.hidden;
-  panel.hidden = false;
-  if (wasHidden && !panelHasManualPosition(panel)) placeLivePanel(panel, true);
-  raisePanel(panel);
+  layout.open('event-panel');
 }
 
-function fillDetailPanel(info) {
-  const panel = $('detail-panel');
-  if (!info) { panel.hidden = true; return; }
-  // never two windows for the same allocation: if it is already pinned,
-  // bring that window to the front instead of opening a duplicate
-  const dup = document.querySelector(`.pinned-detail[data-e="${info.e}"]`);
-  if (dup) {
-    panel.hidden = true;
-    raisePanel(dup);
+// The live Allocation window shows `info`. `place`: where it opens if it is
+// closed (where a window being unpinned stood — `layout.placeOf`). `near`: the
+// viewport point of the selection, which a window placed from scratch opens
+// beside. An open live window stays exactly where it is and only its content
+// changes, so it never jumps while selection moves.
+function fillDetailPanel(info, place = null, near = null) {
+  const panel = $(LIVE);
+  if (!info) { layout.close(LIVE); return; }
+  // never two windows for one allocation: one that is pinned has its window
+  // brought to the front instead (the live window is left as it is)
+  if (layout.isOpen(PINNED, String(info.e))) {
+    layout.reveal(PINNED, String(info.e));
     return;
   }
   UI.detailInfo = info;
-  panel.querySelector('.ph-t').textContent = detailTitle(info);
+  titleAllocWindow(panel, info, 'Allocation');
   buildDetailBody($('detail-body'), info);
-  const wasHidden = panel.hidden;
-  panel.hidden = false;
-  // only reset/cascade position when the live panel was just vacated by a
-  // pin (so a fresh window doesn't land on the pinned one); a plain close
-  // (× or Escape) leaves the window where the user left it unless that spot is
-  // now covered by an open drawer
-  if (wasHidden) placeLivePanel(panel, UI.detailWasPinned || !panelHasManualPosition(panel));
-  UI.detailWasPinned = false;
-  raisePanel(panel);
+  layout.open(LIVE, '', place ? { place } : { near });
 }
 
-// Build a standalone pinned-allocation window for `info`, optionally placed
-// at a floating `rect` ({left,top,right,bottom} css strings). Shared by the
-// interactive pin button and by session restore (see applySession).
-function createPinnedWindow(info, rect) {
-  const live = $('detail-panel');
+// Select `info` and show it in the live window (an unpinned allocation).
+function selectAllocation(info, place = null) {
+  UI.selected = info.e;
+  worker.postMessage({ type: 'set', key: 'selected', value: info.e });
+  fillDetailPanel(info, place);
+}
+
+// A pinned-allocation window's element: the shell calls this when
+// `layout.open('pinned-detail', creatorEvent, { data: info })` creates one,
+// and owns it from then on — placement, docking, close, its dock slot.
+function buildPinnedWindow(info) {
   const win = document.createElement('div');
   win.className = 'panel pinned-detail';
   win.dataset.e = info.e;
   win._allocInfo = info;
-  win.innerHTML = `<div class="panel-head"><span class="ph-t">${esc(detailTitle(info))}</span>
+  win.innerHTML = `<div class="panel-head"><span class="ph-t"></span>
       <span class="head-actions">
-        <button class="d-pin pinned" title="Unpin — return this to the live Allocation panel">📌</button>
+        <button class="d-pin tab-action pinned" type="button" aria-pressed="true" aria-label="Unpin this allocation window"
+          title="Unpin: close this window and show the allocation in the live Allocation window">${$('d-pin').innerHTML}</button>
         <button class="panel-close">×</button>
       </span></div>
     <div class="panel-body detail-body"></div>`;
-  document.body.appendChild(win);
+  titleAllocWindow(win, info, pinnedTitle(info, UI.names.get(info.e)?.name));
   buildDetailBody(win.querySelector('.panel-body'), info);
-  if (rect) {
-    win.style.left = `${rect.left}px`;
-    win.style.top = `${rect.top}px`;
-    win.style.right = 'auto';
-    win.style.bottom = 'auto';
-  }
-  $1('.panel-close', win).onclick = () => {
-    const side = win.dataset.dockSide;
-    win.remove();
-    if (side) refreshDrawerDividers(side);
-  };
-  $1('.d-pin', win).onclick = () => {
-    const side = win.dataset.dockSide;
-    const rr = win.getBoundingClientRect();
-    win.remove();
-    if (side) refreshDrawerDividers(side);
-    fillDetailPanel(info);
-    live.style.left = `${rr.left}px`;
-    live.style.top = `${rr.top}px`;
-    live.style.right = 'auto';
-    live.style.bottom = 'auto';
-    placeLivePanel(live);
-  };
-  makePanelWindow(win, dock);
-  raisePanel(win);
+  // (the pin is shown in the window's tab, so it is kept by reference)
+  win._pin = $1('.d-pin', win);
+  win._pin.onclick = () => unpinAllocation(layout, info, (place) => selectAllocation(info, place));
   return win;
 }
 
-// Pin the current allocation window: it stays exactly where it is (as a
-// pinned window, orange pin), and the next selection opens a fresh live
-// Allocation panel. Clicking a pinned window's pin returns it to the live
-// panel; × closes it. Any number of windows can be pinned.
+// Open a pinned-allocation window for `info` where `place` says: docked
+// (`dock`, with `restoring` from a session), or floating `at` a spot. Used by
+// session restore (see applySession); the pin button goes through
+// `pinAllocation`.
+function createPinnedWindow(info, place = {}) {
+  return layout.open(PINNED, String(info.e), { data: info, ...place });
+}
+
+// Pin the live window's allocation: a pinned window for it opens as a tab
+// beside the live one, which stays and shows the next selection
+// (heap/alloc-windows.ts). Clicking a pinned window's pin unpins it; × closes
+// it. Any number of windows can be pinned, each on its own.
 $('d-pin').onclick = () => {
   const info = UI.detailInfo;
   if (!info) return;
-  const live = $('detail-panel');
-  // identical chrome to the live panel — the orange pin is the only tell
-  createPinnedWindow(info, live.getBoundingClientRect());
-  UI.detailWasPinned = true;
-  live.hidden = true;
+  const hadFocus = document.activeElement === $('d-pin') || $(LIVE).contains(document.activeElement);
+  const win = pinAllocation(layout, info);
+  // the pressed pin's tab is now behind the pinned one: keyboard focus
+  // carries over to the pinned window's pin
+  if (hadFocus) win?._pin?.focus({ preventScroll: true });
 };

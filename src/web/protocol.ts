@@ -30,7 +30,94 @@ export type AllocInfo = { e: number; id: string; [field: string]: any };
 export type EventRow = { seq: number; [field: string]: any };
 
 /** Engine JSON: trace metadata from the load pass. */
-export type TraceMeta = { [field: string]: any };
+export type TraceMeta = {
+  /**
+   * `hp_logs_meta_json`, attached by the worker at load (LOG-009): null when
+   * this core has no log domain; a zero `count` means the trace has no logs.
+   */
+  logs?: LogsMeta | null;
+  /**
+   * `hp_domains_json`, attached by the worker at load (DOM-004): every
+   * domain's descriptor in registry order, or null from a core without it.
+   */
+  domains?: DomainDescriptor[] | null;
+  /** The `intervals` descriptor from `domains`, attached at load (spec/14), or null. */
+  intervals?: DomainDescriptor | null;
+  [field: string]: any;
+};
+
+/**
+ * Engine JSON (DOM-004): one domain's descriptor. The keys the web layer reads
+ * are named; the rest (`fields`, `query`, `limits`, a shape's own keys such as
+ * the interval domain's `tracks`) cross loosely — the core owns them.
+ */
+export type DomainDescriptor = {
+  id: string;
+  name: string;
+  /**
+   * Record types: the wire letter (`"M"`), the kind name (`"malloc"`), and
+   * what the UI calls it — `label` (`"alloc"`) and `description`
+   * (`"Allocation"`), optionally refined per summary `source` (an interval's
+   * `call` begin reads `call ▸`). Labels are absent from an older core.
+   */
+  kinds: {
+    op: string; kind: string; label?: string; description?: string;
+    sources?: Record<string, { label?: string; description?: string }>;
+  }[];
+  shape: 'allocation' | 'point' | 'interval' | string;
+  /** Records of this domain on the spine. */
+  count: number;
+  [field: string]: any;
+};
+
+/** Engine JSON (DOM-004): the generic summary of one spine record. */
+export type RecordSummary = {
+  seq: number; t: number; thr: number | null; pid?: number;
+  domain: string; kind: string; title: string | null;
+  level?: number; source?: string; fields: Record<string, unknown> | null;
+};
+
+/** Engine JSON: one page of a domain query, in the domain's own row keys. */
+export type DomainPage<Row = any> = { total: number; from: number; rows: Row[]; error?: string };
+
+/** Engine JSON: a domain locate — the last match at or before `seq`, or -1. */
+export type DomainLocate = { row: number; total: number; error?: string };
+
+/** Engine JSON (spec/14): one row of an interval window. */
+export type IntervalWindowRow = {
+  ivl: number; name: string; category: string; depth: number;
+  start: number; end: number; open: boolean; lane: number;
+  thr?: number; cpu?: number; idle?: boolean;
+  [field: string]: any;
+};
+
+/** Engine JSON (spec/14): the intervals of one track drawn over a range. */
+export type IntervalWindow = { rows: IntervalWindowRow[]; culled: number; truncated: boolean; [field: string]: any };
+
+/** One interval track: a thread (optionally in a process), or a CPU. */
+export type IntervalTrack = { thr: number; pid?: number } | { cpu: number };
+
+/** The interval window's query (hp_interval_window). */
+export type IntervalWindowQuery = {
+  track: IntervalTrack;
+  axis: 'seq' | 't';
+  lo: number;
+  hi: number;
+  /** Pixel columns the window is drawn into. */
+  width: number;
+  category?: string;
+  [field: string]: unknown;
+};
+
+/** Engine JSON (LOG-009): the log domain's load-time summary. */
+export type LogsMeta = { count: number; byLevel: number[]; loggers: { name: string; count: number }[] };
+
+/** Engine JSON (LOG-009): one row of a `logs` domain query; `row` indexes the match list. */
+export type LogRow = {
+  row: number; seq: number; t: number; thr: number | null;
+  level: number; logger: string | null; msg: string;
+  fields: Record<string, unknown> | null;
+};
 
 /**
  * Engine JSON: one caller-defined trace field, as `hp_fields_json` renders it.
@@ -145,14 +232,24 @@ export type Query =
   | { type: 'tags-dump'; reqId: number }
   | { type: 'pick'; reqId: number; x: number; y: number; forClick?: boolean }
   | { type: 'alloc-info'; reqId: number; e: number }
-  | { type: 'events'; reqId: number; from: number; count: number; filtered?: boolean }
-  | { type: 'ev-pos'; reqId: number; seq: number }
+  // `domains`: the domains the list includes (absent: every one); see
+  // stream/stream-model.ts for how an excluded domain is skipped
+  | { type: 'events'; reqId: number; from: number; count: number; filtered?: boolean; domains?: string[] }
+  | { type: 'ev-pos'; reqId: number; seq: number; filtered?: boolean; domains?: string[] }
   | { type: 'tlhover'; reqId: number; kind: Domain; x: number }
   | { type: 'filter-check'; reqId: number; source: string; cursor: number }
   | { type: 'filter-apply'; reqId: number; source: string }
   | { type: 'analysis-get'; reqId: number }
   | { type: 'analysis-change'; reqId: number; expectedRevision: number; change: unknown }
-  | { type: 'analysis-replace'; reqId: number; document: unknown };
+  | { type: 'analysis-replace'; reqId: number; document: unknown }
+  // the generic domain surface (DOM-004) and the interval domain (spec/14)
+  | { type: 'domains'; reqId: number }
+  | { type: 'domain-query'; reqId: number; domain: string; query: Record<string, unknown> }
+  | { type: 'domain-locate'; reqId: number; domain: string; query: Record<string, unknown> & { seq: number } }
+  | { type: 'domain-state'; reqId: number; domain: string; seq: number }
+  | { type: 'record'; reqId: number; seq: number }
+  | { type: 'tracks'; reqId: number }
+  | { type: 'interval-window'; reqId: number; query: IntervalWindowQuery };
 
 export type ToWorker = Command | Query;
 
@@ -193,6 +290,19 @@ export type ReplyTo = {
     change?: unknown; error?: string; message?: string;
   };
   'analysis-replace': { type: 'analysis-replace-result'; reqId: number; ok: boolean; revision?: number; error?: string; message?: string };
+  // The generic domain replies. `available` is false with no trace loaded or
+  // when this core lacks the export; `result` is then the empty document of
+  // the query's shape (an empty page, a locate of -1, an empty window), or
+  // null where the engine itself can answer null (record, state, tracks).
+  // An engine-level error (an unknown domain) is available, with `error` in
+  // the result.
+  domains: { type: 'domains-result'; reqId: number; available: boolean; domains: DomainDescriptor[]; lanes: unknown[] };
+  'domain-query': { type: 'domain-query-result'; reqId: number; available: boolean; result: DomainPage };
+  'domain-locate': { type: 'domain-locate-result'; reqId: number; available: boolean; result: DomainLocate };
+  'domain-state': { type: 'domain-state-result'; reqId: number; available: boolean; result: unknown };
+  record: { type: 'record-result'; reqId: number; available: boolean; result: RecordSummary | null };
+  tracks: { type: 'tracks-result'; reqId: number; available: boolean; result: unknown };
+  'interval-window': { type: 'interval-window-result'; reqId: number; available: boolean; result: IntervalWindow };
 };
 
 export type QueryType = keyof ReplyTo;

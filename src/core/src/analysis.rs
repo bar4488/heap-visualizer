@@ -85,20 +85,58 @@ pub enum Change {
 pub enum ApplyError { Conflict, Invalid(&'static str) }
 
 impl Document {
-    pub fn validate<F>(&self, event_count: u32, creator: F) -> Result<(), ApplyError>
+    /// Validate an imported document and return it in the canonical form
+    /// `apply` would have produced: every id, name, color and address
+    /// normalized exactly as the matching change normalizes it. Storing the
+    /// raw document instead would keep `" root "` untrimmed, so `named("root")`
+    /// would miss it and a tag keyed `" t "` could never be deleted. Two
+    /// entries that normalize to the same id are invalid.
+    pub fn normalized<F>(&self, event_count: u32, creator: F) -> Result<Document, ApplyError>
     where F: Fn(u32) -> bool {
         if self.version != VERSION || self.tags.len() > MAX_TAGS { return Err(ApplyError::Invalid("unsupported analysis document")); }
-        for (id, tag) in &self.tags { let mut c = Change::PutTag { id: id.clone(), name: tag.name.clone(), color: tag.color.clone() }; normalize(&mut c)?; }
+        let duplicate = || ApplyError::Invalid("duplicate id");
+        let mut out = Document { version: self.version, revision: self.revision, ..Document::default() };
+        for (id, tag) in &self.tags {
+            let mut c = Change::PutTag { id: id.clone(), name: tag.name.clone(), color: tag.color.clone() };
+            normalize(&mut c)?;
+            let Change::PutTag { id, name, color } = c else { unreachable!() };
+            if out.tags.insert(id, Tag { name, color }).is_some() { return Err(duplicate()); }
+        }
         for (&event, value) in &self.allocations {
             require_creator(event, &creator)?;
-            if let Some(name) = &value.name { let mut c = Change::SetAllocationName { creator: event, name: Some(name.clone()) }; normalize(&mut c)?; }
-            if let Some(color) = &value.color { let mut c = Change::SetAllocationColor { creator: event, color: Some(color.clone()) }; normalize(&mut c)?; }
-            if value.tags.iter().any(|id| !self.tags.contains_key(id)) { return Err(ApplyError::Invalid("unknown tag")); }
+            let mut c = Change::SetAllocationName { creator: event, name: value.name.clone() };
+            normalize(&mut c)?;
+            let Change::SetAllocationName { name, .. } = c else { unreachable!() };
+            let mut c = Change::SetAllocationColor { creator: event, color: value.color.clone() };
+            normalize(&mut c)?;
+            let Change::SetAllocationColor { color, .. } = c else { unreachable!() };
+            let mut c = Change::ReplaceAllocationTags { creator: event, tag_ids: value.tags.clone() };
+            normalize(&mut c)?;
+            let Change::ReplaceAllocationTags { tag_ids: tags, .. } = c else { unreachable!() };
+            if tags.iter().any(|id| !out.tags.contains_key(id)) { return Err(ApplyError::Invalid("unknown tag")); }
+            let value = Allocation { name, color, tags };
+            if value != Allocation::default() { out.allocations.insert(event, value); }
         }
-        for (id, value) in &self.bookmarks { let mut c = Change::PutBookmark { id: id.clone(), name: value.name.clone(), seq: value.seq, t: value.t }; normalize(&mut c)?; if value.seq > event_count { return Err(ApplyError::Invalid("invalid bookmark")); } }
-        for (id, value) in &self.address_marks { let mut c = Change::PutAddressMark { id: id.clone(), name: value.name.clone(), addr: value.addr.clone() }; normalize(&mut c)?; }
-        for (id, value) in &self.saved_filters { let mut c = Change::PutSavedFilter { id: id.clone(), name: value.name.clone(), source: value.source.clone() }; normalize(&mut c)?; }
-        Ok(())
+        for (id, value) in &self.bookmarks {
+            let mut c = Change::PutBookmark { id: id.clone(), name: value.name.clone(), seq: value.seq, t: value.t };
+            normalize(&mut c)?;
+            if value.seq > event_count { return Err(ApplyError::Invalid("invalid bookmark")); }
+            let Change::PutBookmark { id, name, seq, t } = c else { unreachable!() };
+            if out.bookmarks.insert(id, Bookmark { name, seq, t }).is_some() { return Err(duplicate()); }
+        }
+        for (id, value) in &self.address_marks {
+            let mut c = Change::PutAddressMark { id: id.clone(), name: value.name.clone(), addr: value.addr.clone() };
+            normalize(&mut c)?;
+            let Change::PutAddressMark { id, name, addr } = c else { unreachable!() };
+            if out.address_marks.insert(id, AddressMark { name, addr }).is_some() { return Err(duplicate()); }
+        }
+        for (id, value) in &self.saved_filters {
+            let mut c = Change::PutSavedFilter { id: id.clone(), name: value.name.clone(), source: value.source.clone() };
+            normalize(&mut c)?;
+            let Change::PutSavedFilter { id, name, source } = c else { unreachable!() };
+            if out.saved_filters.insert(id, SavedFilter { name, source }).is_some() { return Err(duplicate()); }
+        }
+        Ok(out)
     }
 
     pub fn apply<F>(&mut self, expected: u64, event_count: u32, mut change: Change, creator: F) -> Result<Change, ApplyError>
@@ -262,6 +300,29 @@ mod tests {
         assert_eq!(document, original);
         assert!(apply(&mut document, Change::SetAllocationName { creator: 9, name: Some("x".into()) }).is_err());
         assert_eq!(document, original);
+    }
+
+    #[test]
+    fn an_imported_document_is_stored_normalized() {
+        let raw = r##"{"version":1,"revision":4,
+            "tags":{" t ":{"name":" Leak ","color":"#AABBCC"}},
+            "allocations":{"2":{"name":" root ","tags":[" t "]}},
+            "addressMarks":{" a ":{"name":" m ","addr":"0X0A"}}}"##;
+        let document: Document = serde_json::from_str(raw).unwrap();
+        let mut document = document.normalized(10, |e| e == 2).unwrap();
+        assert_eq!(document.revision, 4);
+        assert_eq!(document.tags["t"], Tag { name: "Leak".into(), color: "#aabbcc".into() });
+        assert_eq!(document.allocations[&2].name.as_deref(), Some("root"));
+        assert!(document.allocations[&2].tags.contains("t"));
+        assert_eq!(document.address_marks["a"].addr, "0xa");
+        // and the normalized key is one a delete can reach
+        apply(&mut document, Change::DeleteTag { id: "t".into() }).unwrap();
+        assert!(document.tags.is_empty() && document.allocations[&2].tags.is_empty());
+
+        let clash = r##"{"version":1,"revision":0,"tags":{"t":{"name":"A","color":"#000000"},
+            " t":{"name":"B","color":"#000000"}}}"##;
+        let clash: Document = serde_json::from_str(clash).unwrap();
+        assert_eq!(clash.normalized(10, |_| true), Err(ApplyError::Invalid("duplicate id")));
     }
 
     #[test]

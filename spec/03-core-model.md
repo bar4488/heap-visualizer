@@ -18,6 +18,59 @@ extra-field blobs each get a small table plus a per-event index column. Hex
 address strings are parsed to `u64` at load and never exist as strings again
 internally.
 
+The store is split along the domain boundary of
+[DOM-001/DOM-002](13-domains-and-logs.md#dom-001-one-event-spine):
+
+- the **event spine** holds the columns every record has — `op`, `t`, and
+  thread — one row per record of any domain, indexed by `seq`;
+- the **heap domain** (`HeapCols`) holds `id`, `addr`, `size`, `usable`,
+  site, stack, custom-field fragment, `target`/`death` links, the timeline
+  prefix sums, and the tag bitsets — one row per heap record (`M`, `F`,
+  `R`), never one per record of another domain;
+- each further domain keeps its own store keyed by spine index: the
+  **marks** domain holds the `E` landmarks (title and custom fields), and
+  the **log** domain the `L` records
+  ([LOG-003](13-domains-and-logs.md#log-003-the-log-store)). Both are
+  point stores ([DOM-004](13-domains-and-logs.md#dom-004-the-domain-registry)).
+  The **interval** domain holds the v2 `B`/`X`/`C` edges and the calls,
+  spans and run slices they pair into
+  ([IVL-003](14-intervals.md#ivl-003-the-interval-store)).
+
+In a v2 trace the spine's thread column holds a `(pid, thr?)` track
+([TRACE-011](02-trace-format.md#trace-011-version-2-and-process-identity)):
+the thread table gains a parallel `pid` and process-track flag, and `T`
+names sit in a side map; a v1 trace allocates neither.
+
+Which domain a record belongs to is decided by one table from op to
+(domain, kind) — never by op numbering — and the domain stores sit side by
+side as concrete fields, so heap work reaches its columns directly. A
+landmark's custom fields stay in the trace-wide fragment table and field
+catalog, which the allocation filter reads, exactly as when landmarks were
+heap rows.
+
+Heap rows are read **by spine index** through accessors. While every record
+is a heap record the heap row *is* the spine index and no mapping exists; the
+first non-heap record (a log line or a landmark) materializes a spine→heap rank (`hrank`) and a
+heap→spine column, so a heap-only trace pays nothing for the boundary. Link
+values stay spine indexes, so allocation identity (MODEL-002) is unchanged by
+the presence of other domains.
+
+Heap *work* runs in heap-row space and converts only at its boundaries
+(`hrank` for spine→heap, the heap→spine column, or a binary search over
+`t`). The allocation filter's plan, its match bitset, and the tag bitsets
+are all over heap rows, so the column-slice and tag-word fast paths hold in a
+mixed trace; replay and the Events-list filter walk heap rows; and range
+reads (tagging a seq range, the agent timeline) visit only the heap records
+inside the range. The cost of these operations follows the heap record
+count, not the spine length: `cargo run --release --example mixed_bench
+--manifest-path src/core/Cargo.toml` compares heap-only against the same
+heap records with 10× and 100× as many log lines and (a v2 trace) with
+10× as many interval edges, and the mixed columns
+should match the heap-only one within noise. What still grows with the spine
+is per-record load cost, the timeline's per-column binary searches and log
+lane (O(width · log n)), and a few percent on random seeks, whose replay
+reads spine-indexed accessors.
+
 ## MODEL-002: Identity — ids resolve to event indices at load
 
 The wire format names allocations by `id`; the engine does not. During the
@@ -63,7 +116,9 @@ Seeking to seq *n* means reconstructing the live set after *n* events.
   picks whichever is cheaper: incremental replay from where it is, or rebuild
   from the nearest snapshot at-or-before the target plus forward replay. This
   bounds worst-case seek cost to roughly one snapshot interval regardless of
-  trace length.
+  trace length. Both costs — and the snapshot cadence — are counted in heap
+  records: other domains' records cannot change the live set, so replay
+  skips them without visiting them.
 - Snapshot count is capped (~96): when full, every other snapshot is dropped
   and the interval doubles, keeping memory bounded on huge traces while
   degrading seek cost only logarithmically. Snapshots are a viewer-internal
@@ -88,6 +143,20 @@ rejecting input (goal: *faithful*). Warning codes:
 | overlap | A new allocation overlaps a live region. |
 | bad-size | Creator with missing/zero `size` (rendered as 1 byte). |
 | version | Header declared a version other than 1. |
+| bad-level | `L` record whose `level` is not a known level name; read as `info` ([LOG-001](13-domains-and-logs.md#log-001-the-log-record-l)). |
+| long-log | `L` record whose `msg` exceeded 16 KiB; truncated, record kept. Detail is the original byte length. |
+| too-many-threads | A record on a thread beyond the first 65,535 distinct `thr` values (v2: `(pid, thr)` tracks); its thread is read as absent rather than aliased to another. Detail is the `thr` value. |
+| interval warnings | Codes 12–20: unmatched or implicitly closed interval ends, unclosed intervals, duplicate spans, unknown span parents, depth and open-span limits, a thread running on two CPUs, and a truncated field ([IVL-006](14-intervals.md#ivl-006-warnings)). |
+
+The agent API names these `bad_level`, `long_log` and `too_many_threads`;
+numeric codes are 9, 10 and 11, after `version` (8).
+
+Every warning belongs to a domain — `trace` (malformed, t-decrease,
+seq-mismatch, version, too-many-threads, `long_field`), `heap`
+(unknown-id … bad-size), `log` (bad-level, long-log), `interval` or
+`sched` — and its canonical name is `domain.kind`; bare kinds are unique
+across domains. `hp_warnings_json` gives each warning's `domain` beside its
+`kind`.
 
 Full counts per code are always kept; detailed records are capped (first
 1000) so a pathological trace cannot blow up memory. The UI shows a toolbar

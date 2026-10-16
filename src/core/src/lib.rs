@@ -3,11 +3,17 @@
 //! 8-slot u32 return area at `hp_ret()`, and structured results are JSON
 //! strings (ptr/len in ret[0]/ret[1]).
 
+#[cfg(test)]
+mod context_filter_tests;
 mod filter_eval;
 mod filter_plan;
+#[cfg(test)]
+mod log_tests;
 pub mod agent;
 pub mod analysis;
+pub mod domain;
 pub mod json;
+pub mod logs;
 pub mod parse;
 pub mod render;
 pub mod state;
@@ -107,6 +113,10 @@ struct App {
     /// copy so `named()` can resolve.
     names: Vec<(u32, String)>,
     analysis: analysis::Document,
+    /// The last point-domain query and its matches, so paging and locate
+    /// (which the Logs panel calls as the playhead moves) do not rescan
+    /// message bytes.
+    query_cache: domain::QueryCache,
 }
 
 impl App {
@@ -126,6 +136,7 @@ impl App {
             tag_labels: Vec::new(),
             names: Vec::new(),
             analysis: analysis::Document::default(),
+            query_cache: domain::QueryCache::default(),
         }
     }
 }
@@ -222,8 +233,108 @@ impl Engine {
         agent::timeline(&self.app, source, domain, from, to, bins)
     }
 
+    /// API-008 with landmarks as asked and log records counted in
+    /// `omitted.logs` rather than returned.
     pub fn agent_stream_context(&self, source: &str, center: u32, before: u32, after: u32, landmarks: bool) -> Result<serde_json::Value, agent::Error> {
-        agent::stream_context(&self.app, source, center, before, after, landmarks)
+        let options = agent::ContextOptions { landmarks, logs: false };
+        agent::stream_context(&self.app, source, center, before, after, options.into())
+    }
+
+    /// API-008 with every option: landmarks and log records each included
+    /// or not.
+    pub fn agent_stream_context_with(&self, source: &str, center: u32, before: u32, after: u32, options: impl Into<agent::ContextInclude>) -> Result<serde_json::Value, agent::Error> {
+        agent::stream_context(&self.app, source, center, before, after, options.into())
+    }
+
+    /// `hp_logs_meta_json`'s document.
+    pub fn logs_meta_json(&mut self) -> String {
+        logs::meta_json(&mut self.app.out, &self.app.store.dom.logs);
+        self.app.out.clone()
+    }
+
+    /// `hp_logs_query`'s document for a JSON request.
+    pub fn logs_query_json(&mut self, request: &str) -> String {
+        write_logs_query(&mut self.app, request.as_bytes());
+        self.app.out.clone()
+    }
+
+    /// `hp_logs_locate`'s document for a JSON request.
+    pub fn logs_locate_json(&mut self, request: &str) -> String {
+        write_logs_locate(&mut self.app, request.as_bytes());
+        self.app.out.clone()
+    }
+
+    /// `hp_domains_json`'s document: every domain's descriptor.
+    pub fn domains_json(&mut self) -> String {
+        write_domains_json(&mut self.app);
+        self.app.out.clone()
+    }
+
+    /// `hp_domain_query`'s document for a JSON request `{domain, …}`.
+    pub fn domain_query_json(&mut self, request: &str) -> String {
+        write_domain_query(&mut self.app, request.as_bytes());
+        self.app.out.clone()
+    }
+
+    /// `hp_domain_state`'s document for a JSON request `{domain, seq}`.
+    pub fn domain_state_json(&mut self, request: &str) -> String {
+        write_domain_state(&mut self.app, request.as_bytes());
+        self.app.out.clone()
+    }
+
+    /// `hp_domain_locate`'s document for a JSON request `{domain, seq, …}`.
+    pub fn domain_locate_json(&mut self, request: &str) -> String {
+        write_domain_locate(&mut self.app, request.as_bytes());
+        self.app.out.clone()
+    }
+
+    /// `hp_record_json`'s document: spine record `seq`'s generic summary.
+    pub fn record_json(&mut self, seq: u32) -> String {
+        write_record_json(&mut self.app, seq);
+        self.app.out.clone()
+    }
+
+    /// `hp_interval_window`'s document for a JSON request (IVL-008).
+    pub fn interval_window_json(&mut self, request: &str) -> String {
+        write_interval_window(&mut self.app, request.as_bytes());
+        self.app.out.clone()
+    }
+
+    /// The interval window as data (IVL-008): the drawn intervals with
+    /// their lanes, the culled count, and whether the cap was hit.
+    pub fn interval_window(&self, request: &serde_json::Value) -> Result<domain::interval::Window, String> {
+        let req = domain::interval::WindowRequest::parse(&self.app.store, request)?;
+        Ok(domain::interval_window::window(&self.app.store, &req))
+    }
+
+    /// `hp_tracks_json`'s document: `{threads, cpus}` (IVL-008).
+    pub fn tracks_json(&mut self) -> String {
+        write_tracks_json(&mut self.app);
+        self.app.out.clone()
+    }
+
+    /// `hp_lanes_json`'s document: the timeline lanes, bottom first.
+    pub fn lanes_json(&mut self) -> String {
+        write_lanes_json(&mut self.app);
+        self.app.out.clone()
+    }
+
+    /// A domain's state as of `seq` records applied, for a domain that has
+    /// one (the mark in force); `None` otherwise or for an unknown domain.
+    pub fn domain_state(&self, domain: &str, seq: u32) -> Option<serde_json::Value> {
+        domain::get(&self.app.store, domain::by_name(domain)?)?.state_at(seq)
+    }
+
+    /// One bounded page of any domain's records — the core of a generic
+    /// `GET /api/v1/domains/{d}/records`, without `traceId`.
+    pub fn agent_domain_records(&self, domain: &str, params: &domain::RecordParams) -> Result<serde_json::Value, agent::Error> {
+        agent::domain_records(&self.app, domain, params)
+    }
+
+    /// One bounded page of `GET /api/v1/logs` (LOG-008), without `traceId`,
+    /// which the transport adds as for every other agent response.
+    pub fn agent_logs(&self, params: &agent::LogsParams) -> Result<serde_json::Value, agent::Error> {
+        agent::logs(&self.app, params)
     }
 
     pub fn agent_filter_check(&self, source: &str) -> Result<(), agent::Error> {
@@ -257,8 +368,7 @@ fn is_creator(store: &Store, e: u32) -> bool {
 }
 
 fn replace_analysis(a: &mut App, document: analysis::Document) -> Result<(), analysis::ApplyError> {
-    document.validate(a.store.len(), |e| is_creator(&a.store, e))?;
-    a.analysis = document;
+    a.analysis = document.normalized(a.store.len(), |e| is_creator(&a.store, e))?;
     project_analysis(a);
     Ok(())
 }
@@ -352,6 +462,7 @@ fn parse_begin(a: &mut App) {
     a.tag_labels.clear();
     a.names.clear();
     a.analysis = analysis::Document::default();
+    a.query_cache = domain::QueryCache::default();
 }
 
 #[no_mangle]
@@ -374,6 +485,7 @@ fn parse_end(a: &mut App) -> u32 {
         a.view.reset(&a.store);
         a.ev_filtered = Vec::new();
         a.ev_dirty = true;
+        a.query_cache = domain::QueryCache::default();
     }
     a.store.len()
 }
@@ -395,14 +507,15 @@ fn write_metadata_json(a: &mut App) {
     o.clear();
     o.push('{');
     o.push_str(&format!(
-        "\"n\":{},\"tMin\":{},\"tMax\":{},\"nMalloc\":{},\"nFree\":{},\"nRealloc\":{},\"nCustom\":{}",
+        "\"n\":{},\"tMin\":{},\"tMax\":{},\"nMalloc\":{},\"nFree\":{},\"nRealloc\":{},\"nCustom\":{},\"nLog\":{}",
         s.len(),
         s.t_min as f64,
         s.t_max as f64,
         s.n_malloc,
         s.n_free,
         s.n_realloc,
-        s.n_custom
+        s.n_custom,
+        s.n_log
     ));
     o.push_str(&format!(
         ",\"addrMin\":\"0x{:x}\",\"addrMax\":\"0x{:x}\",\"peakLive\":{},\"totalAlloc\":{}",
@@ -522,6 +635,8 @@ fn write_warnings_json(a: &mut App) {
         }
         o.push_str(&format!("{{\"seq\":{},\"code\":{},\"kind\":", w.seq, w.code));
         push_json_str(o, store::warn_code_name(w.code));
+        o.push_str(",\"domain\":");
+        push_json_str(o, store::warn_domain(w.code));
         o.push_str(",\"msg\":");
         push_json_str(o, warn_name(w.code));
         o.push_str(&format!(",\"detail\":{},\"detailExact\":\"{}\"}}", w.detail as f64, w.detail));
@@ -647,16 +762,16 @@ pub extern "C" fn hp_center_x_for_event(e: u32) -> f64 {
     }
     let ei = e as usize;
     let creator = match s.op[ei] {
-        OP_F => s.target[ei],
-        // a custom event has no address to pan to
-        OP_E => return a.cfg.x_pan,
-        _ => e,
+        OP_F => s.target(e),
+        OP_M | OP_R => e,
+        // any other record has no address to pan to
+        _ => return a.cfg.x_pan,
     };
     if creator == NONE_U32 {
         return a.cfg.x_pan;
     }
     let rb = a.view.row_bytes;
-    let off = s.addr[creator as usize].saturating_sub(a.view.base) % rb;
+    let off = s.addr(creator).saturating_sub(a.view.base) % rb;
     let vis = 1.0 / a.cfg.x_zoom;
     a.cfg.x_pan = (off as f64 / rb as f64 - vis / 2.0).clamp(0.0, 1.0 - vis);
     a.cfg.x_pan
@@ -716,147 +831,6 @@ pub extern "C" fn hp_set_pins(count: u32) {
         pins.push(u64::from_le_bytes(b.try_into().unwrap()));
     }
     a.view.set_pins(pins);
-}
-
-/// Parse a filter spec JSON blob:
-/// {"mode":1,"sites":[0,3],"thrs":[1],"sizeMin":0,"sizeMax":0}
-/// An empty array (`"sites":[]`) is a real constraint (nothing selected ->
-/// hide everything with a site), distinct from an absent/null key (no
-/// constraint) — see `Filter::sites_set`.
-fn parse_filter_json(data: &[u8]) -> Filter {
-    let mut f = Filter::default();
-    let mut sc = json::Scan::new(data);
-    if sc.eat(b'{') {
-        loop {
-            let span = match sc.string_span() {
-                Some(s) => s,
-                None => break,
-            };
-            if !sc.eat(b':') {
-                break;
-            }
-            let key = &data[span.0..span.1];
-            match key {
-                b"mode" => {
-                    f.mode = sc.integer().unwrap_or(0) as u8;
-                }
-                b"sizeMin" => {
-                    f.size_min = sc.integer().unwrap_or(0).max(0) as u64;
-                }
-                b"sizeMax" => {
-                    f.size_max = sc.integer().unwrap_or(0).max(0) as u64;
-                }
-                b"addrRanges" => {
-                    // array of [loHex, hiHex] pairs: [["0x1000","0x2000"],...]
-                    sc.ws();
-                    if sc.peek() == b'[' {
-                        sc.i += 1;
-                        loop {
-                            sc.ws();
-                            if sc.peek() == b']' {
-                                sc.i += 1;
-                                break;
-                            }
-                            if sc.peek() == b'[' {
-                                sc.i += 1;
-                                let lo = sc
-                                    .string_span()
-                                    .and_then(|(a, b)| json::parse_addr(&data[a..b]));
-                                sc.ws();
-                                if sc.peek() == b',' {
-                                    sc.i += 1;
-                                }
-                                let hi = sc
-                                    .string_span()
-                                    .and_then(|(a, b)| json::parse_addr(&data[a..b]));
-                                sc.ws();
-                                if sc.peek() == b']' {
-                                    sc.i += 1;
-                                }
-                                if let (Some(lo), Some(hi)) = (lo, hi) {
-                                    if hi > lo {
-                                        f.addr_ranges.push((lo, hi));
-                                    }
-                                }
-                            } else if sc.skip_value().is_none() {
-                                break;
-                            }
-                            sc.ws();
-                            if sc.peek() == b',' {
-                                sc.i += 1;
-                            }
-                        }
-                    } else {
-                        let _ = sc.skip_value();
-                    }
-                }
-                b"sites" | b"thrs" | b"tags" => {
-                    // collect into a scratch Vec first: an empty JSON array is
-                    // a real constraint ("nothing selected" -> hide all), so
-                    // it must still flip the *_set flag even though it never
-                    // touches the bitmask itself, and doing that while `words`
-                    // (a &mut into one of f's fields) is alive would fight the
-                    // borrow checker for no benefit — this runs once per
-                    // filter change, not per allocation, so the extra Vec is free
-                    sc.ws();
-                    if sc.peek() == b'[' {
-                        sc.i += 1;
-                        let mut vals: Vec<u32> = Vec::new();
-                        loop {
-                            sc.ws();
-                            if sc.peek() == b']' {
-                                sc.i += 1;
-                                break;
-                            }
-                            if let Some(v) = sc.integer() {
-                                vals.push(v.max(0) as u32);
-                            } else {
-                                break;
-                            }
-                            sc.ws();
-                            if sc.peek() == b',' {
-                                sc.i += 1;
-                            }
-                        }
-                        let (words, set_flag) = match key {
-                            b"sites" => (&mut f.sites, &mut f.sites_set),
-                            b"thrs" => (&mut f.thrs, &mut f.thrs_set),
-                            _ => (&mut f.tags, &mut f.tags_set),
-                        };
-                        *set_flag = true;
-                        for v in vals {
-                            let w = (v / 64) as usize;
-                            if words.len() <= w {
-                                words.resize(w + 1, 0);
-                            }
-                            words[w] |= 1u64 << (v % 64);
-                        }
-                    } else {
-                        // "null" means no constraint
-                        let _ = sc.skip_value();
-                    }
-                }
-                _ => {
-                    let _ = sc.skip_value();
-                }
-            }
-            sc.ws();
-            if sc.peek() == b',' {
-                sc.i += 1;
-            } else {
-                break;
-            }
-        }
-    }
-    f
-}
-
-#[no_mangle]
-pub extern "C" fn hp_set_filter(len: u32) {
-    let a = unsafe { &mut *app() };
-    let data: Vec<u8> = a.buf[..len as usize].to_vec();
-    a.cfg.filter = parse_filter_json(&data);
-    a.ev_dirty = true;
 }
 
 fn filter_diagnostic_json(out: &mut String, kind: &str, message: &str, start: usize, end: usize) {
@@ -952,7 +926,7 @@ pub extern "C" fn hp_filter_apply(len: u32) {
             return;
         }
     };
-    let mut bits = vec![0u64; (a.store.len() as usize).div_ceil(64)];
+    let mut bits = vec![0u64; a.store.row_words()];
     let matches = filter_plan::scan(&plan, &ctx, &mut bits);
     let creators = plan.creator_count();
     let mode = a.cfg.filter.mode;
@@ -1093,13 +1067,10 @@ fn tag_filter_matches(a: &mut App, tag: u32) -> u32 {
     let Some(bits) = a.cfg.filter.matches.as_ref() else {
         return 0;
     };
-    let to_tag: Vec<u32> = (0..a.store.len())
-        .filter(|&e| {
-            matches!(a.store.op[e as usize], OP_M | OP_R)
-                && bits
-                    .get(e as usize / 64)
-                    .is_some_and(|word| word & (1 << (e % 64)) != 0)
-        })
+    let to_tag: Vec<u32> = a
+        .store
+        .row_bits_events(bits)
+        .filter(|&e| matches!(a.store.op[e as usize], OP_M | OP_R))
         .collect();
     let tag = tag.min(255) as u8;
     for &e in &to_tag {
@@ -1126,12 +1097,12 @@ fn tag_seq_range(a: &mut App, lo: u32, hi: u32, tag: u32, by_free: u32) -> u32 {
         let s = &a.store;
         let f = &a.cfg.filter;
         let filtered = f.mode != render::FILTER_OFF;
-        (lo..hi.min(s.len()))
+        s.heap_events(lo, hi)
             .filter_map(|e| {
                 let op = s.op[e as usize];
                 if by_free != 0 {
-                    if (op == OP_F || op == OP_R) && s.target[e as usize] != NONE_U32 {
-                        Some(s.target[e as usize])
+                    if (op == OP_F || op == OP_R) && s.target(e) != NONE_U32 {
+                        Some(s.target(e))
                     } else {
                         None
                     }
@@ -1240,9 +1211,17 @@ pub extern "C" fn hp_tags_clear() {
 pub extern "C" fn hp_retag(from: u32, to: u32) -> u32 {
     let a = unsafe { &mut *app() };
     let (from, to) = (from.min(255) as u8, to.min(255) as u8);
-    let events: Vec<u32> = (0..a.store.len())
-        .filter(|&e| a.store.has_tag(e, from))
-        .collect();
+    let s = &a.store;
+    // a tag's members are its bitset over heap rows; tag 0 (untagged) has no
+    // bitset, so it alone walks the heap rows
+    let events: Vec<u32> = match (from, s.tag_members.get(from as usize)) {
+        (0, _) => (0..s.heap_len() as usize)
+            .map(|h| s.heap_seq(h))
+            .filter(|&e| s.has_tag(e, 0))
+            .collect(),
+        (_, Some(bits)) => s.row_bits_events(bits).collect(),
+        (_, None) => Vec::new(),
+    };
     for &e in &events {
         a.store.remove_tag(e, from);
         if to != 0 {
@@ -1262,11 +1241,10 @@ pub extern "C" fn hp_tags_dump_json() {
 }
 
 fn tags_dump_json(s: &Store, o: &mut String) {
+    // each tag's bitset over heap rows, read back as ascending spine indexes
     let mut lists: Vec<Vec<u32>> = vec![Vec::new(); 256];
-    for e in 0..s.len() {
-        for t in s.tag_ids(e) {
-            lists[t as usize].push(e);
-        }
+    for (t, bits) in s.tag_members.iter().enumerate().skip(1) {
+        lists[t] = s.row_bits_events(bits).collect();
     }
     o.clear();
     o.push('{');
@@ -1428,22 +1406,23 @@ pub extern "C" fn hp_alloc_info(e: u32, w: u32, scroll: f64) {
         a.out.clear();
         a.out.push_str("null");
     } else {
-        let addr = a.store.addr[e as usize];
+        let addr = a.store.addr(e);
         a.out = render::alloc_info(&a.store, &mut a.view, &a.cfg, w, addr, e, scroll);
     }
     ret_str(&a.out);
 }
 
 /// Creator-event index of the live allocation covering `addr`, or -1 if none
-/// is live there. Address-only (no pixel/row layout math).
+/// is live there. Address-only (no pixel/row layout math). Where several
+/// cover it, the newest creator wins, as in `render::pick` (MAP-006/MAP-008).
 fn live_at_addr(s: &Store, v: &View, addr: u64) -> i32 {
-    let floor = addr.saturating_sub(s.max_span.max(1));
-    for &(ea, e) in v.live.range((floor, 0)..=(addr, u32::MAX)).rev() {
-        if ea.saturating_add(s.span(e)) > addr {
-            return e as i32;
-        }
-    }
-    -1
+    let floor = addr.saturating_sub(v.max_live_span().max(1));
+    v.live
+        .range((floor, 0)..=(addr, u32::MAX))
+        .filter(|&&(ea, e)| ea.saturating_add(s.span(e)) > addr)
+        .map(|&(_, e)| e)
+        .max()
+        .map_or(-1, |e| e as i32)
 }
 
 /// Creator-event index of the live allocation covering `addr` (lo/hi u32 halves
@@ -1474,7 +1453,7 @@ pub extern "C" fn hp_addr_at(w: u32, x: u32, y: f64, scroll: f64) {
         let row_start = v.base + v.rows[i] * v.row_bytes;
         let (scale, pan) = a.cfg.x_map(w, v.row_bytes);
         let off = (pan + x as f64 / scale) as u64;
-        let addr = row_start + off.min(v.row_bytes - 1);
+        let addr = row_start.saturating_add(off.min(v.row_bytes - 1));
         r[0] = addr as u32;
         r[1] = (addr >> 32) as u32;
         r[3] = 1;
@@ -1526,6 +1505,11 @@ fn push_event_json(o: &mut String, s: &Store, e: u32) {
         return;
     }
     let ei = e as usize;
+    // a log row, like a custom event, touches no allocation (LOG-006)
+    if s.op[ei] == OP_L {
+        logs::push_event_json(o, s, e);
+        return;
+    }
     // A custom event touches no allocation, so it reports none: `e` is null
     // rather than its own index, which is what stops every consumer of this
     // record from selecting a non-allocation. It carries a label and its
@@ -1535,43 +1519,51 @@ fn push_event_json(o: &mut String, s: &Store, e: u32) {
             "{{\"seq\":{},\"op\":{},\"t\":{},\"e\":null,\"title\":",
             e, OP_E, s.t[ei] as f64
         ));
-        if s.label_at(e) != NONE_U32 {
-            push_json_str(o, &s.ev_labels[s.label_at(e) as usize]);
-        } else {
-            o.push_str("null");
+        match domain::marks::title(s, e) {
+            Some(title) => push_json_str(o, title),
+            None => o.push_str("null"),
         }
         o.push_str(",\"thr\":");
-        if s.thr_idx[ei] != NONE_U16 {
-            o.push_str(&format!("{}", s.thrs[s.thr_idx[ei] as usize]));
-        } else {
-            o.push_str("null");
-        }
-        if s.extra_at(e) != NONE_U32 {
-            o.push_str(",\"extra\":{");
-            o.push_str(&s.extras[s.extra_at(e) as usize]);
-            o.push('}');
+        domain::push_thr(o, s, e);
+        if let Some(fields) = domain::marks::fields(s, e) {
+            o.push_str(",\"extra\":");
+            domain::push_fields(o, Some(fields));
         }
         o.push('}');
         return;
     }
+    // Any other domain's record touches no allocation either: without a
+    // bespoke row it is listed by its generic summary, with `op` and a null
+    // `e` added — never by reading heap columns it does not have.
+    if !s.is_heap(e) {
+        let mut one = String::new();
+        if let Some((row, d)) = domain::get(s, s.domain_of(e)).and_then(|d| Some((d.row_of(e)?, d))) {
+            d.record_json(row, &mut one);
+        }
+        match one.strip_prefix('{') {
+            Some(rest) => o.push_str(&format!("{{\"op\":{},\"e\":null,{rest}", s.op[ei])),
+            None => o.push_str("null"),
+        }
+        return;
+    }
     // an F row carries no geometry of its own: report the allocation it kills
-    let gi = if s.op[ei] == OP_F && s.target[ei] != NONE_U32 {
-        s.target[ei] as usize
+    let gi = if s.op[ei] == OP_F && s.target(e) != NONE_U32 {
+        s.target(e)
     } else {
-        ei
+        e
     };
     o.push_str(&format!(
-        "{{\"seq\":{},\"op\":{},\"t\":{},\"id\":{},\"e\":{},\"addr\":\"0x{:x}\",\"size\":{}",
-        e, s.op[ei], s.t[ei] as f64, s.id[ei], gi, s.addr[gi], s.size[gi]
+        "{{\"seq\":{},\"op\":{},\"t\":{},\"id\":\"{}\",\"e\":{},\"addr\":\"0x{:x}\",\"size\":{}",
+        e, s.op[ei], s.t[ei] as f64, s.id(e), gi, s.addr(gi), s.size(gi)
     ));
     if s.op[ei] == OP_R {
         let (oa, os) = s.old_geom_at(e);
         o.push_str(&format!(",\"oldAddr\":\"0x{:x}\",\"oldSize\":{}", oa, os));
     }
     o.push_str(",\"site\":");
-    let si = if s.site[gi] != NONE_U32 { gi } else { ei };
-    if s.site[si] != NONE_U32 {
-        push_json_str(o, &s.sites[s.site[si] as usize]);
+    let si = if s.site(gi) != NONE_U32 { gi } else { e };
+    if s.site(si) != NONE_U32 {
+        push_json_str(o, &s.sites[s.site(si) as usize]);
     } else {
         o.push_str("null");
     }
@@ -1583,31 +1575,27 @@ fn write_allocation_json(o: &mut String, s: &Store, e: u32) -> bool {
         return false;
     }
     let i = e as usize;
-    let addr = s.addr[i];
+    let addr = s.addr(e);
     o.push_str(&format!(
-        "{{\"creator\":{},\"op\":{},\"id\":{},\"addr\":\"0x{:x}\",\"end\":\"0x{:x}\",\"size\":{},\"usable\":{},\"t\":{}",
+        "{{\"creator\":{},\"op\":{},\"id\":\"{}\",\"addr\":\"0x{:x}\",\"end\":\"0x{:x}\",\"size\":{},\"usable\":{},\"t\":{}",
         e,
         s.op[i],
-        s.id[i],
+        s.id(e),
         addr,
-        addr.saturating_add(s.size[i]),
-        s.size[i],
+        s.end(e),
+        s.size(e),
         s.usable_at(e),
         s.t[i] as f64
     ));
     o.push_str(",\"site\":");
-    if s.site[i] != NONE_U32 {
-        push_json_str(o, &s.sites[s.site[i] as usize]);
+    if s.site(e) != NONE_U32 {
+        push_json_str(o, &s.sites[s.site(e) as usize]);
     } else {
         o.push_str("null");
     }
     o.push_str(",\"thread\":");
-    if s.thr_idx[i] != NONE_U16 {
-        o.push_str(&s.thrs[s.thr_idx[i] as usize].to_string());
-    } else {
-        o.push_str("null");
-    }
-    let death = s.death[i];
+    domain::push_thr(o, s, e);
+    let death = s.death(e);
     o.push_str(",\"death\":");
     if death != NONE_U32 {
         o.push_str(&format!(
@@ -1652,17 +1640,14 @@ fn query_json(a: &App, source: &str, from: u32, count: u32) -> String {
             Ok(plan) => plan,
             Err(error) => return query_diagnostic(&error.message, error.span.start, error.span.end),
         };
-        let mut found = vec![0_u64; (a.store.len() as usize).div_ceil(64)];
+        let mut found = vec![0_u64; a.store.row_words()];
         filter_plan::scan(&plan, &context, &mut found);
         bits = Some(found);
     }
-    let matches: Vec<u32> = (0..a.store.len())
-        .filter(|&e| matches!(a.store.op[e as usize], OP_M | OP_R))
-        .filter(|&e| {
-            bits.as_ref().is_none_or(|found| {
-                found[e as usize / 64] & (1_u64 << (e % 64)) != 0
-            })
-        })
+    // the scan is already intersected with the creators
+    let matches: Vec<u32> = a
+        .store
+        .row_bits_events(bits.as_deref().unwrap_or(&a.store.dom.heap.creators))
         .collect();
     let lo = (from as usize).min(matches.len());
     let hi = lo.saturating_add(count as usize).min(matches.len());
@@ -1743,20 +1728,34 @@ fn ensure_ev_filtered(a: &mut App) {
     a.ev_dirty = false;
     let s = &a.store;
     let f = &a.cfg.filter;
+    // Membership is decided in heap rows: a log record has no allocation to
+    // pass a filter (the filter language is over allocations, DOM-003), so
+    // the walk never visits another domain's records, and the record kind is
+    // read off the heap prefix sums rather than the spine's op column.
+    let (green, red) = (&s.dom.heap.green_pre, &s.dom.heap.red_pre);
+    let pass = |h: usize| {
+        f.mode == render::FILTER_OFF
+            || f.matches.as_ref().is_none_or(|bits| {
+                bits.get(h / 64).is_some_and(|w| w & (1 << (h % 64)) != 0)
+            })
+    };
     let mut list = Vec::new();
-    for e in 0..s.len() {
-        // a custom event has no allocation to pass a filter, so it drops out
-        // of the filtered list exactly as an F of an unknown id does
-        if s.op[e as usize] == OP_E {
-            continue;
-        }
-        let creator = if s.op[e as usize] == OP_F {
-            s.target[e as usize]
+    for h in 0..s.heap_len() as usize {
+        // a creator (M/R) passes as itself and an F as the allocation it
+        // frees; a custom event (neither mark) has no allocation and drops
+        // out exactly as an F of an unknown id does
+        let creator = if green[h + 1] != green[h] {
+            Some(h)
+        } else if red[h + 1] != red[h] {
+            match s.dom.heap.target[h] {
+                NONE_U32 => None,
+                t => Some(s.heap_rank(t) as usize),
+            }
         } else {
-            e
+            None
         };
-        if creator != NONE_U32 && f.pass(s, creator) {
-            list.push(e);
+        if creator.is_some_and(pass) {
+            list.push(s.heap_seq(h));
         }
     }
     a.ev_filtered = list;
@@ -1813,6 +1812,233 @@ pub extern "C" fn hp_events_filtered_pos(seq: u32) -> u32 {
     }
     ensure_ev_filtered(a);
     a.ev_filtered.partition_point(|&e| e < seq) as u32
+}
+
+/// Heap records in spine `[0, seq)` the active filter keeps — every heap
+/// record when no filter is active. The Events list's filtered toggle
+/// narrows only the heap rows (NAV-005), so it counts them with this rank
+/// and every other domain with its own.
+#[no_mangle]
+pub extern "C" fn hp_events_filtered_heap_rank(seq: u32) -> u32 {
+    let a = unsafe { &mut *app() };
+    let seq = seq.min(a.store.len());
+    if !ev_filter_active(a) {
+        return a.store.heap_rank(seq);
+    }
+    ensure_ev_filtered(a);
+    a.ev_filtered.partition_point(|&e| e < seq) as u32
+}
+
+// ---------------------------------------------------------------------------
+// logs (LOG-009)
+// ---------------------------------------------------------------------------
+
+/// Run `f` on domain `id` with the engine's query cache, after reading the
+/// JSON request `input`. `None` when the input is not a request object.
+fn with_domain_request(
+    a: &mut App,
+    input: &[u8],
+    id: Option<domain::DomainId>,
+    check_params: bool,
+    f: impl FnOnce(&dyn domain::Domain, &domain::Request, &mut domain::QueryCache, &mut String),
+) -> Result<(), String> {
+    let raw: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(input).map_err(|_| "invalid request")?;
+    let req: domain::Request = serde_json::from_value(serde_json::Value::Object(raw.clone())).map_err(|_| "invalid request")?;
+    let id = match id {
+        Some(id) => id,
+        None => req
+            .domain
+            .as_deref()
+            .and_then(domain::by_name)
+            .ok_or("unknown domain")?,
+    };
+    let d = domain::get(&a.store, id).ok_or("unknown domain")?;
+    if check_params {
+        let known = d.query_params();
+        let shared = ["domain", "from", "count", "seq"];
+        if let Some(k) = raw.keys().find(|k| !shared.contains(&k.as_str()) && !known.contains(&k.as_str())) {
+            return Err(format!("unknown parameter {k}"));
+        }
+    }
+    let mut out = std::mem::take(&mut a.out);
+    f(d.as_ref(), &req, &mut a.query_cache, &mut out);
+    a.out = out;
+    Ok(())
+}
+
+fn write_logs_query(a: &mut App, input: &[u8]) {
+    if with_domain_request(a, input, Some(domain::LOGS), true, |d, req, cache, out| d.query_json(req, cache, out)).is_err() {
+        a.out = "{\"total\":0,\"from\":0,\"rows\":[],\"error\":\"invalid log query\"}".into();
+    }
+}
+
+fn write_logs_locate(a: &mut App, input: &[u8]) {
+    if with_domain_request(a, input, Some(domain::LOGS), true, |d, req, cache, out| d.locate_json(req, cache, out)).is_err() {
+        a.out = "{\"row\":-1,\"total\":0,\"error\":\"invalid log query\"}".into();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// domains (DOM-003): the generic surface every domain answers through
+// ---------------------------------------------------------------------------
+
+fn write_domains_json(a: &mut App) {
+    let all: Vec<serde_json::Value> = domain::all(&a.store).map(|d| d.descriptor()).collect();
+    a.out = serde_json::Value::Array(all).to_string();
+}
+
+fn write_domain_query(a: &mut App, input: &[u8]) {
+    if let Err(error) = with_domain_request(a, input, None, true, |d, req, cache, out| d.query_json(req, cache, out)) {
+        a.out = serde_json::json!({ "total": 0, "from": 0, "rows": [], "error": error }).to_string();
+    }
+}
+
+fn write_domain_locate(a: &mut App, input: &[u8]) {
+    if let Err(error) = with_domain_request(a, input, None, true, |d, req, cache, out| d.locate_json(req, cache, out)) {
+        a.out = serde_json::json!({ "row": -1, "total": 0, "error": error }).to_string();
+    }
+}
+
+fn write_domain_state(a: &mut App, input: &[u8]) {
+    let state = with_domain_request(a, input, None, false, |d, req, _, out| {
+        *out = d.state_at(req.seq()).map_or_else(|| "null".to_string(), |v| v.to_string());
+    });
+    if let Err(error) = state {
+        a.out = serde_json::json!({ "error": error }).to_string();
+    }
+}
+
+fn write_record_json(a: &mut App, seq: u32) {
+    let s = &a.store;
+    a.out.clear();
+    let found = domain::get(s, s.domain_of(seq)).and_then(|d| Some((d.row_of(seq)?, d)));
+    match found {
+        Some((row, d)) => d.record_json(row, &mut a.out),
+        None => a.out.push_str("null"),
+    }
+}
+
+fn write_interval_window(a: &mut App, input: &[u8]) {
+    match serde_json::from_slice::<serde_json::Value>(input) {
+        Ok(request) => domain::interval::view(&a.store).window_json(&request, &mut a.out),
+        Err(_) => a.out = r#"{"rows":[],"culled":0,"truncated":false,"error":"invalid request"}"#.into(),
+    }
+}
+
+fn write_tracks_json(a: &mut App) {
+    a.out = domain::interval::view(&a.store).tracks_value().to_string();
+}
+
+fn write_lanes_json(a: &mut App) {
+    let lanes: Vec<serde_json::Value> = domain::all(&a.store)
+        .flat_map(|d| domain::lanes_value(d.name(), d.lanes()).as_array().cloned().unwrap_or_default())
+        .collect();
+    a.out = serde_json::Value::Array(lanes).to_string();
+}
+
+/// Every domain's descriptor: `[{id, name, kinds, shape, count, lanes,
+/// fields, query, limits}]`.
+#[no_mangle]
+pub extern "C" fn hp_domains_json() {
+    let a = unsafe { &mut *app() };
+    write_domains_json(a);
+    ret_str(&a.out);
+}
+
+/// One page of a domain's query: the input buffer holds `{domain, …query,
+/// from, count}`; the result is `{total, from, rows}` in the domain's keys.
+#[no_mangle]
+pub extern "C" fn hp_domain_query(len: u32) {
+    let a = unsafe { &mut *app() };
+    let input = a.buf[..len as usize].to_vec();
+    write_domain_query(a, &input);
+    ret_str(&a.out);
+}
+
+/// The interval window (IVL-008): the input buffer holds `{track: {thr,
+/// pid?} | {cpu}, axis: "seq"|"t", lo, hi, width, category?}`; the result is
+/// `{rows:[{ivl, name, category, lane, depth, start, end, open, thr, …}],
+/// culled, truncated}`, or the same with `error`.
+#[no_mangle]
+pub extern "C" fn hp_interval_window(len: u32) {
+    let a = unsafe { &mut *app() };
+    let input = a.buf[..len as usize].to_vec();
+    write_interval_window(a, &input);
+    ret_str(&a.out);
+}
+
+/// The interval tracks: `{threads:[{thr, pid?, name, calls, spans}],
+/// cpus:[{cpu, slices}]}`.
+#[no_mangle]
+pub extern "C" fn hp_tracks_json() {
+    let a = unsafe { &mut *app() };
+    write_tracks_json(a);
+    ret_str(&a.out);
+}
+
+/// `{domain, seq}` → the domain's state with `seq` records applied (the
+/// interval domain's call stacks, open spans and CPUs; the mark in force),
+/// or `null` for a domain without one.
+#[no_mangle]
+pub extern "C" fn hp_domain_state(len: u32) {
+    let a = unsafe { &mut *app() };
+    let input = a.buf[..len as usize].to_vec();
+    write_domain_state(a, &input);
+    ret_str(&a.out);
+}
+
+/// `{row, total}` for `{domain, …query, seq}`: the last match at or before
+/// `seq`.
+#[no_mangle]
+pub extern "C" fn hp_domain_locate(len: u32) {
+    let a = unsafe { &mut *app() };
+    let input = a.buf[..len as usize].to_vec();
+    write_domain_locate(a, &input);
+    ret_str(&a.out);
+}
+
+/// The generic summary of spine record `seq`, whatever its domain, or
+/// `null`.
+#[no_mangle]
+pub extern "C" fn hp_record_json(seq: u32) {
+    let a = unsafe { &mut *app() };
+    write_record_json(a, seq);
+    ret_str(&a.out);
+}
+
+/// The timeline lanes the loaded trace draws, bottom first.
+#[no_mangle]
+pub extern "C" fn hp_lanes_json() {
+    let a = unsafe { &mut *app() };
+    write_lanes_json(a);
+    ret_str(&a.out);
+}
+
+/// `{count, byLevel:[n0..n5], loggers:[{name,count}]}`.
+#[no_mangle]
+pub extern "C" fn hp_logs_meta_json() {
+    let a = unsafe { &mut *app() };
+    logs::meta_json(&mut a.out, &a.store.dom.logs);
+    ret_str(&a.out);
+}
+
+/// One page of log records matching the JSON query in the input buffer.
+#[no_mangle]
+pub extern "C" fn hp_logs_query(len: u32) {
+    let a = unsafe { &mut *app() };
+    let input = a.buf[..len as usize].to_vec();
+    write_logs_query(a, &input);
+    ret_str(&a.out);
+}
+
+/// Index of the last match at or before `seq` — what lets the Logs panel
+/// follow the playhead.
+#[no_mangle]
+pub extern "C" fn hp_logs_locate(len: u32) {
+    let a = unsafe { &mut *app() };
+    let input = a.buf[..len as usize].to_vec();
+    write_logs_locate(a, &input);
+    ret_str(&a.out);
 }
 
 // ---------------------------------------------------------------------------
@@ -1888,16 +2114,19 @@ mod tests {
         let full = base.with_fields(&fields);
         let plan =
             filter_plan::lower(&expr, &full).unwrap_or_else(|e| panic!("{source}: {}", e.message));
-        let mut bits = vec![0u64; (a.store.len() as usize).div_ceil(64).max(1)];
+        let mut bits = vec![0u64; a.store.row_words().max(1)];
         let matched = filter_plan::scan(&plan, &full, &mut bits);
 
+        // the oracle walks the spine and evaluates by spine index; the plan's
+        // bits are heap rows, so this is also the boundary conversion's test
         let mut oracle = vec![0u64; bits.len()];
         let mut counted = 0;
         for e in 0..a.store.len() {
             if matches!(a.store.op[e as usize], OP_M | OP_R)
                 && filter_eval::evaluate(&expr, &full, e).unwrap()
             {
-                oracle[e as usize / 64] |= 1 << (e % 64);
+                let h = a.store.heap_row(e).unwrap();
+                oracle[h / 64] |= 1 << (h % 64);
                 counted += 1;
             }
         }
@@ -1909,9 +2138,7 @@ mod tests {
     /// The creator events a source matches, through the plan.
     fn matching(a: &App, labels: &[String], source: &str) -> Vec<u32> {
         let bits = match_bits(a, labels, source);
-        (0..a.store.len())
-            .filter(|&e| bits[e as usize / 64] >> (e % 64) & 1 == 1)
-            .collect()
+        a.store.row_bits_events(&bits).collect()
     }
 
     fn tags(store: &Store) -> Vec<Vec<u8>> {
@@ -1943,8 +2170,11 @@ mod tests {
         let events = engine.events_json(1, 2);
         assert!(events.starts_with("[{\"seq\":1,"));
         assert!(events.contains("},{\"seq\":2,"));
+        // ids are strings on every browser-facing surface (TRACE-001)
+        assert!(events.contains("\"id\":\"2\""), "{events}");
         let allocation = engine.allocation_json(1).unwrap();
         assert!(allocation.contains("\"creator\":1"));
+        assert!(allocation.contains("\"id\":\"2\""), "{allocation}");
         assert!(!allocation.contains("rects"));
         assert!(engine.allocation_json(2).is_none());
 
@@ -1984,12 +2214,12 @@ mod tests {
         assert_eq!(s.t_min, 100);
         assert_eq!(s.t_max, 400);
         // free of id 1 resolves to event 0
-        assert_eq!(s.target[2], 0);
-        assert_eq!(s.death[0], 2);
+        assert_eq!(s.target(2), 0);
+        assert_eq!(s.death(0), 2);
         // realloc kills event 1, creates event 3, freed by event 4
-        assert_eq!(s.target[3], 1);
-        assert_eq!(s.death[1], 3);
-        assert_eq!(s.death[3], 4);
+        assert_eq!(s.target(3), 1);
+        assert_eq!(s.death(1), 3);
+        assert_eq!(s.death(3), 4);
         assert_eq!(s.old_geom_at(3), (0x2000, 128));
         let total: u32 = s.warn_counts.iter().sum();
         assert_eq!(total, 0);
@@ -2018,13 +2248,13 @@ mod tests {
             assert_eq!((s.n_malloc, s.n_free, s.n_realloc), (2, 2, 1));
             assert_eq!(s.warn_counts.iter().sum::<u32>(), 0);
             // labels intern; an E without a title has none
-            assert_eq!(s.ev_labels, vec!["phase: warm up", "phase: steady"]);
+            assert_eq!(s.dom.marks.labels, vec!["phase: warm up", "phase: steady"]);
             assert_eq!(s.label_at(0), 0);
             assert_eq!(s.label_at(1), NONE_U32);
             assert_eq!(s.label_at(7), NONE_U32);
             // and they leave the timelines' alloc/free marks alone
-            assert_eq!(s.green_pre[8] - s.green_pre[7], 0);
-            assert_eq!(s.red_pre[8] - s.red_pre[7], 0);
+            assert_eq!(s.green_before(8) - s.green_before(7), 0);
+            assert_eq!(s.red_before(8) - s.red_before(7), 0);
         }
 
         // at every playhead position the live set equals the same trace with
@@ -2083,8 +2313,8 @@ mod tests {
     fn the_filtered_event_list_drops_custom_events() {
         let mut a = load(SAMPLE_WITH_EVENTS);
         a.cfg.filter.mode = render::FILTER_DIM;
-        a.cfg.filter.sites_set = true;
-        a.cfg.filter.sites = vec![u64::MAX];
+        // every bit set, the custom events' included
+        a.cfg.filter.matches = Some(vec![u64::MAX; a.store.row_words()]);
         a.ev_dirty = true;
         ensure_ev_filtered(&mut a);
         assert!(
@@ -2186,17 +2416,6 @@ not json at all
             .unwrap();
         // attached to the event *before* the bad line, so a jump lands there
         assert_eq!(w.seq, 0);
-    }
-
-    #[test]
-    fn addr_range_filter() {
-        let f = parse_filter_json(br#"{"mode":1,"addrRanges":[["0x1000","0x1040"]]}"#);
-        assert_eq!(f.addr_ranges, vec![(0x1000, 0x1040)]);
-        let mut a = load(SAMPLE);
-        a.cfg.filter = f;
-        assert!(a.cfg.filter.pass(&a.store, 0)); // 0x1000+64 intersects
-        assert!(!a.cfg.filter.pass(&a.store, 1)); // 0x2000+128 does not
-        assert!(!a.cfg.filter.pass(&a.store, 3)); // 0x3000+256 does not
     }
 
     #[test]
@@ -2368,7 +2587,9 @@ not json at all
         let mut a = load(SAMPLE);
         // site "a" only (index 0): M(b) drops out; F events follow the
         // allocation they free; the site-less R passes (site-less passes)
-        a.cfg.filter = parse_filter_json(br#"{"mode":1,"sites":[0]}"#);
+        a.cfg.filter.mode = render::FILTER_DIM;
+        a.cfg.filter.matches =
+            Some(match_bits(&a, &[], r#"malloc.site is None or malloc.site == "a""#));
         a.ev_dirty = true;
         ensure_ev_filtered(&mut a);
         assert_eq!(a.ev_filtered, vec![0, 2, 3, 4]);
@@ -2554,8 +2775,8 @@ not json at all
             a.store.extras,
             vec!["\"pool\":\"gfx\",\"refs\":3".to_string()]
         );
-        assert_eq!(a.store.extra[0], 0);
-        assert_eq!(a.store.extra[1], NONE_U32);
+        assert_eq!(a.store.extra_at(0), 0);
+        assert_eq!(a.store.extra_at(1), NONE_U32);
         a.view.seek(&a.store, 2);
         let info = render::alloc_info(&a.store, &mut a.view, &a.cfg, 200, 0x1000, 0, 0.0);
         assert!(info.contains("\"extra\":{\"pool\":\"gfx\",\"refs\":3}"));
@@ -2694,46 +2915,43 @@ not json at all
     }
 
     #[test]
-    fn empty_filter_array_hides_everything_selected() {
-        // "sites":[] must mean "nothing selected" (hide/dim every site-tagged
-        // allocation), not "no constraint" — an empty bitmask Vec is
-        // otherwise indistinguishable from an absent/null key, which is what
-        // the *_set flags exist to disambiguate (regression: the "none" link
-        // in the sites/threads/tags filter UI used to send exactly this and
-        // had no effect at all).
-        let f = parse_filter_json(br#"{"mode":1,"sites":[],"thrs":null,"tags":null}"#);
-        assert!(f.sites_set);
-        assert!(!f.thrs_set);
-        assert!(!f.tags_set);
-        assert!(f.sites.is_empty());
+    fn live_at_addr_prefers_the_newest_cover_like_pick() {
+        // the newer block starts lower and encloses the older one
+        let input = r#"{"op":"H","v":1,"row_bytes":256}
+{"op":"M","id":1,"addr":"0x1020","size":32,"t":10}
+{"op":"M","id":2,"addr":"0x1000","size":128,"t":20}
+"#;
+        let mut a = load(input);
+        a.view.seek(&a.store, 2);
+        assert_eq!(live_at_addr(&a.store, &a.view, 0x1028), 1);
+        let picked = render::pick(&a.store, &mut a.view, &a.cfg, 256, 0x28, 4.0, 0.0);
+        assert!(picked.starts_with("{\"e\":1,"), "got {}", picked);
+    }
 
-        let mut a = load(SAMPLE);
-        a.cfg.filter = f;
-        // every creator with a site (0, 1) must now fail; event 3 (realloc,
-        // no site) is unaffected by the site constraint per existing semantics
-        assert!(!a.cfg.filter.pass(&a.store, 0));
-        assert!(!a.cfg.filter.pass(&a.store, 1));
-        assert!(a.cfg.filter.pass(&a.store, 3));
-
-        // same story for an empty tags selection: every creator (all
-        // untagged, tag id 0) must fail once tags_set is true with no bits
-        let f2 = parse_filter_json(br#"{"mode":1,"tags":[]}"#);
-        assert!(f2.tags_set);
-        let mut a2 = load(SAMPLE);
-        a2.cfg.filter = f2;
-        assert!(!a2.cfg.filter.pass(&a2.store, 0));
-        assert!(!a2.cfg.filter.pass(&a2.store, 1));
-        assert!(!a2.cfg.filter.pass(&a2.store, 3));
+    #[test]
+    fn allocations_at_the_top_of_the_address_space_render_and_pick() {
+        // spans that reach past 2^64 saturate instead of overflowing
+        let input = r#"{"op":"H","v":1,"row_bytes":256}
+{"op":"M","id":1,"addr":"0xffffffffffffff80","size":4096,"usable":8192,"t":10}
+{"op":"M","id":2,"addr":"0xffffffffffffffc0","size":16,"t":20}
+{"op":"F","id":2,"t":30}
+"#;
+        let mut a = load(input);
+        a.view.seek(&a.store, 3);
+        render::render_addr(&a.store, &mut a.view, &a.cfg, &mut a.frame, &mut a.scratch, 256, 100, 0.0);
+        let picked = render::pick(&a.store, &mut a.view, &a.cfg, 256, 0x90, 4.0, 0.0);
+        assert!(picked.starts_with("{\"e\":0,"), "got {}", picked);
+        assert_eq!(live_at_addr(&a.store, &a.view, u64::MAX - 1), 0);
     }
 
     #[test]
     fn tag_range_respects_filter() {
         // sites: a (events 0), b (event 1); realloc keeps site b (event 3)
         let mut a = load(SAMPLE);
-        // filter: only site "b" (index 1), hide mode
+        // filter: only site "b" (or no site at all), hide mode
         a.cfg.filter.mode = render::FILTER_HIDE;
-        a.cfg.filter.sites = vec![1u64 << 1];
-        a.cfg.filter.sites_set = true;
+        a.cfg.filter.matches =
+            Some(match_bits(&a, &[], r#"malloc.site is None or malloc.site == "b""#));
         let to_tag: Vec<u32> = {
             let s = &a.store;
             let f = &a.cfg.filter;
@@ -3105,6 +3323,38 @@ not json at all
     }
 
     #[test]
+    fn a_repeated_custom_key_filters_on_its_last_value() {
+        let a = load(r#"{"op":"M","id":1,"addr":"0x1000","size":8,"k":1,"k":2}
+"#);
+        assert_eq!(matches_custom(&a, "malloc.fields.k == 2"), vec![0]);
+        assert!(matches_custom(&a, "malloc.fields.k == 1").is_empty());
+    }
+
+    #[test]
+    fn stack_is_optional_and_missing_without_one() {
+        let a = load(r#"{"op":"M","id":1,"addr":"0x1000","size":8,"stack":["main"]}
+{"op":"M","id":2,"addr":"0x2000","size":8}
+"#);
+        assert_eq!(matches_custom(&a, "malloc.stack is None"), vec![1]);
+        assert_eq!(matches_custom(&a, "malloc.stack is not None"), vec![0]);
+        // like every optional field, a comparison on missing is false
+        assert_eq!(matches_custom(&a, r#"malloc.stack != "zzz""#), vec![0]);
+    }
+
+    #[test]
+    fn alloc_end_is_the_displayed_requested_end() {
+        let mut a = load(r#"{"op":"H","v":1,"row_bytes":4096}
+{"op":"M","id":1,"addr":"0x1000","size":16,"usable":32}
+"#);
+        a.view.seek(&a.store, 1);
+        let info = render::alloc_info(&a.store, &mut a.view, &a.cfg, 256, 0x1000, 0, 0.0);
+        assert!(info.contains(r#""end":"0x1010""#), "got {info}");
+        assert_eq!(matches_custom(&a, "alloc.end == 0x1010"), vec![0]);
+        assert!(matches_custom(&a, "alloc.span.overlaps(range(0x1010, 0x1020))").is_empty());
+        assert_eq!(matches_custom(&a, "alloc.usable == 32"), vec![0]);
+    }
+
+    #[test]
     fn custom_fields_filter_in_all_four_spellings() {
         let a = load(CUSTOM);
         assert_eq!(
@@ -3323,7 +3573,7 @@ not json at all
             let fields = filter_eval::FieldValues::resolve(&expr, &a.store);
             let full = base.with_fields(&fields);
             let plan = filter_plan::lower(&expr, &full).unwrap();
-            let mut bits = vec![0u64; (a.store.len() as usize).div_ceil(64).max(1)];
+            let mut bits = vec![0u64; a.store.row_words().max(1)];
 
             // everything that allocates — parsing, checking, resolving custom
             // fields, lowering, the output buffer — has happened by now
@@ -3472,6 +3722,49 @@ not json at all
             let hits = matching(&a, &labels, source).len();
             nonempty += usize::from(hits > 0);
             proper += usize::from(hits > 0 && hits < creators);
+        }
+
+        // The same corpus over the same heap records with a log line before
+        // every one: the plan runs in heap rows while `seq`, `time`, thread,
+        // death links and the oracle are spine-indexed, so every boundary
+        // conversion is exercised. Tags and the name follow the heap rows.
+        let mut mixed_src = String::new();
+        for (i, line) in src.lines().enumerate() {
+            if line.contains("\"op\":\"H\"") || line.trim().is_empty() || line.starts_with('#') {
+                mixed_src.push_str(line);
+            } else {
+                mixed_src.push_str(&format!(
+                    "{{\"op\":\"L\",\"thr\":{},\"msg\":\"before {i}\",\"size\":9}}\n{line}",
+                    i % 3
+                ));
+            }
+            mixed_src.push('\n');
+        }
+        let mut m = load(&mixed_src);
+        assert_eq!(m.store.heap_len(), a.store.heap_len());
+        assert!(m.store.n_log > 0 && !m.store.hrank.is_empty());
+        for h in 0..a.store.heap_len() as usize {
+            let (e, me) = (a.store.heap_seq(h), m.store.heap_seq(h));
+            for tag in a.store.tag_ids(e).collect::<Vec<_>>() {
+                m.store.add_tag(me, tag);
+            }
+        }
+        let named_row = a.store.heap_row(named).unwrap();
+        m.names = vec![(m.store.heap_seq(named_row), "anchor".to_string())];
+        let ids = |app: &App, events: Vec<u32>| -> Vec<u64> {
+            events.into_iter().map(|e| app.store.id(e)).collect()
+        };
+        for source in corpus {
+            let mixed = matching(&m, &labels, source);
+            // positions differ between the traces, so only expressions that
+            // do not read one are expected to select the same allocations
+            if !source.contains(".seq") && !source.contains(".time") && !source.contains("lifetime") {
+                assert_eq!(
+                    ids(&m, mixed),
+                    ids(&a, matching(&a, &labels, source)),
+                    "`{source}` selects different allocations once logs are present"
+                );
+            }
         }
         // a corpus where everything matched nothing would pass the equivalence
         // assertion while testing nothing
@@ -3698,7 +3991,7 @@ not json at all
 {"seq":0,"t":18446744073709551615,"op":"M","id":9007199254740993,"addr":"0x1000","size":64}
 "#,
         );
-        assert_eq!(a.store.id[0], 9_007_199_254_740_993);
+        assert_eq!(a.store.id(0), 9_007_199_254_740_993);
         assert_eq!(a.store.t[0], u64::MAX);
         assert_eq!(
             matching(&a, &[], "allocation(9007199254740993).alloc.id == alloc.id"),
